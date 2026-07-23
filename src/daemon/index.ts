@@ -24,6 +24,7 @@ process.on('uncaughtException', (e) => log.error('uncaughtException', e));
 const relayUrl = process.env.ELOWEN_RELAY_URL;
 const bootstrapUser = process.env.ELOWEN_BOOTSTRAP_USER;
 const bootstrapPass = process.env.ELOWEN_BOOTSTRAP_PASS;
+const journalMode = process.env.ELOWEN_SQLITE_JOURNAL_MODE === 'DELETE' ? 'DELETE' : 'WAL';
 
 // buildApp is async (it awaits the brain ModelRuntime). A boot failure must exit non-zero and loudly:
 // without this the rejection would be swallowed by the unhandledRejection handler above (meant to keep a
@@ -32,6 +33,7 @@ let built: Awaited<ReturnType<typeof buildApp>>;
 try {
   built = await buildApp({
     dbPath: process.env.ELOWEN_DB ?? `${process.env.HOME}/.config/elowen/elowen.db`,
+    journalMode,
     project: { id: 1, slug: process.env.ELOWEN_PROJECT ?? 'elowen', path: process.env.ELOWEN_PROJECT_PATH ?? process.cwd() },
     relay: relayUrl ? { baseUrl: relayUrl, apiKey: process.env.ELOWEN_RELAY_KEY ?? '', model: process.env.ELOWEN_RELAY_MODEL ?? 'gpt-4o-mini' } : null,
     bootstrap: bootstrapUser && bootstrapPass ? { username: bootstrapUser, password: bootstrapPass } : null,

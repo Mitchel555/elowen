@@ -7,6 +7,7 @@ import { renameRegistryTool, renameTool, repairImageTool } from './toolRenames.j
 const here = dirname(fileURLToPath(import.meta.url));
 
 export type Db = Database.Database;
+export type JournalMode = 'WAL' | 'DELETE';
 
 /** Add a column only if it isn't already present. Unlike a try/catch around ALTER TABLE, this
  *  checks the actual table shape, so a genuine ALTER failure (lock, disk full) is not swallowed. */
@@ -16,10 +17,10 @@ function addColumn(db: Db, table: string, column: string, decl: string): void {
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }
 
-export function openDb(path: string): Db {
+export function openDb(path: string, journalMode: JournalMode = 'WAL'): Db {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
-  db.pragma('journal_mode = WAL');
+  db.pragma(`journal_mode = ${journalMode}`);
   // Enforce foreign keys so any REFERENCES added to the schema actually cascade/reject.
   db.pragma('foreign_keys = ON');
   db.exec(readFileSync(join(here, 'schema.sql'), 'utf-8'));

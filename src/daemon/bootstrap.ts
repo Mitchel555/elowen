@@ -1,4 +1,4 @@
-import { openDb } from '../store/db.js';
+import { openDb, type JournalMode } from '../store/db.js';
 import { TaskStore } from '../store/taskStore.js';
 import { Readiness } from '../store/readiness.js';
 import { AgentStore } from '../store/agentStore.js';
@@ -281,6 +281,7 @@ function runLivenessSweep(d: LivenessDeps): void {
 
 export interface BuildOpts {
   dbPath: string;
+  journalMode?: JournalMode;
   project: { id: number; slug: string; path: string };
   relay: { baseUrl: string; apiKey: string; model: string } | null;
   tmux?: TmuxDriver;
@@ -289,7 +290,7 @@ export interface BuildOpts {
 }
 
 export async function buildApp(opts: BuildOpts) {
-  const db = openDb(opts.dbPath);
+  const db = openDb(opts.dbPath, opts.journalMode);
   db.prepare('INSERT OR IGNORE INTO projects (id,slug,path) VALUES (?,?,?)').run(opts.project.id, opts.project.slug, opts.project.path);
   const tmux = opts.tmux ?? new RealTmuxDriver();
   const tasks = new TaskStore(db); const agents = new AgentStore(db);

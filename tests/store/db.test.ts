@@ -17,6 +17,13 @@ describe('openDb', () => {
     expect(names).toEqual(expect.arrayContaining(['projects', 'tasks', 'task_deps', 'agents', 'missions', 'brain_subagent_runs']));
   });
 
+  it('supports DELETE journaling for network-mounted databases', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const db = openDb(join(dir, 'network.db'), 'DELETE');
+    expect(db.pragma('journal_mode', { simple: true })).toBe('delete');
+    db.close();
+  });
+
   it('migrates a pre-project_id events table without throwing (adds the column + index)', () => {
     dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
     const path = join(dir, 'old.db');
