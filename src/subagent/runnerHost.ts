@@ -11,6 +11,7 @@ import {
 } from '../brain/delegatedTurn.js';
 import { RUNNER_ENTRY, parseRunnerMessage, subagentBuildId, type DaemonToRunner } from './protocol.js';
 import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
+import type { JournalMode } from '../store/db.js';
 
 const log = logger('subagent-runner');
 
@@ -24,6 +25,8 @@ const BOOT_RETRY_COOLDOWN_MS = 60_000;
 
 export interface SubagentRunnerHostDeps {
   dbPath: string;
+  /** Must match the daemon connection so a runner never switches a network-mounted database back to WAL. */
+  journalMode?: JournalMode;
   project: { id: number; slug: string; path: string };
   /** The daemon's OWN working directory. A delegated turn resolves its cwd as
    *  `turnWorkDir(...) ?? cwd ?? process.cwd()`, so a child forked with a different one would silently
@@ -282,6 +285,7 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
       });
       this.post(child, {
         type: 'boot', buildId: this.buildId, dbPath: this.d.dbPath, project: this.d.project,
+        ...(this.d.journalMode ? { journalMode: this.d.journalMode } : {}),
         ...(this.d.mcpBridgeSnapshot ? { mcp: this.d.mcpBridgeSnapshot } : {}),
       });
     });

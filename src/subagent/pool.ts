@@ -300,6 +300,7 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
         dbPath: this.d.dbPath,
         project: this.d.project,
         cwd: this.d.cwd,
+        ...(this.d.journalMode ? { journalMode: this.d.journalMode } : {}),
         ...(mcpBridgeSnapshot ? { mcpBridgeSnapshot } : {}),
         ...(this.d.fork ? { fork: this.d.fork } : {}),
         onHeartbeat: (beat) => this.onHeartbeat(entry, beat),

@@ -33,6 +33,7 @@ Starts on port 4400 (override with `ELOWEN_PORT`). Initializes SQLite on first r
 ELOWEN_PORT=4400
 ELOWEN_HOST=127.0.0.1              # use 0.0.0.0 to expose externally
 ELOWEN_DB=$HOME/.config/elowen/elowen.db
+ELOWEN_SQLITE_JOURNAL_MODE=WAL         # use DELETE on network-mounted storage
 ELOWEN_PROJECT=elowen
 ELOWEN_PROJECT_PATH=$PWD
 ELOWEN_ALLOW_OPEN=                  # set to "1" for no-auth mode

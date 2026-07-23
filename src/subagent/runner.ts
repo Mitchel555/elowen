@@ -25,6 +25,7 @@ import { HEARTBEAT_INTERVAL_MS, LAG_WINDOW_MS } from './sizing.js';
 import { buildBrainCore } from '../daemon/brainCore.js';
 import type { TmuxDriver } from '../tmux/types.js';
 import type { BrainService } from '../brain/brainService.js';
+import type { JournalMode } from '../store/db.js';
 import { parseDelegatedTurnRequest, toDelegatedProgress } from '../brain/delegatedTurn.js';
 import { SUBAGENT_PLATFORM, channelSessionId } from '../brain/sessionId.js';
 import { parseDaemonMessage, subagentBuildId, type RunnerToDaemon } from './protocol.js';
@@ -110,11 +111,13 @@ let booting: Promise<void> | undefined;
 async function boot(
   dbPath: string,
   project: { id: number; slug: string; path: string },
+  journalMode: JournalMode | undefined,
   mcpBridgeSnapshot: McpBridgeSnapshot | undefined,
 ): Promise<void> {
   const core = await buildBrainCore({
     dbPath,
     project,
+    ...(journalMode ? { journalMode } : {}),
     tmux: REFUSING_TMUX,
     // The daemon already connected every configured MCP server and knows what each one bridges, so this
     // process declares the identical tools from that snapshot and connects a server only if one of its
@@ -197,7 +200,7 @@ process.on('message', (raw: unknown) => {
         send({ type: 'fatal', reason: `build mismatch (daemon ${msg.buildId}, runner ${own})` });
         process.exit(2);
       }
-      booting = boot(msg.dbPath, msg.project, msg.mcp).then(
+      booting = boot(msg.dbPath, msg.project, msg.journalMode, msg.mcp).then(
         () => { phase('ready'); send({ type: 'ready', buildId: own }); },
         (e: unknown) => { send({ type: 'fatal', reason: errorText(e) }); process.exit(3); },
       );

@@ -1,3 +1,4 @@
+import type { JournalMode } from '../store/db.js';
 import type { TaskStore } from '../store/taskStore.js';
 import type { AgentStore } from '../store/agentStore.js';
 import type { MissionStore } from '../store/missionStore.js';
@@ -374,6 +375,7 @@ function runLivenessSweep(d: LivenessDeps): void {
 
 export interface BuildOpts {
   dbPath: string;
+  journalMode?: JournalMode;
   project: { id: number; slug: string; path: string };
   relay: { baseUrl: string; apiKey: string; model: string } | null;
   tmux?: TmuxDriver;
@@ -400,6 +402,7 @@ export async function buildApp(opts: BuildOpts) {
     ? new SubagentRunnerPool({
       dbPath: opts.dbPath,
       project: opts.project,
+      ...(opts.journalMode ? { journalMode: opts.journalMode } : {}),
       // What the daemon's OWN registry bridges right now. The mcp plugin is the single source: it holds
       // the tool definitions it registered from, so a runner registers from the same data through the same
       // code. Absent control (plugin disabled, or a registry that will not load) ⇒ no snapshot ⇒ the
@@ -429,6 +432,7 @@ export async function buildApp(opts: BuildOpts) {
     dbPath: opts.dbPath,
     project: opts.project,
     tmux,
+    ...(opts.journalMode ? { journalMode: opts.journalMode } : {}),
     bootstrap: opts.bootstrap,
     ...(subagentRunner ? { subagentRunner } : {}),
     // An owner turn finished with the device it was sent from off screen → push it to the user's phone.

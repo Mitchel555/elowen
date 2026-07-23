@@ -4,6 +4,7 @@ import { ELOWEN_VERSION } from '../api/version.js';
 import type { BrainUsage } from '../brain/events.js';
 import type { DelegatedProgressEvent, DelegatedTurnRequest } from '../brain/delegatedTurn.js';
 import { parseMcpBridgeSnapshot, type McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
+import type { JournalMode } from '../store/db.js';
 
 /** The forked runner's entry module. Resolved relative to THIS file so the daemon and the child always
  *  name the same build: in a packaged install both are `dist/subagent/*.js`. A source checkout run through
@@ -42,6 +43,7 @@ interface RunnerBootMessage {
   type: 'boot';
   buildId: string;
   dbPath: string;
+  journalMode?: JournalMode;
   project: { id: number; slug: string; path: string };
   /** The daemon's bridged MCP tool definitions AT THE INSTANT OF THIS FORK, so the runner can declare the
    *  same tools without connecting a single MCP server at boot (each one would otherwise launch its own
@@ -94,10 +96,12 @@ export function parseDaemonMessage(raw: unknown): DaemonToRunner | undefined {
   if (v.type === 'boot') {
     const buildId = str(v.buildId);
     const dbPath = str(v.dbPath);
+    const journalMode = v.journalMode === 'WAL' || v.journalMode === 'DELETE' ? v.journalMode : undefined;
     const p = v.project as Record<string, unknown> | undefined;
     const slug = str(p?.slug);
     const path = str(p?.path);
     if (!buildId || !dbPath || !p || !slug || !path || !Number.isSafeInteger(p.id)) return undefined;
+    if (v.journalMode !== undefined && !journalMode) return undefined;
     // A snapshot that does not parse is REFUSED along with the whole frame, not silently dropped: booting
     // without it would look identical from outside while composing a different tool list — and a tool list
     // is the prompt-cache key. Absent is fine; malformed is not.
@@ -106,7 +110,12 @@ export function parseDaemonMessage(raw: unknown): DaemonToRunner | undefined {
       mcp = parseMcpBridgeSnapshot(v.mcp);
       if (!mcp) return undefined;
     }
-    return { type: 'boot', buildId, dbPath, project: { id: p.id as number, slug, path }, ...(mcp ? { mcp } : {}) };
+    return {
+      type: 'boot', buildId, dbPath,
+      ...(journalMode ? { journalMode } : {}),
+      project: { id: p.id as number, slug, path },
+      ...(mcp ? { mcp } : {}),
+    };
   }
   if (v.type === 'turn') {
     const turnId = str(v.turnId);

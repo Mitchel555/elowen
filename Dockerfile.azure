@@ -29,6 +29,7 @@ ENV NODE_ENV=production \
     ELOWEN_PORT=4400 \
     ELOWEN_DAEMON_URL=http://127.0.0.1:4400 \
     ELOWEN_DB=/home/data/elowen.db \
+    ELOWEN_SQLITE_JOURNAL_MODE=DELETE \
     ELOWEN_LOG_DIR=/home/LogFiles/elowen \
     ELOWEN_PROJECT_PATH=/home/project \
     ELOWEN_AUTOSTART=0

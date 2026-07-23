@@ -31,11 +31,16 @@ class FakeChild extends EventEmitter {
   asChild(): ChildProcess { return this as unknown as ChildProcess; }
 }
 
-function hostWith(child: FakeChild, edges?: (parent: string, childSessionId: string, running: boolean) => void) {
+function hostWith(
+  child: FakeChild,
+  edges?: (parent: string, childSessionId: string, running: boolean) => void,
+  journalMode?: 'WAL' | 'DELETE',
+) {
   const host = new SubagentRunnerHost({
     dbPath: '/tmp/elowen-test.db',
     project: { id: 1, slug: 'e2e', path: '/tmp/project' },
     cwd: '/tmp/project',
+    ...(journalMode ? { journalMode } : {}),
     fork: () => child.asChild(),
   });
   if (edges) host.attachChildEdgeSink(edges);
@@ -61,6 +66,16 @@ describe('SubagentRunnerHost — the forked runner as seen from the daemon', () 
     expect(turn).toMatchObject({ type: 'turn', text: 'do it' });
     child.reply({ type: 'result', turnId: (turn as { turnId: string }).turnId, reply: 'child done' });
     expect(await run).toBe('child done');
+  });
+
+  it('boots with the daemon journal mode so the child cannot switch the database back to WAL', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child, undefined, 'DELETE');
+    const started = host.start();
+    await tick();
+    expect(child.received[0]).toMatchObject({ type: 'boot', journalMode: 'DELETE' });
+    ready(child);
+    await started;
   });
 
   it('replays only the child progress the runner sent, into the delegating turn', async () => {

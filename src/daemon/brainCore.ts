@@ -1,4 +1,4 @@
-import { openDb } from '../store/db.js';
+import { openDb, type JournalMode } from '../store/db.js';
 import { TaskStore } from '../store/taskStore.js';
 import { Readiness } from '../store/readiness.js';
 import { AgentStore } from '../store/agentStore.js';
@@ -95,6 +95,8 @@ export function createDelegatedChildren(
 
 export interface BrainCoreOpts {
   dbPath: string;
+  /** Journal mode chosen by the daemon for this database. Runner processes must use the same mode. */
+  journalMode?: JournalMode;
   project: { id: number; slug: string; path: string };
   /** The tmux driver the spawn service drives. Supplied by the caller (never chosen here) so a process
    *  that has no business launching panes can hand in whatever it wants to be reachable through spawn. */
@@ -133,7 +135,10 @@ export interface BrainCoreOpts {
  *  Those setters have silent defaults: a process that forgets one produces different transcripts with no
  *  error at all, which is the exact failure this factory exists to make impossible. */
 export async function buildBrainCore(opts: BrainCoreOpts) {
-  const db = openDb(opts.dbPath, opts.migrate === false ? { migrate: false } : {});
+  const db = openDb(opts.dbPath, {
+    ...(opts.journalMode ? { journalMode: opts.journalMode } : {}),
+    ...(opts.migrate === false ? { migrate: false } : {}),
+  });
   db.prepare('INSERT OR IGNORE INTO projects (id,slug,path) VALUES (?,?,?)').run(opts.project.id, opts.project.slug, opts.project.path);
   const tmux = opts.tmux;
   const tasks = new TaskStore(db); const agents = new AgentStore(db);

@@ -43,6 +43,7 @@ process.on('uncaughtException', (e) => { if (!isEpipe(e)) log.error('uncaughtExc
 const relayUrl = process.env.ELOWEN_RELAY_URL;
 const bootstrapUser = process.env.ELOWEN_BOOTSTRAP_USER;
 const bootstrapPass = process.env.ELOWEN_BOOTSTRAP_PASS;
+const journalMode = process.env.ELOWEN_SQLITE_JOURNAL_MODE === 'DELETE' ? 'DELETE' : 'WAL';
 
 // buildApp is async (it awaits the brain ModelRuntime). A boot failure must exit non-zero and loudly:
 // without this the rejection would be swallowed by the unhandledRejection handler above (meant to keep a
@@ -55,6 +56,7 @@ try {
     // through, which SQLite opens as an anonymous temporary database — every conversation lost on restart,
     // silently. The launcher always injects ELOWEN_DB, so only a directly started unit hits this.
     dbPath: dbPath(process.env),
+    journalMode,
     project: { id: 1, slug: process.env.ELOWEN_PROJECT ?? 'elowen', path: process.env.ELOWEN_PROJECT_PATH ?? process.cwd() },
     relay: relayUrl ? { baseUrl: relayUrl, apiKey: process.env.ELOWEN_RELAY_KEY ?? '', model: process.env.ELOWEN_RELAY_MODEL ?? 'gpt-4o-mini' } : null,
     bootstrap: bootstrapUser && bootstrapPass ? { username: bootstrapUser, password: bootstrapPass } : null,

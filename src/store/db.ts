@@ -7,6 +7,7 @@ import { renameRegistryTool, renameTool, repairImageTool } from './toolRenames.j
 const here = dirname(fileURLToPath(import.meta.url));
 
 export type Db = Database.Database;
+export type JournalMode = 'WAL' | 'DELETE';
 
 /** Add a column only if it isn't already present. Unlike a try/catch around ALTER TABLE, this
  *  checks the actual table shape, so a genuine ALTER failure (lock, disk full) is not swallowed. */
@@ -17,6 +18,9 @@ function addColumn(db: Db, table: string, column: string, decl: string): void {
 }
 
 export interface OpenDbOptions {
+  /** SQLite's journal implementation. WAL is fastest on local disks; DELETE is compatible with
+   *  network-mounted storage such as Azure App Service's persistent /home volume. */
+  journalMode?: JournalMode;
   /** Create the schema and run migrations (default true). A process that is NOT the migrator — a pooled
    *  sub-agent runner, forked only after the daemon's own openDb returned — passes false: it then opens a
    *  database whose shape is already final, so it neither races the migrator nor needs the write lock. */
@@ -30,13 +34,14 @@ export function openDb(path: string, opts: OpenDbOptions = {}): Db {
   // open a fresh file at the same moment the loser throws SQLITE_BUSY instantly unless the timeout is
   // already armed. Setting it first is what makes that race wait a few milliseconds instead of failing.
   db.pragma('busy_timeout = 5000');
-  db.pragma('journal_mode = WAL');
+  const journalMode = opts.journalMode ?? 'WAL';
+  db.pragma(`journal_mode = ${journalMode}`);
   // better-sqlite3 is synchronous, so every commit's fsync happens ON the event loop — and at SQLite's
   // default FULL that is a disk round-trip per stored message, with every other session and the whole
   // HTTP API waiting behind it. NORMAL is the setting WAL is designed around: a process crash still
   // cannot corrupt or lose committed data, only a power cut or kernel panic can drop the most recent
   // commits, which for a conversation transcript is the right trade for keeping the loop free.
-  db.pragma('synchronous = NORMAL');
+  if (journalMode === 'WAL') db.pragma('synchronous = NORMAL');
   // Enforce foreign keys so any REFERENCES added to the schema actually cascade/reject.
   // Must stay OUTSIDE the migration transaction below — SQLite ignores this pragma inside one.
   db.pragma('foreign_keys = ON');

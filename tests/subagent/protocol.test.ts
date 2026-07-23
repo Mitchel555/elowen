@@ -18,6 +18,11 @@ describe('parseDaemonMessage — boot', () => {
     expect(msg && 'mcp' in msg).toBe(false);
   });
 
+  it('carries only a valid SQLite journal mode through', () => {
+    expect(parseDaemonMessage(boot({ journalMode: 'DELETE' }))).toMatchObject({ journalMode: 'DELETE' });
+    expect(parseDaemonMessage(boot({ journalMode: 'MEMORY' }))).toBeUndefined();
+  });
+
   it('carries a bridged-MCP snapshot through', () => {
     const mcp = [{ serverName: 'parity', tools: [{ name: 'echo_text', description: 'Echo it' }] }];
     expect(parseDaemonMessage(boot({ mcp }))).toMatchObject({ type: 'boot', mcp });
