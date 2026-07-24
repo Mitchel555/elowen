@@ -20,6 +20,7 @@ const USAGE_ROWS = `
          COALESCE(json_extract(m.content, '$.usage.cacheWrite'), 0) AS cache_write,
          COALESCE(json_extract(m.content, '$.usage.totalTokens'), 0) AS total,
          COALESCE(json_extract(m.content, '$.usage.reasoning'), 0) AS reasoning,
+         COALESCE(json_extract(m.content, '$.durationMs'), 0) AS duration_ms,
          json_extract(m.content, '$.usage.cost.total') AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id
    WHERE m.role = 'assistant'
@@ -33,6 +34,7 @@ const USAGE_ROWS = `
          COALESCE(json_extract(je.value, '$.cacheWrite'), 0) AS cache_write,
          COALESCE(json_extract(je.value, '$.totalTokens'), 0) AS total,
          COALESCE(json_extract(je.value, '$.reasoning'), 0) AS reasoning,
+         COALESCE(json_extract(je.value, '$.durationMs'), 0) AS duration_ms,
          json_extract(je.value, '$.cost.total') AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id,
          json_each(json_extract(m.content, '$.usageRollup')) je
@@ -59,11 +61,13 @@ export interface BrainDescendantUsage {
  *  under `$.usageRollup` — one bucket per model that produced dropped spend — under a key that is NEVER
  *  `usage`, so PI's live session and `usageOf` (statusline) never double-count it after rehydrate.
  *  `model` preserves per-model attribution across compaction; `at` is the ms-epoch of the newest dropped
- *  row of that model (the day/window attribution basis, standing in for a live row's `$.timestamp`). */
+ *  row of that model (the day/window attribution basis, standing in for a live row's `$.timestamp`).
+ *  `durationMs` sums the dropped generations' measured wall time, so their output tokens/sec survives
+ *  compaction too (0 for rows that predate timing). */
 export interface UsageRollupBucket {
   model: string;
   input: number; output: number; cacheRead: number; cacheWrite: number;
-  totalTokens: number; reasoning: number; at: number; cost?: { total: number };
+  totalTokens: number; reasoning: number; at: number; durationMs?: number; cost?: { total: number };
 }
 
 /** Fold the usage of the rows a compaction is about to delete into PER-MODEL rollup buckets: assistant
@@ -77,13 +81,16 @@ export function rollupDroppedUsage(dropped: readonly { content: string }[]): Usa
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   const bucketFor = (model: string): UsageRollupBucket => {
     let b = byModel.get(model);
-    if (!b) { b = { model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, reasoning: 0, at: 0 }; byModel.set(model, b); }
+    if (!b) { b = { model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, reasoning: 0, at: 0, durationMs: 0 }; byModel.set(model, b); }
     return b;
   };
-  const fold = (b: UsageRollupBucket, u: Record<string, unknown>, at: number): void => {
+  const fold = (b: UsageRollupBucket, u: Record<string, unknown>, at: number, durationMs?: number): void => {
     b.input += num(u.input); b.output += num(u.output);
     b.cacheRead += num(u.cacheRead); b.cacheWrite += num(u.cacheWrite);
     b.reasoning += num(u.reasoning); b.totalTokens += num(u.totalTokens);
+    // For a prior rollup bucket `u` IS the bucket (durationMs top-level); for an assistant row the
+    // timing lives on the MESSAGE, next to `usage`, so the caller passes it explicitly.
+    b.durationMs = (b.durationMs ?? 0) + (durationMs ?? num(u.durationMs));
     const cost = (u as { cost?: { total?: unknown } }).cost;
     if (cost && typeof cost === 'object' && typeof cost.total === 'number') b.cost = { total: (b.cost?.total ?? 0) + cost.total };
     if (at > b.at) b.at = at; // newest dropped row of this model wins as its attribution point
@@ -92,7 +99,7 @@ export function rollupDroppedUsage(dropped: readonly { content: string }[]): Usa
     let content: unknown;
     try { content = JSON.parse(row.content); } catch { continue; }
     if (typeof content !== 'object' || content === null) continue;
-    const c = content as { usage?: Record<string, unknown>; usageRollup?: unknown; model?: unknown; timestamp?: unknown };
+    const c = content as { usage?: Record<string, unknown>; usageRollup?: unknown; model?: unknown; timestamp?: unknown; durationMs?: unknown };
     if (Array.isArray(c.usageRollup)) {
       // A prior divider — merge each of its per-model buckets (chained compaction).
       for (const raw of c.usageRollup) {
@@ -103,7 +110,7 @@ export function rollupDroppedUsage(dropped: readonly { content: string }[]): Usa
     } else if (c.usage && typeof c.usage === 'object') {
       // An assistant message — attribute to the model it recorded (empty → resolved to the session model
       // in SQL for legacy rows that predate per-message model capture).
-      fold(bucketFor(typeof c.model === 'string' ? c.model : ''), c.usage, typeof c.timestamp === 'number' ? c.timestamp : 0);
+      fold(bucketFor(typeof c.model === 'string' ? c.model : ''), c.usage, typeof c.timestamp === 'number' ? c.timestamp : 0, num(c.durationMs));
     }
   }
   const buckets = [...byModel.values()].filter((b) => b.totalTokens !== 0 || b.cost != null);
@@ -159,7 +166,7 @@ export class BrainUsageStore {
     const toMs = window?.toIso ? Date.parse(window.toIso) : NaN;
     if (Number.isFinite(fromMs)) { clauses.push(`ts >= ?`); params.push(fromMs); }
     if (Number.isFinite(toMs)) { clauses.push(`ts <= ?`); params.push(toMs); }
-    interface Row { model: string; input: number; output: number; cache_read: number; cache_write: number; total: number; reasoning: number; cost: number | null }
+    interface Row { model: string; input: number; output: number; cache_read: number; cache_write: number; total: number; reasoning: number; measured_output: number; duration_ms: number; cost: number | null }
     const rows = this.db.prepare(
       `WITH usage_rows AS (${USAGE_ROWS})
        SELECT model AS model,
@@ -169,6 +176,8 @@ export class BrainUsageStore {
               COALESCE(SUM(cache_write), 0) AS cache_write,
               COALESCE(SUM(total), 0) AS total,
               COALESCE(SUM(reasoning), 0) AS reasoning,
+              COALESCE(SUM(CASE WHEN duration_ms > 0 THEN output ELSE 0 END), 0) AS measured_output,
+              COALESCE(SUM(duration_ms), 0) AS duration_ms,
               CASE WHEN COUNT(cost) = 0 THEN NULL ELSE SUM(cost) END AS cost
          FROM usage_rows
         WHERE ${clauses.join(' AND ')}
@@ -181,6 +190,10 @@ export class BrainUsageStore {
         const usage: TokenUsage = {
           input: r.input, output: r.output, cacheRead: r.cache_read, cacheWrite: r.cache_write,
           total: r.total, reasoning: r.reasoning, costUsd: r.cost, currency: r.cost != null ? 'USD' : null, costSource,
+          // Weighted average over ONLY the generations that carried timing — rows predating the
+          // durationMs stamp contribute neither output nor ms, so they dilute nothing (and a bucket
+          // with no timing at all reports null, not a bogus figure).
+          outputTps: r.duration_ms > 0 ? (r.measured_output / (r.duration_ms / 1000)) : null,
         };
         return { exec: `elowen:${r.model}`, usage };
       });

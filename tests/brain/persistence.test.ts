@@ -29,6 +29,30 @@ describe('brain persistence', () => {
     expect(JSON.parse(msgs.at(-1)!.content)).toMatchObject({ content: 'hello' });
   });
 
+  it('stamps the assistant generation duration from message_start to message_end', () => {
+    const session = { messages: [] as unknown[] } as unknown as AgentSession;
+    const project = createSessionPersistenceProjector(store, session, 's1', 200_000);
+    const assistant = { role: 'assistant', content: 'generated', usage: { input: 1, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 51 } };
+    project({ type: 'message_start', message: { role: 'assistant', content: [] } } as never);
+    project({ type: 'message_end', message: assistant } as never);
+    // The stamp lands on the finished message object (PI keeps the same reference into agent_end)…
+    expect((assistant as { durationMs?: number }).durationMs).toBeGreaterThanOrEqual(0);
+    expect(typeof (assistant as { durationMs?: number }).durationMs).toBe('number');
+    // …and on the mid-turn mirror row the projector persisted.
+    const pending = db.prepare("SELECT content FROM brain_messages WHERE session_id = 's1' AND role = 'assistant'").all() as { content: string }[];
+    expect(pending).toHaveLength(1);
+    expect(JSON.parse(pending[0]!.content)).toHaveProperty('durationMs');
+  });
+
+  it('does not stamp a duration on non-assistant message boundaries', () => {
+    const session = { messages: [] as unknown[] } as unknown as AgentSession;
+    const project = createSessionPersistenceProjector(store, session, 's1', 200_000);
+    const toolResult = { role: 'toolResult', content: 'done', toolCallId: 't1' };
+    project({ type: 'message_start', message: { role: 'toolResult', content: '' } } as never);
+    project({ type: 'message_end', message: toolResult } as never);
+    expect(toolResult).not.toHaveProperty('durationMs');
+  });
+
   it('reorders pre-projected steering into the settled PI run instead of leaving it before earlier output', () => {
     const initialId = projectUserTurn(store, 's1', 'initial clean prompt');
     // A delivered steer is projected at PI's message_start after the agent already emitted an

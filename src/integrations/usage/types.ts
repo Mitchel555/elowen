@@ -27,6 +27,10 @@ export interface TokenUsage {
   /** Small, non-sensitive provider usage object (tokens + cost only) kept for debugging a
    *  provider_reported figure. Never contains prompt/response content or PII. Absent otherwise. */
   rawUsageMetadata?: Record<string, unknown> | null;
+  /** Average OUTPUT tokens/sec over the generations that carry a measured `durationMs` (only the
+   *  embedded brain measures it, so task-worker buckets leave it undefined; null when a measured
+   *  bucket exists but no generation in the window had timing). Weighted: Σoutput / Σduration. */
+  outputTps?: number | null;
 }
 
 export const EMPTY_USAGE: TokenUsage = {

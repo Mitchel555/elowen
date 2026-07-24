@@ -23,11 +23,18 @@ function mergeModelUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   const costSource: CostSource = costUsd == null
     ? 'unavailable'
     : costed.every((u) => u.costSource === 'provider_reported') ? 'provider_reported' : 'calculated';
+  // Speed merges as a duration-weighted average over the sides that MEASURED one (task-worker buckets
+  // carry none): recover each side's generation seconds from output/tps, sum, re-divide.
+  const seconds = (u: TokenUsage): number | null => (u.outputTps != null && u.outputTps > 0 ? u.output / u.outputTps : null);
+  const secA = seconds(a); const secB = seconds(b);
+  const measuredOutput = (secA != null ? a.output : 0) + (secB != null ? b.output : 0);
+  const measuredSeconds = (secA ?? 0) + (secB ?? 0);
   return {
     input: a.input + b.input, output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite,
     total: a.total + b.total, reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0),
     costUsd, currency: a.currency ?? b.currency ?? (costUsd != null ? 'USD' : null), costSource,
+    outputTps: measuredSeconds > 0 ? measuredOutput / measuredSeconds : null,
   };
 }
 

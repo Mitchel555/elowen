@@ -65,6 +65,11 @@ export const sk = {
     sectionModels: 'Všetky modely',
     contextLabel: 'Kontext',
     sessionTokens: 'Tokeny v tejto relácii',
+    inputTokens: 'Vstupné tokeny',
+    outputTokens: 'Výstupné tokeny',
+    cacheHit: 'Zásahy cache',
+    speed: 'Rýchlosť generovania',
+    avgSpeed: 'Priemerná rýchlosť',
     arrowHint: '← → prepínanie sekcií',
   },
   common: {

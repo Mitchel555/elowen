@@ -1,4 +1,4 @@
-import { formatTokens, formatCost } from '../../lib/format';
+import { formatTokens, formatCost, formatSpeed } from '../../lib/format';
 import type { ModelUsage } from '../../lib/types';
 
 /** One model's row on the stats page: figures plus a max-normalized bar width (by tokens). */
@@ -9,6 +9,8 @@ interface UsageRow {
   pct: number;          // 0..100, largest row = 100
   tokensLabel: string;
   costLabel: string;    // '—' when the executor records no cost (claude/codex)
+  speedLabel: string;   // '—' when no generation carried timing
+  cacheHitPct: number | null; // cacheRead / (cacheRead + input); null when nothing was read
 }
 
 export interface UsageSummary {
@@ -20,10 +22,18 @@ export interface UsageSummary {
   totalCacheTokens: number;   // cacheRead + cacheWrite across all models
   totalCacheLabel: string;
   modelsUsed: number;
+  /** Duration-weighted average output speed across every row that measured one ('—' when none did). */
+  avgSpeedLabel: string;
   hasAnyUsage: boolean;
 }
 
 const DASH = '—';
+
+/** Share of prompt tokens served from cache: cacheRead / (cacheRead + fresh input). */
+export function cacheHitPct(u: { cacheRead: number; input: number }): number | null {
+  const reads = u.cacheRead + u.input;
+  return reads > 0 ? (u.cacheRead / reads) * 100 : null;
+}
 
 /** Shape the raw `/usage/by-model` array into sorted, pre-formatted display rows + totals.
  *  Pure and unit-tested; the view stays declarative. Bar widths are max-normalized by tokens
@@ -39,6 +49,8 @@ export function buildUsageSummary(data: ModelUsage[] | undefined): UsageSummary 
       pct: (m.usage.total / maxTokens) * 100,
       tokensLabel: formatTokens(m.usage.total),
       costLabel: m.usage.costUsd == null ? DASH : formatCost(m.usage.costUsd),
+      speedLabel: formatSpeed(m.usage.outputTps),
+      cacheHitPct: cacheHitPct(m.usage),
     }))
     .sort((a, b) => b.totalTokens - a.totalTokens);
 
@@ -46,6 +58,14 @@ export function buildUsageSummary(data: ModelUsage[] | undefined): UsageSummary 
   const totalCacheTokens = items.reduce((sum, m) => sum + m.usage.cacheRead + m.usage.cacheWrite, 0);
   const costs = items.map((m) => m.usage.costUsd).filter((c): c is number => c != null);
   const totalCost = costs.length ? costs.reduce((sum, c) => sum + c, 0) : null;
+  // Average speed is duration-weighted: recover each measured row's generation seconds from
+  // output/tps, sum, re-divide — an arithmetic mean of per-model tps would overweight small runs.
+  let measuredOutput = 0;
+  let measuredSeconds = 0;
+  for (const m of items) {
+    const tps = m.usage.outputTps;
+    if (tps != null && tps > 0) { measuredOutput += m.usage.output; measuredSeconds += m.usage.output / tps; }
+  }
 
   return {
     rows,
@@ -56,6 +76,7 @@ export function buildUsageSummary(data: ModelUsage[] | undefined): UsageSummary 
     totalCacheTokens,
     totalCacheLabel: formatTokens(totalCacheTokens),
     modelsUsed: rows.length,
+    avgSpeedLabel: measuredSeconds > 0 ? formatSpeed(measuredOutput / measuredSeconds) : DASH,
     // A provider may report a settled cost without token detail. Keep that row visible instead of
     // incorrectly replacing the ledger with the empty state.
     hasAnyUsage: totalTokens > 0 || costs.some((cost) => cost > 0),

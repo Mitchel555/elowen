@@ -499,13 +499,15 @@ describe('BrainStore', () => {
 
   describe('usageByModel', () => {
     /** Append an assistant row carrying the full PI `usage` breakdown (+ a top-level ms `timestamp` and,
-     *  when given, the PI `$.model` the row was produced with — the per-row attribution basis). */
-    const usageMsg = (session: string, id: string, u: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; reasoning?: number; totalTokens: number; cost?: number }, tsMs = Date.now(), model?: string) =>
+     *  when given, the PI `$.model` the row was produced with — the per-row attribution basis). The
+     *  optional `durationMs` mirrors the persistence projector's generation-timing stamp. */
+    const usageMsg = (session: string, id: string, u: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; reasoning?: number; totalTokens: number; cost?: number }, tsMs = Date.now(), model?: string, durationMs?: number) =>
       store.appendMessage({
         id, sessionId: session, parentId: null, role: 'assistant',
         content: {
           role: 'assistant',
           ...(model == null ? {} : { model }),
+          ...(durationMs == null ? {} : { durationMs }),
           usage: {
             input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0,
             reasoning: u.reasoning ?? 0, totalTokens: u.totalTokens, ...(u.cost == null ? {} : { cost: { total: u.cost } }),
@@ -518,6 +520,33 @@ describe('BrainStore', () => {
      *  aggregates (no double count); a crashed worker leaves none. */
     const snapshotTask = (taskId: string) =>
       db.prepare("INSERT INTO task_usage (task_id, project_id, exec, total) VALUES (?, 1, 'elowen:claude-opus-4-8', 1)").run(taskId);
+
+    it('computes outputTps over ONLY the generations that carried timing (legacy rows dilute nothing)', () => {
+      store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+      // Measured: 100 output over 2000 ms → 50 tok/s. Unmeasured legacy row: output but no durationMs —
+      // counting its output toward the speed would understate it, so it contributes NEITHER side.
+      usageMsg('brain-a', 'm1', { output: 100, totalTokens: 200 }, Date.now(), undefined, 2000);
+      usageMsg('brain-a', 'm2', { output: 900, totalTokens: 1000 });
+      const [row] = store.usageByModel(1);
+      expect(row!.usage.total).toBe(1200); // totals still count everything
+      expect(row!.usage.outputTps).toBeCloseTo(50);
+    });
+
+    it('reports a null outputTps when no generation in the bucket carried timing', () => {
+      store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+      usageMsg('brain-a', 'm1', { output: 50, totalTokens: 100 });
+      const [row] = store.usageByModel(1);
+      expect(row!.usage.outputTps).toBeNull();
+    });
+
+    it('weights outputTps by generation duration across measured rows (not an arithmetic mean)', () => {
+      store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+      // 100 out / 1 s (100 tok/s) + 50 out / 5 s (10 tok/s) → Σoutput/Σms = 150/6 = 25 tok/s.
+      usageMsg('brain-a', 'm1', { output: 100, totalTokens: 200 }, Date.now(), undefined, 1000);
+      usageMsg('brain-a', 'm2', { output: 50, totalTokens: 100 }, Date.now(), undefined, 5000);
+      const [row] = store.usageByModel(1);
+      expect(row!.usage.outputTps).toBeCloseTo(25);
+    });
 
     it('sums a chat session per model with provider-reported cost, folding into an `elowen:<model>` bucket', () => {
       store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
@@ -669,6 +698,18 @@ describe('BrainStore', () => {
     });
 
     describe('survives compaction (rollup on the divider)', () => {
+      it('keeps the dropped generations timing so outputTps survives compaction', () => {
+        store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+        // Measured rows dropped by the compaction roll their durationMs onto the divider…
+        usageMsg('brain-a', 'old1', { output: 100, totalTokens: 200 }, Date.now(), undefined, 2000);
+        usageMsg('brain-a', 'old2', { output: 50, totalTokens: 100 }, Date.now(), undefined, 5000);
+        // …and combine with the KEPT row's own timing: (100+50+150)/(2+5+3) s = 30 tok/s.
+        usageMsg('brain-a', 'keep1', { output: 150, totalTokens: 300 }, Date.now(), undefined, 3000);
+        store.compactSessionMessages('brain-a', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary', summary: 's' } }, 1);
+        const [row] = store.usageByModel(1);
+        expect(row!.usage.outputTps).toBeCloseTo(30);
+      });
+
       it('keeps dropped assistant rows spend in usageByModel + usageByDay', () => {
         store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
         usageMsg('brain-a', 'old1', { input: 5, totalTokens: 100, cost: 0.1 });

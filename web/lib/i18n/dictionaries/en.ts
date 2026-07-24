@@ -65,6 +65,11 @@ export const en = {
     sectionModels: 'All models',
     contextLabel: 'Context',
     sessionTokens: 'Session tokens',
+    inputTokens: 'Input tokens',
+    outputTokens: 'Output tokens',
+    cacheHit: 'Cache hit rate',
+    speed: 'Generation speed',
+    avgSpeed: 'Avg speed',
     arrowHint: '\u2190 \u2192 \u00b7 switch sections',
   },
   common: {

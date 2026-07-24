@@ -74,7 +74,16 @@ class StatsOverlay implements Component, Focusable {
         body.push(sectionRule('usage', bodyWidth));
         body.push('');
         body.push(kv('tokens', color.text(`${formatK(u.totalTokens)} total`)));
+        if (u.input != null || u.output != null) {
+          body.push(kv('in / out', color.faint(`${formatK(u.input ?? 0)} / ${formatK(u.output ?? 0)}`)));
+        }
+        if (u.cacheRead != null && u.input != null && u.cacheRead + u.input > 0) {
+          body.push(kv('cache hit', color.faint(`${Math.round((u.cacheRead / (u.cacheRead + u.input)) * 100)}%`)));
+        }
         body.push(kv('cost', color.bold(color.text(`$${u.cost.toFixed(2)}`))));
+        if (u.outputTps != null && u.outputTps > 0) {
+          body.push(kv('speed', color.text(`${Math.round(u.outputTps)} tok/s`)));
+        }
       } else {
         body.push(kv('', color.faint('no conversation usage data')));
       }
@@ -84,23 +93,31 @@ class StatsOverlay implements Component, Focusable {
       if (models.length === 0) {
         body.push(kv('', color.faint('no model usage data')));
       } else {
-        const execW = 26, tokW = 10, cacheW = 10, costW = 10;
+        const execW = 26, tokW = 10, cacheW = 10, tpsW = 8, costW = 10;
         const pad = '   ';
-        body.push(`${pad}${color.dim('model'.padEnd(execW))}${color.dim('tokens'.padStart(tokW))}${color.dim('cache'.padStart(cacheW))}${color.dim('cost'.padStart(costW))}`);
+        body.push(`${pad}${color.dim('model'.padEnd(execW))}${color.dim('tokens'.padStart(tokW))}${color.dim('cache'.padStart(cacheW))}${color.dim('tok/s'.padStart(tpsW))}${color.dim('cost'.padStart(costW))}`);
 
         const sorted = [...models].sort((a, b) => b.usage.total - a.usage.total);
         for (const m of sorted) {
           const exec = m.exec.length > execW - 2 ? `${m.exec.slice(0, execW - 4)}…` : m.exec;
           const costStr = m.usage.costUsd != null ? `$${m.usage.costUsd.toFixed(2)}` : '—';
-          body.push(`${pad}${color.text(exec.padEnd(execW))}${color.text(formatK(m.usage.total).padStart(tokW))}${color.faint(formatK(m.usage.cacheRead + m.usage.cacheWrite).padStart(cacheW))}${color.text(costStr.padStart(costW))}`);
+          const tpsStr = m.usage.outputTps != null && m.usage.outputTps > 0 ? `${Math.round(m.usage.outputTps)}` : '—';
+          body.push(`${pad}${color.text(exec.padEnd(execW))}${color.text(formatK(m.usage.total).padStart(tokW))}${color.faint(formatK(m.usage.cacheRead + m.usage.cacheWrite).padStart(cacheW))}${color.faint(tpsStr.padStart(tpsW))}${color.text(costStr.padStart(costW))}`);
         }
 
         const totalTokens = models.reduce((sum, m) => sum + m.usage.total, 0);
         const totalCache = models.reduce((sum, m) => sum + m.usage.cacheRead + m.usage.cacheWrite, 0);
         const costs = models.map((m) => m.usage.costUsd).filter((c): c is number => c != null);
         const totalCost = costs.length ? costs.reduce((sum, c) => sum + c, 0) : null;
-        body.push(`${pad}${color.faint('─'.repeat(execW + tokW + cacheW + costW))}`);
-        body.push(`${pad}${color.accent('Σ'.padEnd(execW))}${color.text(formatK(totalTokens).padStart(tokW))}${color.faint(formatK(totalCache).padStart(cacheW))}${color.bold(color.text((totalCost != null ? `$${totalCost.toFixed(2)}` : '—').padStart(costW)))}`);
+        // Duration-weighted average speed across the models that measured one (output/tps = seconds).
+        let measuredOutput = 0, measuredSeconds = 0;
+        for (const m of models) {
+          const tps = m.usage.outputTps;
+          if (tps != null && tps > 0) { measuredOutput += m.usage.output; measuredSeconds += m.usage.output / tps; }
+        }
+        const avgTps = measuredSeconds > 0 ? `${Math.round(measuredOutput / measuredSeconds)}` : '—';
+        body.push(`${pad}${color.faint('─'.repeat(execW + tokW + cacheW + tpsW + costW))}`);
+        body.push(`${pad}${color.accent('Σ'.padEnd(execW))}${color.text(formatK(totalTokens).padStart(tokW))}${color.faint(formatK(totalCache).padStart(cacheW))}${color.faint(avgTps.padStart(tpsW))}${color.bold(color.text((totalCost != null ? `$${totalCost.toFixed(2)}` : '—').padStart(costW)))}`);
       }
     }
 
@@ -118,7 +135,7 @@ export function openStatsOverlay(o: {
 }): void {
   const longest = Math.max(
     62,
-    ...o.data.models.map((m) => Math.min(m.exec.length, 26) + 10 + 10 + 10 + 6),
+    ...o.data.models.map((m) => Math.min(m.exec.length, 26) + 10 + 10 + 8 + 10 + 6),
     visibleWidth('Stats        ● Conversation    ○ Models') + 8,
   );
   openCenteredModal({

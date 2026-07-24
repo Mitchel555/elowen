@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { BarChart3, ChevronLeft, ChevronRight, Database, DollarSign, Boxes } from 'lucide-react';
+import { BarChart3, ChevronLeft, ChevronRight, Database, DollarSign, Boxes, ArrowDownToLine, ArrowUpFromLine, Zap, Gauge } from 'lucide-react';
 import { useBrainChat } from './BrainChatProvider';
 import { useModelUsage } from '../../lib/queries';
 import { useTranslation } from '../../lib/i18n';
-import { formatTokens, formatCost } from '../../lib/format';
-import { buildUsageSummary } from '../stats/usageBars';
+import { formatTokens, formatCost, formatSpeed } from '../../lib/format';
+import { buildUsageSummary, cacheHitPct } from '../stats/usageBars';
 import { ModelIcon } from '../../components/ui/ModelIcon';
 import { LoadingState, ErrorState, EmptyState } from '../../components/ui/states';
 import { Modal, ModalBody } from '../../components/ui/Modal';
@@ -36,6 +36,7 @@ export function StatsModal({ onClose }: { onClose: () => void }) {
 
   const u = usage;
   const pct = u?.percent != null ? Math.round(u.percent) : null;
+  const convCacheHit = u && u.cacheRead != null && u.input != null ? cacheHitPct({ cacheRead: u.cacheRead, input: u.input }) : null;
 
   return (
     <Modal title={t.stats.modalTitle} onClose={onClose} size="md" icon={BarChart3}>
@@ -118,6 +119,42 @@ export function StatsModal({ onClose }: { onClose: () => void }) {
                   {u ? formatCost(u.cost) : '—'}
                 </span>
               </div>
+              <div className="flex flex-col gap-1 rounded-md border border-border bg-elevated px-3 py-2">
+                <span className="flex items-center gap-1.5 text-xs text-text-muted">
+                  <ArrowDownToLine size={13} aria-hidden />
+                  {t.stats.inputTokens}
+                </span>
+                <span className="font-mono text-sm tabular-nums text-text">
+                  {u?.input != null ? formatTokens(u.input) : '—'}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1 rounded-md border border-border bg-elevated px-3 py-2">
+                <span className="flex items-center gap-1.5 text-xs text-text-muted">
+                  <ArrowUpFromLine size={13} aria-hidden />
+                  {t.stats.outputTokens}
+                </span>
+                <span className="font-mono text-sm tabular-nums text-text">
+                  {u?.output != null ? formatTokens(u.output) : '—'}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1 rounded-md border border-border bg-elevated px-3 py-2">
+                <span className="flex items-center gap-1.5 text-xs text-text-muted">
+                  <Zap size={13} aria-hidden />
+                  {t.stats.cacheHit}
+                </span>
+                <span className="font-mono text-sm tabular-nums text-text">
+                  {convCacheHit != null ? `${Math.round(convCacheHit)} %` : '—'}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1 rounded-md border border-border bg-elevated px-3 py-2">
+                <span className="flex items-center gap-1.5 text-xs text-text-muted">
+                  <Gauge size={13} aria-hidden />
+                  {t.stats.speed}
+                </span>
+                <span className="font-mono text-sm tabular-nums text-text">
+                  {u ? formatSpeed(u.outputTps) : '—'}
+                </span>
+              </div>
             </div>
 
             <p className="text-xs text-text-muted">{t.stats.arrowHint}</p>
@@ -128,7 +165,7 @@ export function StatsModal({ onClose }: { onClose: () => void }) {
           <div className="flex flex-col gap-3">
             {/* Totals strip */}
             {summary.hasAnyUsage && (
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <div className="flex flex-col gap-1 rounded-md border border-border bg-elevated px-3 py-2">
                   <span className="flex items-center gap-1.5 text-xs text-text-muted">
                     <BarChart3 size={13} aria-hidden />
@@ -156,6 +193,15 @@ export function StatsModal({ onClose }: { onClose: () => void }) {
                     {summary.modelsUsed}
                   </span>
                 </div>
+                <div className="flex flex-col gap-1 rounded-md border border-border bg-elevated px-3 py-2">
+                  <span className="flex items-center gap-1.5 text-xs text-text-muted">
+                    <Gauge size={13} aria-hidden />
+                    {t.stats.avgSpeed}
+                  </span>
+                  <span className="font-mono text-sm tabular-nums text-text">
+                    {summary.avgSpeedLabel}
+                  </span>
+                </div>
               </div>
             )}
 
@@ -172,6 +218,7 @@ export function StatsModal({ onClose }: { onClose: () => void }) {
                   <div
                     key={row.exec}
                     className="flex items-center gap-2 bg-surface px-3 py-2"
+                    title={row.cacheHitPct != null ? `${t.stats.cacheHit}: ${Math.round(row.cacheHitPct)} %` : undefined}
                   >
                     <ModelIcon name={row.exec} size={15} />
                     <span className="min-w-0 flex-1 truncate font-mono text-xs text-text" title={row.exec}>
@@ -189,6 +236,9 @@ export function StatsModal({ onClose }: { onClose: () => void }) {
                     </div>
                     <span className="font-mono text-xs tabular-nums text-text-muted">
                       {row.tokensLabel}
+                    </span>
+                    <span className="w-16 text-right font-mono text-xs tabular-nums text-text-muted">
+                      {row.speedLabel}
                     </span>
                     <span className="w-20 text-right font-mono text-xs tabular-nums text-text">
                       {row.costLabel}

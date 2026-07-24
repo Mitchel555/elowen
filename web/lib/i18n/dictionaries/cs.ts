@@ -65,6 +65,11 @@ export const cs = {
     sectionModels: 'Všechny modely',
     contextLabel: 'Kontext',
     sessionTokens: 'Tokeny v této relaci',
+    inputTokens: 'Vstupní tokeny',
+    outputTokens: 'Výstupní tokeny',
+    cacheHit: 'Zásahy cache',
+    speed: 'Rychlost generování',
+    avgSpeed: 'Průměrná rychlost',
     arrowHint: '← → · přepínání sekcí',
   },
   common: {

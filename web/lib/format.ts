@@ -58,6 +58,11 @@ export function formatCost(usd: number, decimals = 4): string {
   return `$${usd.toFixed(decimals)}`;
 }
 
+/** Generation speed as a "62 tok/s" label; null/0 (unmeasured) renders the em dash. */
+export function formatSpeed(tps: number | null | undefined): string {
+  return tps != null && tps > 0 ? `${Math.round(tps)} tok/s` : '—';
+}
+
 // ---------------------------------------------------------------------------------------------
 // Date & time
 // ---------------------------------------------------------------------------------------------

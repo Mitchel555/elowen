@@ -147,6 +147,10 @@ export function createSessionPersistenceProjector(
   let deferredOverflow: AgentSessionEvent | null = null;
   let agentRunOpen = false;
   let pendingRunCompaction = false;
+  // Wall-clock start of the in-flight assistant generation (its `message_start`). Stamped onto the
+  // finished message as `durationMs` at `message_end`, so usage stats can report a REAL output
+  // tokens/sec: per-step generation time excludes tool execution, which happens BETWEEN steps.
+  let assistantStartedAt = 0;
   const persistPendingRunCompaction = (): void => {
     if (!pendingRunCompaction) return;
     persistCompaction(store, session, sessionId);
@@ -157,12 +161,20 @@ export function createSessionPersistenceProjector(
       agentRunOpen = true;
       return;
     }
+    if (event.type === 'message_start') {
+      assistantStartedAt = ((event.message as { role?: string }).role ?? 'assistant') === 'assistant' ? Date.now() : 0;
+      return;
+    }
     // Mid-turn mirror. Deliberately NOT gated on `agentRunOpen`: PI emits this as soon as it has the
     // finished message, and the point of the row is to exist before the turn is allowed to end.
     // MUST stay on `message_end`, never `entry_appended`: PI emits the latter from exactly one place —
     // its ExtensionAPI's `appendEntry`, which hardcodes `type: "custom"` — so an `entry.type === 'message'`
     // test there can never be true and this mirror silently never runs.
     if (event.type === 'message_end') {
+      if (assistantStartedAt > 0 && ((event.message as { role?: string }).role ?? 'assistant') === 'assistant') {
+        (event.message as { durationMs?: number }).durationMs = Date.now() - assistantStartedAt;
+        assistantStartedAt = 0;
+      }
       projectPendingMessage(store, sessionId, event.message);
       return;
     }

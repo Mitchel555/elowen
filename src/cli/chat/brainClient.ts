@@ -28,9 +28,15 @@ export interface BrainClientOpts {
 
 /** Statusline display toggles (the statusline plugin's config; null when the plugin is disabled). */
 export interface StatuslineConfig { showModel?: boolean; showContext?: boolean; showTokens?: boolean; showCost?: boolean }
-export interface BrainUsageView { tokens: number | null; contextWindow: number; percent: number | null; totalTokens: number; cost: number }
+export interface BrainUsageView {
+  tokens: number | null; contextWindow: number; percent: number | null; totalTokens: number; cost: number;
+  /** Cumulative per-session breakdown (absent on older daemons — treat as 0/unknown). */
+  input?: number; output?: number; cacheRead?: number; cacheWrite?: number; reasoning?: number;
+  /** Average output tokens/sec over the session's measured generations; null when none measured. */
+  outputTps?: number | null;
+}
 /** Per-model token/cost usage, one record per model (exec spec), matching the /usage/by-model wire shape. */
-export interface ModelUsageView { exec: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; costUsd: number | null; costSource?: string } }
+export interface ModelUsageView { exec: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; costUsd: number | null; costSource?: string; outputTps?: number | null } }
 export type BrainWorkMode = 'build' | 'plan' | 'workflow';
 /** Single source of truth for the chat work-mode label (status chip / modal) and the toggle notice.
  *  Keyed by BrainWorkMode so adding a mode is one edit here, not scattered ternaries. */

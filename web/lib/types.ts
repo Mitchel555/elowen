@@ -119,7 +119,15 @@ export interface BrainCard { id: string; title?: string; items?: BrainCardItem[]
  *  (sub-agent / channel) from it; null when the process has no session. */
 export interface ProcessInfo { id: string; command: string; cwd: string; startedAt: string; sessionId: string | null; running: boolean; exitCode: number | null }
 /** Live statusline numbers for the active conversation. */
-export interface BrainUsage { tokens: number | null; contextWindow: number; percent: number | null; totalTokens: number; cost: number }
+export interface BrainUsage {
+  tokens: number | null; contextWindow: number; percent: number | null; totalTokens: number; cost: number;
+  /** Cumulative per-session breakdown (absent on older daemons — treat as 0/unknown). */
+  input?: number; output?: number; cacheRead?: number; cacheWrite?: number;
+  /** Reasoning tokens (a subset of `output`, display only). */
+  reasoning?: number;
+  /** Average output tokens/sec over the session's measured generations; null when none measured yet. */
+  outputTps?: number | null;
+}
 /** The statusline plugin's display toggles (null = plugin disabled). */
 export interface StatuslineConfig { showModel?: boolean; showContext?: boolean; showTokens?: boolean; showCost?: boolean }
 export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean }
@@ -636,6 +644,8 @@ export interface TokenUsage {
   currency?: string | null;
   /** Provenance of `costUsd`. Absent on legacy rows (treat as unknown). */
   costSource?: CostSource;
+  /** Average output tokens/sec over measured generations (brain sessions only); null when unmeasured. */
+  outputTps?: number | null;
 }
 
 /** Total token/cost usage aggregated for one model (exec spec). */

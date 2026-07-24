@@ -245,13 +245,25 @@ export interface BrainCard {
   pinned?: boolean;
 }
 
-/** Statusline data for one live conversation: current context fill + session totals. */
+/** Statusline data for one live conversation: current context fill + session totals. The breakdown
+ *  fields (`input`…`reasoning`, `outputTps`) are the session's own cumulative sums, so the /stats views
+ *  can show more than the grand total; optional because tests and custom producers build partial
+ *  literals — treat absence as 0/unknown. */
 export interface BrainUsage {
   tokens: number | null;
   contextWindow: number;
   percent: number | null;
   totalTokens: number;
   cost: number;
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  /** Reasoning tokens (a SUBSET of `output`, display only). */
+  reasoning?: number;
+  /** Average output tokens/sec across the session's measured generations (root session only — a
+   *  sub-agent's speed shows in its own lane). Null until a generation with timing finishes. */
+  outputTps?: number | null;
 }
 
 /** PI's overflow detector expects a fully shaped assistant usage object, while tests/custom stream
@@ -498,9 +510,31 @@ function usageOf(session: AgentSession): BrainUsage {
   const ctx = session.getContextUsage();
   let totalTokens = 0;
   let cost = 0;
-  for (const m of session.messages as { usage?: { totalTokens?: number; cost?: { total?: number } } }[]) {
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  let reasoning = 0;
+  let measuredOutput = 0;
+  let measuredMs = 0;
+  for (const m of session.messages as {
+    usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; reasoning?: number; totalTokens?: number; cost?: { total?: number } };
+    durationMs?: number;
+  }[]) {
     totalTokens += m.usage?.totalTokens ?? 0;
     cost += m.usage?.cost?.total ?? 0;
+    input += m.usage?.input ?? 0;
+    output += m.usage?.output ?? 0;
+    cacheRead += m.usage?.cacheRead ?? 0;
+    cacheWrite += m.usage?.cacheWrite ?? 0;
+    reasoning += m.usage?.reasoning ?? 0;
+    // Speed only over generations that carry the projector's timing stamp — same measured-only
+    // weighting as the store's per-model aggregate.
+    if (m.durationMs && m.durationMs > 0 && m.usage?.output) { measuredOutput += m.usage.output; measuredMs += m.durationMs; }
   }
-  return { tokens: ctx?.tokens ?? null, contextWindow: ctx?.contextWindow ?? 0, percent: ctx?.percent ?? null, totalTokens, cost };
+  return {
+    tokens: ctx?.tokens ?? null, contextWindow: ctx?.contextWindow ?? 0, percent: ctx?.percent ?? null, totalTokens, cost,
+    input, output, cacheRead, cacheWrite, reasoning,
+    outputTps: measuredMs > 0 ? measuredOutput / (measuredMs / 1000) : null,
+  };
 }

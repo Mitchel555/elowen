@@ -30,6 +30,31 @@ describe('buildUsageSummary', () => {
     expect(s.totalCacheLabel).toBe('35');
   });
 
+  it('labels per-row speed and a duration-weighted average, dashing unmeasured rows', () => {
+    const s = buildUsageSummary([
+      // 100 out at 100 tok/s (1 s) + 50 out at 10 tok/s (5 s) → avg 150/6 = 25 tok/s; 'c' unmeasured.
+      { exec: 'a', usage: { input: 0, output: 100, cacheRead: 0, cacheWrite: 0, total: 100, costUsd: null, outputTps: 100 } },
+      { exec: 'b', usage: { input: 0, output: 50, cacheRead: 0, cacheWrite: 0, total: 50, costUsd: null, outputTps: 10 } },
+      { exec: 'c', usage: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0, total: 10, costUsd: null } },
+    ]);
+    expect(s.rows.find((r) => r.exec === 'a')!.speedLabel).toBe('100 tok/s');
+    expect(s.rows.find((r) => r.exec === 'c')!.speedLabel).toBe('—');
+    expect(s.avgSpeedLabel).toBe('25 tok/s');
+  });
+
+  it('dashes the average speed when nothing measured one', () => {
+    expect(buildUsageSummary([mk('a', 100, 1)]).avgSpeedLabel).toBe('—');
+  });
+
+  it('computes the cache hit rate per row, null when nothing was read', () => {
+    const s = buildUsageSummary([
+      { exec: 'a', usage: { input: 25, output: 0, cacheRead: 75, cacheWrite: 0, total: 100, costUsd: null } },
+      { exec: 'b', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, costUsd: 0.5 } },
+    ]);
+    expect(s.rows.find((r) => r.exec === 'a')!.cacheHitPct).toBeCloseTo(75);
+    expect(s.rows.find((r) => r.exec === 'b')!.cacheHitPct).toBeNull();
+  });
+
   it('sorts rows by tokens desc and max-normalizes the bar widths', () => {
     const s = buildUsageSummary([mk('a/small', 1000, 1), mk('b/big', 4000, 2)]);
     expect(s.rows.map((r) => r.exec)).toEqual(['b/big', 'a/small']);
