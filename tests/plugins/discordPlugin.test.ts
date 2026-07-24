@@ -1516,4 +1516,51 @@ describe('discord plugin prompt-commands (native registration + RAW dispatch)', 
     expect(called).toBe(false);
     expect(JSON.stringify(rest.find((r) => r.path.includes('/callback'))!.body)).toContain('Only the operator');
   });
+
+  // Regression: `fetchHistory` fed raw channel content into a new conversation's first prompt, footers and
+  // all. A model shown "every message here ends with `-# <model> · <n> %`" adopted it as house style and
+  // began forging that line itself — observed live emitting `-# claude · 4 %` from a qwen-only session,
+  // which then re-entered the next history window and reinforced the pattern.
+  describe('runtime footer never re-enters the prompt', () => {
+    const loadFormat = () => import(join(repoRoot, 'plugins/discord/index.mjs')) as Promise<{
+      footerLine: (idle: unknown) => string;
+      withoutFooter: (text: string) => string;
+    }>;
+
+    it('round-trips: whatever footerLine writes, withoutFooter takes back off', async () => {
+      const { footerLine, withoutFooter } = await loadFormat();
+      const footer = footerLine({ model: 'alibaba/qwen3.8-max-preview', usage: { percent: 4 } });
+      expect(footer).toBe('-# qwen3.8-max-preview · 4 %');
+      expect(withoutFooter(`Hotovo.\n\n${footer}`)).toBe('Hotovo.');
+      // Model-only footer (no context percentage) comes off just the same.
+      expect(withoutFooter(`Hotovo.\n\n${footerLine({ model: 'gpt-5' })}`)).toBe('Hotovo.');
+    });
+
+    it('leaves a message that merely looks similar alone', async () => {
+      const { withoutFooter } = await loadFormat();
+      // No footer at all.
+      expect(withoutFooter('Hotovo.')).toBe('Hotovo.');
+      // Subtext in the MIDDLE is content, not a trailing footer.
+      expect(withoutFooter('-# poznámka\n\nHotovo.')).toBe('-# poznámka\n\nHotovo.');
+      // A bare fence carries nothing to strip.
+      expect(withoutFooter('Hotovo.\n\n-#')).toBe('Hotovo.\n\n-#');
+      expect(withoutFooter('')).toBe('');
+    });
+
+    it('strips only our own messages when building history context', async () => {
+      const { adapter } = await makeAdapter([]);
+      adapter.cfg.historyLimit = 10;
+      adapter.rest = async () => [
+        // newest-first, the order Discord's API returns
+        { content: 'Filipe, hotovo.\n\n-# qwen3.8-max-preview · 4 %', author: { username: 'Elowen', bot: true } },
+        { content: 'a co tohle\n-# můj vlastní subtext', author: { username: 'dragocz95' } },
+      ];
+      const history = await adapter.fetchHistory('C', 'before');
+      // Our footer is gone…
+      expect(history).toContain('[Elowen] Filipe, hotovo.');
+      expect(history).not.toContain('qwen3.8-max-preview');
+      // …but a person's own subtext line is theirs and survives verbatim.
+      expect(history).toContain('-# můj vlastní subtext');
+    });
+  });
 });

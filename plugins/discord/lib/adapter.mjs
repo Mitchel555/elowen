@@ -2,7 +2,7 @@
 // slash-command/component interactions, voice (STT/TTS) and outbound posting.
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { memberIsAdmin, displayNameOf, resolveMentions, buildReplyContext, parseModelExec, stripForSpeech } from './format.mjs';
+import { memberIsAdmin, displayNameOf, resolveMentions, buildReplyContext, parseModelExec, stripForSpeech, withoutFooter } from './format.mjs';
 import { buildAskComponents } from './ask.mjs';
 import { MESSAGES } from './messages.mjs';
 import { LiveMessage, postWithImages } from './stream.mjs';
@@ -346,7 +346,11 @@ export class DiscordAdapter {
     if (!Array.isArray(msgs) || msgs.length === 0) return '';
     const lines = [];
     for (const m of [...msgs].reverse()) { // API returns newest-first
-      const body = String(m.content ?? '').trim();
+      // Our own runtime footer comes off first: it is metadata we appended, not something anyone said, and
+      // a model shown it as house style starts forging that line itself (with a model name it never ran
+      // on). Only for messages WE authored — a person's own subtext line is theirs and stays.
+      const raw = String(m.content ?? '');
+      const body = (m.author?.bot ? withoutFooter(raw) : raw).trim();
       if (!body) continue;
       lines.push(`[${displayNameOf(m)}] ${body.length > 400 ? `${body.slice(0, 400)}…` : body}`);
     }

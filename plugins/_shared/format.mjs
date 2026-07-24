@@ -45,6 +45,49 @@ export function stripThinking(text) {
   return out.trim();
 }
 
+/**
+ * The runtime footer a turn settles with (`model · context %`), wrapped in the surface's own subtext
+ * markup. `fence` is that markup: Discord `{ open: '-# ' }`, Telegram `{ open: '— ' }`, WhatsApp
+ * `{ open: '_', close: '_' }`. The provider prefix is dropped (`anthropic/claude-sonnet-5` → the model
+ * name alone) and the percentage rounded; missing data simply omits its fragment, and an idle event
+ * carrying neither yields '' so no empty subtext line is posted.
+ */
+export function runtimeFooter(idle, fence) {
+  const parts = [];
+  const model = typeof idle?.model === 'string' ? idle.model.split('/').pop() : '';
+  if (model) parts.push(model);
+  const pct = idle?.usage?.percent;
+  if (typeof pct === 'number' && pct >= 0) parts.push(`${Math.round(pct)} %`);
+  return parts.length ? `${fence.open}${parts.join(' · ')}${fence.close ?? ''}` : '';
+}
+
+/**
+ * Drop a trailing {@link runtimeFooter} from a message body — for feeding channel history back into a
+ * prompt, where the footer is our own runtime metadata rather than anything a person said.
+ *
+ * Without this the model reads "messages in this thread end with `-# <model> · <n> %`" as part of the
+ * house style and starts writing that line ITSELF, inventing a model name it never ran on. The forged
+ * footer then lands in the next history window and reinforces the pattern.
+ *
+ * Matched structurally, not by pattern: the last non-blank line must open (and, where the surface closes
+ * its markup, close) with the SAME fence we emit, and hold something between the two. So a bare `_` is
+ * not mistaken for an empty WhatsApp footer. Caller-restricted to messages we authored — a person's own
+ * subtext line is theirs to keep.
+ */
+export function stripRuntimeFooter(text, fence) {
+  const body = String(text ?? '');
+  const lines = body.split('\n');
+  let last = lines.length - 1;
+  while (last >= 0 && lines[last].trim() === '') last--;
+  if (last < 0) return body;
+  const line = lines[last].trim();
+  const close = fence.close ?? '';
+  if (line.length <= fence.open.length + close.length) return body;
+  if (!line.startsWith(fence.open)) return body;
+  if (close && !line.endsWith(close)) return body;
+  return lines.slice(0, last).join('\n').trimEnd();
+}
+
 /** Parse a picker exec (`elowen:<provider>/<model>`, `<provider>/<model>`, or bare model) into the brain's
  *  model selection shape. */
 export function parseModelExec(spec) {

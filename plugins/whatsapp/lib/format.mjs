@@ -1,7 +1,7 @@
 // WhatsApp text/format helpers. The transport-neutral pieces (extractImageRefs, stripThinking,
 // parseModelExec, the fenced-split core) live in ../../_shared/format.mjs; only WhatsApp's own chunk size,
 // reply-quote and footer stay here.
-import { splitContent as splitAtChunk, extractImageRefs, stripThinking, parseModelExec } from '../../_shared/format.mjs';
+import { splitContent as splitAtChunk, extractImageRefs, stripThinking, parseModelExec, runtimeFooter } from '../../_shared/format.mjs';
 export { extractImageRefs, stripThinking, parseModelExec };
 
 export const CHUNK = 4000;            // split long replies into readable pieces
@@ -18,12 +18,10 @@ export function buildReplyContext(name, body) {
   return `[Replying to ${name || 'someone'}: "${excerpt}"]`;
 }
 
+/** The italic markup WhatsApp's runtime footer is wrapped in — consumed by `footerLine` here and by
+ *  `stripRuntimeFooter` should this surface ever read its channel history back into a prompt. */
+const FOOTER_FENCE = { open: '_', close: '_' };
+
 /** Runtime footer: `model · 42 %`. Empty when the idle event carried no usable data. */
-export function footerLine(idle) {
-  const parts = [];
-  const model = typeof idle?.model === 'string' ? idle.model.split('/').pop() : '';
-  if (model) parts.push(model);
-  const pct = idle?.usage?.percent;
-  if (typeof pct === 'number' && pct >= 0) parts.push(`${Math.round(pct)} %`);
-  return parts.length ? `_${parts.join(' · ')}_` : '';
-}
+export const footerLine = (idle) => runtimeFooter(idle, FOOTER_FENCE);
+
