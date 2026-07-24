@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { BarChart3, Boxes, Database, DollarSign } from 'lucide-react';
+import { BarChart3, Boxes, Database, DollarSign, Gauge } from 'lucide-react';
 import { useModelUsage, useMe } from '../../lib/queries';
 import { ModelIcon } from '../../components/ui/ModelIcon';
 import { DateRangeFilter } from '../../components/ui/DateRangeFilter';
@@ -44,6 +44,7 @@ export function StatsView() {
           <WorkspaceMetric label={t.stats.cardTotalCost} value={summary.totalCostLabel} icon={DollarSign} />
           <WorkspaceMetric label={t.stats.cardCache} value={summary.totalCacheLabel} icon={Database} />
           <WorkspaceMetric label={t.stats.cardModelsUsed} value={summary.modelsUsed} icon={Boxes} />
+          <WorkspaceMetric label={t.stats.avgSpeed} value={summary.avgSpeedLabel} icon={Gauge} />
         </>,
       }}>
         <ControlSurfaceDocument>
@@ -72,7 +73,7 @@ export function StatsView() {
                 <div data-testid="model-usage-list">
                   <DataTable
                     ariaLabel={t.stats.costByModel}
-                    columns="2rem minmax(0,12rem) minmax(6rem,1fr) 7.5rem 9rem"
+                    columns="2rem minmax(0,12rem) minmax(6rem,1fr) 7.5rem 6rem 9rem"
                     compactColumns="2rem minmax(0,1fr) auto"
                   >
                     <DataTableRow header>
@@ -80,6 +81,7 @@ export function StatsView() {
                       <DataTableCell header className="whitespace-nowrap">{t.stats.cardModelsUsed}</DataTableCell>
                       <DataTableCell header priority="wide" className="whitespace-nowrap">{t.stats.pulseLabel}</DataTableCell>
                       <DataTableCell header priority="wide" className="whitespace-nowrap text-right">{t.stats.cardTotalTokens}</DataTableCell>
+                      <DataTableCell header priority="wide" className="whitespace-nowrap text-right">tok/s</DataTableCell>
                       <DataTableCell header className="whitespace-nowrap text-right">{t.stats.cardTotalCost}</DataTableCell>
                     </DataTableRow>
                     <div role="rowgroup">
@@ -108,7 +110,14 @@ export function StatsView() {
                                 {row.tokensLabel}
                               </DataTableCell>
                               <DataTableCell
-                                className="col-start-3 row-start-1 text-right font-mono text-xs tabular-nums text-text @4xl:col-start-5"
+                                priority="wide"
+                                className="col-start-3 row-start-3 font-mono text-xs tabular-nums text-text-muted @4xl:col-start-5 @4xl:row-start-1 @4xl:text-right"
+                                aria-label={`${t.stats.speed}: ${row.speedLabel}`}
+                              >
+                                {row.speedLabel}
+                              </DataTableCell>
+                              <DataTableCell
+                                className="col-start-3 row-start-1 text-right font-mono text-xs tabular-nums text-text @4xl:col-start-6"
                                 aria-label={`${t.stats.cardTotalCost}: ${row.costLabel}`}
                               >
                                 {row.costLabel}
