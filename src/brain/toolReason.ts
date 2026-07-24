@@ -19,11 +19,12 @@ const REASON_KEY = '_reason';
  *  advertise the old schema, and a model can copy the old key from its own conversation history. */
 const LEGACY_REASON_KEY = 'reason';
 
-/** Kept short on purpose: it rides EVERY augmented tool schema (prompt-cache cost), so the full rule —
- *  user's language, present tense, always for long tools — lives once in the system prompt (elowen.md). */
+/** Kept short on purpose: it rides EVERY augmented tool schema (prompt-cache cost), so only the shape the
+ *  model most often gets wrong is restated here — the rest of the rule (when to write one at all, and that
+ *  it never belongs in the answer) lives once in the system prompt (elowen.md). */
 export const REASON_DESC =
-  "A short present-tense status note IN THE USER'S LANGUAGE saying what this call does (e.g. 'Čtu "
-  + "konfiguraci'). Write it FIRST; it is shown live next to the spinner and is not part of your answer.";
+  "Optional status note for calls that may take a noticeable moment; omit it on quick ones. AT MOST 4 "
+  + "WORDS, present tense, IN THE USER'S LANGUAGE, ending with '…' (e.g. 'Reading config…'). Write it FIRST.";
 
 /** The optional-string property prepended to each tool's input schema. */
 const REASON_PROP = Type.Optional(Type.String({ description: REASON_DESC }));
