@@ -88,7 +88,11 @@ describe('OrbitalNav', () => {
 
   it('exposes work and project destinations as top-level orbital links', () => {
     mount();
-    expect(screen.getByTestId('future-navigation').querySelector('canvas')).toBeNull();
+    // The rail is real links and DOM, never the WebGL orbit scene it started as — that scene is gone and
+    // must not come back. Asserted on the scene itself rather than on "no canvas at all", which also
+    // forbade the ambient ember drizzle the rail deliberately carries.
+    expect(screen.queryByTestId('orbit-webgl')).toBeNull();
+    expect(screen.getByTestId('future-navigation').querySelector('canvas.ember-fall')).toBeTruthy();
     expect(screen.queryByRole('img', { name: 'Elowen' })).toBeNull();
     expect(screen.getByRole('link', { name: 'Stats' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: 'Chat' })).toHaveAttribute('href', '/chat');

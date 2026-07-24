@@ -481,8 +481,8 @@ html[data-effects='full'] .cosmos[data-mode='orbit'] .cosmos-pod:hover .cosmos-p
 .cosmos[data-mode='stack'] .cosmos-pod__control { justify-content: flex-start; padding-left: 3.6rem; }
 .cosmos[data-mode='stack'] .cosmos-pod__inner { background: radial-gradient(ellipse at 50% 25%, rgb(255 255 255 / 0.03), transparent 78%); }
 
-/* ambient ember drizzle behind the whole app (rendered only in effects mode 'full') */
-.ember-fall { position: fixed; inset: 0; z-index: 1; pointer-events: none; }  /* z:1 — above page surfaces (some are opaque), below overlays/toasts */
+/* ambient ember drizzle behind the navigation rail (rendered only in effects mode 'full') */
+.ember-fall { position: absolute; inset: 0; pointer-events: none; }  /* fills its host (the nav rail); no z-index — the rail's own items sit on z-10 above it */
 
 /* switches inside pods: bigger, glowing when on, with a warm knob that reads on OLED black.
    Function descriptions stay out of pods — the control speaks for itself. */

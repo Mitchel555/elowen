@@ -9,6 +9,7 @@ import { useTranslation } from '../../lib/i18n';
 import { entryIsActive } from './NavGroup';
 import { useShellNavigation } from './useShellNavigation';
 import { CollapseHandle } from './CollapseHandle';
+import { EmberFall } from './EmberFall';
 import { useElementHeight } from '../../lib/useElementWidth';
 import type { NavEntry } from './NavItem';
 
@@ -101,6 +102,9 @@ export function OrbitalNav({ compact = false, side = 'left', onToggleCollapse }:
       onWheel={onWheel}
       className={`relative h-full shrink-0 overflow-hidden border-border/45 bg-black ${side === 'right' ? 'border-l' : 'border-r'} ${compact ? 'w-[4.75rem]' : 'w-[17rem]'}`}
     >
+      {/* Ambient sparks behind the rail. The nav is already `relative` + `overflow-hidden`, so it is the
+          containing block that both sizes and clips them; every item below sits on z-10, above the canvas. */}
+      <EmberFall />
       <div
         ref={stageRef}
         role="list"

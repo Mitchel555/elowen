@@ -3,10 +3,14 @@
 import { useEffect, useRef } from 'react';
 import { useEffects } from '../../lib/useEffects';
 
-/** Ambient ember drizzle — tiny red sparks slowly falling across the whole app behind the content.
- *  Deliberately faint (low count, low opacity, gentle sway + twinkle) so it reads as atmosphere, not
- *  decoration. Renders only when the resolved effects mode is 'full', so reduced/off devices and
- *  prefers-reduced-motion users never see motion. */
+/** Ambient ember drizzle — tiny red sparks slowly falling down the navigation rail behind its items.
+ *  Scoped to the rail rather than the whole app: over a full viewport the same density reads as dust on
+ *  the screen, while in one narrow column it reads as the nav itself smouldering. Renders only when the
+ *  resolved effects mode is 'full', so reduced/off devices and prefers-reduced-motion users never see
+ *  motion.
+ *
+ *  Sizes itself from its own box (it stretches to the host via `inset: 0`), so the host only has to be a
+ *  containing block — no dimensions are passed in and none are read off the window. */
 export function EmberFall() {
   const { resolvedMode } = useEffects();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -19,19 +23,25 @@ export function EmberFall() {
 
     interface Ember { x: number; y: number; r: number; fall: number; sway: number; phase: number; opacity: number; warm: boolean }
     let embers: Ember[] = [];
+    let width = 0;
+    let height = 0;
     let raf = 0;
     let last = performance.now();
 
     const size = () => {
+      width = canvas.clientWidth;
+      height = canvas.clientHeight;
+      if (width === 0 || height === 0) { embers = []; return; } // collapsed/hidden rail — nothing to draw
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(window.innerWidth * dpr);
-      canvas.height = Math.round(window.innerHeight * dpr);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      // Density scales with viewport area but stays sparse — "a little glitter", not snowfall.
-      const count = Math.max(20, Math.min(64, Math.round((window.innerWidth * window.innerHeight) / 42000)));
+      // Density scales with the rail's own area. Tuned for a column, not a viewport: the same divisor that
+      // kept a full screen sparse would leave barely a handful of sparks in a 17rem strip.
+      const count = Math.max(24, Math.min(120, Math.round((width * height) / 3600)));
       embers = Array.from({ length: count }, () => ({
-        x: Math.random() * window.innerWidth,
-        y: Math.random() * window.innerHeight,
+        x: Math.random() * width,
+        y: Math.random() * height,
         r: 0.6 + Math.random() * 1.2,
         fall: 11 + Math.random() * 20, // px/s — a slow drizzle
         sway: 4 + Math.random() * 7,
@@ -44,12 +54,12 @@ export function EmberFall() {
     const tick = (now: number) => {
       const dt = Math.min(now - last, 64) / 1000;
       last = now;
-      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      ctx.clearRect(0, 0, width, height);
       for (const e of embers) {
         e.y += e.fall * dt;
-        if (e.y > window.innerHeight + 4) {
+        if (e.y > height + 4) {
           e.y = -4;
-          e.x = Math.random() * window.innerWidth;
+          e.x = Math.random() * width;
         }
         const twinkle = e.opacity * (0.55 + 0.45 * Math.sin(now / 1100 + e.phase));
         ctx.beginPath();
@@ -65,11 +75,14 @@ export function EmberFall() {
     };
 
     size();
-    window.addEventListener('resize', size);
+    // The rail resizes on its own (rail↔full pin, dock side, drawer) without the window ever changing, so
+    // this observes the element rather than listening for `resize`.
+    const observer = new ResizeObserver(size);
+    observer.observe(canvas);
     raf = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(raf);
-      window.removeEventListener('resize', size);
+      observer.disconnect();
     };
   }, [resolvedMode]);
 
