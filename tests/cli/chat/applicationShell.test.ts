@@ -137,6 +137,60 @@ describe('chat application shell ownership', () => {
     composition.dispose();
   });
 
+  // ↑-recall refills the composer optimistically for instant feedback, but the SERVER owns the queue: it
+  // pops the real tail by value. The reply was thrown away, so the guess was never corrected — and when
+  // the guess was wrong the message stayed in the composer and got sent a second time, which is the exact
+  // duplicate this path exists to prevent.
+  describe('queue recall reconciles the composer against the server', () => {
+    const recall = (h: Harness, text: string | null): void => {
+      (h.resources.client as unknown as { queueRecall: () => Promise<{ text: string | null }> })
+        .queueRecall = async () => ({ text });
+    };
+    /** What ↑ actually does: the editor asks for the recalled text, then writes it in (see picker.ts). */
+    const pressUp = (h: Harness): string | null => {
+      const recalled = h.resources.editor.onQueueRecall?.() ?? null;
+      if (recalled != null) h.resources.editor.setText(recalled);
+      return recalled;
+    };
+
+    it('clears the composer when the server had nothing left to pop', async () => {
+      const h = compositionHarness();
+      const composition = makeComposition(h);
+      h.rt.queued = [{ id: 'q1', text: 'the queued one' }];
+      recall(h, null); // already delivered, or a display-only echo behind a running /compact
+
+      expect(pressUp(h)).toBe('the queued one');
+      await vi.waitFor(() => expect(h.resources.editor.getText()).toBe(''));
+      expect(h.rt.notice).toContain('not recalled');
+      composition.dispose();
+    });
+
+    it('replaces the optimistic guess when the server popped a different message', async () => {
+      const h = compositionHarness();
+      const composition = makeComposition(h);
+      h.rt.queued = [{ id: 'q1', text: 'what this client saw' }];
+      recall(h, 'what the server actually popped');
+
+      pressUp(h);
+      await vi.waitFor(() => expect(h.resources.editor.getText()).toBe('what the server actually popped'));
+      composition.dispose();
+    });
+
+    // The reply is asynchronous, so it must never clobber an edit the user has already started.
+    it('leaves the composer alone once the user has typed over the recalled text', async () => {
+      const h = compositionHarness();
+      const composition = makeComposition(h);
+      h.rt.queued = [{ id: 'q1', text: 'the queued one' }];
+      recall(h, null);
+
+      pressUp(h);
+      h.resources.editor.setText('something the user is writing now');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(h.resources.editor.getText()).toBe('something the user is writing now');
+      composition.dispose();
+    });
+  });
+
   // A newer notice must not be swallowed by the timer the previous one armed.
   it('lets a replacement notice outlive the timer armed for the notice it replaced', async () => {
     const h = compositionHarness();

@@ -1053,7 +1053,27 @@ export function createChatComposition(
     rt.queued = rt.queued.slice(0, -1); // optimistic; the queue snapshot reconciles
     lifetime.runSession(
       () => client.queueRecall(),
-      () => {},
+      ({ text }) => {
+        // The optimistic refill above is a GUESS: the server owns the queue, and between the keypress and
+        // this reply the tail may have been delivered, or a second attached client may have queued
+        // something else that got popped instead. Only overwrite what we ourselves put there — if the user
+        // has started typing, their edit wins over a late reconciliation.
+        if (editor.getText() !== last.text) return;
+        // Nothing was left to pop, so the message is committed and will reach the model on its own. Two
+        // ways to get here: PI delivered the tail between the keypress and this reply, or the chip was a
+        // display-only echo for a send blocked behind a running /compact, which is not in PI's queue and
+        // cannot be withdrawn. Either way, leaving the text in the composer is how it gets sent a SECOND
+        // time — the exact duplicate this recall path exists to prevent.
+        if (text === null) {
+          editor.setText('');
+          rt.notice = color.dim('queued message is already on its way — not recalled');
+        } else if (text !== last.text) {
+          editor.setText(text);
+        } else {
+          return;
+        }
+        render('input:queue-recall-reconciled');
+      },
       (e) => { rt.notice = color.error(`error: ${e.message}`); render('input:queue-remove-error'); },
     );
     render('input:queue-recall');

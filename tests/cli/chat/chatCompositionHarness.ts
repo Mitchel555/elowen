@@ -131,6 +131,8 @@ export function compositionHarness(options: {
     abort: async () => {},
     interruptQueued: async () => ({ interrupted: false, injected: false }),
     queueRemove: async () => true,
+    /** Overridden per test — the recall path reconciles the composer against whatever the server says. */
+    queueRecall: async (): Promise<{ text: string | null }> => ({ text: null }),
   };
   const resources = {
     client: client as unknown as BrainClient,
