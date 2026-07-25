@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
-import { useAutoSaveStatus } from '../../lib/useAutoSaveStatus';
+import { render, renderHook, waitFor } from '@testing-library/react';
+import { Activity } from 'react';
+import { useAutoSaveStatus, type SaveStatus } from '../../lib/useAutoSaveStatus';
 
 describe('useAutoSaveStatus', () => {
   it('does not save the seed value, then debounce-saves after a change', async () => {
@@ -53,6 +54,31 @@ describe('useAutoSaveStatus', () => {
     settle();
     await new Promise((r) => setTimeout(r, 0));
     expect(saves).toBe(1); // and it settles once, without the unmounted controller queueing another pass
+  });
+
+  // Every settings and account panel is wrapped in `<Activity>`, which tears its children's effects down
+  // when the panel is hidden and builds them back up on return — while REFS survive, because the component
+  // instance is kept alive. A hook that only ever clears a liveness flag in its cleanup therefore goes
+  // permanently deaf the first time the user switches category, and the footer keeps claiming the last
+  // status it managed to report. Silent for a save that succeeds; a lie for one that fails.
+  it('keeps reporting status after the panel it lives in is hidden and shown again', async () => {
+    let failing = false;
+    let seen: SaveStatus = 'idle';
+    function Probe({ v }: { v: string }) {
+      const { status } = useAutoSaveStatus([v], async () => { if (failing) throw new Error('rejected'); }, { delay: 5 });
+      seen = status;
+      return null;
+    }
+    const harness = (hidden: boolean, v: string) => (
+      <Activity mode={hidden ? 'hidden' : 'visible'}><Probe v={v} /></Activity>
+    );
+
+    const { rerender } = render(harness(false, 'a'));
+    rerender(harness(true, 'a'));  // user switches category — effects are destroyed, refs are not
+    rerender(harness(false, 'a')); // and back: effects are set up again on the SAME hook instance
+    failing = true;
+    rerender(harness(false, 'b')); // a real edit, whose save rejects
+    await waitFor(() => expect(seen).toBe('error'));
   });
 
   it('only the latest save drives the terminal status (stale response is ignored)', async () => {

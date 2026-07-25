@@ -87,10 +87,19 @@ export function useAutoSaveStatus(
     if (pending.current) run();
   }, [run]);
 
-  // Flush a pending save on unmount so closing the modal never drops the last edit. The flag is cleared
-  // in the same cleanup, immediately before the flush, so the write still happens while its now-invisible
+  // Flush a pending save on teardown so closing the modal never drops the last edit. The flag is cleared in
+  // the same cleanup, immediately before the flush, so the write still happens while its now-invisible
   // status updates are dropped — and no ordering between separate effect cleanups has to hold for that.
-  useEffect(() => () => { mounted.current = false; flush(); }, [flush]);
+  //
+  // It is RAISED in the setup, not just initialised with the ref, because a teardown is not always the end:
+  // `<Activity>` wraps every settings and account panel, and hiding one destroys its children's effects
+  // while keeping their refs. Leaving the flag down would make the hook go permanently deaf the first time
+  // the user switches category, and the footer would keep asserting whatever status it last managed to
+  // report — harmless for a save that succeeds, a lie for one that fails.
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; flush(); };
+  }, [flush]);
 
   const retry = useCallback(() => run(), [run]);
   return { status, retry, flush };
