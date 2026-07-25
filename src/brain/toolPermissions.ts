@@ -50,7 +50,10 @@ export const BASH_PERMISSION_TOOLS: ReadonlySet<string> = new Set(['Bash']);
  *  in READ_ONLY_BASH_RULES, so every read-only context sees the same list. Module-private: callers take
  *  the assembled rules, never the bare patterns, so nobody can re-permit these without the re-denies. */
 const READ_ONLY_BASH_ALLOW: readonly string[] = [
-  'git status*', 'git diff*', 'git log*', 'ls', 'ls *', 'pwd', 'cat *', 'grep *', 'which *',
+  // `git show` belongs with diff/log: reading a commit is the basic operation of reviewing one, and
+  // without it a read-only reviewer can only inspect the working tree and has to guess at history.
+  // Its write-capable flags (--output, --ext-diff, --extcmd) are clawed back below like the others'.
+  'git status*', 'git diff*', 'git log*', 'git show*', 'ls', 'ls *', 'pwd', 'cat *', 'grep *', 'which *',
 ];
 
 /** The full shell clamp for a context that must not mutate: deny every command, re-permit only the
@@ -311,10 +314,11 @@ export function splitBashSegments(command: string): { segments: string[]; ambigu
 }
 
 /** The candidate strings a bash rule pattern is tested against for one simple-command segment: the
- *  segment verbatim (whitespace-normalized) AND its canonical form — leading `VAR=val` assignments and
- *  known wrappers (env/command/sudo/nice) stripped, and the program reduced to its basename — so a rule
- *  like `rm*` catches `/bin/rm`, `FOO=1 rm` and `env rm`, while an args-bearing pattern like `git status*`
- *  still matches the verbatim form. */
+ *  segment verbatim (whitespace-normalized) FIRST, then its canonical form — leading `VAR=val`
+ *  assignments and known wrappers (env/command/sudo/nice) stripped, and the program reduced to its
+ *  basename — so a rule like `rm*` catches `/bin/rm`, `FOO=1 rm` and `env rm`. The verbatim form is
+ *  always index 0: resolveBashPermission grants an `allow` on that form ALONE, because the canonical
+ *  form is there to stop a deny being dodged and must never hand out a permission instead. */
 function segmentMatchValues(segment: string): string[] {
   const full = segment.replace(/\s+/g, ' ').trim();
   let tokens = full.split(' ').filter(Boolean);
@@ -357,9 +361,19 @@ function resolveBashPermission(
   const scope: PermissionScope = 'bash';
   const resolveSegment = (segment: string): { action: PermissionAction; pattern: string; scope: PermissionScope } => {
     const values = segmentMatchValues(segment);
+    const verbatim = values[0]!;
     for (let i = ruleset.length - 1; i >= 0; i--) {
       const rule = ruleset[i]!;
-      if (rule.scope === 'bash' && values.some((v) => matchPermissionPattern(v, rule.pattern))) return { ...rule };
+      if (rule.scope !== 'bash') continue;
+      // ASYMMETRY, and it is the point: the canonical form may only ever tighten a decision, never grant
+      // one. It exists so a deny cannot be dodged by spelling the program differently (`/bin/rm`, `env rm`,
+      // `FOO=1 rm`) — but matching an ALLOW against it inverts that: `./tools/cat x` and
+      // `LD_PRELOAD=payload.so git status` both canonicalize straight onto an allow-listed pattern while
+      // running something else entirely. An allow therefore matches the VERBATIM command only; anything
+      // spelled with a path or a leading assignment falls through to the surrounding rule (`ask` by
+      // default, `deny` under the read-only clamp) instead of inheriting a permission it never earned.
+      const candidates = rule.action === 'allow' ? [verbatim] : values;
+      if (candidates.some((v) => matchPermissionPattern(v, rule.pattern))) return { ...rule };
     }
     return { action: 'ask', pattern: '*', scope };
   };

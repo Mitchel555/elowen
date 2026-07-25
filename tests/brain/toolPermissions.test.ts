@@ -302,6 +302,38 @@ describe('resolveToolPermission — bash chaining bypass is closed (most-restric
     expect(resolveToolPermission(ruleset(), 'Bash', 'env rm').action).toBe('deny');
   });
 
+  // The other direction of the same normalization, and the one that bites: canonicalizing onto an ALLOW
+  // hands out a permission the command never earned. `./tools/cat` is not `cat`, and a leading assignment
+  // can decide what the program actually does (LD_PRELOAD) while the canonical form still reads as a
+  // plain `git status`. Both spellings must fall through to the surrounding rule instead.
+  it('the canonical form may tighten a decision but never grant one', () => {
+    const rs = buildPermissionRuleset(settings());
+    // Baseline: the plain spellings really are allowed, so the assertions below are about the spelling.
+    expect(resolveToolPermission(rs, 'Bash', 'cat README').action).toBe('allow');
+    expect(resolveToolPermission(rs, 'Bash', 'git status').action).toBe('allow');
+    // A repo-local executable merely NAMED like an allow-listed one earns nothing.
+    expect(resolveToolPermission(rs, 'Bash', './tools/cat README').action).not.toBe('allow');
+    expect(resolveToolPermission(rs, 'Bash', 'tools/git status').action).not.toBe('allow');
+    // Neither does an env assignment that can redirect what the allowed program loads or runs.
+    expect(resolveToolPermission(rs, 'Bash', 'LD_PRELOAD=payload.so git status').action).not.toBe('allow');
+    expect(resolveToolPermission(rs, 'Bash', 'env cat README').action).not.toBe('allow');
+    // Under the read-only clamp the fall-through is a hard deny, not a prompt.
+    const clamped = [...rs, ...READ_ONLY_BASH_RULES];
+    expect(resolveToolPermission(clamped, 'Bash', './tools/cat README').action).toBe('deny');
+    expect(resolveToolPermission(clamped, 'Bash', 'LD_PRELOAD=payload.so git status').action).toBe('deny');
+  });
+
+  it('the read-only clamp can read a commit, but not through git flags that run or write', () => {
+    const clamped = [...buildPermissionRuleset(settings()), ...READ_ONLY_BASH_RULES];
+    // Reviewing a commit is the basic operation of reviewing; without it only the worktree is inspectable.
+    expect(resolveToolPermission(clamped, 'Bash', 'git show 8ef8afcf').action).toBe('allow');
+    expect(resolveToolPermission(clamped, 'Bash', 'git show --stat HEAD~3').action).toBe('allow');
+    // The same claw-backs the other git allows get.
+    expect(resolveToolPermission(clamped, 'Bash', 'git show --output=/tmp/x HEAD').action).toBe('deny');
+    expect(resolveToolPermission(clamped, 'Bash', 'git show --ext-diff HEAD').action).toBe('deny');
+    expect(resolveToolPermission(clamped, 'Bash', 'git show HEAD > /tmp/x').action).toBe('deny');
+  });
+
   it('most-restrictive wins across segments: any deny denies, else any ask asks, else allow', () => {
     const rs = buildPermissionRuleset(settings({ bash: { 'git *': 'allow', 'rm*': 'deny' } }));
     expect(resolveToolPermission(rs, 'Bash', 'git status && git diff').action).toBe('allow'); // both allow
