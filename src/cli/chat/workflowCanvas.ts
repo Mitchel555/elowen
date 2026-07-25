@@ -206,7 +206,10 @@ export function drawCircuit(placements: readonly Placement[], opts: CircuitOptio
             : `waits: ${node.deps.join(', ') || '—'}`;
       const line1Ink = node.status === 'running' ? color.accentSoft : node.status === 'error' ? color.error : node.status === 'pending' ? color.faint : color.dim;
       text(grid, p.x + 2, p.y, clipPlain(terminalInlineText(line1), inner), line1Ink);
-      const line2 = meta || clipPlain(terminalInlineText(node.task), inner);
+      // A full card has the room, so the model rides under the id beside the counts — a mixed-model
+      // workflow otherwise looks identical node to node.
+      const line2 = [meta, node.model ? terminalInlineText(node.model) : ''].filter(Boolean).join(' · ')
+        || clipPlain(terminalInlineText(node.task), inner);
       text(grid, p.x + 2, p.y + 1, clipPlain(line2, inner), color.faint);
     } else {
       putc(grid, p.x + 2, p.y, glyphCh, statusInk);

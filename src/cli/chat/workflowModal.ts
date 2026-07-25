@@ -255,8 +255,10 @@ class WorkflowModal implements Component, Focusable {
     const secs = this.seconds(node, now);
     const vitals = [
       `${STATUS_INK[node.status](glyphOf(node, spinner))} ${STATUS_INK[node.status](node.status)}`,
-      node.model ? `${color.faint('model ')}${color.text(terminalInlineText(node.model))}` : '',
       node.tokens !== undefined ? `${color.text(formatK(node.tokens))}${color.faint(' tok')}` : '',
+      // Directly after the tokens: which model actually burned them. A workflow routinely mixes models
+      // across nodes, so the count alone does not tell you what you are paying for.
+      node.model ? `${color.faint('model ')}${color.text(terminalInlineText(node.model))}` : '',
       secs !== undefined ? color.text(formatDuration(secs)) : '',
       `${color.faint('deps ')}${color.text(terminalInlineText(node.deps.join(', ')) || 'root')}`,
     ].filter(Boolean).join(color.faint('  ·  '));

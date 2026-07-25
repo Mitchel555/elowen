@@ -92,7 +92,8 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         ...(s.detail ? { detail: s.detail } : {}),
         ...(s.tokens !== undefined ? { tokens: s.tokens } : {}),
         ...(s.seconds !== undefined ? { seconds: s.seconds } : {}),
-        ...(n.model ? { model: n.model } : {}),
+        // The resolved model once the node has started; before that, the declared override if there is one.
+        ...(s.model ?? n.model ? { model: s.model ?? n.model } : {}),
         ...(s.startedAt !== undefined ? { startedAt: s.startedAt } : {}),
         ...(s.result ? { result: clip(s.result, SNAPSHOT_RESULT_PREVIEW) } : {}),
         ...(s.error ? { error: clip(s.error, SNAPSHOT_RESULT_PREVIEW) } : {}),
@@ -175,6 +176,11 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     };
     try {
       const access = await buildNodeAccess(wf, node);
+      // The EFFECTIVE model, not the node's override. `node.model` is only set when the caller named a
+      // different one, so a node that inherits — the common case — would otherwise report nothing at all,
+      // which is exactly when you most want to see what is actually running.
+      ns.model = access.model ? `${access.model.provider}/${access.model.model}` : undefined;
+      snapshot(wf);
       const channelId = `wf-${wf.id}-${node.id}-${randomUUID()}`;
       const collectSource = { platform: 'subagent', userId: 'subagent', roleIds: [], channelId, access };
       const raw = await getRun()(collectSource, node.task, onEvent);

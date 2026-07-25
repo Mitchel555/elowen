@@ -108,6 +108,17 @@ describe('workflow engine', () => {
     expect(last.nodes[0]!.status).toBe('done');
   });
 
+  // The modal reports which model is burning a node's tokens. `node.model` is only set when the caller
+  // named a DIFFERENT one, so reporting that alone left every inheriting node blank — the common case,
+  // and the one where "what is actually running?" matters most (it is how a whole review workflow can
+  // silently run on the wrong model).
+  it('reports the EFFECTIVE model of a node that inherits, not just an explicit override', async () => {
+    const { tools, snapshots } = harness();
+    await tools.get('WorkflowStart')!.execute('t-model', { nodes: [{ id: 'a', task: 'a' }] });
+    const node = snapshots.at(-1)!.nodes[0]!;
+    expect(node.model).toBe('p/m'); // the parent's model, which the node inherited
+  });
+
   // Regression: qwen3.8-max-preview double-escaped non-ASCII in the title argument, so the parsed string
   // carried a literal backslash-u sequence and the CLI rail showed "Docs update \u2014 write" verbatim.
   it('decodes double-escaped unicode sequences in the model-authored title', async () => {
