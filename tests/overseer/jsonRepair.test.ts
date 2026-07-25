@@ -53,6 +53,25 @@ describe('repairJson + parseLenient', () => {
     expect(parseLenient('{"a": "see {x: 1}", "b": 2,}')).toEqual({ a: 'see {x: 1}', b: 2 });
   });
 
+  // A single-quoted string carries its own escapes, and re-quoting has to translate them rather than
+  // layer another round on top. Both of these are ordinary model output — an apostrophe is about the
+  // most common character a written sentence has — and both used to come back out unparseable.
+  it('unwraps an escaped apostrophe, which JSON has no escape for', () => {
+    expect(parseLenient(String.raw`{'msg': 'don\'t'}`)).toEqual({ msg: "don't" });
+  });
+
+  it('does not escape a quote that the single-quoted body had already escaped', () => {
+    // `\"` escaped a second time becomes `\\"` — an escaped backslash and then a LIVE quote, which ends
+    // the string early and turns a repairable snippet into a parse error.
+    expect(parseLenient(String.raw`{'msg': 'say \" hi'}`)).toEqual({ msg: 'say " hi' });
+  });
+
+  it('escapes a raw quote inside a single-quoted value and leaves other escapes alone', () => {
+    expect(parseLenient(`{'a': 'he said "hi"'}`)).toEqual({ a: 'he said "hi"' });
+    expect(parseLenient(String.raw`{'a': 'line\nbreak'}`)).toEqual({ a: 'line\nbreak' });
+    expect(parseLenient(String.raw`{'a': 'x\\'}`)).toEqual({ a: 'x\\' });
+  });
+
   it('handles single-quoted values containing braces', () => {
     expect(parseLenient("{'a': 'x } y', 'b': 1}")).toEqual({ a: 'x } y', b: 1 });
   });

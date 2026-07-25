@@ -25,15 +25,25 @@ function singleToDouble(s: string): string {
     }
     if (ch === '"') { inDouble = true; out += ch; continue; }
     if (ch === "'") {
-      // Consume a single-quoted string and re-emit it double-quoted, escaping any inner `"`.
+      // Consume a single-quoted string and re-emit it double-quoted. Quotes are escaped per character on
+      // the way in, never as a blanket replace over the finished body: a body that already carries `\"`
+      // would have that quote escaped a SECOND time, turning `\"` into `\\"` — an escaped backslash
+      // followed by a live quote, which ends the string early and breaks the very parse this rescues.
       let body = '';
       i++;
       for (; i < s.length; i++) {
-        if (s[i] === '\\') { body += s[i] + (s[i + 1] ?? ''); i++; continue; }
+        if (s[i] === '\\') {
+          // `\'` is how a single-quoted string carries an apostrophe. JSON has no such escape and the
+          // character needs none, so it is unwrapped; every other escape is already JSON's own.
+          const next = s[i + 1] ?? '';
+          body += next === "'" ? "'" : `\\${next}`;
+          i++;
+          continue;
+        }
         if (s[i] === "'") break;
-        body += s[i];
+        body += s[i] === '"' ? '\\"' : s[i];
       }
-      out += `"${body.replace(/"/g, '\\"')}"`;
+      out += `"${body}"`;
       continue;
     }
     out += ch;
