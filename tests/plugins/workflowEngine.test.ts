@@ -342,6 +342,7 @@ describe('workflow background + detach', () => {
     const tools = new Map<string, Tool>();
     const controls = new Map<string, Ctrl>();
     const completions: Completion[] = [];
+    const snapshots: { status: string; background?: boolean }[] = [];
     const launched: string[] = [];
     const finished: string[] = [];
     let release!: () => void;
@@ -361,7 +362,7 @@ describe('workflow background + detach', () => {
       currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
       currentAccess: () => ({ toolPolicy: undefined }),
       currentModel: () => ({ provider: 'p', model: 'm' }),
-      workflowEmitter: () => () => {},
+      workflowEmitter: () => (u: { status: string; background?: boolean }) => { snapshots.push(u); },
       workflowCompletionEmitter: () => (c: Completion) => { completions.push(c); },
       listModels: async () => [],
       toolNames: () => ['Read'],
@@ -371,7 +372,7 @@ describe('workflow background + detach', () => {
       principalOf: (id: { elowenUserId?: number } | null) => (id?.elowenUserId ? `elowen:${id.elowenUserId}` : null),
       delegateContextChunk: (raw: string) => (raw ? `ctx:${raw}` : undefined),
     });
-    return { tools, controls, completions, launched, finished, release };
+    return { tools, controls, completions, launched, finished, release, snapshots };
   }
 
   it('background=true returns a handle immediately and delivers the summary when the DAG finishes', async () => {
@@ -407,6 +408,34 @@ describe('workflow background + detach', () => {
     expect(completions).toHaveLength(1);
     expect(completions[0]).toMatchObject({ toolCallId: 'fg1', status: 'done' });
     expect(completions[0]!.result).toContain('done:a');
+  });
+
+  // Ctrl+B tells the user the workflow keeps running, so a later abort in the SAME conversation must not
+  // kill it — the host spares a detached delegate's children on this exact seam for the same reason. Any
+  // unrelated Esc-Esc used to reach this loop and silently destroy the work.
+  it('a parent abort spares a background workflow but still halts a foreground one', async () => {
+    const { tools, controls, completions, finished, release } = bgHarness();
+    const startP = tools.get('WorkflowStart')!.execute('bg-abort', { background: true, nodes: [{ id: 'a', task: 'a' }] });
+    await startP;
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(controls.get('workflow')!.cancelForSession({ sessionId: 'brain-parent' })).toEqual({ cancelled: 0 });
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(finished).toEqual(['a']); // it ran to completion despite the abort
+    expect(completions[0]).toMatchObject({ toolCallId: 'bg-abort', status: 'done' });
+  });
+
+  it('publishes `background` on the snapshot so the host can spare its nodes and the CLI can count', async () => {
+    const { tools, controls, snapshots, release } = bgHarness();
+    const startP = tools.get('WorkflowStart')!.execute('fg-flag', { nodes: [{ id: 'a', task: 'a' }] });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(snapshots.at(-1)!.background).toBeUndefined(); // a blocking call is not background
+    controls.get('workflow')!.detachForeground({ sessionId: 'brain-parent', principal: 'elowen:1' });
+    await startP;
+    expect(snapshots.at(-1)!.background).toBe(true);
+    release();
+    await new Promise((r) => setTimeout(r, 5));
   });
 
   it('does not re-detach an already-background workflow and ignores a foreign origin', async () => {

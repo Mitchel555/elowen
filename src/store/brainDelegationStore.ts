@@ -400,9 +400,13 @@ export class BrainDelegationStore {
     const result = normalizeWorkflowCompletion(raw);
     if (!parentSessionId || !result) return false;
     return this.db.transaction(() => {
+      // The workflow id is part of the linkage, not just the (parent, tool_call) pair: without it a
+      // completion naming a DIFFERENT workflow is accepted and filed under this row, so the parent is
+      // woken with a summary that belongs to another DAG. upsertWorkflowRun already refuses to let a
+      // second workflow id take over a tool call, so the stored id is the authoritative one.
       const linked = this.db.prepare(
-        'SELECT 1 FROM brain_workflows WHERE parent_session_id = ? AND tool_call_id = ?'
-      ).get(parentSessionId, result.toolCallId);
+        'SELECT 1 FROM brain_workflows WHERE parent_session_id = ? AND tool_call_id = ? AND workflow_id = ?'
+      ).get(parentSessionId, result.toolCallId, result.id);
       if (!linked) return false;
       const payload = JSON.stringify({ result: result.result });
       this.db.prepare(

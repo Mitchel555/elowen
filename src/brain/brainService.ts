@@ -425,11 +425,21 @@ export class BrainService {
    *  the contract promised keeps running. Foreground blocking delegates are NOT spared — they belong to the
    *  interrupted turn. Same predicate the start() reconcile uses to decide auto-delivery. */
   private sparedChildSessionIds(parentSessionId: string): Set<string> {
-    return new Set(
+    const spared = new Set(
       this.d.store.getSubagentRuns(parentSessionId)
         .filter((run) => run.status === 'running' && (run.background === true || run.autoDeliver === true))
         .map((run) => run.sessionId),
     );
+    // A background workflow makes the same promise a detached delegate does, so its still-running NODE
+    // sessions are spared on the same terms. Without this the engine correctly declined to cancel the
+    // workflow while the abort cascade tore down the very children it was running in.
+    for (const run of this.d.store.getWorkflowRuns(parentSessionId)) {
+      if (run.status !== 'running' || run.background !== true) continue;
+      for (const node of run.nodes) {
+        if (node.status === 'running' && node.sessionId) spared.add(node.sessionId);
+      }
+    }
+    return spared;
   }
 
   /** Stop the workflow engine for an aborted origin BEFORE its children are torn down: the engine would

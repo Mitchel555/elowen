@@ -105,7 +105,14 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     });
     // Always the ORIGIN's WorkflowStart call, never whatever tool call is executing right now: a node's
     // own turn can trigger a snapshot (WorkflowAddNodes), and it must still land on the origin's row.
-    try { wf.emit({ id: wf.id, toolCallId: wf.toolCallId, ...(wf.title ? { title: wf.title } : {}), status: wf.status, nodes }); }
+    // `background` rides the snapshot because it is not display trivia: the host reads it to decide which
+    // node sessions a parent abort must SPARE, and the CLI to decide what Ctrl+B still has left to detach.
+    try {
+      wf.emit({
+        id: wf.id, toolCallId: wf.toolCallId, ...(wf.title ? { title: wf.title } : {}),
+        status: wf.status, ...(wf.background ? { background: true } : {}), nodes,
+      });
+    }
     catch (e) { ctx.logger.warn(`workflow snapshot fan-out failed: ${errorText(e)}`); }
   };
 
@@ -285,11 +292,16 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
    *  abort tree kills the node children that are RUNNING; this stops the engine from launching the rest
    *  — without it, every node whose deps had already finished would spawn a fresh child AFTER the abort,
    *  with nothing left alive to tear it down. Running nodes are left to settle: their sessions are being
-   *  aborted by the same cascade, and `tick` no longer relaunches anything once `finished` is set. */
+   *  aborted by the same cascade, and `tick` no longer relaunches anything once `finished` is set.
+   *
+   *  A BACKGROUND workflow is deliberately spared. Outliving the turn that started it is the whole promise
+   *  of Ctrl+B and of background:true, and the host spares a detached delegate's children on this same
+   *  abort for exactly that reason. Without the check, any later Esc-Esc in the conversation — related or
+   *  not — silently killed work the user had been told keeps running. */
   const cancelForSession = (sessionId) => {
     let cancelled = 0;
     for (const wf of workflows.values()) {
-      if (wf.finished || wf.originSessionId !== sessionId) continue;
+      if (wf.finished || wf.background || wf.originSessionId !== sessionId) continue;
       wf.status = 'cancelled';
       wf.finished = true;
       wf.finishedAt = Date.now();
@@ -309,7 +321,6 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       if (wf.finished || wf.background || wf.status !== 'running'
         || wf.originSessionId !== sessionId || wf.originPrincipal !== principal) continue;
       wf.background = true;
-      wf.autoDeliver = !!wf.emitCompletion;
       wf.resolveDetached?.();
       wf.resolveDetached = undefined;
       snapshot(wf);
@@ -373,7 +384,6 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         resolveDone: undefined,
         // A detach (Ctrl+B) or explicit background flips this on; foreground and background share ONE run.
         background: p.background === true,
-        autoDeliver: p.background === true && !!emitCompletion,
         emitCompletion,
         resolveDetached: undefined,
       };

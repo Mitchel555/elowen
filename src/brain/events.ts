@@ -112,8 +112,12 @@ export type BrainEvent =
    *  `WorkflowAddNodes` addresses and what the panel keys on), while `toolCallId` is the origin's
    *  `WorkflowStart` call — the durable anchor that binds the DAG to a row in the parent's transcript,
    *  exactly as `subagent.id` does for a delegate call. A snapshot always names the ORIGIN's call, even
-   *  when a node's own turn triggered it. */
-  | { type: 'workflow'; id: string; toolCallId: string; title?: string; status: 'running' | 'done' | 'error' | 'cancelled'; nodes: WorkflowNode[] }
+   *  when a node's own turn triggered it.
+   *
+   *  `background` (started with background:true, or detached with Ctrl+B) is NOT display trivia: a parent
+   *  abort must SPARE such a workflow's node sessions exactly as it spares a detached delegate's child,
+   *  and Ctrl+B must not count one that is already detached. */
+  | { type: 'workflow'; id: string; toolCallId: string; title?: string; status: 'running' | 'done' | 'error' | 'cancelled'; background?: boolean; nodes: WorkflowNode[] }
   /** A visible, display-only marker that the owner changed session state out of turn — switched the
    *  model, work mode (build/plan/workflow), renamed the conversation, or changed the reasoning level.
    *  Rendered as a subtle system line interleaved into the transcript by `at`; persisted (replayed on

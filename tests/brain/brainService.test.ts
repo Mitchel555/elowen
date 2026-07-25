@@ -1224,8 +1224,11 @@ describe('BrainService', () => {
     const reg = new PluginRegistry();
     const ctx = reg.contextFor('subagent', {}, { info() {}, warn() {}, error() {} });
     const cancelledFor: string[] = [];
+    // Both methods: the registry verifies the WHOLE contract before narrowing, so a control that
+    // registered only half of it is rejected outright rather than throwing at the call site.
     ctx.registerControl('workflow', {
       cancelForSession: ({ sessionId }: { sessionId: string }) => { cancelledFor.push(sessionId); return { cancelled: 1 }; },
+      detachForeground: () => ({ detached: 0 }),
     });
     (d as unknown as { plugins: unknown }).plugins = new PluginRegistryProvider(async () => reg);
     const svc = new BrainService(d as never);

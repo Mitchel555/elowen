@@ -1227,10 +1227,12 @@ export function createChatComposition(
             .filter((agent) => agent.status === 'running' && agent.background !== true).length;
           const fgCommands = rt.processes
             .filter((proc) => proc.running && proc.completionMode === 'foreground').length;
-          // A blocking WorkflowStart shows as a `running` workflow. Any already-background one is skipped
-          // by the plugin's detach (it returns 0 for those), so triggering on `running` is safe.
+          // Only a workflow still BLOCKING the turn counts. The plugin skips already-background ones
+          // anyway, but counting them here made a conversation whose only workflow was already detached
+          // take the "moving work to the background" path and then report that it had finished or moved —
+          // when the honest answer is that there was nothing in the foreground to move.
           const fgWorkflows = stream.workflowStates()
-            .filter((workflow) => workflow.status === 'running').length;
+            .filter((workflow) => workflow.status === 'running' && workflow.background !== true).length;
           if (fgSubagents === 0 && fgCommands === 0 && fgWorkflows === 0) {
             rt.notice = color.dim('nothing running in the foreground to background');
             render('input:foreground-background-empty');

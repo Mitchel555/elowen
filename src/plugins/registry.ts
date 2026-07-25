@@ -40,14 +40,16 @@ export interface PluginEmbedder {
   embedBatch(cfg: EmbeddingConfig, texts: string[]): Promise<Float32Array[]>;
 }
 
-/** The method each KNOWN control must expose for `PluginRegistry.control()` to accept it — the runtime
+/** EVERY method each KNOWN control must expose for `PluginRegistry.control()` to accept it — the runtime
  *  narrowing check that a registered blob really is the contract its key promises (a plugin registers
- *  an untyped `PluginControl`, so the shape is verified here, once, instead of at every call site). */
-const KNOWN_CONTROL_METHODS: { [K in keyof KnownControls]: keyof KnownControls[K] & string } = {
-  subagent: 'detachForeground',
-  terminal: 'detachForeground',
-  cron: 'pendingWakeupOriginSessionIds',
-  workflow: 'cancelForSession',
+ *  an untyped `PluginControl`, so the shape is verified here, once, instead of at every call site).
+ *  A control carrying more than one method must list them all: verifying only the first hands the caller
+ *  a value typed as the WHOLE contract while a method may be missing, which then throws at the call site. */
+const KNOWN_CONTROL_METHODS: { [K in keyof KnownControls]: readonly (keyof KnownControls[K] & string)[] } = {
+  subagent: ['detachForeground'],
+  terminal: ['detachForeground'],
+  cron: ['pendingWakeupOriginSessionIds'],
+  workflow: ['cancelForSession', 'detachForeground'],
 };
 
 /** Aggregates every enabled plugin's contributions, and hands each plugin a PluginContext scoped to its
@@ -192,7 +194,9 @@ export class PluginRegistry {
    *  for core callers, so no call site needs an `as unknown as` cast. */
   control<K extends keyof KnownControls>(name: K): KnownControls[K] | undefined {
     const raw: unknown = this.controls.get(name);
-    if (!raw || typeof (raw as Record<string, unknown>)[KNOWN_CONTROL_METHODS[name]] !== 'function') return undefined;
+    if (!raw) return undefined;
+    const blob = raw as Record<string, unknown>;
+    if (KNOWN_CONTROL_METHODS[name].some((method) => typeof blob[method] !== 'function')) return undefined;
     return raw as KnownControls[K];
   }
 
