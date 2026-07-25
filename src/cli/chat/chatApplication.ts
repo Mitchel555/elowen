@@ -144,7 +144,11 @@ export class ChatApplication {
     this.hydrator?.stop();
     this.diagnostics?.record({ type: 'lifecycle', action: 'stop' });
     this.lifecycle?.stop();
-    this.detachExitGuards();
+    // Deliberately NOT detaching the exit guards here. stopLocal() is the synchronous first half of the
+    // shutdown transaction and runs while the daemon stop is still in flight — dropping the signal
+    // handlers now hands the next ctrl+c straight to Node's default, killing the process mid-release,
+    // which is the exact wedge this path exists to prevent. `run()`'s finally detaches once shutdown has
+    // settled, which is also what keeps listeners from stacking across a menu relaunch.
     void this.diagnostics?.close();
     return this.localStop;
   }

@@ -59,6 +59,22 @@ describe('installExitGuards — process listener lifecycle', () => {
     expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before.fatal);
   });
 
+  // Regression: the signal guards were registered with `process.once`. Node removes a `once` listener
+  // BEFORE invoking it, and removing the last listener for a signal restores the default disposition —
+  // so the second ctrl+c killed the process outright during the window the first one was still delivering
+  // the daemon stop, recreating the very wedge the guards exist to prevent. The behavioural test below
+  // could not catch it: it calls a captured reference, which never exercises Node's own removal. Assert
+  // the registration itself — a `once` listener appears in rawListeners as a wrapper carrying `.listener`.
+  it('registers the signal guards so they SURVIVE being dispatched', () => {
+    const dispose = installExitGuards({ shutdown: async () => {}, teardownNow: () => {}, exit: () => {} });
+    for (const signal of ['SIGINT', 'SIGTSTP', 'SIGTERM', 'SIGHUP'] as const) {
+      const raw = process.rawListeners(signal).at(-1) as { listener?: unknown };
+      expect(raw, signal).toBeTypeOf('function');
+      expect(raw.listener, `${signal} must be registered with .on, not .once`).toBeUndefined();
+    }
+    dispose();
+  });
+
   // Regression: SIGINT/SIGTSTP were unhandled, so a ctrl+c landing while raw mode was off (during
   // shutdown's own terminal restore, a `!` shell, the editor) hit Node's default and killed the process
   // instantly — taking the in-flight stopSession with it. The daemon never learned the client left, kept

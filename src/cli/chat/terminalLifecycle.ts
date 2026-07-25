@@ -173,11 +173,15 @@ export function installExitGuards(options: {
   // best-effort on these last-chance hooks. The signal handlers above explicitly await the bounded promise.
   const onExit = (): void => { options.teardownNow(); void options.shutdown(); };
   const onFatal = (): void => { options.teardownNow(); void options.shutdown(); };
+  // `on`, NOT `once`, for the signals: Node removes a `once` listener BEFORE invoking it, and removing the
+  // last listener for a signal restores the default disposition — so the second ctrl+c would kill the
+  // process outright, during the exact window the first one is still delivering the daemon stop. The
+  // `exiting` latch above is what makes a repeat press harmless; the registration must keep it reachable.
   process.once('exit', onExit);
-  process.once('SIGTERM', onSigTerm);
-  process.once('SIGHUP', onSigHup);
-  process.once('SIGINT', onSigInt);
-  process.once('SIGTSTP', onSigTstp);
+  process.on('SIGTERM', onSigTerm);
+  process.on('SIGHUP', onSigHup);
+  process.on('SIGINT', onSigInt);
+  process.on('SIGTSTP', onSigTstp);
   process.once('uncaughtExceptionMonitor', onFatal);
   return (): void => {
     process.off('exit', onExit);
