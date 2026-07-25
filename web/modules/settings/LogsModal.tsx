@@ -126,11 +126,6 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
       <Modal title={t.settings.logs} description={list.data?.dir} icon={ScrollText} onClose={onClose}>
         <div className="flex min-h-0 flex-1 gap-4 p-4">
           <div className="flex w-64 shrink-0 flex-col gap-2">
-            <div className="flex items-center justify-end gap-2">
-              <Button variant="danger" icon={Trash2} disabled={files.length === 0 || deleteAll.isPending} onClick={() => setDeleteAllOpen(true)}>
-                {t.settings.logsDeleteAll}
-              </Button>
-            </div>
             <div className="min-h-0 flex-1 overflow-auto rounded-md border border-border">
               {files.length === 0 ? (
                 <EmptyState title={t.settings.logsEmpty} icon={ScrollText} />
@@ -160,6 +155,13 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
                   </div>
                 ))
               )}
+            </div>
+            {/* Below the list, not above it: a destructive action that clears everything belongs after the
+                thing it destroys, where it cannot be hit on the way to picking a file. */}
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="danger" icon={Trash2} disabled={files.length === 0 || deleteAll.isPending} onClick={() => setDeleteAllOpen(true)}>
+                {t.settings.logsDeleteAll}
+              </Button>
             </div>
           </div>
 

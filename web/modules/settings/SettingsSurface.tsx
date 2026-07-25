@@ -20,7 +20,9 @@ export function SettingsGroup({ title, description, icon: Icon, actions, tone = 
   actions?: ReactNode;
   tone?: SettingsTone;
   density?: SettingsDensity;
-  children: ReactNode;
+  /** Optional: a group whose whole story fits in its header (a title, a figure, one action) renders as a
+   *  single row. An empty body div would still contribute its own padding and read as a stray gap. */
+  children?: ReactNode;
   className?: string;
   variant?: 'classic';
 }) {
@@ -42,7 +44,7 @@ export function SettingsGroup({ title, description, icon: Icon, actions, tone = 
           {actions ? <div className="settings-group__actions">{actions}</div> : null}
         </header>
       ) : null}
-      <div className="settings-group__body">{children}</div>
+      {children ? <div className="settings-group__body">{children}</div> : null}
     </section>
   );
   // A `variant="classic"` group inside an active scope keeps its own rows classic too.

@@ -1073,17 +1073,15 @@ export default function SettingsPage() {
         <SettingsPanel id="plugins" active={category} visited={visitedCategories}><PluginsSection /></SettingsPanel>
 
         <SettingsPanel id="data" active={category} visited={visitedCategories}>
+          {/* Header only. The directory and the per-file breakdown are one click away in the viewer, so
+              repeating them here bought a row between two sections and nothing else. */}
           <SettingsGroup
-            title={t.settings.logs}
+            title={logFiles.data
+              ? `${t.settings.logs} · ${formatLogSize(logFiles.data.files.reduce((sum, f) => sum + f.bytes, 0))}`
+              : t.settings.logs}
             icon={ScrollText}
             actions={<Button icon={ScrollText} onClick={() => setLogsOpen(true)}>{t.settings.logsOpen}</Button>}
-          >
-            <SettingsState>
-              {logFiles.data
-                ? `${logFiles.data.dir} — ${logFiles.data.files.length} × ${formatLogSize(logFiles.data.files.reduce((sum, f) => sum + f.bytes, 0))}`
-                : t.common.loading}
-            </SettingsState>
-          </SettingsGroup>
+          />
           <SettingsGroup
             title={t.settings.dangerZone}
             description={t.settings.cleanupDesc}
