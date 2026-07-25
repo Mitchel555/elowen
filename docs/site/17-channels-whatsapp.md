@@ -37,6 +37,7 @@ A group JID grants access to everyone in that group.
 | Command | What it does |
 |---------|-------------|
 | `/model` | Show a numbered model menu; reply with a number to switch |
+| `/context` | Show a numbered menu of your conversations; reply with a number to bind one here |
 | `/new` | Start a fresh conversation |
 | `/help` | Show available commands |
 

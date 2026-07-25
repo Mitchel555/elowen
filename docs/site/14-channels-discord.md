@@ -36,7 +36,8 @@ Configure in **Settings → Plugins → Discord → Role policies**:
 
 | Command | What it does |
 |---------|-------------|
-| `/model` | Switch the model for this channel |
+| `/model` | Switch the model for this channel (paged picker) |
+| `/context` | Bind this channel to one of your existing conversations (paged picker) |
 | `/reasoning` | Toggle extended-thinking output |
 | `/display` | Override tool activity and answer mode per channel |
 | `/new` | Start a fresh conversation |
