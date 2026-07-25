@@ -24,7 +24,7 @@ Every conversation is checked against the authenticated user's access at the dae
 
 ## Turns that stay coherent
 
-Only one turn runs in a conversation at a time. If you send a message while the agent is working, it is accepted into a durable queue and delivered as a follow-up after the current turn. Queued items are visible to connected clients and survive a daemon restart.
+Only one turn runs in a conversation at a time. If you send a message while the agent is working, it is accepted into a durable queue and delivered as a follow-up after the current turn. Queued items are visible to connected clients and survive a daemon restart. Press **↑** (CLI) or use the recall control (web) while the queue is non-empty to edit or remove a queued message before it is delivered.
 
 Long conversations are managed in three complementary ways:
 

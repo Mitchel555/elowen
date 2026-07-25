@@ -24,7 +24,7 @@ Desktop navigation uses one shared spatial rail. Account and Settings use a focu
 | `/kanban` | Seeing task state as a board and organizing work visually. |
 | `/sessions` | Watching live worker sessions and opening a terminal when appropriate. |
 | `/timeline` | Reviewing activity and related commit history. |
-| `/stats` | Inspecting model and usage trends. |
+| `/stats` | Generation speed, cache hit rate, token split, and cost trends. |
 | `/projects` | Managing the repositories Elowen may work in. |
 | `/editor` | Browsing and editing project files in the built-in editor. |
 | `/memory` | Curating durable memories and their categories. |
@@ -47,7 +47,7 @@ The **Tasks** workspace is the primary operational surface. Its header exposes t
 
 ![Sessions and conversation history](images/web-ui-sessions.png)
 
-**Timeline** and **Stats** provide the historical side: activity, commits, and usage rather than another competing task list. Stats shows tokens and model cost. A provider-reported cost is authoritative; a `~` amount is an estimate from the models.dev catalog, used for proxy or custom-model turns when the provider does not report a price.
+**Timeline** and **Stats** provide the historical side: activity, commits, and usage rather than another competing task list. Stats shows tokens, model cost, generation speed (tokens/s per model with an average in the hero), cache hit rate, and the input/output token split. A provider-reported cost is authoritative; a `~` amount is an estimate from the models.dev catalog, used for proxy or custom-model turns when the provider does not report a price. The `/stats` slash command opens the same data as a modal (web) or an overlay with ⇄-switchable sections (CLI).
 
 ![Timeline of commits and active files](images/web-ui-timeline.png)
 
