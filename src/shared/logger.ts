@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { logDir } from './paths.js';
 
 /**
  * Global structured logger — single source of truth for everything the daemon prints. Every line is
@@ -36,9 +37,11 @@ const MIN: LogLevel = ((): LogLevel => {
   return v in ORDER ? (v as LogLevel) : 'info';
 })();
 
-// Default to `<cwd>/logs` (the daemon's WorkingDirectory is the repo root). Overridable so a second
-// process (e.g. the web server) can point at the same directory.
-const DIR = (process.env.ELOWEN_LOG_DIR) || join(process.cwd(), 'logs');
+// Resolved by the shared paths helper — the ONE rule for where persistent state lives (`~/.config/elowen`,
+// or ELOWEN_LOG_DIR when set). Deliberately not a `<cwd>/logs` default: the daemon's WorkingDirectory is
+// the repo root, so that wrote logs INTO the checkout whenever the env var was absent (a plain dev run),
+// leaving two rival log folders — the installed one and a stale one npm update would blow away.
+const DIR = logDir(process.env);
 let dirReady = false;
 
 /** Local wall-clock `YYYY-MM-DD HH:MM:SS.mmm` — readable at a glance, sortable, no timezone noise. */

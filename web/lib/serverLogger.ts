@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -18,9 +19,11 @@ const MIN: LogLevel = (() => {
   return v in ORDER ? (v as LogLevel) : 'info';
 })();
 
-// Default to the shared repo-root `logs/` (web cwd is `<repo>/web`, so `../logs`). Overridable via
-// ELOWEN_LOG_DIR — set it in the web systemd unit so daemon and web write to exactly the same folder.
-const DIR = process.env.ELOWEN_LOG_DIR || join(process.cwd(), '..', 'logs');
+// Mirrors `logDir()` in src/shared/paths.ts — the canonical rule for where persistent state lives. It is
+// duplicated rather than imported because the web is a separate TS package (see the note above); keep the
+// two in step. NOT a cwd-relative default: that wrote logs into the checkout on any run without the env
+// var, so the installed folder and a stale in-repo one both filled up.
+const DIR = process.env.ELOWEN_LOG_DIR || join(process.env.HOME || homedir(), '.config', 'elowen', 'logs');
 let dirReady = false;
 
 function stamp(d: Date): string {
