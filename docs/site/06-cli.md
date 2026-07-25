@@ -40,6 +40,7 @@ The terminal chat streams assistant text, tool calls, diffs, approvals, todos, a
 - Use **`/fast`** with a ChatGPT/OpenAI OAuth model to toggle priority processing for this conversation when that model supports it.
 - Use **`/model`**, **`/theme`**, and **`/keybinds`** for the corresponding pickers and preferences.
 - Use **`/statusline`** for a checkbox overlay (like `/keybinds`) that picks which segments the status bar shows — context usage, total tokens, and cost. It edits the shared statusline config, so the choice also applies to the web chat dock.
+- Use **`/stats`** for an overlay with generation speed, cache hit rate, and the input/output token split. Press **⇄** to switch sections. The web chat opens the same data as a modal.
 
 While Elowen is working, the CLI shows live activity and elapsed time. A tool call that takes longer to compose shows a localized action label describing what the tool is doing. **`Ctrl+B`** moves a running foreground sub-agent or `Bash` command into the background without cancelling it; its result returns to the conversation when it completes.
 
@@ -55,7 +56,7 @@ elowen run --resume <session-id> "continue"
 elowen run --new "start a clean investigation"
 ```
 
-If you send a message while a turn is running, Elowen stores it in that session's durable queue and delivers it after the current turn settles. `/compact` compacts older history when needed, retaining a summary and the useful tail. Context, output, goal, and channel limits are controlled by the instance owner in **Settings → Elowen AI**.
+If you send a message while a turn is running, Elowen stores it in that session's durable queue and delivers it after the current turn settles. Press **`↑`** while the queue is non-empty to recall (edit or remove) a queued message before it is delivered — the same recall works in the web chat dock. `/compact` compacts older history when needed, retaining a summary and the useful tail. Context, output, goal, and channel limits are controlled by the instance owner in **Settings → Elowen AI**.
 
 ### Background commands
 
@@ -91,11 +92,11 @@ A workflow is a DAG of sub-agents. The agent declares nodes — each a self-cont
 
 Use a workflow when subtasks have an order or a shared result (gather → analyze → write); for a handful of unrelated tasks, plain parallel delegation is simpler. Nodes inherit the caller's allowed scope and can only ever narrow it — a workflow cannot reach past what the person who started it may already do.
 
-The transcript carries a marker with a live tally of node states, and the telemetry rail lists workflows while they run. Clicking either opens the workflow view:
+The transcript carries a marker with a live tally of node states, and the telemetry rail lists workflows while they run. Clicking either opens the workflow view — a spatial DAG canvas that lays nodes out as a directed graph rather than a flat list:
 
-![Workflow view with the dependency tree on the left and the selected node's detail on the right](../screenshots/cli/17-workflow-modal.png)
+![Workflow view as a spatial DAG canvas with the selected node's detail beside it](../screenshots/cli/17-workflow-modal.png)
 
-The node list on the left is the dependency tree; the detail beside it belongs to the selected node — its status, model, tokens, elapsed time, dependencies, task, and the tool it is running right now. A node that waits on several others is drawn under the first of them and names the rest in its detail, since one indented list cannot show two parents.
+Nodes are positioned by their dependency edges; the detail panel beside the canvas belongs to the selected node — its status, model, tokens, elapsed time, dependencies, task, result or error, and the tool it is running right now. Aborting the parent turn (Esc / Ctrl+C) cancels the entire running workflow rather than letting orphaned nodes continue.
 
 | Key | Action |
 | --- | --- |
