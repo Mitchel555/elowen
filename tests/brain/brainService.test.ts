@@ -1964,6 +1964,47 @@ describe('BrainService', () => {
     expect(activeTools).not.toContain('WorkflowStart');
   });
 
+  // Regression: buildScope hard-coded mode 'build'. Plan mode admits Delegate, so a background delegation
+  // started while planning delivers its result through exactly this path — and the delivery turn was then
+  // rebuilt WITHOUT the read-only shell clamp, re-advertising every tool plan mode had withheld. With
+  // auto-approval on, a child result landing mid-plan handed the model a fully armed build turn nobody
+  // asked for. A host-initiated turn must inherit the mode the user is actually in.
+  it('a sub-agent result delivered mid-plan keeps plan mode instead of reopening a build turn', async () => {
+    const d = fakeDeps();
+    d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
+      name === 'cli/plan-mode' ? 'PLAN MODE PROMPT' : `PERSONA:${name}:${vars.userName}`,
+    );
+    const reg = new PluginRegistry();
+    const ctx = reg.contextFor('terminal', {}, { info() {}, warn() {}, error() {} });
+    for (const name of ['Bash', 'KillProcess', 'Delegate', 'WorkflowStart']) {
+      ctx.registerTool(defineTool({
+        name, label: name, description: name, parameters: Type.Object({}),
+        execute: async () => ({ content: [{ type: 'text' as const, text: 'ok' }], details: {} }),
+      }));
+    }
+    (d as unknown as { plugins: unknown }).plugins = new PluginRegistryProvider(async () => reg);
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    await svc.send({ userId: 1, text: 'plan it first', mode: 'plan' });
+    // The delivery must settle with a fresh assistant, else sendCustomSystem reports a non-delivery.
+    d.session.sendCustomMessage.mockImplementation(async () => {
+      d.session.messages.push({ role: 'assistant', content: 'noted' } as never);
+    });
+    d.session.setActiveToolsByName.mockClear();
+
+    const runner = (svc as unknown as {
+      turnRunner: { sendCustomSystem(userId: number, session: string, customType: string, content: string): Promise<void> };
+    }).turnRunner;
+    await runner.sendCustomSystem(1, sessionId, 'subagent-result', 'the child reported back');
+
+    const activeTools = d.session.setActiveToolsByName.mock.calls.at(-1)?.[0] ?? d.session.__active;
+    expect(activeTools).toContain('Bash');
+    expect(activeTools).toContain('Delegate');
+    // The half that used to leak: delivering a result re-armed the mutating tools mid-plan.
+    expect(activeTools).not.toContain('KillProcess');
+    expect(activeTools).not.toContain('WorkflowStart');
+  });
+
   it('plan mode composes only DECLARED read-only tools — a reader-sounding name earns nothing', async () => {
     const d = fakeDeps();
     d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>

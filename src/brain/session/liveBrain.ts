@@ -4,6 +4,7 @@ import type { BrainEvent } from '../events.js';
 import type { ProviderRequestProfile } from '../modelCapabilities.js';
 import type { LiveEventReplay } from './liveEventReplay.js';
 import type { DelegatedExecutionScope } from '../delegatedScope.js';
+import type { TurnMode } from '../service/turnRequest.js';
 import type { ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 
 /** A queued mid-turn message's image attachments, in PI's ImageContent shape. */
@@ -98,6 +99,12 @@ export interface LiveBrain {
    *  idle-rollover check (send()) so a deliberately reopened old conversation continues instead of being
    *  cut over to a fresh session. Unset for auto-resumed sessions (client boot). */
   interactedAt?: number;
+  /** Mode of the last real turn the user drove (the CLI toggle is per-request, so the daemon has no other
+   *  record of it). A HOST-initiated turn carries no request of its own — a background sub-agent result is
+   *  delivered through buildScope — and must not silently fall back to 'build': that would rebuild the turn
+   *  without plan mode's shell clamp and re-advertise the tools plan mode withheld, letting a delivery that
+   *  lands mid-planning mutate the repo. */
+  lastTurnMode?: TurnMode;
   /** Platform id (e.g. Discord author) of the sender whose turn is currently in flight — set at the
    *  start of a channel turn. Mid-run injection only STEERS a message into the running turn when it comes
    *  from this SAME sender, so one member can never inject instructions into another's (or the admin's)

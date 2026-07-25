@@ -66,6 +66,8 @@ export class TurnContextBuilder {
 
   async build(request: TurnRequest, live: LiveBrain): Promise<PreparedTurnContext> {
     const mode: TurnMode = request.mode ?? 'build';
+    // Remember it for the host-initiated turns that carry no request of their own (buildScope).
+    live.lastTurnMode = mode;
     const memSettings = this.d.userSettings?.(request.userId);
     const memoryBlock = await this.memoryBlock(request.userId, request.text, memSettings?.autoRecall !== false);
     const hookBlock = await this.hookBlock(request.text);
@@ -175,7 +177,11 @@ export class TurnContextBuilder {
    *  receives an empty prompt, which its caller (sendCustomSystem) ignores while driving PI's native
    *  custom-message seam. */
   buildScope(userId: number, live: LiveBrain): PreparedTurnContext {
-    const scope = this.scopeOptions(userId, live, 'build');
+    // The session's own mode, NOT 'build'. Plan mode admits Delegate, so a background delegation started
+    // while planning delivers its result through here — and hard-coding 'build' rebuilt that follow-up turn
+    // without the read-only shell clamp and re-advertised the withheld tools, so the model could mutate
+    // mid-plan. The mode a delivery inherits must be the one the user is actually in.
+    const scope = this.scopeOptions(userId, live, live.lastTurnMode ?? 'build');
     return {
       autoSaveMemory: false,
       run: <T>(operation: (prompt: string) => Promise<T>): Promise<T> => runWithPolicy(live.policy, () => operation(''), scope),
