@@ -5,7 +5,9 @@ import { isNewer } from '../../cli/version.js';
 import { handleMcpRequest } from '../../mcp/server.js';
 import { eventProjectId } from '../eventProject.js';
 import { ELOWEN_VERSION, ELOWEN_INSTALLED_AT, ELOWEN_PORT, defaultLatestVersion, defaultStartUpdate, defaultStartRestart } from '../version.js';
-import { parseBody } from '../validation.js';
+import { parseBody, queryInt } from '../validation.js';
+import { LOG_DIR } from '../../shared/logger.js';
+import { listLogFiles, readLogFile, deleteLogFile, deleteAllLogFiles, DEFAULT_LOG_TAIL_LINES, MAX_LOG_TAIL_LINES } from '../../integrations/logFiles.js';
 import { pushSubscribeSchema, pushUnsubscribeSchema, systemRestartSchema } from '../schemas/config.js';
 import { resolveExecutor } from '../../overseer/routing.js';
 import { DEFAULT_BINS, BARE_PLAIN_PROGRAM, parseElowenExec } from '../../shared/execs.js';
@@ -46,7 +48,7 @@ function binExists(path: string): boolean { try { accessSync(path, constants.X_O
  *  config read/write (admin-gated write), the System panel (version/update-available) and the live
  *  SSE event stream (per-subscriber tenancy gate). */
 export function registerConfigRoutes(app: ElowenApp, ctx: RouteContext): void {
-  const { d, accessibleProjects, eventDeps, skillService, notAdminUnlessSetup } = ctx;
+  const { d, accessibleProjects, eventDeps, skillService, notAdminUnlessSetup, notAdmin } = ctx;
   // MCP endpoint: the advisor agent connects here to control Elowen with native tools. Each request is
   // handled statelessly with the toolset bound to the caller's token, and every tool delegates to the
   // same `callElowenApi` core as the `elowen api` CLI verb — so a new REST endpoint needs zero edits here.
@@ -191,6 +193,36 @@ export function registerConfigRoutes(app: ElowenApp, ctx: RouteContext): void {
     const b = await parseBody(c, systemRestartSchema);
     setTimeout(() => (d.startRestart ?? defaultStartRestart)(b.target), 100);
     return c.json({ ok: true });
+  });
+
+  // The daily log files (daemon + web) behind Settings → Data → Logs. Admin-only via `notAdmin`, NOT the
+  // setup-tolerant gate the routes above use: logs carry live operational detail, so they must not be
+  // readable during first-run onboarding when no admin exists yet.
+  app.get('/system/logs', (c) => {
+    if (notAdmin(c)) return c.json({ error: 'forbidden' }, 403);
+    return c.json({ dir: LOG_DIR, files: listLogFiles() });
+  });
+
+  app.get('/system/logs/:name', (c) => {
+    if (notAdmin(c)) return c.json({ error: 'forbidden' }, 403);
+    const lines = queryInt(c.req.query('lines'), { min: 1, max: MAX_LOG_TAIL_LINES, fallback: DEFAULT_LOG_TAIL_LINES });
+    const result = readLogFile(c.req.param('name'), lines);
+    if (result.ok) return c.json(result.content);
+    if (result.reason === 'invalid') return c.json({ error: 'invalid log file' }, 400);
+    if (result.reason === 'too-large') return c.json({ error: 'log file too large' }, 413);
+    return c.json({ error: 'log file not found' }, 404);
+  });
+
+  app.delete('/system/logs/:name', (c) => {
+    if (notAdmin(c)) return c.json({ error: 'forbidden' }, 403);
+    const result = deleteLogFile(c.req.param('name'));
+    if (result.ok) return c.json({ deleted: 1 });
+    return c.json({ error: result.reason === 'invalid' ? 'invalid log file' : 'log file not found' }, result.reason === 'invalid' ? 400 : 404);
+  });
+
+  app.delete('/system/logs', (c) => {
+    if (notAdmin(c)) return c.json({ error: 'forbidden' }, 403);
+    return c.json({ deleted: deleteAllLogFiles() });
   });
 
   app.get('/events', c => streamSSE(c, async stream => {
