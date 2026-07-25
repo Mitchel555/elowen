@@ -116,6 +116,40 @@ describe('BrainSessionFactory context-saving installers', () => {
     }
   });
 
+  // The seam a plugin needs to restore per-conversation state that lives in daemon memory while its
+  // evidence lives in the transcript (the files plugin's read-before-write guard). It has to carry the
+  // REHYDRATED history and be awaited, or the first turn could run before the state is in place.
+  it('hands the rehydrated history to onSpawned before returning the session', async () => {
+    const history = [{ role: 'toolResult', details: { ok: true, tool: 'Read', path: '/x', contentHash: 'h' } }];
+    const session = {
+      sessionId: 'sess-spawned',
+      agent: {} as Record<string, unknown>,
+      subscribe: () => () => {},
+      messages: history as unknown[],
+    };
+    const factory = new BrainSessionFactory({
+      store: new BrainStore(openDb(':memory:')),
+      createSession: vi.fn(async () => ({ session })) as never,
+      resourceLoaderFactory: () => undefined,
+    });
+    let seen: { sessionId: string; messages: readonly unknown[] } | undefined;
+    let settled = false;
+    await factory.create({
+      sessionId: session.sessionId, ownerUserId: 1, runtime: undefined,
+      model: { id: 'test-model', provider: 'kimi-coding', contextWindow: 200_000 },
+      cwd: process.cwd(), systemPrompt: 'sp', appendSystemPrompt: [], skills: [], tools: [],
+      autoCompact: false, autoCompactAtPct: 80,
+      onSpawned: async (e: { sessionId: string; messages: readonly unknown[] }) => {
+        seen = e;
+        await Promise.resolve();
+        settled = true;
+      },
+    } as never);
+
+    expect(seen).toEqual({ sessionId: 'sess-spawned', messages: history });
+    expect(settled).toBe(true); // awaited, not fired and forgotten
+  });
+
   it('skips cacheWatch for non-anthropic providers (their cache stats would make it cry wolf)', async () => {
     const { listeners, session } = await createWithProvider('kimi-coding');
     try {

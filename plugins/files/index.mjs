@@ -472,14 +472,52 @@ function sessionFiles(sessionId) {
   return files;
 }
 
-/** Record that this conversation now knows `abs` holds exactly `content`. `ours` marks content WE just
- *  wrote (as opposed to read), which is what earns the one post-write formatter forgiveness above. */
-export function markFileRead(sessionId, abs, content, ours = false) {
+function recordHash(sessionId, abs, hash, ours) {
   if (!sessionId) return;
   const files = sessionFiles(sessionId);
   files.delete(abs); // re-insert so the entry counts as freshest for eviction
-  files.set(abs, { hash: hashOf(content), ours });
+  files.set(abs, { hash, ours });
   if (files.size > READ_STATE_MAX_FILES) files.delete(files.keys().next().value);
+}
+
+/** Record that this conversation now knows `abs` holds exactly `content`. `ours` marks content WE just
+ *  wrote (as opposed to read), which is what earns the one post-write formatter forgiveness above. */
+export function markFileRead(sessionId, abs, content, ours = false) {
+  recordHash(sessionId, abs, hashOf(content), ours);
+}
+
+/** Which tool results vouch for a file's content, and whether that content counts as OURS — the `ours`
+ *  tier has to survive a restart too, or the first edit after one would trip over a formatter rewrite
+ *  that the live session would have forgiven. */
+const VOUCHING_TOOLS = { Read: false, Write: true, Edit: true };
+
+/** Re-seed this session's read state from its own rehydrated history.
+ *
+ *  The state above lives in daemon memory, but the CONVERSATION outlives the process — and Elowen
+ *  restarts routinely (auto-update). Without this, reopening a conversation made the guard insist the
+ *  agent had never seen a file it read three messages ago and still has in its context: a pointless
+ *  re-read of a file that had not changed, on every restart, for every file.
+ *
+ *  Seeding from the transcript rather than from a persisted map is what keeps the guard HONEST. The
+ *  recorded hash is replayed from the very tool result the model can still see, so the two move
+ *  together: a Read that compaction dropped from the context seeds nothing and the guard correctly
+ *  forgets it too. A persisted map would keep vouching for content the model no longer holds.
+ *
+ *  Messages arrive oldest-first, so the newest result for a file wins — the same last-write-wins order
+ *  the live path has. Nothing is trusted about the file itself: the replayed hash still has to match
+ *  what is on disk now, so anything edited while the daemon was down is refused exactly as before. */
+export function seedReadStateFromHistory(sessionId, messages) {
+  if (!sessionId || !Array.isArray(messages)) return 0;
+  let seeded = 0;
+  for (const m of messages) {
+    const d = m?.details;
+    if (!d || d.ok !== true || typeof d.path !== 'string' || typeof d.contentHash !== 'string') continue;
+    const ours = VOUCHING_TOOLS[d.tool];
+    if (ours === undefined) continue; // some other tool's result that happens to carry a path
+    recordHash(sessionId, d.path, d.contentHash, ours);
+    seeded++;
+  }
+  return seeded;
 }
 
 /** Why a mutation of `abs` must not proceed, or null when it may. `current` is the file's bytes on disk, or
@@ -710,6 +748,14 @@ export function register(ctx) {
   const readCap = Math.min(Math.max(Number(ctx.config.readCap) || DEFAULT_MAX, 20_000), 500_000);
   const searchMaxMatches = Math.min(Math.max(Number(ctx.config.searchMaxMatches) || DEFAULT_SEARCH_MAX_MATCHES, 50), 1000);
 
+  // A conversation coming back after a daemon restart brings its history with it — and with it every
+  // file this session has already seen. Replay that into the read state so the guard picks up where the
+  // previous process left off instead of treating the whole conversation as file-blind.
+  ctx.registerHook({
+    name: 'brain.session.afterSpawn',
+    run: (payload) => { seedReadStateFromHistory(payload?.sessionId, payload?.messages); },
+  });
+
   ctx.registerTool(defineTool({
     name: 'Read', label: 'Read file',
     description: [
@@ -743,13 +789,16 @@ export function register(ctx) {
           // Only a read that actually SHOWED the agent something counts. A bad `pages` spec, an encrypted
           // PDF or a missing poppler must not leave the file marked as read — that would license a later
           // blind Write over a document nobody ever saw.
-          if (result.details?.ok) markFileRead(ctx.currentSessionId?.(), abs, raw);
-          return result;
+          if (!result.details?.ok) return result;
+          markFileRead(ctx.currentSessionId?.(), abs, raw);
+          // The hash rides the RESULT so a later process can re-seed the read state from this very
+          // message (see seedReadStateFromHistory) instead of demanding the file be read again.
+          return { ...result, details: { ...result.details, contentHash: hashOf(raw) } };
         }
         const mime = detectImageMime(raw);
         if (mime) {
           markFileRead(ctx.currentSessionId?.(), abs, raw);
-          const details = { ok: true, tool: 'Read', truncated: false, path: abs, bytes: raw.length, image: true, mimeType: mime };
+          const details = { ok: true, tool: 'Read', truncated: false, path: abs, bytes: raw.length, image: true, mimeType: mime, contentHash: hashOf(raw) };
           const resized = await resizeImage(raw, mime, { maxWidth: 2000, maxHeight: 2000 }).catch(() => null);
           let data = resized?.data;
           let outMime = resized?.mimeType ?? mime;
@@ -813,7 +862,7 @@ export function register(ctx) {
         } else if (truncated) {
           text += `\n\n[Showing lines ${start + 1}-${endShown} of ${total}. Use offset=${endShown + 1} to continue.]`;
         }
-        return ok('Read', text, { path: abs, bytes: Buffer.byteLength(body), truncated });
+        return ok('Read', text, { path: abs, bytes: Buffer.byteLength(body), truncated, contentHash: hashOf(raw) });
       } catch (e) { return fail('Read', e); }
     },
   }));
@@ -845,12 +894,13 @@ export function register(ctx) {
           const guard = readGuardError(sessionId, abs, beforeBuf);
           if (guard) return ok('Write', `Error: ${guard}`, { ok: false, path: abs });
           writeFileSync(abs, p.content, 'utf-8');
-          markFileRead(sessionId, abs, Buffer.from(p.content, 'utf-8'), true);
+          const written = Buffer.from(p.content, 'utf-8');
+          markFileRead(sessionId, abs, written, true);
           const base = beforeBuf?.toString('utf-8') ?? '';
           const diff = displayDiff(base, p.content);
           const patch = unifiedPatch(abs, base, p.content);
           return ok('Write', `Wrote ${Buffer.byteLength(p.content)} bytes to ${abs}`, {
-            path: abs, bytes: Buffer.byteLength(p.content),
+            path: abs, bytes: Buffer.byteLength(p.content), contentHash: hashOf(written),
             ...(diff ? { diff } : {}), ...(patch ? { patch } : {}),
           });
         });
@@ -892,11 +942,12 @@ export function register(ctx) {
           if (plan.error === 'ambiguous') return ok('Edit', `Error: oldText matches ${plan.count} times. Provide more context to make it unique, or set replaceAll.`, { ok: false, path: abs, matches: plan.count });
           if (plan.newContent === plan.content) return ok('Edit', 'Error: the replacement produced identical content.', { ok: false, path: abs });
           writeFileSync(abs, plan.after, 'utf-8');
-          markFileRead(sessionId, abs, Buffer.from(plan.after, 'utf-8'), true);
+          const written = Buffer.from(plan.after, 'utf-8');
+          markFileRead(sessionId, abs, written, true);
           const diff = displayDiff(plan.content, plan.newContent);
           const patch = unifiedPatch(abs, plan.content, plan.newContent);
           return ok('Edit', `Edited ${abs} (${plan.count > 1 ? `${plan.count} replacements` : '1 replacement'})`, {
-            path: abs, replacements: plan.count, ...(diff ? { diff } : {}), ...(patch ? { patch } : {}),
+            path: abs, replacements: plan.count, contentHash: hashOf(written), ...(diff ? { diff } : {}), ...(patch ? { patch } : {}),
           });
         });
       } catch (e) { return fail('Edit', e); }

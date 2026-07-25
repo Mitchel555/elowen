@@ -210,6 +210,7 @@ export class BrainWorkerService {
       // factory persists each compaction into the store, so a rehydrated/resumed task keeps the savings).
       autoCompact: true, autoCompactAtPct: DEFAULT_AUTO_COMPACT_PCT,
       title: `${input.taskId}${input.taskTitle ? `: ${input.taskTitle}` : ''}`,
+      onSpawned: toolHookBus ? (e) => toolHookBus.emit('brain.session.afterSpawn', e) : undefined,
     });
 
     const worker: LiveWorker = {

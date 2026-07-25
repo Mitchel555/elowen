@@ -207,6 +207,7 @@ export class LiveSessionSpawner {
       // project path, and PI walks it plus every ancestor up to `/`, so a plain user's chat would
       // otherwise inhale the operator's private CLAUDE.md (internal hosts, prod credentials).
       contextFiles: !opts.channel && !!u?.is_admin,
+      onSpawned: toolHookBus ? (e) => toolHookBus.emit('brain.session.afterSpawn', e) : undefined,
     });
 
     // Resolve tool→icon once per session and stamp it on each tool event, so every client renders the

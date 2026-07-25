@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlugins } from '../../src/plugins/loader.js';
+import { PluginHookBus } from '../../src/plugins/hookBus.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import type { Policy } from '../../src/plugins/policy.js';
 import type { PluginRegistry } from '../../src/plugins/registry.js';
@@ -220,6 +221,78 @@ describe('files plugin — read-before-modify guard', () => {
     const path = fixture('no-session.txt', 'body\n');
     const res = await runWithPolicy(userPolicy([dir]), () => runTool(reg, 'Edit', { path, oldText: 'body', newText: 'BODY' }));
     expect(res.content[0].text).toContain('Edited');
+  });
+
+  // Elowen auto-updates, so a daemon restart mid-conversation is routine — and the guard's state is
+  // process memory while the conversation is not. Reopening one used to make the guard insist the agent
+  // had never seen a file it read three messages ago and still has in its context. The transcript is
+  // replayed into the state at spawn; a session id this process has never seen IS the post-restart state.
+  describe('across a restart', () => {
+    const afterSpawn = (sid: string, messages: unknown[]) =>
+      new PluginHookBus({ hooks: reg.hooks }).emit('brain.session.afterSpawn', { sessionId: sid, messages });
+    const toolResult = (details: unknown) => ({ role: 'toolResult', details });
+
+    it('a read replayed from history spares the agent a second read of an unchanged file', async () => {
+      const path = fixture('restart.txt', 'alpha\nbeta\n');
+      const read = await inSession('Read', { path });
+      expect(read.details?.contentHash).toEqual(expect.any(String));
+
+      const revived = `${session}-revived`;
+      await afterSpawn(revived, [toolResult(read.details)]);
+
+      const res = await inSession('Edit', { path, oldText: 'alpha', newText: 'ALPHA' }, revived);
+      expect(res.details).toMatchObject({ ok: true });
+      expect(readFileSync(path, 'utf-8')).toBe('ALPHA\nbeta\n');
+    });
+
+    it('still refuses when the file moved while the daemon was down', async () => {
+      const path = fixture('restart-changed.txt', 'alpha\n');
+      const read = await inSession('Read', { path });
+      writeFileSync(path, 'someone else wrote this\n'); // the window the guard exists for
+      const revived = `${session}-revived`;
+      await afterSpawn(revived, [toolResult(read.details)]);
+
+      const res = await inSession('Edit', { path, oldText: 'someone', newText: 'X' }, revived);
+      expect(res.content[0].text).toMatch(/has changed on disk since you last read it/);
+      expect(readFileSync(path, 'utf-8')).toBe('someone else wrote this\n');
+    });
+
+    // The point of seeding from the transcript rather than a persisted map: the guard and the model's
+    // actual knowledge move together. A read the model can no longer see vouches for nothing.
+    it('does not vouch for a read that compaction dropped from the context', async () => {
+      const path = fixture('restart-compacted.txt', 'alpha\n');
+      await inSession('Read', { path });
+      const revived = `${session}-revived`;
+      await afterSpawn(revived, []);
+
+      const res = await inSession('Edit', { path, oldText: 'alpha', newText: 'X' }, revived);
+      expect(res.content[0].text).toMatch(/has not been read in this conversation/);
+    });
+
+    // Content WE wrote sits in a softer tier so a post-write reformat does not block the next edit. That
+    // tier has to survive the restart too, or the first edit after one trips over the formatter's rewrite.
+    it('keeps the formatter window open for a file we wrote before the restart', async () => {
+      const path = join(dir, `${n}-restart-authored.txt`);
+      const write = await inSession('Write', { path, content: 'one\ntwo\n' });
+      writeFileSync(path, 'one\ntwo\n\n'); // stand-in for the formatters hook reshaping our output
+      const revived = `${session}-revived`;
+      await afterSpawn(revived, [toolResult(write.details)]);
+
+      const res = await inSession('Edit', { path, oldText: 'two', newText: 'TWO' }, revived);
+      expect(res.details).toMatchObject({ ok: true });
+    });
+
+    it('replays in order, so the newest result for a file is the one that counts', async () => {
+      const path = fixture('restart-order.txt', 'v1\n');
+      const stale = await inSession('Read', { path });
+      writeFileSync(path, 'v2\n');
+      const fresh = await inSession('Read', { path });
+      const revived = `${session}-revived`;
+      await afterSpawn(revived, [toolResult(stale.details), toolResult(fresh.details)]);
+
+      const res = await inSession('Edit', { path, oldText: 'v2', newText: 'V2' }, revived);
+      expect(res.details).toMatchObject({ ok: true });
+    });
   });
 
   it('a read of the PDF or the image branch also counts as having read the file', async () => {

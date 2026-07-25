@@ -82,6 +82,12 @@ export interface SessionSpec {
   contextFiles?: boolean;
   /** Session title to set when the stored row has none yet (task sessions name themselves). */
   title?: string;
+  /** Fired once the live session exists, carrying its REHYDRATED history. Callers forward it to the
+   *  plugin hook bus as `brain.session.afterSpawn` — the seam a plugin needs to restore per-conversation
+   *  state that lives in daemon memory but whose evidence lives in the transcript (the files plugin's
+   *  read-before-write guard). Awaited, like `onToolResult`, so the state is in place before the first
+   *  turn can run; the bus is fail-open and budgets each hook, so a broken one cannot block a spawn. */
+  onSpawned?: (e: { sessionId: string; messages: readonly unknown[] }) => void | Promise<void>;
 }
 
 export interface SessionFactoryDeps {
@@ -356,6 +362,8 @@ export class BrainSessionFactory {
     session.subscribe(createSessionPersistenceProjector(
       this.d.store, session, spec.sessionId, spec.model.contextWindow,
     ));
+    // Last, so observers see the finished session — and before the caller can run a turn on it.
+    await spec.onSpawned?.({ sessionId: spec.sessionId, messages: session.messages });
     return { session };
   }
 }

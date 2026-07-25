@@ -18,7 +18,13 @@ export type PluginSkill = Skill;
  *  and is AWAITED before the result travels onward (per-event budget — see hookBus EVENT_BUDGETS): a
  *  hook may mutate the written file and/or append short strings to `result.details.notes: string[]`
  *  (create if absent) to annotate the transcript — e.g. the formatters plugin formats files written by
- *  the files plugin and notes "formatted <file> with <name>". */
+ *  the files plugin and notes "formatted <file> with <name>".
+ *
+ *  `brain.session.afterSpawn` fires once a live session is assembled, with `{ sessionId, messages }`
+ *  where `messages` is its REHYDRATED history, and is AWAITED before the caller may run a turn. It is
+ *  the seam for per-conversation state that lives in daemon memory while its evidence lives in the
+ *  transcript: the files plugin re-seeds its read-before-write guard there, so reopening a conversation
+ *  after a restart does not make the agent re-read files it has already seen. */
 export type PluginHookName =
   | 'platform.message.received' | 'platform.message.normalized'
   | 'brain.session.beforeSpawn' | 'brain.session.afterSpawn'
