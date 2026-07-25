@@ -28,6 +28,7 @@ All channels share these traits:
 - **Reasoning** — stream extended-thinking output into the progress bubble (toggle with `showReasoning`, off by default)
 - **AskUserQuestion** — when the agent needs a decision, it posts a prompt and waits for a reply (button click on Discord, inline-keyboard tap on Telegram, Adaptive Card tap on Teams, numbered reply on WhatsApp). `askTimeoutMs` controls how long it stays open.
 - **Language** — service messages (`/new`, `/model`, placeholders) in `en`, `cs` or `sk`, selectable from a dropdown in the plugin settings.
+- **`/context`** — bind the current channel/chat to one of your existing conversations from any surface (CLI, Web UI, another channel). The command opens a paginated picker of your own conversations (Discord and Teams use native select menus with prev/next buttons; Telegram uses inline-keyboard pages; WhatsApp uses a numbered text menu you reply to). Picking one moves the channel's session onto that conversation's history, so you can continue a CLI or Web chat right from your phone. Operator-gated (admin role policies only); ownership is re-verified server-side.
 
 ## Security model
 
