@@ -230,6 +230,29 @@ export function useSaveMyPermissions() {
   const qc = useQueryClient();
   return useMutation({ mutationFn: (patch: Partial<PermissionSettings>) => elowenClient.saveMyPermissions(patch), onSuccess: () => qc.invalidateQueries({ queryKey: ['my-permissions'] }) });
 }
+/** Delete one log file. Both the list and any cached read of that file are dropped — the viewer must not
+ *  keep showing the contents of a file that is gone. */
+export function useDeleteLogFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => elowenClient.deleteLogFile(name),
+    onSuccess: (_d, name) => {
+      void qc.invalidateQueries({ queryKey: ['log-files'] });
+      void qc.removeQueries({ queryKey: ['log-file', name] });
+    },
+  });
+}
+/** Delete every log file. Drops every cached read, since none of them still exist. */
+export function useDeleteAllLogFiles() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => elowenClient.deleteAllLogFiles(),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['log-files'] });
+      void qc.removeQueries({ queryKey: ['log-file'] });
+    },
+  });
+}
 /** Toggle a plugin on/off. Optimistic: the installed list AND the open detail flip instantly so the UI
  *  reacts immediately, without waiting for the daemon's hot-reload + refetch. On settle we re-fetch the
  *  list, the detail and its logs (health derives from the log ring) so everything reflects the real

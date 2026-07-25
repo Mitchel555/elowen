@@ -357,6 +357,31 @@ export interface PluginLogs {
   health: 'ok' | 'error';
 }
 
+/** One daily log file on disk (daemon or web), as listed by GET /system/logs. */
+export interface LogFile {
+  name: string;
+  source: 'daemon' | 'web';
+  bytes: number;
+  /** Epoch millis of the last write — the list arrives sorted by it, newest first. */
+  modifiedAt: number;
+}
+
+/** GET /system/logs — the daily log files plus the directory they live in. */
+export interface LogFileList {
+  dir: string;
+  files: LogFile[];
+}
+
+/** GET /system/logs/:name — a bounded tail of one log file. `truncated` means older lines were dropped
+ *  (the viewer then offers to load the whole file). */
+export interface LogFileContent {
+  name: string;
+  lines: string[];
+  totalLines: number;
+  truncated: boolean;
+  bytes: number;
+}
+
 /** One recorded run of a plugin hook (the shared HookAuditBuffer). `outcome`: `ok` = a context patch was
  *  accepted (`changed === 'turnContext'`); `rejected` = the capability gate denied the patch (deny-by-default,
  *  no `changed`); `threw`/`timeout` = fail-open, the hook produced no patch (no `changed`). `ts` is epoch ms. */

@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 import { Activity, useCallback, useEffect, useState, useRef, useMemo, type ReactNode } from 'react';
-import { Bot, SlidersHorizontal, Plus, X, Pencil, Radio, Cpu, Gauge, Layers, Link2, KeyRound, FileText, Eye, Lock, Trash2, GitPullRequest, GitBranch, TerminalSquare, RefreshCw, RotateCcw, Sparkles, FlaskConical, Search, Server, CalendarClock } from 'lucide-react';
+import { Bot, SlidersHorizontal, Plus, X, Pencil, Radio, Cpu, Gauge, Layers, Link2, KeyRound, FileText, Eye, Lock, Trash2, GitPullRequest, GitBranch, TerminalSquare, RefreshCw, RotateCcw, Sparkles, FlaskConical, Search, Server, CalendarClock, ScrollText } from 'lucide-react';
 import { PROVIDERS, ProviderLogo } from '../../modules/settings/providers';
 import { ModelIcon } from '../../components/ui/ModelIcon';
 import { BackendPicker } from '../../components/ui/BackendPicker';
@@ -17,7 +17,9 @@ import { MemorySection } from '../../modules/settings/MemorySection';
 import { ChoiceField } from '../../components/ui/ChoiceField';
 import { execProvider, execModel, type ProviderId } from '../../lib/modelProvider';
 import { formatTokens } from '../../lib/format';
-import { useBrainModels, useConfig, useMe, useSystem, useSystemSkills } from '../../lib/queries';
+import { useBrainModels, useConfig, useMe, useSystem, useSystemSkills, useLogFiles } from '../../lib/queries';
+import { LogsModal } from '../../modules/settings/LogsModal';
+import { formatLogSize } from '../../modules/settings/logFilter';
 import { useAutoSaveStatus, type SaveStatus } from '../../lib/useAutoSaveStatus';
 import { combineSaveFeedback, type SaveFeedback } from '../../lib/saveFeedback';
 import { useUpdateConfig, useCleanupAll, useSystemUpdate, useSystemRestart, useInstallSkills } from '../../lib/mutations';
@@ -115,6 +117,9 @@ export default function SettingsPage() {
   const { t } = useTranslation();
   // Drives the "delete all data" confirm dialog (Data section).
   const [cleanupOpen, setCleanupOpen] = useState(false);
+  // Whether the log viewer is open (Data section). Mounted only while open, so its queries stay idle
+  // until someone actually asks to read the logs.
+  const [logsOpen, setLogsOpen] = useState(false);
   // Which service the "restart?" confirm dialog is asking about (null = closed).
   const [restartTarget, setRestartTarget] = useState<'daemon' | 'web' | null>(null);
 
@@ -132,6 +137,9 @@ export default function SettingsPage() {
   useEffect(() => {
     setVisitedCategories((current) => current.has(category) ? current : new Set(current).add(category));
   }, [category]);
+  // Only while the Data section is on screen — the log summary is a nicety, not a reason to query the
+  // daemon from every other settings tab.
+  const logFiles = useLogFiles(category === 'data');
   const isValidCat = (c: string | null): c is Category => !!c && (CATEGORY_VALUES as readonly string[]).includes(c);
   // React to CLIENT-side URL changes — the sidebar's nested settings sub-items navigate to `?cat=x`
   // without remounting the page, and useSearchParams updates on those.
@@ -1066,6 +1074,18 @@ export default function SettingsPage() {
 
         <SettingsPanel id="data" active={category} visited={visitedCategories}>
           <SettingsGroup
+            title={t.settings.logs}
+            description={t.settings.logsDesc}
+            icon={ScrollText}
+            actions={<Button icon={ScrollText} onClick={() => setLogsOpen(true)}>{t.settings.logsOpen}</Button>}
+          >
+            <SettingsState>
+              {logFiles.data
+                ? `${logFiles.data.dir} — ${logFiles.data.files.length} × ${formatLogSize(logFiles.data.files.reduce((sum, f) => sum + f.bytes, 0))}`
+                : t.settings.logsDesc}
+            </SettingsState>
+          </SettingsGroup>
+          <SettingsGroup
             title={t.settings.dangerZone}
             description={t.settings.cleanupDesc}
             icon={Trash2}
@@ -1080,6 +1100,8 @@ export default function SettingsPage() {
 
       </SpatialControlDeck>
       </div>
+
+      {logsOpen ? <LogsModal onClose={() => setLogsOpen(false)} /> : null}
 
       <ConfirmDialog
         open={restartTarget !== null}

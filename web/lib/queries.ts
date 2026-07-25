@@ -282,6 +282,16 @@ export const usePluginContributions = (name: string | null) =>
 export const usePluginLogs = (name: string | null) =>
   useQuery({ queryKey: ['plugin-logs', name], queryFn: () => elowenClient.pluginLogs(name as string), enabled: !!name, refetchInterval: name ? 3000 : false });
 
+/** The daily log files on disk (Settings → Data → Logs). Not polled: the list only changes when a day
+ *  rolls over or the user deletes something, both of which already invalidate it. */
+export const useLogFiles = (enabled = true) =>
+  useQuery({ queryKey: ['log-files'], queryFn: () => elowenClient.logFiles(), enabled });
+
+/** A bounded tail of one log file. `lines` is part of the key so asking for the whole file after a
+ *  truncated read fetches instead of serving the short cached copy. */
+export const useLogFile = (name: string | null, lines?: number) =>
+  useQuery({ queryKey: ['log-file', name, lines ?? null], queryFn: () => elowenClient.logFile(name as string, lines), enabled: !!name });
+
 /** One plugin's hook-run audit, newest-first (the Hooks section's recent-executions panel). */
 export const usePluginHookExecutions = (name: string | null) =>
   useQuery({ queryKey: ['plugin-hook-executions', name], queryFn: () => elowenClient.pluginHookExecutions(name as string), enabled: !!name });

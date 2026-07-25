@@ -1,4 +1,4 @@
-import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, MissionDetail, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, CommitFileChange, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
+import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, MissionDetail, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, LogFileList, LogFileContent, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, CommitFileChange, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
 import { clearToken } from './token';
 import type { BrainBinding } from './brainSession';
 
@@ -161,6 +161,15 @@ export const elowenClient = {
   pluginHookExecutions: (name: string) => req<PluginHookExecutions>(`/plugins/${encodeURIComponent(name)}/hook-executions`),
   /** Destructive — wipe the contents of the plugin's data directory (the dir itself is kept). */
   clearPluginData: (name: string) => req<{ ok: true }>(`/plugins/${encodeURIComponent(name)}/data/clear`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
+  /** The daily log files on disk (daemon + web) behind Settings → Data → Logs. Admin-only. */
+  logFiles: () => req<LogFileList>('/system/logs'),
+  /** A bounded tail of one log file — `lines` caps how many of the newest lines come back. */
+  logFile: (name: string, lines?: number) =>
+    req<LogFileContent>(`/system/logs/${encodeURIComponent(name)}${lines ? `?lines=${lines}` : ''}`),
+  /** Destructive — delete one log file. The current day's file is simply recreated on the next line. */
+  deleteLogFile: (name: string) => req<{ deleted: number }>(`/system/logs/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  /** Destructive — delete every log file; anything else in the log directory is left alone. */
+  deleteAllLogFiles: () => req<{ deleted: number }>('/system/logs', { method: 'DELETE' }),
   /** The plugin marketplace catalog (curated registry ✕ what's on disk). `refresh` forces a registry pull. */
   marketplace: (refresh = false) => req<Marketplace>(`/plugins/marketplace${refresh ? '?refresh=1' : ''}`),
   /** Download + install a registry plugin into the user plugin dir; enables it by default. Applies live. */
