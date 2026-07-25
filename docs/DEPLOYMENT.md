@@ -51,7 +51,7 @@ ELOWEN_RELAY_MODEL=gpt-4o-mini
 
 # Logging
 ELOWEN_LOG_LEVEL=                   # debug | info | warn | error
-ELOWEN_LOG_DIR=$PWD/logs
+ELOWEN_LOG_DIR=~/.config/elowen/logs # the default — state lives outside the package
 
 # Web UI
 ELOWEN_WEB_PORT=4500
@@ -219,8 +219,11 @@ curl http://localhost:4400/health
 
 ```bash
 journalctl -u elowen-daemon -f
-tail -f $PWD/logs/daemon.log   # file-based (ELOWEN_LOG_DIR)
+tail -f ~/.config/elowen/logs/daemon-$(date +%F).log   # file-based (ELOWEN_LOG_DIR)
 ```
+
+The files are daily, so the name carries the date — there is no rolling
+`daemon.log`. Settings → Data → Logs reads the same directory in the web UI.
 
 ## Updating
 

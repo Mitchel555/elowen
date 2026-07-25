@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { logDir } from '../../src/shared/paths.js';
 
 /** The log directory is read once at module load, so each case needs a fresh module registry. */
@@ -30,7 +30,23 @@ describe('logger log directory', () => {
   it('falls back to the shared data dir, never the working directory', async () => {
     const dir = await loadLogDir({ ELOWEN_LOG_DIR: undefined, HOME: '/home/someone' });
     expect(dir).toBe(join('/home/someone', '.config', 'elowen', 'logs'));
-    expect(dir).not.toContain(process.cwd());
+  });
+
+  // The same bug one directory deeper, and the case the assertion above cannot reach: with HOME unset —
+  // or set to '', which `??` happily passed through — join produced a RELATIVE '.config/elowen/logs'
+  // that resolves against the process cwd. That is the in-checkout log folder all over again.
+  it('stays absolute when HOME is unset or empty', async () => {
+    for (const HOME of [undefined, '']) {
+      const dir = await loadLogDir({ ELOWEN_LOG_DIR: undefined, HOME });
+      expect(isAbsolute(dir), `HOME=${String(HOME)}`).toBe(true);
+    }
+  });
+
+  // An empty ELOWEN_LOG_DIR meant "the current directory" under `??`, which is never what an operator
+  // who left the variable blank intended.
+  it('treats an empty ELOWEN_LOG_DIR as unset', async () => {
+    const dir = await loadLogDir({ ELOWEN_LOG_DIR: '', HOME: '/home/someone' });
+    expect(dir).toBe(join('/home/someone', '.config', 'elowen', 'logs'));
   });
 
   it('resolves to exactly what the shared paths helper says, so there is one rule', async () => {
