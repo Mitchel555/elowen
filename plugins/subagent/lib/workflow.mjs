@@ -249,17 +249,36 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     return lines.join('\n');
   };
 
-  const runWorkflow = async (wf) => {
+  /** Start the DAG ONCE and resolve with the final summary when it settles. The single `tick(wf)` here is
+   *  the only launch point, so a foreground blocking call and a detach/background call share ONE run: a
+   *  detach never re-starts the engine, it only stops the parent waiting on it. Settles the terminal
+   *  status, finishes the row (drives retention) and yields the summary the caller returns or delivers. */
+  const runToCompletion = (wf) => {
     wf.status = 'running';
     snapshot(wf);
-    await new Promise((resolve) => { wf.resolveDone = resolve; tick(wf); });
-    // A cancel settles the status itself — the late arithmetic here must not repaint it as done/error
-    // when the aborted node children eventually error out.
-    if (wf.status !== 'cancelled') {
-      wf.status = [...wf.state.values()].some((s) => s.status === 'error') ? 'error' : 'done';
+    return new Promise((resolve) => { wf.resolveDone = resolve; tick(wf); }).then(() => {
+      // A cancel settles the status itself — the late arithmetic here must not repaint it as done/error
+      // when the aborted node children eventually error out.
+      if (wf.status !== 'cancelled') {
+        wf.status = [...wf.state.values()].some((s) => s.status === 'error') ? 'error' : 'done';
+      }
+      wf.finished = true;
+      wf.finishedAt = Date.now();
+      snapshot(wf);
+      return summarize(wf);
+    });
+  };
+
+  /** Deliver a detached/background workflow's summary through the turn-captured durable host sink, so an
+   *  explicit `background` and a Ctrl+B detach follow the exact same result path. A never-detached
+   *  foreground workflow returns its summary inline instead, so this is gated on `wf.background`. */
+  const deliverCompletion = (wf, summary) => {
+    if (!wf.background || !wf.emitCompletion) return;
+    try {
+      wf.emitCompletion({ id: wf.id, toolCallId: wf.toolCallId, ...(wf.title ? { title: wf.title } : {}), status: wf.status, result: summary });
+    } catch (e) {
+      ctx.logger.warn(`workflow completion persistence failed: ${errorText(e)}`);
     }
-    snapshot(wf);
-    return summarize(wf);
   };
 
   /** The abort seam core calls when a parent turn is torn down (Esc-Esc, /stop, queue interrupt). The
@@ -280,7 +299,29 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     }
     return { cancelled };
   };
-  ctx.registerControl('workflow', { cancelForSession: ({ sessionId }) => cancelForSession(sessionId) });
+  /** Ctrl+B seam (see api.ts KnownControls.workflow). Flip every foreground workflow blocking THIS origin
+   *  into a background one: resolve the parent's blocking wait — never abort the nodes, they keep running —
+   *  and mark it for automatic delivery. An already-background workflow is skipped, so it is never counted
+   *  as newly detached. Foreground and background share ONE run, exactly like the sub-agent jobs. */
+  const detachForeground = (sessionId, principal) => {
+    let detached = 0;
+    for (const wf of workflows.values()) {
+      if (wf.finished || wf.background || wf.status !== 'running'
+        || wf.originSessionId !== sessionId || wf.originPrincipal !== principal) continue;
+      wf.background = true;
+      wf.autoDeliver = !!wf.emitCompletion;
+      wf.resolveDetached?.();
+      wf.resolveDetached = undefined;
+      snapshot(wf);
+      detached += 1;
+    }
+    return { detached };
+  };
+  // The `workflow` control name is taken by cancelForSession, so the detach seam rides the same control.
+  ctx.registerControl('workflow', {
+    cancelForSession: ({ sessionId }) => cancelForSession(sessionId),
+    detachForeground: ({ sessionId, principal }) => detachForeground(sessionId, principal),
+  });
 
   ctx.registerTool(defineTool({
     name: 'WorkflowStart', label: 'Run a workflow',
@@ -288,12 +329,13 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       'Run a DAG of sub-agents: you declare nodes (each a self-contained task) and their dependencies, and the engine executes them as dependencies clear — independent nodes run in parallel, dependents wait for what they need. Each node is a fresh sub-agent that inherits your access; it cannot see this conversation, so every task must be complete and standalone.',
       'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. For a set of fully independent tasks, plain parallel delegate calls are simpler.',
       'A node is given the results of the nodes it depends on as context, so a later task can refer to "your dependency results" instead of repeating the work or being told it twice.',
-      'The call BLOCKS and returns a summary of every node\'s result once the whole workflow finishes. A node whose dependency failed is reported as skipped. Give each node a short unique id and list its dependency ids in deps. Use read_only/tools/model per node exactly as with delegate — you can only ever narrow your own access.',
+      'By default the call BLOCKS and returns a summary of every node\'s result once the whole workflow finishes. Set background=true to return a handle immediately and have the summary delivered to you in a NEW turn when the DAG finishes — do other work meanwhile, then end your turn. A node whose dependency failed is reported as skipped. Give each node a short unique id and list its dependency ids in deps. Use read_only/tools/model per node exactly as with delegate — you can only ever narrow your own access.',
     ].join(' '),
     parameters: Type.Object({
       title: Type.Optional(Type.String({ description: 'Human label for the workflow, shown in the CLI panel: AT MOST 4 WORDS, in the user\'s language, no trailing punctuation (the UI appends an ellipsis).' })),
       context: Type.Optional(Type.String({ description: 'Background shared by ALL nodes (added to each node\'s cache-friendly system prefix) — findings, conventions, ids they would otherwise re-derive.' })),
       nodes: Type.Array(NODE_SHAPE, { description: 'The workflow nodes. At least one must have no deps (a root).' }),
+      background: Type.Optional(Type.Boolean({ description: 'Start asynchronously and return a handle immediately; the summary is delivered to you in a NEW turn when the workflow finishes. Omit or false to wait for the result.' })),
     }),
     execute: async (toolCallId, p) => {
       if (!getRun()) return ok('Error: workflows are not wired up on this server.');
@@ -304,6 +346,9 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       if (error) return ok(`Error: ${error}`);
       pruneWorkflows();
       if (workflows.size >= MAX_WORKFLOWS) return ok(`Error: too many workflows (${MAX_WORKFLOWS}) are running; wait for one to finish.`);
+      // Capture the durable completion sink on the ORIGIN turn, before any node is scheduled — node turns
+      // run in their own scope where this accessor no longer resolves to this conversation.
+      const emitCompletion = ctx.workflowCompletionEmitter?.() ?? undefined;
       const wf = {
         id: `wf-${randomUUID()}`,
         // THIS call — the origin's WorkflowStart. Every snapshot names it, so the host can persist the
@@ -326,16 +371,50 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         finished: false,
         finishedAt: undefined,
         resolveDone: undefined,
+        // A detach (Ctrl+B) or explicit background flips this on; foreground and background share ONE run.
+        background: p.background === true,
+        autoDeliver: p.background === true && !!emitCompletion,
+        emitCompletion,
+        resolveDetached: undefined,
       };
       workflows.set(wf.id, wf);
-      try {
-        return ok(await runWorkflow(wf));
-      } catch (e) {
-        return ok(`Error: workflow failed: ${errorText(e)}`);
-      } finally {
+      // Start the DAG once. This promise settles the terminal status, finishes the row and yields the
+      // summary — a foreground blocking call and a detach/background call ride this SAME run.
+      const completion = runToCompletion(wf).catch((e) => {
+        wf.status = 'error';
         wf.finished = true;
         wf.finishedAt = Date.now();
+        return `Error: workflow failed: ${errorText(e)}`;
+      });
+
+      if (p.background === true) {
+        // No durable sink on this surface (worker/cron) — block rather than silently drop the result.
+        if (!emitCompletion) return ok(await completion);
+        void completion.then((summary) => deliverCompletion(wf, summary));
+        return ok(
+          `Started background workflow ${wf.id}.\n`
+            + 'Its result is delivered to you automatically in a NEW turn when it finishes — you do not have to '
+            + 'fetch it. Do any other useful work now, then end your turn. If there is nothing else to do, say so '
+            + 'briefly and end the turn: waiting inside this turn only delays the result.',
+          { workflowId: wf.id, status: 'running' },
+        );
       }
+
+      // Foreground: block on the DAG, but let Ctrl+B detach the wait — the run keeps going in the
+      // background and delivers its summary through the completion sink, exactly like explicit background.
+      const detached = new Promise((resolve) => { wf.resolveDetached = resolve; });
+      const winner = await Promise.race([
+        completion.then((summary) => ({ kind: 'done', summary })),
+        detached.then(() => ({ kind: 'detached' })),
+      ]);
+      if (winner.kind === 'done') return ok(winner.summary);
+      void completion.then((summary) => deliverCompletion(wf, summary));
+      return ok(
+        `The user moved this workflow to the background. It is still running as ${wf.id}; continue helping the `
+        + 'user now. Its result is delivered to you automatically in a new turn when it finishes, so once you have '
+        + 'nothing else to do, end your turn instead of waiting or polling for it.',
+        { workflowId: wf.id, status: 'running', detached: true },
+      );
     },
   }));
 
@@ -367,8 +446,9 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   ctx.registerTool(defineTool({
     name: 'WorkflowStatus', label: 'Check a workflow',
     description: 'Return a snapshot of a workflow: each node\'s status, dependencies and progress. A one-off '
-      + 'view for when the user asks how it is going — WorkflowStart already blocks until the whole workflow '
-      + 'is done and returns the full result, so you do not need this to collect results.',
+      + 'view for when the user asks how it is going. A foreground WorkflowStart already blocks and returns '
+      + 'the full result; a background one delivers its result to you on its own in a new turn — so either '
+      + 'way you do not need this to collect results, and polling it in a loop is never the answer.',
     parameters: Type.Object({ workflowId: Type.String({ description: 'The workflow id from WorkflowStart.' }) }),
     execute: async (_id, p) => {
       const wf = authWorkflow(p.workflowId);

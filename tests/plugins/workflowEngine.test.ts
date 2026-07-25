@@ -328,3 +328,100 @@ describe('workflow engine', () => {
     expect(launched).toEqual([]);
   });
 });
+
+describe('workflow background + detach', () => {
+  interface Completion { id: string; toolCallId: string; title?: string; status: string; result: string }
+  interface Ctrl {
+    cancelForSession(input: { sessionId: string }): { cancelled: number };
+    detachForeground(input: { sessionId: string; principal: string }): { detached: number };
+  }
+  /** A harness whose single node parks until `release()` and then returns done — so a workflow can be
+   *  observed while still running (to detach it) and after it finishes (to see delivery). Captures the
+   *  durable completions the engine emits and the registered control. */
+  function bgHarness() {
+    const tools = new Map<string, Tool>();
+    const controls = new Map<string, Ctrl>();
+    const completions: Completion[] = [];
+    const launched: string[] = [];
+    const finished: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const run = async (_s: unknown, task: string, onEvent: (e: unknown) => void) => {
+      launched.push(task);
+      onEvent({ type: 'session', sessionId: `s-${task}` });
+      await gate;
+      finished.push(task);
+      return `done:${task}`;
+    };
+    const ctx = {
+      registerTool: (def: Tool) => { tools.set(def.name, def); },
+      registerControl: (name: string, control: Ctrl) => { controls.set(name, control); },
+      logger: { info() {}, warn() {} },
+      currentSessionId: () => 'brain-parent',
+      currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
+      currentAccess: () => ({ toolPolicy: undefined }),
+      currentModel: () => ({ provider: 'p', model: 'm' }),
+      workflowEmitter: () => () => {},
+      workflowCompletionEmitter: () => (c: Completion) => { completions.push(c); },
+      listModels: async () => [],
+      toolNames: () => ['Read'],
+    };
+    registerWorkflow(ctx, () => run, {
+      resolveDelegateTools: () => ({ allow: undefined }),
+      principalOf: (id: { elowenUserId?: number } | null) => (id?.elowenUserId ? `elowen:${id.elowenUserId}` : null),
+      delegateContextChunk: (raw: string) => (raw ? `ctx:${raw}` : undefined),
+    });
+    return { tools, controls, completions, launched, finished, release };
+  }
+
+  it('background=true returns a handle immediately and delivers the summary when the DAG finishes', async () => {
+    const { tools, completions, finished, release } = bgHarness();
+    const res = await tools.get('WorkflowStart')!.execute('bg1', { background: true, nodes: [{ id: 'a', task: 'a' }] });
+    // Returned while the node is still parked — a handle, not a summary.
+    expect(res.details).toMatchObject({ status: 'running' });
+    expect(res.content[0]!.text).toMatch(/Started background workflow/);
+    expect(completions).toEqual([]);
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(finished).toEqual(['a']);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({ toolCallId: 'bg1', status: 'done' });
+    expect(completions[0]!.result).toContain('done:a');
+  });
+
+  it('Ctrl+B detach resolves the parent wait without aborting the running node, then delivers', async () => {
+    const { tools, controls, completions, launched, finished, release } = bgHarness();
+    const startP = tools.get('WorkflowStart')!.execute('fg1', { nodes: [{ id: 'a', task: 'a' }] });
+    await new Promise((r) => setTimeout(r, 5)); // node launches and parks
+    expect(launched).toEqual(['a']);
+    // Exactly one workflow detaches; the node is NOT aborted — the run keeps going.
+    expect(controls.get('workflow')!.detachForeground({ sessionId: 'brain-parent', principal: 'elowen:1' })).toEqual({ detached: 1 });
+    expect(finished).toEqual([]);
+    const res = await startP; // the parent's blocking wait was resolved by the detach
+    expect(res.details).toMatchObject({ status: 'running', detached: true });
+    expect(res.content[0]!.text).toMatch(/moved this workflow to the background/);
+    expect(completions).toEqual([]); // still running
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(finished).toEqual(['a']); // the node ran to completion after the detach
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({ toolCallId: 'fg1', status: 'done' });
+    expect(completions[0]!.result).toContain('done:a');
+  });
+
+  it('does not re-detach an already-background workflow and ignores a foreign origin', async () => {
+    const { tools, controls, release } = bgHarness();
+    const startP = tools.get('WorkflowStart')!.execute('fg2', { nodes: [{ id: 'a', task: 'a' }] });
+    await new Promise((r) => setTimeout(r, 5));
+    // A different session or principal never detaches this workflow.
+    expect(controls.get('workflow')!.detachForeground({ sessionId: 'someone-else', principal: 'elowen:1' })).toEqual({ detached: 0 });
+    expect(controls.get('workflow')!.detachForeground({ sessionId: 'brain-parent', principal: 'elowen:2' })).toEqual({ detached: 0 });
+    // The owner detaches it once…
+    expect(controls.get('workflow')!.detachForeground({ sessionId: 'brain-parent', principal: 'elowen:1' })).toEqual({ detached: 1 });
+    await startP;
+    // …and a second Ctrl+B counts nothing, since it is already background.
+    expect(controls.get('workflow')!.detachForeground({ sessionId: 'brain-parent', principal: 'elowen:1' })).toEqual({ detached: 0 });
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+  });
+});

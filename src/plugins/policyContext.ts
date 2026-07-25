@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Policy } from './policy.js';
-import type { AskAnswer, AskQuestion, SubagentCompletion, SubagentUpdate, WorkflowUpdate } from '../brain/events.js';
+import type { AskAnswer, AskQuestion, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from '../brain/events.js';
 import type { TurnPermissions } from '../brain/toolPermissions.js';
 
 /** Ask the current user one or more multiple-choice questions and await their pick(s). Bound per-turn by
@@ -20,6 +20,10 @@ export type SubagentCompletionEmitter = (completion: SubagentCompletion) => void
  *  BrainEvents. Bound per-turn by BrainService (see `ctx.workflowEmitter`); captured once by the
  *  workflow engine before it schedules nodes, since node turns run in their own scope. */
 export type WorkflowEmitter = (update: WorkflowUpdate) => void;
+
+/** Host-only durable completion sink for a detached/background workflow — mirror of
+ *  SubagentCompletionEmitter. Captured once by the workflow engine before it schedules nodes. */
+export type WorkflowCompletionEmitter = (completion: WorkflowCompletion) => void;
 
 /** The provider entry + model the current turn's session runs on (see `ctx.currentModel`). `thinkingLevel`
  *  is the turn's effective reasoning effort (empty/undefined when the model has no reasoning ladder), so a
@@ -67,7 +71,7 @@ export function toolPermitted(name: string, tp: ToolPolicy | undefined): boolean
  *  layer keeps its one-directional dependency; the brain's TurnMode is structurally identical. */
 export type TurnWorkMode = 'build' | 'plan' | 'workflow';
 
-interface TurnScope { policy: Policy; workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel; mode?: TurnWorkMode }
+interface TurnScope { policy: Policy; workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; emitWorkflowCompletion?: WorkflowCompletionEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel; mode?: TurnWorkMode }
 
 /** pi tools have no per-call session context, so a plugin tool can't be told which user's policy applies
  *  through its arguments. We carry the resolved Policy (+ the sender's identity + their effective tool
@@ -79,8 +83,8 @@ const store = new AsyncLocalStorage<TurnScope>();
 /** Run `fn` (a brain prompt turn) with `policy` established for any plugin tool it invokes. `opts`
  *  carries the sender's identity, a turn-bound elicitor/card-emitter, and the effective tool policy —
  *  all read at tool-execute time via the `current*()` accessors. */
-export function runWithPolicy<T>(policy: Policy, fn: () => T, opts?: { workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel; mode?: TurnWorkMode }): T {
-  return store.run({ policy, workDir: opts?.workDir, sessionId: opts?.sessionId, identity: opts?.identity, elicit: opts?.elicit, emitCard: opts?.emitCard, emitSubagent: opts?.emitSubagent, emitSubagentCompletion: opts?.emitSubagentCompletion, emitWorkflow: opts?.emitWorkflow, toolPolicy: opts?.toolPolicy, permissions: opts?.permissions, model: opts?.model, mode: opts?.mode }, fn);
+export function runWithPolicy<T>(policy: Policy, fn: () => T, opts?: { workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; emitWorkflowCompletion?: WorkflowCompletionEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel; mode?: TurnWorkMode }): T {
+  return store.run({ policy, workDir: opts?.workDir, sessionId: opts?.sessionId, identity: opts?.identity, elicit: opts?.elicit, emitCard: opts?.emitCard, emitSubagent: opts?.emitSubagent, emitSubagentCompletion: opts?.emitSubagentCompletion, emitWorkflow: opts?.emitWorkflow, emitWorkflowCompletion: opts?.emitWorkflowCompletion, toolPolicy: opts?.toolPolicy, permissions: opts?.permissions, model: opts?.model, mode: opts?.mode }, fn);
 }
 
 /** The Policy in effect for the current prompt turn, or undefined outside a `runWithPolicy` scope. */
@@ -150,6 +154,13 @@ export function currentSubagentCompletionEmitter(): SubagentCompletionEmitter | 
  *  child's scope, where this would no longer resolve to the originating conversation. */
 export function currentWorkflowEmitter(): WorkflowEmitter | null {
   return store.getStore()?.emitWorkflow ?? null;
+}
+
+/** The turn-bound workflow completion sink, or null outside a prompt turn (or a transport that wired
+ *  none). Captured ONCE by the workflow engine before it schedules nodes — a detached/background
+ *  workflow delivers its summary through this. */
+export function currentWorkflowCompletionEmitter(): WorkflowCompletionEmitter | null {
+  return store.getStore()?.emitWorkflowCompletion ?? null;
 }
 
 /** The provider+model the current turn's session runs on, or null outside a prompt turn — lets a

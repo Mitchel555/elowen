@@ -108,6 +108,11 @@ export function openDb(path: string): Db {
   // Immutable, JSON-serialized delegated execution scope. Legacy child rows intentionally remain NULL:
   // a continuation must reject them rather than guessing an owner-wide replacement scope.
   addColumn(db, 'brain_sessions', 'delegated_access', 'TEXT');
+  // The delegated-result inbox now serves two producers (see brain_subagent_results in schema.sql):
+  // `kind` discriminates them and `workflow_id` links a workflow row to its brain_workflows DAG. Old
+  // rows are all sub-agent completions, so the 'subagent' default reads the whole back catalogue right.
+  addColumn(db, 'brain_subagent_results', 'kind', "TEXT NOT NULL DEFAULT 'subagent'");
+  addColumn(db, 'brain_subagent_results', 'workflow_id', 'TEXT');
   // Mid-turn (provisional) message rows — see brain_messages in schema.sql. Every existing row was written
   // by a settled agent_end, so the 0 default correctly reads the whole back catalogue as durable history.
   addColumn(db, 'brain_messages', 'pending', 'INTEGER NOT NULL DEFAULT 0');

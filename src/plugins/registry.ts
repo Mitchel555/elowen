@@ -8,7 +8,7 @@ import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
 import { commandsWithPlugins, isReservedCommandName, type PluginSlashCommand } from '../brain/slashCommands.js';
 import type { PluginManifest } from './manifest.js';
 import { assertPathAllowed, allowedRoots, defaultCwd, isAllAccess, currentAccess } from './pathGuard.js';
-import { currentIdentity, currentElicitor, currentCardEmitter, currentSubagentEmitter, currentSubagentCompletionEmitter, currentWorkflowEmitter, currentTurnModel, currentWorkDir, currentSessionId } from './policyContext.js';
+import { currentIdentity, currentElicitor, currentCardEmitter, currentSubagentEmitter, currentSubagentCompletionEmitter, currentWorkflowEmitter, currentWorkflowCompletionEmitter, currentTurnModel, currentWorkDir, currentSessionId } from './policyContext.js';
 import { processRegistry } from '../brain/processRegistry.js';
 import type { AskAnswer } from '../brain/events.js';
 
@@ -342,6 +342,7 @@ export class PluginRegistry {
       subagentEmitter: currentSubagentEmitter,
       subagentCompletionEmitter: currentSubagentCompletionEmitter,
       workflowEmitter: currentWorkflowEmitter,
+      workflowCompletionEmitter: currentWorkflowCompletionEmitter,
       currentModel: currentTurnModel,
       notify: notify ?? (async () => { /* no notification sink wired */ }),
       listModels: listModels ?? (async () => []),

@@ -1,5 +1,5 @@
 import type { Skill, ToolDefinition } from '@earendil-works/pi-coding-agent';
-import type { SubagentCompletionEmitter, SubagentEmitter, TurnIdentity, TurnModel, WorkflowEmitter } from './policyContext.js';
+import type { SubagentCompletionEmitter, SubagentEmitter, TurnIdentity, TurnModel, WorkflowCompletionEmitter, WorkflowEmitter } from './policyContext.js';
 import type { AskAnswer, AskQuestion, BrainCard } from '../brain/events.js';
 import type { ProcessRegistry } from '../brain/processRegistry.js';
 import type { NoninteractivePermissionBoundary } from '../brain/toolPermissions.js';
@@ -277,7 +277,11 @@ export interface PendingWakeupControl {
 /** The workflow engine's abort seam. Aborting a parent turn tears down the node child sessions that are
  *  RUNNING (they sit in the abort tree), but the in-plugin engine would otherwise keep launching every
  *  node whose dependencies had already finished — fresh children born after the abort, which nothing
- *  tears down. Core calls this with the aborted origin session so the engine stops the DAG instead. */
+ *  tears down. Core calls this with the aborted origin session so the engine stops the DAG instead.
+ *
+ *  The same control also carries `detachForeground` (Ctrl+B): the engine and the sub-agent jobs live in
+ *  ONE plugin, but the `workflow` control name is already taken here, so the workflow detach rides this
+ *  control rather than a second registration. */
 export interface WorkflowCancelControl {
   cancelForSession(input: { sessionId: string }): { cancelled: number };
 }
@@ -289,7 +293,7 @@ export interface KnownControls {
   subagent: DetachControl;
   terminal: DetachControl;
   cron: PendingWakeupControl;
-  workflow: WorkflowCancelControl;
+  workflow: WorkflowCancelControl & DetachControl;
 }
 
 /** A plugin-contributed chat slash command (a reusable prompt macro, opencode-style). Invoking `/name args`
@@ -436,6 +440,9 @@ export interface PluginContext {
    *  workflow engine MUST capture this BEFORE scheduling nodes: each update fans out to the parent's
    *  clients as a `workflow` BrainEvent (the CLI/web Workflow panel + drill-in modal). */
   workflowEmitter(): WorkflowEmitter | null;
+  /** Host-only durable completion sink for a detached/background workflow. Capture it in the parent
+   *  turn before scheduling nodes, mirroring subagentCompletionEmitter. */
+  workflowCompletionEmitter(): WorkflowCompletionEmitter | null;
   /** The provider entry id + model the CURRENT turn's session runs on, or null outside a prompt turn —
    *  a delegating plugin uses it to default the child to "the same model as me". */
   currentModel(): TurnModel | null;

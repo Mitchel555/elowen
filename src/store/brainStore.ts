@@ -449,6 +449,12 @@ export class BrainStore {
     return this.delegation.enqueueSubagentResult(parentSessionId, raw);
   }
 
+  /** Persist a terminal workflow result into the shared delegated-result inbox — see
+   *  {@link BrainDelegationStore.enqueueWorkflowResult}. */
+  enqueueWorkflowResult(parentSessionId: string, raw: unknown): boolean {
+    return this.delegation.enqueueWorkflowResult(parentSessionId, raw);
+  }
+
   /** The parent's still-undelivered child results, oldest first — see
    *  {@link BrainDelegationStore.pendingSubagentResults}. */
   pendingSubagentResults(parentSessionId: string): ReturnType<BrainDelegationStore['pendingSubagentResults']> {

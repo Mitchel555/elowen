@@ -345,6 +345,15 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     catch (e) { return c.json({ error: (e as Error).message }, 409); }
   }));
 
+  // Ctrl+B: detach a foreground WorkflowStart so its DAG keeps running and delivers its summary back
+  // into this conversation, exactly like a background workflow. Same shape as the two routes above.
+  app.post('/brain/workflows/background', withBrain(async (c, brain) => {
+    const { session, client, generation } = await parseBody(c, brainStopSchema);
+    const boundClient = session && client && generation ? { id: client, generation } : undefined;
+    try { return c.json(await brain.detachForegroundWorkflows(c.get('user').id, session, boundClient)); }
+    catch (e) { return c.json({ error: (e as Error).message }, 409); }
+  }));
+
   // Closing a session-bound client: abort its active run and dispose the live PI session only when no
   // other client is attached. Persisted history remains resumable.
   app.post('/brain/session/stop', withBrain(async (c, brain) => {

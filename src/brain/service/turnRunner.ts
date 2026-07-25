@@ -21,7 +21,7 @@ import { flushReasoningMarker, recordSessionEvent } from './sessionEvents.js';
 import type { TurnImage, TurnMode, TurnRequest } from './turnRequest.js';
 import { hasActiveNativeCompactionCheck } from '../session/compactionCheckCoordinator.js';
 import { queuedWithPending } from '../session/queueMirror.js';
-import type { SubagentCompletion } from '../events.js';
+import type { SubagentCompletion, WorkflowCompletion } from '../events.js';
 import { randomUUID } from 'node:crypto';
 import { isNonUserSession } from '../sessionId.js';
 import { xmlEscape } from '../../shared/xml.js';
@@ -86,6 +86,9 @@ export class BrainTurnRunner {
       ...d,
       completeSubagent: (parentSessionId, userId, completion) => {
         this.acceptSubagentCompletion(parentSessionId, userId, completion);
+      },
+      completeWorkflow: (parentSessionId, userId, completion) => {
+        this.acceptWorkflowCompletion(parentSessionId, userId, completion);
       },
     });
   }
@@ -163,6 +166,18 @@ export class BrainTurnRunner {
     void this.drainPendingSubagentResults(userId, parentSessionId);
   }
 
+  /** Terminal completion ingress for a detached/background WORKFLOW. Shares the exact durable inbox and
+   *  drain as sub-agent results (one place for retry/backoff/ack); only the enqueue linkage differs (it
+   *  validates against brain_workflows, not a child run row). No `publishResultDelivery`: a workflow has
+   *  no brain_subagent_runs row to project a delivery marker onto. */
+  acceptWorkflowCompletion(parentSessionId: string, userId: number, completion: WorkflowCompletion): void {
+    if (!this.d.store.enqueueWorkflowResult(parentSessionId, completion)) {
+      logger('brain-subagent').error(`dropped workflow result for ${parentSessionId} (tool ${completion.toolCallId}, workflow ${completion.id}): no durable workflow link`);
+      return;
+    }
+    void this.drainPendingSubagentResults(userId, parentSessionId);
+  }
+
   /** Deliver every durable pending result serially after any active owner turn. A failed transport or
    * model turn leaves the row pending and schedules bounded retry; no permanent poller exists. */
   async drainPendingSubagentResults(userId: number, parentSessionId: string): Promise<void> {
@@ -180,15 +195,24 @@ export class BrainTurnRunner {
         const result = this.d.store.pendingSubagentResults(parentSessionId).find((row) => !attempted.has(row.id));
         if (!result) break;
         attempted.add(result.id);
-        const body = result.status === 'done'
-          ? `<result>${xmlEscape(result.result ?? '(the sub-agent returned nothing)')}</result>`
-          : `<error>${xmlEscape(result.error ?? 'unknown sub-agent error')}</error>`;
-        const content = '<system-reminder>\n'
-          + `<subagent-result id="${xmlEscape(result.id)}" session="${xmlEscape(result.sessionId)}" status="${result.status}">\n`
-          + `<task>${xmlEscape(result.task)}</task>\n${body}\n</subagent-result>\n`
-          + '<instruction>A background sub-agent finished. Incorporate this result into your current work. '
-          + 'The child transcript remains available separately; do not claim its internal tool calls as your own.</instruction>\n'
-          + '</system-reminder>';
+        const content = result.kind === 'workflow'
+          // A workflow delivers one whole-DAG summary body (which itself names each node's outcome), so
+          // it rides a <workflow-result> block rather than the sub-agent <result>/<error> split.
+          ? '<system-reminder>\n'
+            + `<workflow-result id="${xmlEscape(result.id)}" status="${result.status}">\n`
+            + `<task>${xmlEscape(result.task)}</task>\n<result>${xmlEscape(result.result ?? '(the workflow returned nothing)')}</result>\n</workflow-result>\n`
+            + '<instruction>A background workflow finished. Incorporate this result into your current work. '
+            + 'The node transcripts remain available separately; do not claim their internal tool calls as your own.</instruction>\n'
+            + '</system-reminder>'
+          : '<system-reminder>\n'
+            + `<subagent-result id="${xmlEscape(result.id)}" session="${xmlEscape(result.sessionId)}" status="${result.status}">\n`
+            + `<task>${xmlEscape(result.task)}</task>\n`
+            + `${result.status === 'done'
+              ? `<result>${xmlEscape(result.result ?? '(the sub-agent returned nothing)')}</result>`
+              : `<error>${xmlEscape(result.error ?? 'unknown sub-agent error')}</error>`}\n</subagent-result>\n`
+            + '<instruction>A background sub-agent finished. Incorporate this result into your current work. '
+            + 'The child transcript remains available separately; do not claim its internal tool calls as your own.</instruction>\n'
+            + '</system-reminder>';
         try {
           await this.sendCustomSystem(userId, parentSessionId, 'subagent-result', content, result.id);
           if (this.d.store.acknowledgeSubagentResult(parentSessionId, result.id)) {

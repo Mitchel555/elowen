@@ -8,7 +8,7 @@ import type { BrainStore } from '../../store/brainStore.js';
 import type { BrainDeps } from '../brainDeps.js';
 import type { CardRegistry } from '../cards.js';
 import type { ElicitationRegistry } from '../elicitation.js';
-import type { AskQuestion, SubagentCompletion, SubagentUpdate, WorkflowUpdate } from '../events.js';
+import type { AskQuestion, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from '../events.js';
 import type { IdentityResolver } from '../identity.js';
 import type { MemoryService } from '../memoryService.js';
 import { frameUntrusted } from '../messageView.js';
@@ -37,6 +37,7 @@ interface TurnContextBuilderDeps {
   hookAudit?: HookAuditBuffer;
   projectPath?: () => string | undefined;
   completeSubagent?(parentSessionId: string, userId: number, completion: SubagentCompletion): void;
+  completeWorkflow?(parentSessionId: string, userId: number, completion: WorkflowCompletion): void;
 }
 
 /** Tools plan mode admits even though they are NOT declared plan-safe, because a clamp elsewhere makes
@@ -143,6 +144,9 @@ export class TurnContextBuilder {
       if (!this.d.store.upsertWorkflowRun(live.sessionId, update)) return;
       live.replay.publish({ type: 'workflow', ...update });
     };
+    const emitWorkflowCompletion = (completion: WorkflowCompletion): void => {
+      this.d.completeWorkflow?.(live.sessionId, userId, completion);
+    };
     const toolPolicy = this.applyOwnerToolPolicy(userId, live, mode);
     const workDir = turnWorkDir(live.policy, clientCwd ?? live.workDir, this.d.projectPath);
     const base = this.d.permissions.turnPermissions(userId, live, true);
@@ -160,6 +164,7 @@ export class TurnContextBuilder {
       emitSubagent,
       emitSubagentCompletion,
       emitWorkflow,
+      emitWorkflowCompletion,
       toolPolicy,
       permissions,
       workDir,

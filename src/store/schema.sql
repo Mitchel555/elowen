@@ -232,13 +232,21 @@ CREATE TABLE IF NOT EXISTS brain_session_events (
   PRIMARY KEY (session_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_brain_session_events_session ON brain_session_events(session_id);
--- Durable completion inbox for detached/background sub-agents. A result is persisted before the
+-- Durable completion inbox for detached/background delegated work. A result is persisted before the
 -- parent is woken and remains pending until that triggered parent turn settles successfully.
+--
+-- `kind` discriminates the two producers that share this one queue (so retry/backoff, the delivery
+-- drain, acknowledgement and the restart reconcile stay in ONE place): a 'subagent' row links to a
+-- brain_subagent_runs row via child_session_id, while a 'workflow' row links to a brain_workflows row
+-- via workflow_id and leaves child_session_id empty (a workflow fans out to N node sessions, so there
+-- is no single child to key on).
 CREATE TABLE IF NOT EXISTS brain_subagent_results (
   result_id TEXT PRIMARY KEY,
   parent_session_id TEXT NOT NULL,
   tool_call_id TEXT NOT NULL,
   child_session_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'subagent',
+  workflow_id TEXT,
   status TEXT NOT NULL CHECK (status IN ('done', 'error')),
   task TEXT NOT NULL,
   payload TEXT NOT NULL,

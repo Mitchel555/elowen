@@ -1227,24 +1227,30 @@ export function createChatComposition(
             .filter((agent) => agent.status === 'running' && agent.background !== true).length;
           const fgCommands = rt.processes
             .filter((proc) => proc.running && proc.completionMode === 'foreground').length;
-          if (fgSubagents === 0 && fgCommands === 0) {
+          // A blocking WorkflowStart shows as a `running` workflow. Any already-background one is skipped
+          // by the plugin's detach (it returns 0 for those), so triggering on `running` is safe.
+          const fgWorkflows = stream.workflowStates()
+            .filter((workflow) => workflow.status === 'running').length;
+          if (fgSubagents === 0 && fgCommands === 0 && fgWorkflows === 0) {
             rt.notice = color.dim('nothing running in the foreground to background');
             render('input:foreground-background-empty');
             return;
           }
           rt.notice = color.dim('moving foreground work to the background…');
           rt.noticeSticky = true; // live progress — the outcome below replaces it and expires normally
-          // Fire whichever detaches apply as ONE session task so a single combined notice reports both,
-          // instead of two independent callbacks racing to overwrite rt.notice.
+          // Fire whichever detaches apply as ONE session task so a single combined notice reports all,
+          // instead of independent callbacks racing to overwrite rt.notice.
           lifetime.runSession(
             () => Promise.all([
               fgSubagents > 0 ? client.backgroundSubagents() : Promise.resolve({ detached: 0 }),
               fgCommands > 0 ? client.backgroundCommands() : Promise.resolve({ detached: 0 }),
+              fgWorkflows > 0 ? client.backgroundWorkflows() : Promise.resolve({ detached: 0 }),
             ]),
-            ([subs, cmds]) => {
+            ([subs, cmds, workflows]) => {
               const parts: string[] = [];
               if (subs.detached > 0) parts.push(`${subs.detached} sub-agent${subs.detached === 1 ? '' : 's'}`);
               if (cmds.detached > 0) parts.push(`${cmds.detached} command${cmds.detached === 1 ? '' : 's'}`);
+              if (workflows.detached > 0) parts.push(`${workflows.detached} workflow${workflows.detached === 1 ? '' : 's'}`);
               rt.notice = parts.length > 0
                 ? color.success(`moved ${parts.join(' and ')} to background`)
                 : color.dim('foreground work already finished or moved to background');

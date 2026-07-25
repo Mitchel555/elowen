@@ -190,6 +190,18 @@ export interface SubagentCompletion {
   model?: string;
 }
 
+/** Terminal result emitted once by the workflow engine for a detached/background workflow. Unlike a
+ *  live `workflow` snapshot this carries the whole-DAG summary body and is host-only: core persists it
+ *  into the shared delegated-result inbox before waking the parent conversation. `status` may be
+ *  'cancelled' (the store collapses that to an errored delivery; the summary body still says so). */
+export interface WorkflowCompletion {
+  id: string;
+  toolCallId: string;
+  title?: string;
+  status: 'done' | 'error' | 'cancelled';
+  result: string;
+}
+
 /** Result of a manual/auto context compaction. `compacted` is false when there was nothing to compact
  *  (session too small / already compacted) — a benign no-op the clients report as a friendly notice
  *  rather than an error. `usage` is always the fresh post-call context fill. */

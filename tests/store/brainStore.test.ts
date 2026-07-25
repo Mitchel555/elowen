@@ -235,6 +235,62 @@ describe('BrainStore', () => {
     })).toBe(false);
   });
 
+  describe('workflow results share the delegated-result inbox with a kind discriminator', () => {
+    it('accepts a workflow completion linked to a known (parent, tool-call) DAG and reads it kind-aware', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      // A durable DAG for this tool call is the linkage a workflow result validates against.
+      expect(store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'done', nodes: [] })).toBe(true);
+      const completion = { id: 'wf-1', toolCallId: 'wfcall-1', title: 'Ship it', status: 'done' as const, result: 'every node done' };
+      expect(store.enqueueWorkflowResult('root', completion)).toBe(true);
+      expect(store.enqueueWorkflowResult('root', completion)).toBe(true); // duplicate emit is idempotent
+
+      const pending = store.pendingSubagentResults('root');
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        kind: 'workflow', id: 'wf-1', toolCallId: 'wfcall-1', sessionId: '', workflowId: 'wf-1',
+        status: 'done', task: 'Ship it', result: 'every node done', delivery: 'pending',
+      });
+      // Acknowledgement + retry accounting are kind-agnostic (the whole point of one shared queue).
+      expect(store.acknowledgeSubagentResult('root', 'wf-1')).toBe(true);
+      expect(store.pendingSubagentResults('root')).toEqual([]);
+    });
+
+    it('rejects a workflow result whose (parent, tool-call) has no durable DAG', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'running', nodes: [] });
+      // Right parent, but a tool call that never persisted a workflow.
+      expect(store.enqueueWorkflowResult('root', { id: 'wf-x', toolCallId: 'ghost', status: 'done', result: 'x' })).toBe(false);
+      // Unknown parent session entirely.
+      expect(store.enqueueWorkflowResult('nope', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'done', result: 'x' })).toBe(false);
+      // Malformed completion (bad status / non-string body) never reaches the queue.
+      expect(store.enqueueWorkflowResult('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'weird', result: 'x' })).toBe(false);
+      expect(store.enqueueWorkflowResult('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'done', result: 42 })).toBe(false);
+      expect(store.pendingSubagentResults('root')).toEqual([]);
+    });
+
+    it('collapses a cancelled workflow to an errored delivery while preserving the summary body', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'cancelled', nodes: [] });
+      expect(store.enqueueWorkflowResult('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'cancelled', result: 'stopped mid-run' })).toBe(true);
+      expect(store.pendingSubagentResults('root')[0]).toMatchObject({ kind: 'workflow', status: 'error', result: 'stopped mid-run' });
+    });
+
+    it('keeps sub-agent and workflow results side by side, each read as its own kind', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+      store.upsertSubagentRun('root', { id: 'dlg-call', sessionId: 'child', status: 'done', task: 'inspect', tools: 1, seconds: 1 });
+      store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wf-call', status: 'done', nodes: [] });
+      expect(store.enqueueSubagentResult('root', {
+        id: 'dlg-1', toolCallId: 'dlg-call', sessionId: 'child', status: 'done', task: 'inspect', result: 'clear', tools: 1, seconds: 1,
+      })).toBe(true);
+      expect(store.enqueueWorkflowResult('root', { id: 'wf-1', toolCallId: 'wf-call', status: 'done', result: 'dag done' })).toBe(true);
+      const pending = store.pendingSubagentResults('root');
+      expect(pending.map((row) => row.kind).sort()).toEqual(['subagent', 'workflow']);
+      expect(pending.find((row) => row.kind === 'subagent')).toMatchObject({ id: 'dlg-1', sessionId: 'child', result: 'clear' });
+      expect(pending.find((row) => row.kind === 'workflow')).toMatchObject({ id: 'wf-1', sessionId: '', result: 'dag done' });
+    });
+  });
+
   it('reassigns and deletes sub-agent sidecars with their session tree', () => {
     store.createSession({ id: 'root', userId: 1, model: 'm' });
     store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });

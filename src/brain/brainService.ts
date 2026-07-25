@@ -216,6 +216,8 @@ export class BrainService {
       permissions: d.permissions, // deny rules apply to channel turns too (asks follow unattendedAsks there)
       completeSubagent: (parentSessionId, userId, completion) =>
         this.turnRunner.acceptSubagentCompletion(parentSessionId, userId, completion),
+      completeWorkflow: (parentSessionId, userId, completion) =>
+        this.turnRunner.acceptWorkflowCompletion(parentSessionId, userId, completion),
       cancelWorkflows: (sessionId) => this.cancelWorkflowsFor(sessionId),
     });
     this.platforms = new PlatformOrchestrator({
@@ -1108,6 +1110,22 @@ export class BrainService {
     const target = this.preflightSend(userId, session, client);
     const registry = await this.d.plugins?.get();
     const control = registry?.control('terminal');
+    if (!control) return { detached: 0 };
+    return control.detachForeground({ sessionId: target, principal: `elowen:${userId}` });
+  }
+
+  /** Convert every foreground `WorkflowStart` currently blocking this parent into a detached background
+   * workflow. Same shape as detachForegroundSubagents/Commands — the engine keeps running the DAG and
+   * delivers its summary back into this conversation. Detach rides the workflow control (which already
+   * owns `cancelForSession` — see api.ts KnownControls). */
+  async detachForegroundWorkflows(
+    userId: number,
+    session?: string,
+    client?: BoundClientRequest,
+  ): Promise<{ detached: number }> {
+    const target = this.preflightSend(userId, session, client);
+    const registry = await this.d.plugins?.get();
+    const control = registry?.control('workflow');
     if (!control) return { detached: 0 };
     return control.detachForeground({ sessionId: target, principal: `elowen:${userId}` });
   }

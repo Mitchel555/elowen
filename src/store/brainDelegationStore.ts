@@ -27,10 +27,14 @@ export interface BrainSubagentRun extends BrainSubagentRunState {
  *  the event and the state attached to the tool item cannot drift apart. Bounded display data only. */
 export type BrainWorkflowRun = WorkflowUpdate;
 export interface BrainSubagentResult {
+  /** Which producer enqueued this row (see brain_subagent_results.kind). A 'workflow' result carries an
+   *  empty `sessionId` and a `workflowId` instead of a child session. */
+  kind: 'subagent' | 'workflow';
   id: string;
   parentSessionId: string;
   toolCallId: string;
   sessionId: string;
+  workflowId?: string;
   status: 'done' | 'error';
   task: string;
   result?: string;
@@ -160,7 +164,7 @@ function normalizeSubagentState(raw: unknown): BrainSubagentRunState | undefined
   };
 }
 
-function normalizeSubagentResult(raw: unknown): Omit<BrainSubagentResult, 'parentSessionId' | 'delivery' | 'attempts'> | undefined {
+function normalizeSubagentResult(raw: unknown): Omit<BrainSubagentResult, 'parentSessionId' | 'delivery' | 'attempts' | 'kind' | 'workflowId'> | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const o = raw as Record<string, unknown>;
   if (typeof o.id !== 'string' || !o.id || o.id.length > 512) return undefined;
@@ -181,6 +185,29 @@ function normalizeSubagentResult(raw: unknown): Omit<BrainSubagentResult, 'paren
     ...(typeof o.error === 'string' ? { error: bounded(o.error, 100_000) } : {}),
     tools: o.tools, ...(typeof o.tokens === 'number' ? { tokens: o.tokens } : {}), seconds: o.seconds,
     ...(typeof o.model === 'string' ? { model: bounded(o.model, 512) } : {}),
+  };
+}
+
+/** The terminal payload the workflow engine emits for a detached/background workflow. Mirrors the
+ *  sub-agent completion, but the whole DAG summary is one body and its link is the workflow's origin
+ *  call, not a child session. `cancelled` collapses to 'error' for the queue's binary status column;
+ *  the summary body still names the true engine status. */
+function normalizeWorkflowCompletion(
+  raw: unknown,
+): { id: string; toolCallId: string; status: 'done' | 'error'; task: string; result: string } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.id !== 'string' || !o.id || o.id.length > 512) return undefined;
+  if (typeof o.toolCallId !== 'string' || !o.toolCallId || o.toolCallId.length > 512) return undefined;
+  if (o.status !== 'done' && o.status !== 'error' && o.status !== 'cancelled') return undefined;
+  if (typeof o.result !== 'string') return undefined;
+  const title = typeof o.title === 'string' && o.title ? o.title : o.id;
+  return {
+    id: o.id,
+    toolCallId: o.toolCallId,
+    status: o.status === 'done' ? 'done' : 'error',
+    task: bounded(title, 8_000),
+    result: bounded(o.result, 100_000),
   };
 }
 
@@ -363,21 +390,62 @@ export class BrainDelegationStore {
     })();
   }
 
+  /** Persist a terminal WORKFLOW result before waking the parent. Same durable queue as a sub-agent
+   *  completion (one place for retry/backoff/drain/ack), but the linkage is kind-aware: the row is
+   *  accepted only against an existing brain_workflows DAG for this exact (parent_session_id,
+   *  tool_call_id). A workflow leaves child_session_id empty and carries its id in workflow_id.
+   *  First-write-wins and idempotent on a duplicate emit; workflows never take part in the synthetic
+   *  restart upgrade (a daemon restart drops the in-memory engine, so there is nothing to reconcile). */
+  enqueueWorkflowResult(parentSessionId: string, raw: unknown): boolean {
+    const result = normalizeWorkflowCompletion(raw);
+    if (!parentSessionId || !result) return false;
+    return this.db.transaction(() => {
+      const linked = this.db.prepare(
+        'SELECT 1 FROM brain_workflows WHERE parent_session_id = ? AND tool_call_id = ?'
+      ).get(parentSessionId, result.toolCallId);
+      if (!linked) return false;
+      const payload = JSON.stringify({ result: result.result });
+      this.db.prepare(
+        `INSERT INTO brain_subagent_results
+          (result_id, parent_session_id, tool_call_id, child_session_id, kind, workflow_id, status, task, payload)
+         VALUES (?, ?, ?, '', 'workflow', ?, ?, ?, ?)
+         ON CONFLICT(result_id) DO NOTHING
+         ON CONFLICT(parent_session_id, tool_call_id) DO NOTHING`
+      ).run(result.id, parentSessionId, result.toolCallId, result.id, result.status, result.task, payload);
+      const row = this.db.prepare(
+        'SELECT parent_session_id, tool_call_id FROM brain_subagent_results WHERE result_id = ?'
+      ).get(result.id) as { parent_session_id: string; tool_call_id: string } | undefined;
+      return row?.parent_session_id === parentSessionId && row.tool_call_id === result.toolCallId;
+    })();
+  }
+
   pendingSubagentResults(parentSessionId: string): BrainSubagentResult[] {
     const rows = this.db.prepare(
       `SELECT * FROM brain_subagent_results WHERE delivery_state = 'pending'
        AND parent_session_id = ? ORDER BY created_at, rowid`
     ).all(parentSessionId) as Record<string, unknown>[];
-    return rows.flatMap((row) => {
+    return rows.flatMap((row): BrainSubagentResult[] => {
       let payload: Record<string, unknown>;
       try { payload = JSON.parse(String(row.payload)) as Record<string, unknown>; } catch { return []; }
+      // A workflow row has no child session and a whole-DAG summary body, so it is read directly rather
+      // than through the sub-agent validator (which requires a non-empty child sessionId).
+      if (row.kind === 'workflow') {
+        return [{
+          kind: 'workflow' as const, id: String(row.result_id), parentSessionId: String(row.parent_session_id),
+          toolCallId: String(row.tool_call_id), sessionId: '',
+          ...(typeof row.workflow_id === 'string' ? { workflowId: row.workflow_id } : {}),
+          status: row.status === 'done' ? 'done' as const : 'error' as const, task: String(row.task ?? ''),
+          ...(typeof payload.result === 'string' ? { result: payload.result } : {}),
+          tools: 0, seconds: 0, delivery: 'pending' as const, attempts: Number(row.attempts) || 0,
+        }];
+      }
       const normalized = normalizeSubagentResult({
         id: row.result_id, toolCallId: row.tool_call_id, sessionId: row.child_session_id,
         status: row.status, task: row.task, ...payload,
       });
       return normalized ? [{
-        ...normalized, parentSessionId: String(row.parent_session_id), delivery: 'pending' as const,
-        attempts: Number(row.attempts) || 0,
+        ...normalized, kind: 'subagent' as const, parentSessionId: String(row.parent_session_id),
+        delivery: 'pending' as const, attempts: Number(row.attempts) || 0,
       }] : [];
     });
   }

@@ -7,7 +7,7 @@ import {
   normalizeDelegatedExecutionScope,
   type DelegatedExecutionScope,
 } from './delegatedScope.js';
-import type { AskQuestion, BrainEvent, BrainUsage, CompactResult, SubagentCompletion, SubagentUpdate, WorkflowUpdate } from './events.js';
+import type { AskQuestion, BrainEvent, BrainUsage, CompactResult, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from './events.js';
 import { runCompaction, withDescendantUsage, sessionUsageSnapshot } from './events.js';
 import type { ElicitationRegistry } from './elicitation.js';
 import { normalizeCard } from './cards.js';
@@ -117,6 +117,7 @@ export interface ChannelServiceDeps {
    *  but never wire an approval channel, so only `deny` rules bite here (ask → allow, see send()). */
   permissions?: (userId: number) => PermissionSettings;
   completeSubagent?: (parentSessionId: string, userId: number, completion: SubagentCompletion) => void;
+  completeWorkflow?: (parentSessionId: string, userId: number, completion: WorkflowCompletion) => void;
   /** Stop the workflow engine for an aborted origin session (see BrainService.cancelWorkflowsFor) —
    *  a channel `/stop` must halt a DAG started from that channel exactly like the owner's Esc-Esc. */
   cancelWorkflows?: (sessionId: string) => Promise<void>;
@@ -371,6 +372,9 @@ export class ChannelSessionService {
           if (!this.d.store.upsertWorkflowRun(ch.sessionId, u)) return;
           ch.replay.publish({ type: 'workflow', ...u });
         };
+        const emitWorkflowCompletion = parentSessionId && this.d.completeWorkflow
+          ? (completion: WorkflowCompletion) => { this.d.completeWorkflow!(ch.sessionId, opts.ownerUserId, completion); }
+          : undefined;
         const assistantBefore = [...(ch.session.messages as { role?: string }[])].reverse()
           .find((message) => message.role === 'assistant');
         try {
@@ -415,7 +419,7 @@ export class ChannelSessionService {
               await ch.session.prompt(NO_REPLY_NUDGE);
               if (this.d.registry.consumePendingAbort(sessionId)) throw new Error('delegation aborted');
             }
-          }, { identity: opts.identity, elicit, emitCard, emitSubagent, emitSubagentCompletion, emitWorkflow, toolPolicy: effectiveToolPolicy, permissions, sessionId, workDir: ch.workDir, model: { provider: ch.providerId, model: ch.model, thinkingLevel: ch.thinkingLevel } }));
+          }, { identity: opts.identity, elicit, emitCard, emitSubagent, emitSubagentCompletion, emitWorkflow, emitWorkflowCompletion, toolPolicy: effectiveToolPolicy, permissions, sessionId, workDir: ch.workDir, model: { provider: ch.providerId, model: ch.model, thinkingLevel: ch.thinkingLevel } }));
           // Deterministic settled idle (model + context fill) AFTER the turn — proactive footers depend on it.
           turnOnEvent?.({ type: 'idle', model: ch.model, usage: sessionUsageSnapshot(ch.session, this.d.store, ch.sessionId) });
         } finally { detach?.(); }
