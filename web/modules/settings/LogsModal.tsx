@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollText, Trash2 } from 'lucide-react';
 import type { OnMount } from '@monaco-editor/react';
 import { Modal } from '../../components/ui/Modal';
@@ -7,9 +7,10 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Badge } from '../../components/ui/Badge';
-import { EmptyState } from '../../components/ui/states';
+import { EmptyState, LoadingState, ErrorState } from '../../components/ui/states';
 import { MonacoEditor } from '../projects/editor/monacoLoader';
 import { defineEditorThemes } from '../projects/editor/oledTheme';
+import { ElowenApiError } from '../../lib/elowenClient';
 import { useLogFiles, useLogFile } from '../../lib/queries';
 import { useDeleteLogFile, useDeleteAllLogFiles } from '../../lib/mutations';
 import { useTranslation } from '../../lib/i18n';
@@ -38,6 +39,9 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [full, setFull] = useState(false);
   const [query, setQuery] = useState('');
+  // The input stays immediate; the heavy work (filtering up to 50k lines, rebuilding the buffer and
+  // replacing the Monaco model) runs against a deferred copy so a keystroke never blocks on it.
+  const deferredQuery = useDeferredValue(query);
   const [levels, setLevels] = useState<ReadonlySet<LogLevel>>(new Set<LogLevel>());
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleteAllOpen, setDeleteAllOpen] = useState(false);
@@ -60,7 +64,7 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
     () => parseLogLines(file.data?.lines ?? [], file.data ? file.data.totalLines - file.data.lines.length + 1 : 1),
     [file.data],
   );
-  const visible = useMemo(() => filterLogLines(parsed, { query, levels }), [parsed, query, levels]);
+  const visible = useMemo(() => filterLogLines(parsed, { query: deferredQuery, levels }), [parsed, deferredQuery, levels]);
   // Monaco also breaks a model on a bare \r, so a captured line carrying one would produce more editor
   // lines than entries here and shift every gutter number below it. Strip them: the log is line-oriented.
   const text = useMemo(() => visible.map((l) => l.text.replace(/\r/g, '')).join('\n'), [visible]);
@@ -100,6 +104,16 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
 
   const files = list.data?.files ?? [];
 
+  // Distinguish the two failure modes the read endpoint has from a generic failure: a 404 means the file
+  // was deleted from under the viewer, a 413 means it is over the server's read cap. Both otherwise render
+  // as an empty pane, indistinguishable from an empty log.
+  const readErrorMessage = (error: unknown): string => {
+    const status = error instanceof ElowenApiError ? error.status : 0;
+    if (status === 404) return t.settings.logsErrorGone;
+    if (status === 413) return t.settings.logsErrorTooBig;
+    return t.settings.logsError;
+  };
+
   return (
     <>
       <Modal title={t.settings.logs} description={list.data?.dir} icon={ScrollText} onClose={onClose}>
@@ -119,7 +133,7 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
                     key={f.name}
                     className={`flex items-center gap-2 border-b border-border px-3 py-2 last:border-b-0 ${f.name === selected ? 'bg-elevated' : ''}`}
                   >
-                    <button type="button" className="min-w-0 flex-1 text-left" onClick={() => pick(f.name)}>
+                    <button type="button" aria-current={f.name === selected} className="min-w-0 flex-1 text-left" onClick={() => pick(f.name)}>
                       <div className="truncate text-xs text-text">{f.name}</div>
                       <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-muted">
                         <Badge>{f.source}</Badge>
@@ -175,19 +189,30 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
             {selected && file.data?.truncated ? (
               <div className="flex items-center gap-3 rounded-md border border-border px-3 py-2 text-[11px] text-text-muted">
                 <span>
-                  {t.settings.logsTruncated
+                  {/* Once the whole file was requested, a still-truncated read means the file is over the
+                      viewer's line ceiling — the count is honest but the button no longer does anything, so
+                      it is dropped and the wording says the limit is the viewer's. */}
+                  {(full ? t.settings.logsTruncatedCapped : t.settings.logsTruncated)
                     .replace('{n}', String(file.data.lines.length))
                     .replace('{total}', String(file.data.totalLines))}
                 </span>
-                <Button variant="ghost" onClick={() => setFull(true)} disabled={file.isFetching}>
-                  {t.settings.logsLoadFull}
-                </Button>
+                {!full ? (
+                  <Button variant="ghost" onClick={() => setFull(true)} disabled={file.isFetching}>
+                    {t.settings.logsLoadFull}
+                  </Button>
+                ) : null}
               </div>
             ) : null}
 
             <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
               {!selected ? (
                 <EmptyState title={t.settings.logsPickFile} icon={ScrollText} />
+              ) : file.isLoading ? (
+                // Only for a read with nothing yet on screen — `isLoading` stays false on the 3s background
+                // refetch, so a poll never flashes a spinner over content the user is reading.
+                <LoadingState />
+              ) : file.isError && !file.data ? (
+                <ErrorState message={readErrorMessage(file.error)} onRetry={() => file.refetch()} />
               ) : (
                 <MonacoEditor
                   key={selected}
