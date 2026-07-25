@@ -86,6 +86,17 @@ describe('LogsModal read states', () => {
     expect(screen.getByText(en.settings.logsErrorTooBig)).toBeInTheDocument();
   });
 
+  it('surfaces a deleted-file error over stale cached content instead of freezing the editor', async () => {
+    // A file deleted from under the viewer 404s while react-query keeps the last successful read. Showing
+    // the editor here would freeze that stale content on screen forever; the viewer must say the file is
+    // gone even though `data` is still populated.
+    setFileState({ data: content(), isError: true, error: new ElowenApiError('gone', 404) });
+    renderModal();
+    await selectFile();
+    expect(screen.getByText(en.settings.logsErrorGone)).toBeInTheDocument();
+    expect(screen.queryByTestId('monaco')).not.toBeInTheDocument();
+  });
+
   it('falls back to a generic read error for anything else', async () => {
     setFileState({ isError: true, error: new ElowenApiError('boom', 500) });
     renderModal();

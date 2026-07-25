@@ -297,7 +297,15 @@ export const useLogFiles = (enabled = true, poll = false) =>
  *  truncated read fetches instead of serving the short cached copy. `poll` keeps the tail live in the
  *  open viewer — it is left off for a full-file read so polling never re-pulls a large payload. */
 export const useLogFile = (name: string | null, lines?: number, poll = false) =>
-  useQuery({ queryKey: ['log-file', name, lines ?? null], queryFn: () => elowenClient.logFile(name as string, lines), enabled: !!name, refetchInterval: poll ? LOG_POLL_MS : false });
+  useQuery({
+    queryKey: ['log-file', name, lines ?? null],
+    queryFn: () => elowenClient.logFile(name as string, lines),
+    enabled: !!name,
+    // Stop the poll once the read has errored: a file deleted from under the viewer (404) would otherwise
+    // 404 every few seconds forever. The healthy tail keeps its interval; the error state's manual retry
+    // clears the error and resumes polling.
+    refetchInterval: poll ? (q) => (q.state.status === 'error' ? false : LOG_POLL_MS) : false,
+  });
 
 /** One plugin's hook-run audit, newest-first (the Hooks section's recent-executions panel). */
 export const usePluginHookExecutions = (name: string | null) =>

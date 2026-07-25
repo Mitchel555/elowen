@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseLogLines, filterLogLines, formatLogSize, type LogLevel } from '../../../modules/settings/logFilter';
+import { parseLogLines, filterLogLines, formatLogSize, refreshScrollAction, type LogLevel } from '../../../modules/settings/logFilter';
 
 const levels = (...v: LogLevel[]) => new Set<LogLevel>(v);
 const none = new Set<LogLevel>();
@@ -87,6 +87,25 @@ describe('filterLogLines', () => {
 
   it('ignores surrounding whitespace in the query', () => {
     expect(filterLogLines(parsed, { query: '  gateway  ', levels: none }).map((l) => l.n)).toEqual([5]);
+  });
+});
+
+describe('refreshScrollAction', () => {
+  // A refresh for the same view keeps the reader's place, following the tail only when already parked at it.
+  it('keeps the scroll on a same-view refresh away from the bottom', () => {
+    expect(refreshScrollAction(true, false)).toBe('keep');
+  });
+
+  it('follows the tail on a same-view refresh when the reader is at the bottom', () => {
+    expect(refreshScrollAction(true, true)).toBe('follow');
+  });
+
+  // Regression: a filter/severity change is a different, usually shorter document. Reapplying the previous
+  // pixel scroll (or following its stale "bottom") threw a reader parked at the tail to the wrong place —
+  // the expected behaviour is to show the top of the new results, regardless of the old bottom flag.
+  it('shows the top on a view change, never reusing the previous scroll', () => {
+    expect(refreshScrollAction(false, false)).toBe('top');
+    expect(refreshScrollAction(false, true)).toBe('top');
   });
 });
 

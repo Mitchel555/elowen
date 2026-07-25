@@ -66,6 +66,18 @@ export function filterLogLines(lines: readonly LogLine[], { query, levels }: Log
   });
 }
 
+export type ScrollAction = 'top' | 'follow' | 'keep';
+
+/** What a live content refresh does to the viewport. A refresh for the SAME filtered view keeps the
+ *  reader where they are, following the tail only when they are already parked at the bottom. A first
+ *  fill or a changed filter/severity (`sameView` false) shows the TOP instead: the reader is looking at a
+ *  different, usually much shorter document, so reapplying the previous pixel offset would fling them to
+ *  the wrong place — typically the bottom of the filtered results. */
+export function refreshScrollAction(sameView: boolean, atBottom: boolean): ScrollAction {
+  if (!sameView) return 'top';
+  return atBottom ? 'follow' : 'keep';
+}
+
 /** Human byte size for the file list — matches the compact style used elsewhere in Settings. */
 export function formatLogSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

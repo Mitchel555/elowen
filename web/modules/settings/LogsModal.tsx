@@ -14,7 +14,7 @@ import { ElowenApiError } from '../../lib/elowenClient';
 import { useLogFiles, useLogFile } from '../../lib/queries';
 import { useDeleteLogFile, useDeleteAllLogFiles } from '../../lib/mutations';
 import { useTranslation } from '../../lib/i18n';
-import { parseLogLines, filterLogLines, formatLogSize, LOG_LEVELS, type LogLevel } from './logFilter';
+import { parseLogLines, filterLogLines, formatLogSize, refreshScrollAction, LOG_LEVELS, type LogLevel } from './logFilter';
 
 /** Line count asked for when the user opts out of the default tail. Matches the daemon's own ceiling. */
 const FULL_FILE_LINES = 50_000;
@@ -46,10 +46,10 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleteAllOpen, setDeleteAllOpen] = useState(false);
   const [editor, setEditor] = useState<CodeEditor | null>(null);
-  // Whether the current editor instance has had its first content set. Reset on mount (the editor
-  // remounts per file via key={selected}), so the initial fill leaves the view at the top while later
-  // live refreshes preserve the reader's scroll.
-  const initialized = useRef(false);
+  // The filter/severity signature of the content last written to the editor, or null for a fresh editor
+  // instance (it remounts per file via key={selected}). Scroll is only preserved when a refresh is for
+  // this SAME view; a first fill or a filter change instead shows the top of the new results.
+  const filledView = useRef<string | null>(null);
 
   // The list and the selected file's tail poll on their own while the modal is open (both queries only
   // exist while it is mounted). A full-file read is not polled — it must not re-pull a large payload.
@@ -68,27 +68,34 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
   // Monaco also breaks a model on a bare \r, so a captured line carrying one would produce more editor
   // lines than entries here and shift every gutter number below it. Strip them: the log is line-oriented.
   const text = useMemo(() => visible.map((l) => l.text.replace(/\r/g, '')).join('\n'), [visible]);
+  // The current view's identity: the same filter/severity inputs `text` is built from. When it changes,
+  // `text` is a different document and a scroll position captured against the previous one is meaningless.
+  const viewKey = useMemo(() => JSON.stringify([deferredQuery, [...levels].sort()]), [deferredQuery, levels]);
 
   // Feed Monaco by hand instead of the controlled `value` prop. On a read-only editor that prop calls
   // setValue on every change, which slams the scroll back to the top — turning each poll into a jump.
-  // Here the first fill leaves the view at the top (as before), and a live refresh only follows the tail
-  // when the reader is already parked at the bottom; otherwise their scroll position is kept.
+  // A first fill and a filter change leave the view at the top; a live refresh of the SAME view keeps the
+  // reader's scroll, following the tail only when they are already parked at the bottom.
   useEffect(() => {
     if (!editor) return;
     const model = editor.getModel();
-    if (!model || model.getValue() === text) return;
-    if (!initialized.current) {
-      model.setValue(text);
-      initialized.current = true;
-      return;
-    }
-    const atBottom = editor.getScrollTop() >= editor.getScrollHeight() - editor.getLayoutInfo().height - SCROLL_BOTTOM_SLACK;
+    if (!model) return;
+    const sameView = filledView.current === viewKey;
+    // Nothing to write — record the view so a later poll for it counts as the same view, then stop.
+    if (model.getValue() === text) { filledView.current = viewKey; return; }
+    const atBottom = sameView && editor.getScrollTop() >= editor.getScrollHeight() - editor.getLayoutInfo().height - SCROLL_BOTTOM_SLACK;
     const top = editor.getScrollTop();
+    const action = refreshScrollAction(sameView, atBottom);
+    filledView.current = viewKey;
     model.setValue(text);
-    editor.setScrollTop(atBottom ? editor.getScrollHeight() : top);
-  }, [text, editor]);
+    // Follow the tail via Monaco's own reveal, not setScrollTop(scrollHeight): with word wrap the wrapped
+    // line heights settle after setValue, so a pixel target lands short of the true bottom and following
+    // silently stops. Revealing the last line pins the view to the tail regardless.
+    if (action === 'follow') editor.revealLine(model.getLineCount());
+    else if (action === 'keep') editor.setScrollTop(top);
+  }, [text, viewKey, editor]);
 
-  const onEditorMount: OnMount = (instance): void => { initialized.current = false; setEditor(instance); };
+  const onEditorMount: OnMount = (instance): void => { filledView.current = null; setEditor(instance); };
 
   const toggleLevel = (level: LogLevel): void => {
     setLevels((cur) => {
@@ -211,7 +218,10 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
                 // Only for a read with nothing yet on screen — `isLoading` stays false on the 3s background
                 // refetch, so a poll never flashes a spinner over content the user is reading.
                 <LoadingState />
-              ) : file.isError && !file.data ? (
+              ) : file.isError ? (
+                // Surface the failure even when a previous read is still cached: a file deleted from under
+                // the viewer (404) keeps its last data, so showing the editor here would freeze stale
+                // content on screen while the file is gone. The retry clears the error and resumes polling.
                 <ErrorState message={readErrorMessage(file.error)} onRetry={() => file.refetch()} />
               ) : (
                 <MonacoEditor
