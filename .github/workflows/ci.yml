@@ -11,6 +11,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege for every job below: these only ever check out the repo and run tests, so the token
+# needs to read contents and nothing else. Declared here rather than per job so a job added later cannot
+# quietly inherit more than it needs — and so a fork's pull request can never get a writable token.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint (eslint + knip + depcruise)
