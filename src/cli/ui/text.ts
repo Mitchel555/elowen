@@ -187,9 +187,14 @@ export function formatK(n: number): string {
   return n < 1000 ? String(n) : n < 1_000_000 ? `${Math.round(n / 1000)}k` : `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** Elapsed run time for humans: seconds under a minute, then `2m 17s` — a five-digit seconds counter
- *  reads as noise once an agent runs long. */
+/** Elapsed run time for humans, rolling each unit into the next so no count overflows its scale:
+ *  `8s`, then `2m 17s`, then `1h 12m`. Seconds are dropped past an hour where they carry no signal, and
+ *  precision falls off as the value grows. Bounded width (≤7 chars below 100h) keeps it stable in the
+ *  padded, truncated columns beside model names and token counts. Days are not modelled: no chat turn or
+ *  goal loop here runs that long, and a bare `Nh` past a day still reads fine and stays short. */
 export function formatDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }

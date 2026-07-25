@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CURSOR_MARKER, visibleWidth } from '@earendil-works/pi-tui';
 import {
+  formatDuration,
   padAnsi,
   terminalInlineText,
   terminalPhysicalRow,
@@ -90,5 +91,48 @@ describe('terminal text trust boundary', () => {
     expect(rendered).not.toContain('\x1b[2J');
     expect(rendered).not.toMatch(/[\r\n]/);
     expect(rendered).toContain('hostile session forged physical row');
+  });
+});
+
+describe('formatDuration', () => {
+  it('shows bare seconds under a minute', () => {
+    expect(formatDuration(0)).toBe('0s');
+    expect(formatDuration(8)).toBe('8s');
+    expect(formatDuration(59)).toBe('59s');
+  });
+
+  it('rolls seconds into minutes at 60s', () => {
+    expect(formatDuration(60)).toBe('1m 0s');
+    expect(formatDuration(61)).toBe('1m 1s');
+    expect(formatDuration(72 * 60)).toBe('1h 12m'); // never '72m 0s'
+  });
+
+  it('rolls minutes into hours at 3600s and drops now-noise seconds', () => {
+    expect(formatDuration(59 * 60 + 59)).toBe('59m 59s');
+    expect(formatDuration(3600)).toBe('1h 0m');
+    expect(formatDuration(3600 + 59)).toBe('1h 0m'); // sub-minute tail dropped past an hour
+    expect(formatDuration(3660)).toBe('1h 1m');
+  });
+
+  it('never overflows a unit that should have rolled over', () => {
+    expect(formatDuration(90)).toBe('1m 30s'); // not '90s'
+    expect(formatDuration(90 * 60)).toBe('1h 30m'); // not '90m 0s'
+  });
+
+  it('does not model days: past a day it stays a bare hour count', () => {
+    expect(formatDuration(26 * 3600)).toBe('26h 0m');
+  });
+
+  it('clamps fractional and negative input', () => {
+    expect(formatDuration(0.4)).toBe('0s');
+    expect(formatDuration(59.6)).toBe('1m 0s'); // rounds to 60
+    expect(formatDuration(-5)).toBe('0s');
+    expect(formatDuration(Number.NEGATIVE_INFINITY)).toBe('0s');
+  });
+
+  it('stays within 7 visible chars for every value below 100h', () => {
+    for (const s of [0, 9, 59, 60, 599, 3599, 3600, 99 * 3600 + 59 * 60]) {
+      expect(visibleWidth(formatDuration(s))).toBeLessThanOrEqual(7);
+    }
   });
 });
