@@ -37,11 +37,15 @@ export function useAutoSaveStatus(
   const pending = useRef(false);
   const running = useRef(false);
   const queued = useRef(false);
+  // The unmount flush deliberately leaves a save in flight after the component is gone, so its result
+  // lands on a hook nobody renders any more. Reporting into that void is not just wasted work: the write
+  // can outlive the whole page/test environment, and touching React's scheduler that late throws.
+  const mounted = useRef(true);
 
   const run = useCallback(() => {
     pending.current = false;
     queued.current = true;
-    setStatus('saving');
+    if (mounted.current) setStatus('saving');
     if (running.current) return;
 
     running.current = true;
@@ -59,7 +63,7 @@ export function useAutoSaveStatus(
         }
       }
       running.current = false;
-      setStatus(terminal);
+      if (mounted.current) setStatus(terminal);
     })();
   }, []);
 
@@ -83,8 +87,10 @@ export function useAutoSaveStatus(
     if (pending.current) run();
   }, [run]);
 
-  // Flush a pending save on unmount so closing the modal never drops the last edit.
-  useEffect(() => () => { flush(); }, [flush]);
+  // Flush a pending save on unmount so closing the modal never drops the last edit. The flag is cleared
+  // in the same cleanup, immediately before the flush, so the write still happens while its now-invisible
+  // status updates are dropped — and no ordering between separate effect cleanups has to hold for that.
+  useEffect(() => () => { mounted.current = false; flush(); }, [flush]);
 
   const retry = useCallback(() => run(), [run]);
   return { status, retry, flush };

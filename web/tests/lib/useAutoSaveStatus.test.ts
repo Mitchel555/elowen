@@ -37,6 +37,24 @@ describe('useAutoSaveStatus', () => {
     await waitFor(() => expect(saves).toBe(1));
   });
 
+  it('lets a save that was still in flight at unmount finish on its own', async () => {
+    // The real-world shape of the unmount flush: an async save that only settles after the modal is gone.
+    // The write must still complete (that is the whole point of flushing), while the controller reports
+    // nothing back — there is no longer anything rendering its status to report to.
+    let settle: () => void = () => {};
+    let saves = 0;
+    const { unmount, rerender } = renderHook(
+      ({ v }) => useAutoSaveStatus([v], () => { saves++; return new Promise<void>((resolve) => { settle = resolve; }); }, { delay: 1000 }),
+      { initialProps: { v: 'a' } },
+    );
+    rerender({ v: 'b' });
+    unmount();
+    expect(saves).toBe(1); // flushed synchronously, before the debounce would have fired
+    settle();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(saves).toBe(1); // and it settles once, without the unmounted controller queueing another pass
+  });
+
   it('only the latest save drives the terminal status (stale response is ignored)', async () => {
     // First save resolves slowly with an error; a second, newer save resolves fast and OK. The stale
     // slow error must NOT flip the status back once the newer save reported success.
