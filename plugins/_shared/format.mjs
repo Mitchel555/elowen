@@ -48,16 +48,19 @@ export function stripThinking(text) {
 /**
  * The runtime footer a turn settles with (`model · context %`), wrapped in the surface's own subtext
  * markup. `fence` is that markup: Discord `{ open: '-# ' }`, Telegram `{ open: '— ' }`, WhatsApp
- * `{ open: '_', close: '_' }`. The provider prefix is dropped (`anthropic/claude-sonnet-5` → the model
- * name alone) and the percentage rounded; missing data simply omits its fragment, and an idle event
- * carrying neither yields '' so no empty subtext line is posted.
+ * `{ open: '_', close: '_' }`, Teams `{ open: '' }` (bot messages there have no small-text style at all).
+ * The provider prefix is dropped (`anthropic/claude-sonnet-5` → the model name alone) and the percentage
+ * rounded; missing data simply omits its fragment, and an idle event carrying neither yields '' so no
+ * empty subtext line is posted. The percentage is checked for finiteness, not merely for being a number:
+ * it reaches us from the agent runtime's context accounting, where a zero-sized window would divide out
+ * to Infinity and print as `Infinity %`.
  */
 export function runtimeFooter(idle, fence) {
   const parts = [];
   const model = typeof idle?.model === 'string' ? idle.model.split('/').pop() : '';
   if (model) parts.push(model);
   const pct = idle?.usage?.percent;
-  if (typeof pct === 'number' && pct >= 0) parts.push(`${Math.round(pct)} %`);
+  if (Number.isFinite(pct) && pct >= 0) parts.push(`${Math.round(pct)} %`);
   return parts.length ? `${fence.open}${parts.join(' · ')}${fence.close ?? ''}` : '';
 }
 
@@ -76,6 +79,10 @@ export function runtimeFooter(idle, fence) {
  */
 export function stripRuntimeFooter(text, fence) {
   const body = String(text ?? '');
+  // An unfenced surface (Teams) has nothing to recognise a footer BY: every line "starts with" the empty
+  // string, so a reader there would eat the last line of every message it was handed. Refuse rather than
+  // guess — a surface that wants its footer back off has to mark it on the way out first.
+  if (!fence.open && !(fence.close ?? '')) return body;
   const lines = body.split('\n');
   let last = lines.length - 1;
   while (last >= 0 && lines[last].trim() === '') last--;

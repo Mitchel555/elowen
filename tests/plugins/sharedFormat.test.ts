@@ -59,6 +59,27 @@ describe('shared plugin format helpers', () => {
       expect(runtimeFooter(idle, FENCES.whatsapp)).toBe('_qwen3.8-max-preview · 42 %_');
     });
 
+    // Teams is the one surface with no subtext style for bot messages, so its footer carries no markup.
+    // It still goes through the same writer: one footer shape across every platform, fence or not.
+    const teams = { open: '', close: '' };
+
+    it('writes the same footer unmarked on a surface that has no subtext style', () => {
+      expect(runtimeFooter(idle, teams)).toBe('qwen3.8-max-preview · 42 %');
+      expect(runtimeFooter(null, teams)).toBe('');
+    });
+
+    it('refuses to read a footer back off an unfenced surface, where every line would match', () => {
+      expect(stripRuntimeFooter('Hotovo.\n\nqwen3.8-max-preview · 42 %', teams)).toBe('Hotovo.\n\nqwen3.8-max-preview · 42 %');
+      expect(stripRuntimeFooter('Just one line.', teams)).toBe('Just one line.');
+    });
+
+    it('omits a percentage that is not a finite number rather than printing it', () => {
+      // `percent` comes from the agent runtime's context accounting; a zero-sized window divides out to
+      // Infinity, and `Infinity %` under an answer is worse than no percentage at all.
+      expect(runtimeFooter({ model: 'gpt-5', usage: { percent: Infinity } }, FENCES.discord)).toBe('-# gpt-5');
+      expect(runtimeFooter({ model: 'gpt-5', usage: { percent: NaN } }, FENCES.discord)).toBe('-# gpt-5');
+    });
+
     it('renders nothing rather than an empty fence when the idle event carried no usable data', () => {
       for (const fence of Object.values(FENCES)) {
         expect(runtimeFooter(null, fence)).toBe('');

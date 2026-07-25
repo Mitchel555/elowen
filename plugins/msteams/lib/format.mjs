@@ -1,5 +1,5 @@
 // Teams-flavoured formatting: shared splitting/reply-context helpers sized for Teams message limits.
-import { splitContent as splitAtChunk, parseModelExec } from '../../_shared/format.mjs';
+import { splitContent as splitAtChunk, parseModelExec, runtimeFooter } from '../../_shared/format.mjs';
 
 export { parseModelExec };
 
@@ -17,10 +17,10 @@ export function buildReplyContext(name, body) {
   return `[In reply to ${name}: "${clipped}"]`;
 }
 
+/** The markup Teams' runtime footer is wrapped in — none. Bot messages there have no small-text style
+ *  (`stream.mjs` renders every subtext plain for the same reason), so the footer rides as an ordinary
+ *  line. Named and passed like every other surface's fence so the footer itself stays one shared shape. */
+const FOOTER_FENCE = { open: '' };
+
 /** The runtime footer under a final reply: `model · context %` from the idle event, or ''. */
-export function footerLine(idle) {
-  if (!idle?.model) return '';
-  const pct = idle.usage?.percent;
-  const ctx = typeof pct === 'number' && Number.isFinite(pct) ? ` · context ${Math.round(pct)}%` : '';
-  return `${idle.model}${ctx}`;
-}
+export const footerLine = (idle) => runtimeFooter(idle, FOOTER_FENCE);
