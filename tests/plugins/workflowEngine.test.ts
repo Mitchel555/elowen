@@ -24,8 +24,11 @@ function harness(opts: { toolPolicyAllow?: string[] } = {}) {
   const controls = new Map<string, WorkflowControl>();
   const snapshots: { id: string; toolCallId: string; title?: string; status: string; nodes: { id: string; status: string; deps: string[]; startedAt?: number; result?: string; error?: string }[] }[] = [];
   const launched: string[] = [];
-  const run = async (_source: unknown, task: string, onEvent: (e: unknown) => void) => {
+  /** The context each node was actually handed, by task — what the child can see, not what we hoped. */
+  const contexts = new Map<string, string | undefined>();
+  const run = async (source: { access?: { context?: string } }, task: string, onEvent: (e: unknown) => void) => {
     launched.push(task);
+    contexts.set(task, source.access?.context);
     onEvent({ type: 'session', sessionId: `s-${task}` });
     onEvent({ type: 'tool', name: 'Read' });
     onEvent({ type: 'idle', usage: { totalTokens: 100 } });
@@ -51,7 +54,7 @@ function harness(opts: { toolPolicyAllow?: string[] } = {}) {
     delegateContextChunk: (raw: string) => (raw ? `ctx:${raw}` : undefined),
   };
   registerWorkflow(ctx, () => run, helpers);
-  return { tools, controls, snapshots, launched };
+  return { tools, controls, snapshots, launched, contexts };
 }
 
 describe('workflow engine', () => {
@@ -106,6 +109,28 @@ describe('workflow engine', () => {
     const last = snapshots.at(-1)!;
     expect(last.status).toBe('done');
     expect(last.nodes[0]!.status).toBe('done');
+  });
+
+  // A dependency edge used to only ORDER the run: the dependent node started with an empty context and had
+  // to re-derive, or invent, what its dependencies had already produced. That made the tool's own
+  // "gather → analyze → write" promise false, and a real synthesis node reported it could not do its job
+  // because the reports it was told it would receive were nowhere in its context.
+  it('hands a node the results of the dependencies it waited for', async () => {
+    const { tools, contexts } = harness();
+    await tools.get('WorkflowStart')!.execute('t-deps', {
+      nodes: [
+        { id: 'gather', task: 'gather' },
+        { id: 'other', task: 'other' },
+        { id: 'write', task: 'write', deps: ['gather'] },
+      ],
+    });
+    const write = contexts.get('write') ?? '';
+    expect(write).toContain('done:gather');
+    expect(write).toContain('gather'); // attributed to the node it came from
+    // Only what it actually depends on — a sibling branch is not its business.
+    expect(write).not.toContain('done:other');
+    // A root node has nothing to inherit and must not be handed a phantom results block.
+    expect(contexts.get('gather') ?? '').not.toContain('Results from the nodes');
   });
 
   // The modal reports which model is burning a node's tokens. `node.model` is only set when the caller

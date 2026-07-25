@@ -18,6 +18,10 @@ const SNAPSHOT_TASK_PREVIEW = 500;
 // Same bound for a terminal node's result/error preview: the modal dock shows a line or two, and the
 // full MAX_RESULT_CHARS body already reaches the parent through the blocking WorkflowStart return.
 const SNAPSHOT_RESULT_PREVIEW = 500;
+// Total budget for the dependency results handed to one node, shared equally between its dependencies.
+// A wide fan-in (a synthesis node over many branches) must not bury the node's own task, and each slice
+// keeps clip()'s `[truncated]` marker so the child can see it is reading a partial result.
+const DEP_CONTEXT_BUDGET_CHARS = 40_000;
 
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
 const errorText = (e) => (e instanceof Error ? e.message : String(e));
@@ -143,6 +147,19 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         + `to add them; otherwise just finish your task and report.`);
     }
     if (wf.sharedContext) contextParts.push(wf.sharedContext);
+    // What the node waited for. Without this a dependency edge only ORDERS the run: the node still starts
+    // with an empty context and has to re-derive — or invent — whatever its dependencies already produced,
+    // which is precisely the "gather → analyze → write" shape the tool advertises. Appended last, after the
+    // workflow-wide shared context, so the stable part of the prefix stays identical across nodes.
+    const depResults = (node.deps ?? [])
+      .map((id) => ({ id, result: wf.state.get(id)?.result }))
+      .filter((d) => d.result);
+    if (depResults.length) {
+      const perDep = Math.floor(DEP_CONTEXT_BUDGET_CHARS / depResults.length);
+      contextParts.push(`Results from the nodes this one depends on:\n\n${depResults
+        .map((d) => `## Result from node "${d.id}"\n${clip(d.result, perDep)}`)
+        .join('\n\n')}`);
+    }
     const context = contextParts.length ? delegateContextChunk(contextParts.join('\n\n')) : undefined;
     return {
       ...wf.parentAccess,
@@ -270,6 +287,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     description: [
       'Run a DAG of sub-agents: you declare nodes (each a self-contained task) and their dependencies, and the engine executes them as dependencies clear — independent nodes run in parallel, dependents wait for what they need. Each node is a fresh sub-agent that inherits your access; it cannot see this conversation, so every task must be complete and standalone.',
       'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. For a set of fully independent tasks, plain parallel delegate calls are simpler.',
+      'A node is given the results of the nodes it depends on as context, so a later task can refer to "your dependency results" instead of repeating the work or being told it twice.',
       'The call BLOCKS and returns a summary of every node\'s result once the whole workflow finishes. A node whose dependency failed is reported as skipped. Give each node a short unique id and list its dependency ids in deps. Use read_only/tools/model per node exactly as with delegate — you can only ever narrow your own access.',
     ].join(' '),
     parameters: Type.Object({
