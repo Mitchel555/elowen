@@ -563,11 +563,12 @@ export class AttachmentChips implements Component {
   }
 }
 
-/** Pending mid-turn messages as dim QUEUED lines above the input — the opencode "queued prompt" look
- *  (a bright ' QUEUED ' pill + the message text). These are messages typed while a turn streams; they are
- *  STEERED into the running turn (PI delivers them between steps) and reported as a transient backlog via
- *  the daemon's `queue` snapshot. Renders nothing while empty, so it costs no rows at rest. `removeHint` is
- *  a faint one-line reminder of the remove-last keybind, shown only while the queue is non-empty. */
+/** Pending mid-turn messages shown above the input: the queued message text itself, each on its own
+ *  indented line marked by a quiet pause glyph — no 'N queued' header label, so the strip reads as the
+ *  messages rather than an announcement about them. These are messages typed while a turn streams; they
+ *  are STEERED into the running turn (PI delivers them between steps) and reported as a transient backlog
+ *  via the daemon's `queue` snapshot. Renders nothing while empty, so it costs no rows at rest. `removeHint`
+ *  is a faint one-line reminder of the recall/remove keybind, shown only while the queue is non-empty. */
 export class QueuedMessages implements Component {
   private items: { id: string; text: string }[] = [];
   private removeHint: string | null = null;
@@ -581,17 +582,14 @@ export class QueuedMessages implements Component {
   }
   render(width: number): string[] {
     if (this.items.length === 0 || this.maxRows <= 0) return [];
-    // A soft grouped header (quiet accent glyph + count) over an indented list — the accent stays a marker,
-    // not a filled label on every row, so the strip reads calmly and breathes instead of looking crammed.
     const room = Math.max(8, width - 7);
-    const lines = [`  ${color.accentDim('⏸')} ${DIM(`${this.items.length} queued`)}`];
-    for (const it of this.items) lines.push(`     ${FAINTC('›')} ${DIM(truncateToWidth(inlineText(it.text), room, '…'))}`);
+    const lines = this.items.map((it) => `  ${color.accentDim('⏸')} ${DIM(truncateToWidth(inlineText(it.text), room, '…'))}`);
     if (this.removeHint) lines.push(`     ${FAINTC(inlineText(this.removeHint))}`);
     if (lines.length <= this.maxRows) return lines;
-    // Keep the header; the last visible row counts the items hidden by the budget (header + this note = 2).
+    // Over budget: the last visible row counts the messages hidden by the clip (that note takes one row).
     const clipped = lines.slice(0, this.maxRows);
-    const shownItems = Math.max(0, this.maxRows - 2);
-    clipped[this.maxRows - 1] = `     ${FAINTC(`… +${Math.max(1, this.items.length - shownItems)} more queued`)}`;
+    const shownItems = Math.max(0, this.maxRows - 1);
+    clipped[this.maxRows - 1] = `  ${FAINTC(`… +${Math.max(1, this.items.length - shownItems)} more`)}`;
     return clipped;
   }
 }

@@ -87,32 +87,32 @@ describe('chat components', () => {
     expect(panel.page()).toBe(false);
   });
 
-  it('QueuedMessages renders nothing while empty, then a grouped count header + one line per item + a hint', () => {
+  it('QueuedMessages renders nothing while empty, then one line per queued message + a hint (no header)', () => {
     const q = new QueuedMessages();
     expect(q.render(40)).toEqual([]); // empty → zero rows at rest
     q.set([{ id: 'a', text: 'check the logs' }, { id: 'b', text: 'and the metrics' }], 'ctrl+x x removes the last queued message');
     const lines = q.render(60);
-    expect(lines).toHaveLength(4); // count header + two pending lines + the remove hint
-    expect(lines[0]).toContain('2 queued'); // soft header with the count, not a pill on every row
-    expect(lines[1]).toContain('check the logs');
-    expect(lines[2]).toContain('and the metrics');
-    expect(lines[3]).toContain('removes the last');
+    expect(lines).toHaveLength(3); // two message lines + the remove hint, no 'N queued' header
+    expect(lines[0]).toContain('check the logs');
+    expect(lines[1]).toContain('and the metrics');
+    expect(lines[2]).toContain('removes the last');
+    expect(lines[0]).not.toMatch(/\d+ queued/); // the 'N queued' count header is gone; only the messages show
   });
 
   it('QueuedMessages truncates a long pending message to the width and drops the hint when unset', () => {
     const q = new QueuedMessages();
     q.set([{ id: 'a', text: 'x'.repeat(400) }]); // no hint
     const lines = q.render(30);
-    expect(lines).toHaveLength(2); // count header + the one item line, no hint row
-    expect(visibleWidth(lines[1]!)).toBeLessThanOrEqual(30);
-    expect(lines[1]).toContain('…'); // item truncated to width
+    expect(lines).toHaveLength(1); // just the one message line, no header, no hint row
+    expect(visibleWidth(lines[0]!)).toBeLessThanOrEqual(30);
+    expect(lines[0]).toContain('…'); // item truncated to width
   });
 
   it('QueuedMessages reports its uncapped desired rows until the central layout assigns a cap', () => {
     const q = new QueuedMessages();
     q.set(Array.from({ length: 9 }, (_, i) => ({ id: String(i), text: `msg ${i}` })));
     const lines = q.render(40);
-    expect(lines).toHaveLength(10); // count header + nine item lines
+    expect(lines).toHaveLength(9); // one line per queued message, no header
     expect(lines.at(-1)).toContain('msg 8');
   });
 
@@ -122,7 +122,7 @@ describe('chat components', () => {
     q.set(Array.from({ length: 9 }, (_, i) => ({ id: String(i), text: `msg ${i}` })), 'remove hint');
     const lines = q.render(40);
     expect(lines).toHaveLength(2);
-    expect(lines[1]).toContain('more queued');
+    expect(lines[1]).toContain('more');
   });
 
   it('StatusBar justifies left and right to the edges', () => {
