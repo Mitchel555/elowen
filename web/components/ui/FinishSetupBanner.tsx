@@ -19,7 +19,10 @@ export function FinishSetupBanner() {
   const [state, setState] = usePersistentState<(typeof DISMISS_VALUES)[number]>('elowen.dashboard.finishSetup', 'open', DISMISS_VALUES);
 
   if (!isAdmin || state === 'dismissed') return null;
-  const chatOk = readiness.data?.checks.find((c) => c.id === 'chat')?.ok;
+  // `checks` is guarded as well as `data`: the payload crosses the network, so its shape is a promise
+  // rather than a guarantee, and an answer without the array would take the entire dashboard down over an
+  // optional nudge. Missing checks read the same as "nothing known yet" — the banner simply stays away.
+  const chatOk = readiness.data?.checks?.find((c) => c.id === 'chat')?.ok;
   if (chatOk !== false) return null; // only render once we know chat is NOT ready
 
   return (
