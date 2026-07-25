@@ -1,0 +1,64 @@
+# Dependency update policy. Security updates are enabled at the repository level and run regardless of
+# this file; what is configured here is the routine VERSION updates on top of them.
+#
+# Everything is grouped so a week's drift arrives as a handful of reviewable pull requests rather than one
+# per package. Each pull request runs the full required-check matrix, so an update that breaks the daemon,
+# the web app or any platform E2E shows up red before it can reach main.
+version: 2
+updates:
+  # ── Daemon / CLI / plugins ────────────────────────────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # The PI packages are pinned to an EXACT version on purpose: they ship breaking changes in patch
+      # releases, and they must move in lockstep or the agent runtime fails to start. Grouping them keeps
+      # that lockstep — one pull request carrying all three, with CI proving the bump before it lands.
+      # They are deliberately NOT ignored: an ignore rule here would also suppress their SECURITY updates.
+      pi-runtime:
+        patterns:
+          - "@earendil-works/*"
+      production:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+        exclude-patterns:
+          - "@earendil-works/*"
+      development:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+
+  # ── Next.js web app ───────────────────────────────────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      production:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      development:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+
+  # ── Workflow actions ──────────────────────────────────────────────────────────────────────────────
+  # Actions are referenced by major tag, so this only surfaces a genuine major bump — rare, and worth
+  # reading when it happens.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
