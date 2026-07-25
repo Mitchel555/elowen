@@ -137,6 +137,29 @@ describe('delegate — the access handed to the child', () => {
     expect(seen.access?.toolPolicy).toBeUndefined(); // no plugin-side allow-list; the host mints it
   });
 
+  // Plan mode may delegate exploration, but a planning turn must never spawn a child that can write.
+  // The flag is stamped by the host on currentAccess(), so the model cannot decline it: the plugin only
+  // ever ADDS read_only from its own argument and has no path that clears it.
+  it('forces read-only on every delegation made from a PLANNING turn', async () => {
+    const tool = reg.tools.find((t) => t.name === 'Delegate')!;
+    await runWithPolicy(
+      adminPolicy,
+      () => (tool as unknown as { execute: (id: string, p: unknown) => Promise<unknown> }).execute('call', { task: 'explore for the plan' }),
+      { identity: owner, sessionId: 'brain-1', mode: 'plan' },
+    );
+    expect(seen.access?.readOnly).toBe(true);
+  });
+
+  it('leaves a BUILD turn free to delegate a writing child', async () => {
+    const tool = reg.tools.find((t) => t.name === 'Delegate')!;
+    await runWithPolicy(
+      adminPolicy,
+      () => (tool as unknown as { execute: (id: string, p: unknown) => Promise<unknown> }).execute('call', { task: 'implement it' }),
+      { identity: owner, sessionId: 'brain-1', mode: 'build' },
+    );
+    expect(seen.access?.readOnly).toBeUndefined();
+  });
+
   it('sends an exact tools allow-list', async () => {
     await delegate({ task: 'read the auth module', tools: ['Read', 'ListDir'] });
     expect(seen.access?.toolPolicy).toEqual({ allow: ['Read', 'ListDir'] });

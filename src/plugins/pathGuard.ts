@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { resolve, sep, dirname, basename, join } from 'node:path';
-import { currentIdentity, currentPolicy, currentSessionId, currentToolPolicy, currentTurnPermissions, currentWorkDir } from './policyContext.js';
+import { currentIdentity, currentPolicy, currentSessionId, currentToolPolicy, currentTurnMode, currentTurnPermissions, currentWorkDir } from './policyContext.js';
 import { noninteractivePermissionBoundary, type NoninteractivePermissionBoundary } from '../brain/toolPermissions.js';
 import { toolResultSpillDir } from '../shared/paths.js';
 
@@ -26,8 +26,13 @@ export function isAllAccess(): boolean {
 /** The current turn's complete access as a plain descriptor a plugin can safely forward to a sub-agent.
  *  Owner truth stays independent from admin project scope, Set policies cross the platform boundary as
  *  arrays without losing the significant empty-allow-list case, and the effective granular permission
- *  boundary is snapshotted rather than re-resolved from the durable child row owner later. */
-export function currentAccess(): { projectIds: number[]; admin: boolean; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null } {
+ *  boundary is snapshotted rather than re-resolved from the durable child row owner later.
+ *
+ *  A turn running in PLAN mode stamps `readOnly`, which the host bakes into the child's toolset and
+ *  permission boundary (brain/platforms.ts). Forced here, at the single source every spawner reads, so
+ *  both Delegate and WorkflowStart inherit it by construction: the plugin only ever ADDS `readOnly` from
+ *  its own argument and never clears it, so a planning turn cannot talk its way into a writing child. */
+export function currentAccess(): { projectIds: number[]; admin: boolean; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean } {
   const p = currentPolicy();
   const tools = currentToolPolicy();
   const toolPolicy = tools ? {
@@ -40,6 +45,7 @@ export function currentAccess(): { projectIds: number[]; admin: boolean; owner: 
     owner: currentIdentity()?.owner === true,
     permissionBoundary: noninteractivePermissionBoundary(currentTurnPermissions()),
     ...(toolPolicy ? { toolPolicy } : {}),
+    ...(currentTurnMode() === 'plan' ? { readOnly: true } : {}),
   };
 }
 

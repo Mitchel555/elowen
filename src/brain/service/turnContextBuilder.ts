@@ -39,12 +39,18 @@ interface TurnContextBuilderDeps {
   completeSubagent?(parentSessionId: string, userId: number, completion: SubagentCompletion): void;
 }
 
-/** Tools plan mode admits even though they are NOT declared plan-safe, because this file also clamps
- *  them on the same turn. `planSafe` states "this tool only reads", which Bash plainly does not — it is
- *  usable while planning only because `scopeOptions` narrows the turn's shell rules to
- *  READ_ONLY_BASH_RULES. The two must always move together: admitting a tool here without a matching
- *  clamp would hand plan mode a way to mutate. Kept next to both halves so that is impossible to miss. */
-const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash']);
+/** Tools plan mode admits even though they are NOT declared plan-safe, because a clamp elsewhere makes
+ *  them safe for the duration of the turn. `planSafe` states "this tool only reads", which neither of
+ *  these does, so they are admitted here — beside the mode that clamps them — rather than by claiming
+ *  something untrue in a manifest. Admitting a tool here WITHOUT its clamp hands plan mode a way to
+ *  mutate, so the two must always move together:
+ *   - `Bash` — `scopeOptions` below narrows the turn's shell rules to READ_ONLY_BASH_RULES.
+ *   - `Delegate` — `scopeOptions` puts the turn's mode on the AsyncLocalStorage, and
+ *     pathGuard.currentAccess stamps `readOnly` on every delegation a planning turn makes, which the
+ *     host bakes into the child's toolset and permission boundary (brain/platforms.ts).
+ *  `WorkflowStart` stays withheld: it would inherit the same forcing, but its nodes expand through
+ *  `WorkflowAddNodes`, and admitting one without the other only buys a workflow that cannot grow. */
+const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate']);
 
 export interface PreparedTurnContext {
   autoSaveMemory: boolean;
@@ -155,6 +161,9 @@ export class TurnContextBuilder {
       toolPolicy,
       permissions,
       workDir,
+      // Carried into the turn's AsyncLocalStorage so the delegation path can see it: a turn spent
+      // planning may only ever spawn a read-only child (see pathGuard.currentAccess).
+      mode,
       sessionId: live.sessionId,
       model: { provider: live.providerId, model: live.model, thinkingLevel: live.thinkingLevel },
     };

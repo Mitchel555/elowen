@@ -387,8 +387,9 @@ export interface PluginContext {
   isAdminSession(): boolean;
   /** The current turn's complete delegable authorization descriptor. `owner` is independent from admin,
    *  toolPolicy carries exact allow+deny sets, and permissionBoundary carries the effective unattended
-   *  granular-rule context so a child inherits exactly the caller's scope. */
-  currentAccess(): { projectIds: number[]; admin: boolean; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null };
+   *  granular-rule context so a child inherits exactly the caller's scope. `readOnly` is stamped by the
+   *  host when the caller's turn is PLANNING — forward it untouched; never clear it. */
+  currentAccess(): { projectIds: number[]; admin: boolean; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean };
   /** Who is driving the current turn (platform sender, resolved Elowen account, admin flag) — plugins
    *  that persist per-user state (long-term memory) key it on this. Null outside a prompt turn. */
   currentIdentity(): TurnIdentity | null;

@@ -1941,7 +1941,7 @@ describe('BrainService', () => {
     );
     const reg = new PluginRegistry();
     const ctx = reg.contextFor('terminal', {}, { info() {}, warn() {}, error() {} });
-    for (const name of ['Bash', 'KillProcess']) {
+    for (const name of ['Bash', 'KillProcess', 'Delegate', 'WorkflowStart']) {
       ctx.registerTool(defineTool({
         name, label: name, description: name, parameters: Type.Object({}),
         execute: async () => ({ content: [{ type: 'text' as const, text: 'ok' }], details: {} }),
@@ -1956,8 +1956,12 @@ describe('BrainService', () => {
 
     const activeTools = d.session.setActiveToolsByName.mock.calls.at(-1)?.[0] ?? d.session.__active;
     expect(activeTools).toContain('Bash');
-    // The clamp is a shell-command boundary, not a blanket pass for the terminal plugin.
+    // Delegating exploration is the other half of what plan mode's prompt asks for; the child is forced
+    // read-only on the delegation path (tests/plugins/subagentTools.test.ts).
+    expect(activeTools).toContain('Delegate');
+    // Each admission is deliberate and paired with a clamp — not a blanket pass for the owning plugin.
     expect(activeTools).not.toContain('KillProcess');
+    expect(activeTools).not.toContain('WorkflowStart');
   });
 
   it('plan mode composes only DECLARED read-only tools — a reader-sounding name earns nothing', async () => {

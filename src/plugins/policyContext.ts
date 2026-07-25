@@ -63,7 +63,11 @@ export function toolPermitted(name: string, tp: ToolPolicy | undefined): boolean
   return true;
 }
 
-interface TurnScope { policy: Policy; workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel }
+/** The owner's work mode for this turn. Declared here rather than imported from the brain so the plugin
+ *  layer keeps its one-directional dependency; the brain's TurnMode is structurally identical. */
+export type TurnWorkMode = 'build' | 'plan' | 'workflow';
+
+interface TurnScope { policy: Policy; workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel; mode?: TurnWorkMode }
 
 /** pi tools have no per-call session context, so a plugin tool can't be told which user's policy applies
  *  through its arguments. We carry the resolved Policy (+ the sender's identity + their effective tool
@@ -75,8 +79,8 @@ const store = new AsyncLocalStorage<TurnScope>();
 /** Run `fn` (a brain prompt turn) with `policy` established for any plugin tool it invokes. `opts`
  *  carries the sender's identity, a turn-bound elicitor/card-emitter, and the effective tool policy —
  *  all read at tool-execute time via the `current*()` accessors. */
-export function runWithPolicy<T>(policy: Policy, fn: () => T, opts?: { workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel }): T {
-  return store.run({ policy, workDir: opts?.workDir, sessionId: opts?.sessionId, identity: opts?.identity, elicit: opts?.elicit, emitCard: opts?.emitCard, emitSubagent: opts?.emitSubagent, emitSubagentCompletion: opts?.emitSubagentCompletion, emitWorkflow: opts?.emitWorkflow, toolPolicy: opts?.toolPolicy, permissions: opts?.permissions, model: opts?.model }, fn);
+export function runWithPolicy<T>(policy: Policy, fn: () => T, opts?: { workDir?: string; sessionId?: string; identity?: TurnIdentity; elicit?: Elicitor; emitCard?: CardEmitter; emitSubagent?: SubagentEmitter; emitSubagentCompletion?: SubagentCompletionEmitter; emitWorkflow?: WorkflowEmitter; toolPolicy?: ToolPolicy; permissions?: TurnPermissions; model?: TurnModel; mode?: TurnWorkMode }): T {
+  return store.run({ policy, workDir: opts?.workDir, sessionId: opts?.sessionId, identity: opts?.identity, elicit: opts?.elicit, emitCard: opts?.emitCard, emitSubagent: opts?.emitSubagent, emitSubagentCompletion: opts?.emitSubagentCompletion, emitWorkflow: opts?.emitWorkflow, toolPolicy: opts?.toolPolicy, permissions: opts?.permissions, model: opts?.model, mode: opts?.mode }, fn);
 }
 
 /** The Policy in effect for the current prompt turn, or undefined outside a `runWithPolicy` scope. */
@@ -107,6 +111,13 @@ export function currentSessionId(): string | undefined {
  *  undefined when none was established (→ every plugin tool permitted). */
 export function currentToolPolicy(): ToolPolicy | undefined {
   return store.getStore()?.toolPolicy;
+}
+
+/** The owner's work mode for the current turn, or undefined where none is established (channel, cron and
+ *  sub-agent turns have no mode). Read by the delegation path so a turn spent PLANNING can only ever
+ *  spawn a read-only child. */
+export function currentTurnMode(): TurnWorkMode | undefined {
+  return store.getStore()?.mode;
 }
 
 /** The granular tool-permission context of the current turn (rules + effective YOLO + the approval
