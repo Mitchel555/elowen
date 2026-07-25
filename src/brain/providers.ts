@@ -45,18 +45,12 @@ export const OAUTH_BUILTIN: Record<string, string> = {
   'oauth-kimi': 'kimi-coding',
 };
 
-/** Image models the ChatGPT/OpenAI OAuth account exposes for the GenerateImage tool but that the pinned PI
- *  release does not list in the openai-codex catalog. The account's text models now ship natively, so only
- *  these remain Elowen's to add — the copy-forward below keeps PI's descriptors for everything else. */
-const OPENAI_CODEX_OAUTH_MODELS = ['gpt-image-1.5', 'gpt-image-2'] as const;
-
-function extendOpenAiCodexCatalog(registry: ModelRegistry): void {
-  const provider = 'openai-codex';
-  const builtins = registry.getAll().filter((model) => model.provider === provider);
-  const template = builtins.find((model) => model.id === 'gpt-5.5') ?? builtins[0];
-  if (!template) return; // PI dropped the provider — nothing to extend.
-  const existing = new Set(builtins.map((model) => model.id));
-  const models = builtins.map((model) => ({
+/** One built-in descriptor restated as a registration input. Registering an extension config REPLACES the
+ *  provider's model list rather than merging into it (pi-coding-agent's provider composer builds the new
+ *  list from the definitions alone), so every built-in has to be copied forward field by field or it
+ *  disappears from the account's catalog together with the metadata PI maintains for it. */
+function catalogDefinition(model: Model<Api>) {
+  return {
     id: model.id,
     name: model.name,
     api: model.api,
@@ -68,7 +62,21 @@ function extendOpenAiCodexCatalog(registry: ModelRegistry): void {
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     compat: model.compat,
-  }));
+  };
+}
+
+/** Image models the ChatGPT/OpenAI OAuth account exposes for the GenerateImage tool but that the pinned PI
+ *  release does not list in the openai-codex catalog. The account's text models now ship natively, so only
+ *  these remain Elowen's to add — the copy-forward below keeps PI's descriptors for everything else. */
+const OPENAI_CODEX_OAUTH_MODELS = ['gpt-image-1.5', 'gpt-image-2'] as const;
+
+function extendOpenAiCodexCatalog(registry: ModelRegistry): void {
+  const provider = 'openai-codex';
+  const builtins = registry.getAll().filter((model) => model.provider === provider);
+  const template = builtins.find((model) => model.id === 'gpt-5.5') ?? builtins[0];
+  if (!template) return; // PI dropped the provider — nothing to extend.
+  const existing = new Set(builtins.map((model) => model.id));
+  const models = builtins.map(catalogDefinition);
   for (const id of OPENAI_CODEX_OAUTH_MODELS) {
     if (existing.has(id)) continue;
     const capabilities = descriptorCapabilities(provider, id);
@@ -94,6 +102,32 @@ function extendOpenAiCodexCatalog(registry: ModelRegistry): void {
     api: 'openai-codex-responses',
     baseUrl: 'https://chatgpt.com/backend-api',
     models,
+  });
+}
+
+/** A Claude model the Anthropic account already serves that the pinned PI release does not list yet. Opus 5
+ *  is the same descriptor as Opus 4.8 in every field that matters — 1M context, 128k answer, $5/$25 rates,
+ *  no temperature knob, the same thinking ladder — so it is CLONED from that entry rather than hand-written:
+ *  the compat flags and effort levels stay whatever PI maintains for the tier instead of a second copy of
+ *  them drifting here. */
+const ANTHROPIC_OAUTH_MODEL = { id: 'claude-opus-5', name: 'Claude Opus 5', clonedFrom: 'claude-opus-4-8' } as const;
+
+function extendAnthropicCatalog(registry: ModelRegistry): void {
+  const provider = 'anthropic';
+  const builtins = registry.getAll().filter((model) => model.provider === provider);
+  // Already listed — either PI ships it now and its own descriptor wins, or this runtime was extended by an
+  // earlier build. Both want the same thing: leave the catalog alone.
+  if (builtins.some((model) => model.id === ANTHROPIC_OAUTH_MODEL.id)) return;
+  const template = builtins.find((model) => model.id === ANTHROPIC_OAUTH_MODEL.clonedFrom);
+  if (!template) return; // Nothing to clone from; no entry beats one guessed from scratch.
+  // Sorted so the catalog stays alphabetical, which is what PREFERRED_DEFAULT's fallback assumes. `name`,
+  // `api` and `baseUrl` are omitted on purpose: the composition falls back to the built-in's own for each,
+  // and to its native OAuth for the credential — restating them here would only be a copy that can drift.
+  registry.registerProvider(provider, {
+    models: [
+      ...builtins.map(catalogDefinition),
+      { ...catalogDefinition(template), id: ANTHROPIC_OAUTH_MODEL.id, name: ANTHROPIC_OAUTH_MODEL.name },
+    ].sort((a, b) => a.id.localeCompare(b.id)),
   });
 }
 
@@ -191,6 +225,7 @@ export function buildBrainRegistry(cfg: BrainRuntimeConfig, runtime: ModelRuntim
     if (id.startsWith('elowen-') && !wanted.has(id)) registry.unregisterProvider(id);
   }
   extendOpenAiCodexCatalog(registry);
+  extendAnthropicCatalog(registry);
   for (const p of cfg.providers) {
     if (p.type === 'openai') {
       const api = openAiApiFor(p);
@@ -239,7 +274,7 @@ export interface BrainModelRoute {
  *  account): the catalog is alphabetical, so "first" would be the OLDEST model. Prefer a known-good
  *  current model; fall back to the first catalog entry if it ever disappears. */
 export const PREFERRED_DEFAULT: Record<string, string> = {
-  anthropic: 'claude-opus-4-8',
+  anthropic: 'claude-opus-5',
   'openai-codex': 'gpt-5.5',
   'github-copilot': 'claude-opus-4.8',
   'kimi-coding': 'k3',

@@ -84,7 +84,25 @@ describe('listBrainModels', () => {
     const models = await listBrainModels(cfg, f);
     expect(models.length).toBeGreaterThan(0);
     expect(models.every((m) => m.provider === 'claude')).toBe(true);
-    expect(models.filter((m) => m.default).map((m) => m.model)).toEqual(['claude-opus-4-8']);
+    expect(models.filter((m) => m.default).map((m) => m.model)).toEqual(['claude-opus-5']);
+  });
+
+  // The Claude account serves Opus 5, but the pinned PI release's catalog stops at Opus 4.8 — without the
+  // clone the newest model is simply missing from the picker, and the default falls back to the older tier.
+  it('offers Opus 5 on the Claude account with the reasoning ladder of its tier', async () => {
+    const f = vi.fn() as unknown as typeof fetch;
+    const cfg: BrainRuntimeConfig = {
+      providers: [{ id: 'claude', label: 'Claude account', type: 'oauth-anthropic', baseUrl: '', models: [], apiKey: null }],
+    };
+    const models = await listBrainModels(cfg, f);
+    const opus5 = models.find((m) => m.model === 'claude-opus-5');
+    expect(opus5).toBeDefined();
+    expect(opus5!.reasoningLevels).toEqual(models.find((m) => m.model === 'claude-opus-4-8')!.reasoningLevels);
+    // Cloning must not cost the account the rest of its catalog: registering the extension replaces the
+    // provider's model list wholesale, so every built-in has to survive the round-trip.
+    expect(models.map((m) => m.model)).toEqual(expect.arrayContaining([
+      'claude-opus-4-8', 'claude-sonnet-5', 'claude-fable-5', 'claude-haiku-4-5',
+    ]));
   });
 
   it('adds the complete OpenAI OAuth account catalog', async () => {
