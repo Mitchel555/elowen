@@ -158,19 +158,33 @@ export function installExitGuards(options: {
   };
   const onSigTerm = onSignal(143);
   const onSigHup = onSignal(129);
+  // ctrl+c/ctrl+z normally arrive as raw bytes (the chat keybinds) because raw mode clears ISIG — but only
+  // while pi-tui owns the terminal. `shutdown()` restores it synchronously BEFORE the daemon stop has been
+  // sent, and it is off again around suspend (a `!` shell, the external editor) and the startup/teardown
+  // edges. Unhandled, a signal landing in one of those windows hits Node's default and kills the process
+  // instantly — taking the in-flight `stopSession` with it, so the daemon never learns the client left and
+  // keeps the conversation live and streaming (unresumable until the daemon restarts). Route them into the
+  // same bounded transaction; the `exiting` latch then swallows an impatient second press instead of
+  // letting it kill the very request that releases the session.
+  const onSigInt = onSignal(130);
+  const onSigTstp = onSignal(148);
   // Node does not wait for asynchronous work from `exit` or an uncaught-exception monitor. Entering the
   // coordinator still guarantees its synchronous terminal teardown; the detached daemon stop is strictly
-  // best-effort on these last-chance hooks. SIGTERM/SIGHUP above explicitly await the bounded promise.
+  // best-effort on these last-chance hooks. The signal handlers above explicitly await the bounded promise.
   const onExit = (): void => { options.teardownNow(); void options.shutdown(); };
   const onFatal = (): void => { options.teardownNow(); void options.shutdown(); };
   process.once('exit', onExit);
   process.once('SIGTERM', onSigTerm);
   process.once('SIGHUP', onSigHup);
+  process.once('SIGINT', onSigInt);
+  process.once('SIGTSTP', onSigTstp);
   process.once('uncaughtExceptionMonitor', onFatal);
   return (): void => {
     process.off('exit', onExit);
     process.off('SIGTERM', onSigTerm);
     process.off('SIGHUP', onSigHup);
+    process.off('SIGINT', onSigInt);
+    process.off('SIGTSTP', onSigTstp);
     process.off('uncaughtExceptionMonitor', onFatal);
   };
 }

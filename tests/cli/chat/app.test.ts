@@ -33,24 +33,74 @@ describe('initial transcript hydration', () => {
 });
 
 describe('installExitGuards — process listener lifecycle', () => {
-  it('registers exit/SIGTERM/SIGHUP guards and the disposer removes exactly those', () => {
+  it('registers exit/SIGTERM/SIGHUP/SIGINT/SIGTSTP guards and the disposer removes exactly those', () => {
     const before = {
       exit: process.listenerCount('exit'),
       term: process.listenerCount('SIGTERM'),
       hup: process.listenerCount('SIGHUP'),
+      int: process.listenerCount('SIGINT'),
+      tstp: process.listenerCount('SIGTSTP'),
       fatal: process.listenerCount('uncaughtExceptionMonitor'),
     };
     const dispose = installExitGuards({ shutdown: async () => {}, teardownNow: () => {}, exit: () => {} });
     expect(process.listenerCount('exit')).toBe(before.exit + 1);
     expect(process.listenerCount('SIGTERM')).toBe(before.term + 1);
     expect(process.listenerCount('SIGHUP')).toBe(before.hup + 1);
+    expect(process.listenerCount('SIGINT')).toBe(before.int + 1);
+    expect(process.listenerCount('SIGTSTP')).toBe(before.tstp + 1);
     expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before.fatal + 1);
     // Menu return: quit() calls the disposer, which must drop the count back so a relaunch doesn't stack.
     dispose();
     expect(process.listenerCount('exit')).toBe(before.exit);
     expect(process.listenerCount('SIGTERM')).toBe(before.term);
     expect(process.listenerCount('SIGHUP')).toBe(before.hup);
+    expect(process.listenerCount('SIGINT')).toBe(before.int);
+    expect(process.listenerCount('SIGTSTP')).toBe(before.tstp);
     expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before.fatal);
+  });
+
+  // Regression: SIGINT/SIGTSTP were unhandled, so a ctrl+c landing while raw mode was off (during
+  // shutdown's own terminal restore, a `!` shell, the editor) hit Node's default and killed the process
+  // instantly — taking the in-flight stopSession with it. The daemon never learned the client left, kept
+  // the conversation live and streaming, and /resume reattached to a wedged session until a daemon restart.
+  it('SIGINT issues the daemon stop through the bounded shutdown instead of killing the process', async () => {
+    const calls: string[] = [];
+    let finishStop!: () => void;
+    const shutdown = createShutdownCoordinator({
+      teardown: () => { calls.push('teardown'); },
+      stopBoundSession: () => new Promise<void>((resolve) => { calls.push('stop-session'); finishStop = resolve; }),
+      timeoutMs: 5_000,
+    });
+    const dispose = installExitGuards({ shutdown, teardownNow: shutdown.teardownNow, exit: (code) => { calls.push(`exit:${code}`); } });
+    const sigint = process.listeners('SIGINT').at(-1) as () => void;
+
+    sigint();
+    expect(calls).toEqual(['teardown']);
+    await Promise.resolve();
+    // The whole point: the session release is actually issued, and the process is still alive to send it.
+    expect(calls).toEqual(['teardown', 'stop-session']);
+    // An impatient second ctrl+c in that window must be swallowed, not kill the very request that frees
+    // the session (the `exiting` latch).
+    sigint();
+    expect(calls).toEqual(['teardown', 'stop-session']);
+
+    finishStop();
+    await shutdown();
+    await Promise.resolve();
+    expect(calls).toContain('exit:130');
+    dispose();
+  });
+
+  it('SIGTSTP (ctrl+z) takes the same release path rather than suspending with the session still held', async () => {
+    const calls: string[] = [];
+    const shutdown = vi.fn(async () => { calls.push('shutdown'); });
+    const dispose = installExitGuards({ shutdown, teardownNow: () => { calls.push('teardown-now'); }, exit: (code) => { calls.push(`exit:${code}`); } });
+    const sigtstp = process.listeners('SIGTSTP').at(-1) as () => void;
+    sigtstp();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(['teardown-now', 'shutdown', 'exit:148']);
+    dispose();
   });
 
   it('a signal waits for bounded shutdown before exiting', async () => {
