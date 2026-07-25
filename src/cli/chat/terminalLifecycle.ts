@@ -120,7 +120,13 @@ export function createShutdownCoordinator(options: ShutdownCoordinatorOptions): 
       timer = setTimeout(() => {
         stopAc.abort(new Error('chat shutdown timed out'));
         resolve();
-      }, options.timeoutMs ?? 750);
+        // Sized for the SLOW case, not the common one. Against a local daemon the stop returns in
+        // single-digit milliseconds and this timer never fires; it only matters when the daemon is remote
+        // or wedged, which is exactly when losing the release hurts most — an unreleased session keeps the
+        // conversation streaming and unresumable until the daemon restarts. The terminal is already
+        // restored synchronously by teardownNow(), so the cost of waiting is the process lingering before
+        // it exits, and paying that rarely beats stranding a session.
+      }, options.timeoutMs ?? 2_000);
     });
     const serverCleanup = Promise.race([
       Promise.resolve().then(() => options.stopBoundSession(stopAc.signal)).catch(() => {}),
