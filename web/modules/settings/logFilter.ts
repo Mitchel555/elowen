@@ -30,8 +30,14 @@ const RECORD = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\s+(DEBUG|INFO|WARN|E
 
 /** Split raw log lines into records. A line without the timestamp+level header is a CONTINUATION — a
  *  stack-trace frame or a wrapped payload — so it inherits the level and scope of the record it belongs
- *  to. Without that, filtering to `error` would show the error's first line and drop its whole stack. */
-export function parseLogLines(lines: readonly string[]): LogLine[] {
+ *  to. Without that, filtering to `error` would show the error's first line and drop its whole stack.
+ *
+ *  `firstLine` is the file line number of `lines[0]`. It is NOT optional in practice: the viewer is
+ *  normally handed a TAIL (the API serves the last 2000 lines by default), so numbering from 1 would
+ *  report a position off by the whole dropped prefix — confidently and silently, which is worse than not
+ *  showing a number at all. A tail also means the first lines can be continuations of a record that was
+ *  cut off above the window; those stay unattributed rather than inheriting a level we cannot know. */
+export function parseLogLines(lines: readonly string[], firstLine = 1): LogLine[] {
   const out: LogLine[] = [];
   let level: LogLevel | null = null;
   let scope: string | null = null;
@@ -42,7 +48,7 @@ export function parseLogLines(lines: readonly string[]): LogLine[] {
       level = m[1].toLowerCase() as LogLevel;
       scope = m[2] || null;
     }
-    out.push({ n: i + 1, text, level, scope });
+    out.push({ n: firstLine + i, text, level, scope });
   }
   return out;
 }

@@ -40,9 +40,16 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
   const deleteOne = useDeleteLogFile();
   const deleteAll = useDeleteAllLogFiles();
 
-  const parsed = useMemo(() => parseLogLines(file.data?.lines ?? []), [file.data]);
+  // The read is a TAIL, so the gutter has to start where the window starts — otherwise every number is
+  // off by the dropped prefix, which is most of the file on any busy day.
+  const parsed = useMemo(
+    () => parseLogLines(file.data?.lines ?? [], file.data ? file.data.totalLines - file.data.lines.length + 1 : 1),
+    [file.data],
+  );
   const visible = useMemo(() => filterLogLines(parsed, { query, levels }), [parsed, query, levels]);
-  const text = useMemo(() => visible.map((l) => l.text).join('\n'), [visible]);
+  // Monaco also breaks a model on a bare \r, so a captured line carrying one would produce more editor
+  // lines than entries here and shift every gutter number below it. Strip them: the log is line-oriented.
+  const text = useMemo(() => visible.map((l) => l.text.replace(/\r/g, '')).join('\n'), [visible]);
 
   const toggleLevel = (level: LogLevel): void => {
     setLevels((cur) => {

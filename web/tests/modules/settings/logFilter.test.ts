@@ -37,6 +37,24 @@ describe('parseLogLines', () => {
   it('handles an empty file', () => {
     expect(parseLogLines([])).toEqual([]);
   });
+
+  // Regression: the viewer is normally handed a TAIL (the API serves the last 2000 lines by default), so
+  // numbering from 1 reported a position off by the whole dropped prefix — silently, and on the common
+  // path. The gutter exists to be correlated against journalctl, so a confident wrong number is the worst
+  // possible output.
+  it('numbers a tail from its real position in the file, not from one', () => {
+    const parsed = parseLogLines(SAMPLE, 7683);
+    expect(parsed.map((l) => l.n)).toEqual([7683, 7684, 7685, 7686, 7687, 7688]);
+  });
+
+  it('keeps the real numbers through a filter, which is the whole point of the gutter', () => {
+    const parsed = parseLogLines(SAMPLE, 7683);
+    expect(filterLogLines(parsed, { query: '', levels: levels('error') }).map((l) => l.n)).toEqual([7684, 7685, 7686]);
+  });
+
+  it('defaults to one so a whole-file read still numbers from the top', () => {
+    expect(parseLogLines(SAMPLE).map((l) => l.n)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
 });
 
 describe('filterLogLines', () => {
