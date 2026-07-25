@@ -358,7 +358,7 @@ export interface PluginLogs {
 }
 
 /** One daily log file on disk (daemon or web), as listed by GET /system/logs. */
-export interface LogFile {
+interface LogFile {
   name: string;
   source: 'daemon' | 'web';
   bytes: number;

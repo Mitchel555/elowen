@@ -45,10 +45,11 @@ export interface PermissionSettings {
 /** Tool names whose permission is decided in the `bash` pattern space, against `args.command`. */
 export const BASH_PERMISSION_TOOLS: ReadonlySet<string> = new Set(['Bash']);
 
-/** The read-only shell allow-list: commands that only ever inspect, never mutate. It is the single
- *  source of truth for "safe to run without asking" — consumed both by the built-in defaults below and by
- *  the read-only agent boundary (see brain/agents/readOnlyBoundary.ts), so the two can never drift. */
-export const READ_ONLY_BASH_ALLOW: readonly string[] = [
+/** The read-only shell allow-list: commands that only ever inspect, never mutate. The single source of
+ *  truth for "safe to run without asking" — feeding both the built-in defaults below and the full clamp
+ *  in READ_ONLY_BASH_RULES, so every read-only context sees the same list. Module-private: callers take
+ *  the assembled rules, never the bare patterns, so nobody can re-permit these without the re-denies. */
+const READ_ONLY_BASH_ALLOW: readonly string[] = [
   'git status*', 'git diff*', 'git log*', 'ls', 'ls *', 'pwd', 'cat *', 'grep *', 'which *',
 ];
 

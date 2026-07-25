@@ -13,7 +13,7 @@ import { LOG_DIR } from '../shared/logger.js';
  * reach a file the log viewer was never meant to expose.
  */
 
-export type LogSource = 'daemon' | 'web';
+type LogSource = 'daemon' | 'web';
 
 export interface LogFileInfo {
   name: string;
@@ -23,7 +23,7 @@ export interface LogFileInfo {
   modifiedAt: number;
 }
 
-export interface LogFileContent {
+interface LogFileContent {
   name: string;
   /** The tail: at most `limit` lines, in file order. */
   lines: string[];
@@ -44,7 +44,7 @@ const LOG_NAME = /^(daemon|web)-\d{4}-\d{2}-\d{2}\.log$/;
 
 /** A whole file is read to serve a tail, so cap what may be pulled into memory at once. Well above any
  *  real daily log (the largest observed is single-digit MB) and far below anything that could OOM. */
-export const MAX_LOG_READ_BYTES = 64 * 1024 * 1024;
+const MAX_LOG_READ_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_LOG_TAIL_LINES = 2_000;
 export const MAX_LOG_TAIL_LINES = 50_000;
 
