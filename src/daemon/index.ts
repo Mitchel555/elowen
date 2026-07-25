@@ -4,6 +4,7 @@ import { buildApp } from './bootstrap.js';
 import { terminalWsHandler } from '../terminal/wsHandler.js';
 import { loadPty } from '../terminal/ptyLoader.js';
 import { logger, LOG_DIR } from '../shared/logger.js';
+import { dbPath } from '../shared/paths.js';
 
 const log = logger('daemon');
 
@@ -31,7 +32,11 @@ const bootstrapPass = process.env.ELOWEN_BOOTSTRAP_PASS;
 let built: Awaited<ReturnType<typeof buildApp>>;
 try {
   built = await buildApp({
-    dbPath: process.env.ELOWEN_DB ?? `${process.env.HOME}/.config/elowen/elowen.db`,
+    // The shared resolver, not a second copy of the rule: this one interpolated an unset HOME straight
+    // into the path (a literal "undefined/.config/…", relative to the cwd) and let an EMPTY ELOWEN_DB
+    // through, which SQLite opens as an anonymous temporary database — every conversation lost on restart,
+    // silently. The launcher always injects ELOWEN_DB, so only a directly started unit hits this.
+    dbPath: dbPath(process.env),
     project: { id: 1, slug: process.env.ELOWEN_PROJECT ?? 'elowen', path: process.env.ELOWEN_PROJECT_PATH ?? process.cwd() },
     relay: relayUrl ? { baseUrl: relayUrl, apiKey: process.env.ELOWEN_RELAY_KEY ?? '', model: process.env.ELOWEN_RELAY_MODEL ?? 'gpt-4o-mini' } : null,
     bootstrap: bootstrapUser && bootstrapPass ? { username: bootstrapUser, password: bootstrapPass } : null,

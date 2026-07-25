@@ -310,6 +310,9 @@ export class ConversationLifecycle {
         clientCwd: prevWorkDir,
       });
       live.interactedAt = Date.now(); // a model switch is a deliberate touch — don't idle-roll it over
+      // The user's mode survives the respawn: a host-initiated delivery reads it (buildScope) to stay
+      // clamped, so dropping it here would silently rearm a plan turn's withheld tools.
+      live.lastTurnMode = previous?.lastTurnMode;
       this.d.sessions.set(sessionId, live);
       // Carry the previous live's direct listeners onto the fresh one (mirrors maybeRollover/maybeVisionHop):
       // open SSE taps are already re-attached by the spawner (sessionTaps), so this covers the non-tap
@@ -372,6 +375,9 @@ export class ConversationLifecycle {
     // Attached listener sets were re-keyed before spawn so both the spawner and a racing stop request see
     // the replacement identity. Carry the raw live listeners as well (non-client internal listeners).
     for (const l of carried) fresh.listeners.add(l);
+    // Same client, same mode toggle — carry it so a delivery into the rolled-over conversation stays
+    // clamped (buildScope reads it).
+    fresh.lastTurnMode = b.lastTurnMode;
     fresh.replay.publish({ type: 'session', sessionId: fresh.sessionId });
     return fresh;
   }
@@ -421,6 +427,7 @@ export class ConversationLifecycle {
     const fresh = this.d.sessions.get(hopId);
     if (!fresh) throw new Error('brain not started for user');
     for (const listener of listeners) fresh.listeners.add(listener);
+    fresh.lastTurnMode = b.lastTurnMode; // the hop is not a mode change (buildScope reads it)
     // Mark the fallback active only if the respawn actually reached the requested vision model (not the
     // configured default because the vision model was unavailable/disallowed) — so the NEXT text turn
     // hops back. Provider matters too: two configured entries can expose the same model id.

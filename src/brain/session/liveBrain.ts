@@ -103,7 +103,11 @@ export interface LiveBrain {
    *  record of it). A HOST-initiated turn carries no request of its own — a background sub-agent result is
    *  delivered through buildScope — and must not silently fall back to 'build': that would rebuild the turn
    *  without plan mode's shell clamp and re-advertise the tools plan mode withheld, letting a delivery that
-   *  lands mid-planning mutate the repo. */
+   *  lands mid-planning mutate the repo.
+   *
+   *  Carried across every in-memory respawn (model switch, idle rollover, vision hop). It does NOT survive
+   *  a daemon restart: the mode is a per-request CLI flag with no durable home, so a result drained into a
+   *  freshly respawned session falls back to 'build' until the user's next real turn re-states it. */
   lastTurnMode?: TurnMode;
   /** Platform id (e.g. Discord author) of the sender whose turn is currently in flight — set at the
    *  start of a channel turn. Mid-run injection only STEERS a message into the running turn when it comes
