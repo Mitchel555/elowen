@@ -33,13 +33,12 @@ describe('initial transcript hydration', () => {
 });
 
 describe('installExitGuards — process listener lifecycle', () => {
-  it('registers exit/SIGTERM/SIGHUP/SIGINT/SIGTSTP guards and the disposer removes exactly those', () => {
+  it('registers exit/SIGTERM/SIGHUP/SIGINT guards and the disposer removes exactly those', () => {
     const before = {
       exit: process.listenerCount('exit'),
       term: process.listenerCount('SIGTERM'),
       hup: process.listenerCount('SIGHUP'),
       int: process.listenerCount('SIGINT'),
-      tstp: process.listenerCount('SIGTSTP'),
       fatal: process.listenerCount('uncaughtExceptionMonitor'),
     };
     const dispose = installExitGuards({ shutdown: async () => {}, teardownNow: () => {}, exit: () => {} });
@@ -47,7 +46,6 @@ describe('installExitGuards — process listener lifecycle', () => {
     expect(process.listenerCount('SIGTERM')).toBe(before.term + 1);
     expect(process.listenerCount('SIGHUP')).toBe(before.hup + 1);
     expect(process.listenerCount('SIGINT')).toBe(before.int + 1);
-    expect(process.listenerCount('SIGTSTP')).toBe(before.tstp + 1);
     expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before.fatal + 1);
     // Menu return: quit() calls the disposer, which must drop the count back so a relaunch doesn't stack.
     dispose();
@@ -55,7 +53,6 @@ describe('installExitGuards — process listener lifecycle', () => {
     expect(process.listenerCount('SIGTERM')).toBe(before.term);
     expect(process.listenerCount('SIGHUP')).toBe(before.hup);
     expect(process.listenerCount('SIGINT')).toBe(before.int);
-    expect(process.listenerCount('SIGTSTP')).toBe(before.tstp);
     expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before.fatal);
   });
 
@@ -67,7 +64,7 @@ describe('installExitGuards — process listener lifecycle', () => {
   // the registration itself — a `once` listener appears in rawListeners as a wrapper carrying `.listener`.
   it('registers the signal guards so they SURVIVE being dispatched', () => {
     const dispose = installExitGuards({ shutdown: async () => {}, teardownNow: () => {}, exit: () => {} });
-    for (const signal of ['SIGINT', 'SIGTSTP', 'SIGTERM', 'SIGHUP'] as const) {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
       const raw = process.rawListeners(signal).at(-1) as { listener?: unknown };
       expect(raw, signal).toBeTypeOf('function');
       expect(raw.listener, `${signal} must be registered with .on, not .once`).toBeUndefined();
@@ -75,7 +72,7 @@ describe('installExitGuards — process listener lifecycle', () => {
     dispose();
   });
 
-  // Regression: SIGINT/SIGTSTP were unhandled, so a ctrl+c landing while raw mode was off (during
+  // Regression: SIGINT was unhandled, so a ctrl+c landing while raw mode was off (during
   // shutdown's own terminal restore, a `!` shell, the editor) hit Node's default and killed the process
   // instantly — taking the in-flight stopSession with it. The daemon never learned the client left, kept
   // the conversation live and streaming, and /resume reattached to a wedged session until a daemon restart.
@@ -107,15 +104,17 @@ describe('installExitGuards — process listener lifecycle', () => {
     dispose();
   });
 
-  it('SIGTSTP (ctrl+z) takes the same release path rather than suspending with the session still held', async () => {
-    const calls: string[] = [];
-    const shutdown = vi.fn(async () => { calls.push('shutdown'); });
-    const dispose = installExitGuards({ shutdown, teardownNow: () => { calls.push('teardown-now'); }, exit: (code) => { calls.push(`exit:${code}`); } });
-    const sigtstp = process.listeners('SIGTSTP').at(-1) as () => void;
-    sigtstp();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(calls).toEqual(['teardown-now', 'shutdown', 'exit:148']);
+  // Regression: SIGTSTP was briefly routed into the same shutdown as SIGINT. It only ever reaches this
+  // process while raw mode is OFF — inside the external editor or a `!` shell — and vim signals the whole
+  // process group, so the handler tore the chat down around a live editor: SIGTERM, then SIGKILL once the
+  // bounded wait expired (a stopped process cannot service TERM), the draft temp file removed by the
+  // editor's own finally, and the alt-screen reset written into a terminal the editor still owned. A
+  // reflexive ctrl+z destroyed unsaved work. Suspend is not exit — the default disposition stops the group
+  // and `fg` resumes it with the session still bound, so no release is owed here in the first place.
+  it('leaves SIGTSTP to default job control so ctrl+z suspends instead of quitting', () => {
+    const before = process.listenerCount('SIGTSTP');
+    const dispose = installExitGuards({ shutdown: async () => {}, teardownNow: () => {}, exit: () => {} });
+    expect(process.listenerCount('SIGTSTP')).toBe(before);
     dispose();
   });
 

@@ -158,16 +158,22 @@ export function installExitGuards(options: {
   };
   const onSigTerm = onSignal(143);
   const onSigHup = onSignal(129);
-  // ctrl+c/ctrl+z normally arrive as raw bytes (the chat keybinds) because raw mode clears ISIG — but only
-  // while pi-tui owns the terminal. `shutdown()` restores it synchronously BEFORE the daemon stop has been
-  // sent, and it is off again around suspend (a `!` shell, the external editor) and the startup/teardown
-  // edges. Unhandled, a signal landing in one of those windows hits Node's default and kills the process
-  // instantly — taking the in-flight `stopSession` with it, so the daemon never learns the client left and
-  // keeps the conversation live and streaming (unresumable until the daemon restarts). Route them into the
-  // same bounded transaction; the `exiting` latch then swallows an impatient second press instead of
-  // letting it kill the very request that releases the session.
+  // ctrl+c normally arrives as a raw byte (the chat keybinds) because raw mode clears ISIG — but only while
+  // pi-tui owns the terminal. `shutdown()` restores it synchronously BEFORE the daemon stop has been sent,
+  // and it is off again around suspend (a `!` shell, the external editor) and the startup/teardown edges.
+  // Unhandled, a SIGINT landing in one of those windows hits Node's default and kills the process instantly
+  // — taking the in-flight `stopSession` with it, so the daemon never learns the client left and keeps the
+  // conversation live and streaming (unresumable until the daemon restarts). Route it into the same bounded
+  // transaction; the `exiting` latch then swallows an impatient second press instead of letting it kill the
+  // very request that releases the session.
+  //
+  // SIGTSTP is deliberately NOT handled. It reaches this process only in those same raw-mode-off windows,
+  // and every one of them is a moment where quitting is the wrong answer: ctrl+z inside the external editor
+  // is a reflex, and vim signals the whole process group, so a handler here tore down the chat around a
+  // still-running editor — SIGKILLing it after the bounded wait (a stopped process cannot service SIGTERM),
+  // deleting the draft temp file, and writing the alt-screen reset into a terminal the editor owned. Suspend
+  // is not exit: the default disposition stops the group, and `fg` resumes it with the session still bound.
   const onSigInt = onSignal(130);
-  const onSigTstp = onSignal(148);
   // Node does not wait for asynchronous work from `exit` or an uncaught-exception monitor. Entering the
   // coordinator still guarantees its synchronous terminal teardown; the detached daemon stop is strictly
   // best-effort on these last-chance hooks. The signal handlers above explicitly await the bounded promise.
@@ -181,14 +187,12 @@ export function installExitGuards(options: {
   process.on('SIGTERM', onSigTerm);
   process.on('SIGHUP', onSigHup);
   process.on('SIGINT', onSigInt);
-  process.on('SIGTSTP', onSigTstp);
   process.once('uncaughtExceptionMonitor', onFatal);
   return (): void => {
     process.off('exit', onExit);
     process.off('SIGTERM', onSigTerm);
     process.off('SIGHUP', onSigHup);
     process.off('SIGINT', onSigInt);
-    process.off('SIGTSTP', onSigTstp);
     process.off('uncaughtExceptionMonitor', onFatal);
   };
 }
