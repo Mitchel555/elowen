@@ -282,15 +282,22 @@ export const usePluginContributions = (name: string | null) =>
 export const usePluginLogs = (name: string | null) =>
   useQuery({ queryKey: ['plugin-logs', name], queryFn: () => elowenClient.pluginLogs(name as string), enabled: !!name, refetchInterval: name ? 3000 : false });
 
-/** The daily log files on disk (Settings → Data → Logs). Not polled: the list only changes when a day
- *  rolls over or the user deletes something, both of which already invalidate it. */
-export const useLogFiles = (enabled = true) =>
-  useQuery({ queryKey: ['log-files'], queryFn: () => elowenClient.logFiles(), enabled });
+/** How often the open log viewer re-pulls the file list and the selected file's tail, so new entries
+ *  appear without a manual refresh. A few seconds keeps it live without hammering the daemon; polling
+ *  only runs while the modal (and thus these observers) is mounted with `poll` set. */
+const LOG_POLL_MS = 3000;
+
+/** The daily log files on disk (Settings → Data → Logs). `poll` is set only by the open log viewer so
+ *  a new day's file / changing sizes stay current; the Data-tab summary reads it without polling, and a
+ *  day roll-over or a delete already invalidates it. */
+export const useLogFiles = (enabled = true, poll = false) =>
+  useQuery({ queryKey: ['log-files'], queryFn: () => elowenClient.logFiles(), enabled, refetchInterval: poll ? LOG_POLL_MS : false });
 
 /** A bounded tail of one log file. `lines` is part of the key so asking for the whole file after a
- *  truncated read fetches instead of serving the short cached copy. */
-export const useLogFile = (name: string | null, lines?: number) =>
-  useQuery({ queryKey: ['log-file', name, lines ?? null], queryFn: () => elowenClient.logFile(name as string, lines), enabled: !!name });
+ *  truncated read fetches instead of serving the short cached copy. `poll` keeps the tail live in the
+ *  open viewer — it is left off for a full-file read so polling never re-pulls a large payload. */
+export const useLogFile = (name: string | null, lines?: number, poll = false) =>
+  useQuery({ queryKey: ['log-file', name, lines ?? null], queryFn: () => elowenClient.logFile(name as string, lines), enabled: !!name, refetchInterval: poll ? LOG_POLL_MS : false });
 
 /** One plugin's hook-run audit, newest-first (the Hooks section's recent-executions panel). */
 export const usePluginHookExecutions = (name: string | null) =>

@@ -1075,14 +1075,13 @@ export default function SettingsPage() {
         <SettingsPanel id="data" active={category} visited={visitedCategories}>
           <SettingsGroup
             title={t.settings.logs}
-            description={t.settings.logsDesc}
             icon={ScrollText}
             actions={<Button icon={ScrollText} onClick={() => setLogsOpen(true)}>{t.settings.logsOpen}</Button>}
           >
             <SettingsState>
               {logFiles.data
                 ? `${logFiles.data.dir} — ${logFiles.data.files.length} × ${formatLogSize(logFiles.data.files.reduce((sum, f) => sum + f.bytes, 0))}`
-                : t.settings.logsDesc}
+                : t.common.loading}
             </SettingsState>
           </SettingsGroup>
           <SettingsGroup

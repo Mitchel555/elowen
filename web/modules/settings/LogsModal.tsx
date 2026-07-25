@@ -1,6 +1,7 @@
 'use client';
-import { useMemo, useState } from 'react';
-import { ScrollText, Trash2, RefreshCw } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ScrollText, Trash2 } from 'lucide-react';
+import type { OnMount } from '@monaco-editor/react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Button } from '../../components/ui/Button';
@@ -25,6 +26,12 @@ const LEVEL_CLASS: Record<LogLevel, string> = {
   error: 'text-danger',
 };
 
+type CodeEditor = Parameters<OnMount>[0];
+
+/** How close to the bottom (px) still counts as "reading the tail" — roughly a line. Within it a live
+ *  refresh follows the newest line; past it the reader has scrolled up and their position is kept. */
+const SCROLL_BOTTOM_SLACK = 8;
+
 /** Read-only Monaco viewer for the Elowen log files: pick a file, filter it, delete what is stale. */
 export function LogsModal({ onClose }: { onClose: () => void }) {
   const { t, locale } = useTranslation();
@@ -34,9 +41,16 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
   const [levels, setLevels] = useState<ReadonlySet<LogLevel>>(new Set<LogLevel>());
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleteAllOpen, setDeleteAllOpen] = useState(false);
+  const [editor, setEditor] = useState<CodeEditor | null>(null);
+  // Whether the current editor instance has had its first content set. Reset on mount (the editor
+  // remounts per file via key={selected}), so the initial fill leaves the view at the top while later
+  // live refreshes preserve the reader's scroll.
+  const initialized = useRef(false);
 
-  const list = useLogFiles();
-  const file = useLogFile(selected, full ? FULL_FILE_LINES : undefined);
+  // The list and the selected file's tail poll on their own while the modal is open (both queries only
+  // exist while it is mounted). A full-file read is not polled — it must not re-pull a large payload.
+  const list = useLogFiles(true, true);
+  const file = useLogFile(selected, full ? FULL_FILE_LINES : undefined, !full);
   const deleteOne = useDeleteLogFile();
   const deleteAll = useDeleteAllLogFiles();
 
@@ -50,6 +64,27 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
   // Monaco also breaks a model on a bare \r, so a captured line carrying one would produce more editor
   // lines than entries here and shift every gutter number below it. Strip them: the log is line-oriented.
   const text = useMemo(() => visible.map((l) => l.text.replace(/\r/g, '')).join('\n'), [visible]);
+
+  // Feed Monaco by hand instead of the controlled `value` prop. On a read-only editor that prop calls
+  // setValue on every change, which slams the scroll back to the top — turning each poll into a jump.
+  // Here the first fill leaves the view at the top (as before), and a live refresh only follows the tail
+  // when the reader is already parked at the bottom; otherwise their scroll position is kept.
+  useEffect(() => {
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model || model.getValue() === text) return;
+    if (!initialized.current) {
+      model.setValue(text);
+      initialized.current = true;
+      return;
+    }
+    const atBottom = editor.getScrollTop() >= editor.getScrollHeight() - editor.getLayoutInfo().height - SCROLL_BOTTOM_SLACK;
+    const top = editor.getScrollTop();
+    model.setValue(text);
+    editor.setScrollTop(atBottom ? editor.getScrollHeight() : top);
+  }, [text, editor]);
+
+  const onEditorMount: OnMount = (instance): void => { initialized.current = false; setEditor(instance); };
 
   const toggleLevel = (level: LogLevel): void => {
     setLevels((cur) => {
@@ -70,10 +105,7 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
       <Modal title={t.settings.logs} description={list.data?.dir} icon={ScrollText} onClose={onClose}>
         <div className="flex min-h-0 flex-1 gap-4 p-4">
           <div className="flex w-64 shrink-0 flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <Button variant="ghost" icon={RefreshCw} disabled={list.isFetching} onClick={() => void list.refetch()}>
-                {t.settings.logsRefresh}
-              </Button>
+            <div className="flex items-center justify-end gap-2">
               <Button variant="danger" icon={Trash2} disabled={files.length === 0 || deleteAll.isPending} onClick={() => setDeleteAllOpen(true)}>
                 {t.settings.logsDeleteAll}
               </Button>
@@ -163,7 +195,7 @@ export function LogsModal({ onClose }: { onClose: () => void }) {
                   language="plaintext"
                   theme="elowen-oled"
                   beforeMount={defineEditorThemes}
-                  value={text}
+                  onMount={onEditorMount}
                   options={{
                     readOnly: true,
                     fontSize: 12,
