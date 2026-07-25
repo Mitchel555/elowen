@@ -1931,6 +1931,35 @@ describe('BrainService', () => {
     expect(activeTools).not.toContain('ElowenPlan');
   });
 
+  // Bash is admitted in plan mode even though it is NOT declared plan-safe, because the same turn narrows
+  // the shell ruleset to READ_ONLY_BASH_RULES (covered in toolPermissions.test.ts). Withholding it made
+  // the mode's own prompt a lie: it invites read-only inspection the model then had no way to perform.
+  it('plan mode keeps Bash available for read-only inspection', async () => {
+    const d = fakeDeps();
+    d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
+      name === 'cli/plan-mode' ? 'PLAN MODE PROMPT' : `PERSONA:${name}:${vars.userName}`,
+    );
+    const reg = new PluginRegistry();
+    const ctx = reg.contextFor('terminal', {}, { info() {}, warn() {}, error() {} });
+    for (const name of ['Bash', 'KillProcess']) {
+      ctx.registerTool(defineTool({
+        name, label: name, description: name, parameters: Type.Object({}),
+        execute: async () => ({ content: [{ type: 'text' as const, text: 'ok' }], details: {} }),
+      }));
+    }
+    (d as unknown as { plugins: unknown }).plugins = new PluginRegistryProvider(async () => reg);
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    d.session.setActiveToolsByName.mockClear();
+
+    await svc.send({ userId: 1, text: 'plan it first', mode: 'plan' });
+
+    const activeTools = d.session.setActiveToolsByName.mock.calls.at(-1)?.[0] ?? d.session.__active;
+    expect(activeTools).toContain('Bash');
+    // The clamp is a shell-command boundary, not a blanket pass for the terminal plugin.
+    expect(activeTools).not.toContain('KillProcess');
+  });
+
   it('plan mode composes only DECLARED read-only tools — a reader-sounding name earns nothing', async () => {
     const d = fakeDeps();
     d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>

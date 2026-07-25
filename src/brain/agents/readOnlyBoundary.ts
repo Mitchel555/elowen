@@ -1,42 +1,21 @@
 import {
   normalizeNoninteractivePermissionBoundary,
-  READ_ONLY_BASH_ALLOW,
+  READ_ONLY_BASH_RULES,
   type NoninteractivePermissionBoundary,
   type PermissionRule,
 } from '../toolPermissions.js';
 
 /** The restrictions layered onto a read-only agent's boundary, in order. Appended AFTER the parent's own
- *  rules so — with last-match-wins resolution — they win over an inherited allow: writes are denied, every
- *  shell command is denied, then only the read-only allow-list is re-permitted, and finally the re-deny
- *  rules below claw back the dangerous ways an otherwise-allowed command can still write or execute:
- *   - `*>*` — an output redirection (`>` / `>>`) is a write; `cat x > victim` would otherwise ride the
- *     `cat *` allow (the `>` is not a command separator, so it stays in the same segment);
- *   - `git difftool*` / `git mergetool*` and `*--ext-diff*` / `*--extcmd*` / `*GIT_EXTERNAL_DIFF*` — every
- *     path by which git runs an arbitrary external command, which the broad `git diff*` allow would admit;
- *   - `*--output*` — `git diff`/`git log --output=FILE` writes a file, and carries no `>` to catch;
- *   - `*GIT_CONFIG*=*` / `*GIT_PAGER=*` — a leading env assignment of the GIT_CONFIG* family (GIT_CONFIG,
- *     GIT_CONFIG_GLOBAL/SYSTEM, GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS) or
- *     GIT_PAGER injects core.pager/diff.external/textconv → arbitrary exec. segmentMatchValues strips
- *     these leading `VAR=val` assignments off the canonical form (so `… git diff` still matches the allow),
- *     but they survive in the VERBATIM value these patterns match; the `=` keeps a safe read of a file
- *     merely NAMED like the var (`cat GIT_CONFIG_notes.md`) out of the net.
+ *  rules so — with last-match-wins resolution — they win over an inherited allow: writes are denied, then
+ *  the shared shell clamp (deny everything, re-permit only the read-only allow-list, claw back the
+ *  redirection/git-exec escapes — see READ_ONLY_BASH_RULES for why each rule is there).
  *  This is the unattended security clamp; the shared READ_ONLY_BASH_ALLOW stays frictionless for the
  *  interactive owner, who is trusted to run these. `Write`/`Edit` deny is defense-in-depth (a read-only
  *  agent never holds them in its tool allow-list either). */
 const READ_ONLY_RESTRICT_RULES: readonly PermissionRule[] = [
   { scope: 'tools', pattern: 'Write', action: 'deny' },
   { scope: 'tools', pattern: 'Edit', action: 'deny' },
-  { scope: 'bash', pattern: '*', action: 'deny' },
-  ...READ_ONLY_BASH_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
-  { scope: 'bash', pattern: '*>*', action: 'deny' },
-  { scope: 'bash', pattern: 'git difftool*', action: 'deny' },
-  { scope: 'bash', pattern: 'git mergetool*', action: 'deny' },
-  { scope: 'bash', pattern: '*--ext-diff*', action: 'deny' },
-  { scope: 'bash', pattern: '*--extcmd*', action: 'deny' },
-  { scope: 'bash', pattern: '*GIT_EXTERNAL_DIFF*', action: 'deny' },
-  { scope: 'bash', pattern: '*--output*', action: 'deny' },
-  { scope: 'bash', pattern: '*GIT_CONFIG*=*', action: 'deny' },
-  { scope: 'bash', pattern: '*GIT_PAGER=*', action: 'deny' },
+  ...READ_ONLY_BASH_RULES,
 ];
 
 /**

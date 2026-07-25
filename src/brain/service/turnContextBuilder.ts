@@ -16,7 +16,7 @@ import { applyToolVisibility } from '../session/capabilities.js';
 import type { LiveBrain } from '../session/liveBrain.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
 import { isPromptCommand } from '../slashCommands.js';
-import { summarizePermissions } from '../toolPermissions.js';
+import { summarizePermissions, READ_ONLY_BASH_RULES } from '../toolPermissions.js';
 import { xmlEscape } from '../../shared/xml.js';
 import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
@@ -38,6 +38,13 @@ interface TurnContextBuilderDeps {
   projectPath?: () => string | undefined;
   completeSubagent?(parentSessionId: string, userId: number, completion: SubagentCompletion): void;
 }
+
+/** Tools plan mode admits even though they are NOT declared plan-safe, because this file also clamps
+ *  them on the same turn. `planSafe` states "this tool only reads", which Bash plainly does not — it is
+ *  usable while planning only because `scopeOptions` narrows the turn's shell rules to
+ *  READ_ONLY_BASH_RULES. The two must always move together: admitting a tool here without a matching
+ *  clamp would hand plan mode a way to mutate. Kept next to both halves so that is impossible to miss. */
+const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash']);
 
 export interface PreparedTurnContext {
   autoSaveMemory: boolean;
@@ -130,7 +137,14 @@ export class TurnContextBuilder {
     };
     const toolPolicy = this.applyOwnerToolPolicy(userId, live, mode);
     const workDir = turnWorkDir(live.policy, clientCwd ?? live.workDir, this.d.projectPath);
-    const permissions = this.d.permissions.turnPermissions(userId, live, true);
+    const base = this.d.permissions.turnPermissions(userId, live, true);
+    // The other half of admitting Bash in plan mode: narrow the turn's shell rules to the shared
+    // read-only clamp. Appended LAST so last-match-wins puts it over the user's own rules — a planning
+    // turn must not mutate even for someone who allowed `rm *` in Settings. `deny` also survives YOLO
+    // (which only promotes `ask`), so plan mode keeps its promise with auto-approval switched on.
+    const permissions = base && mode === 'plan'
+      ? { ...base, ruleset: [...base.ruleset, ...READ_ONLY_BASH_RULES] }
+      : base;
     return {
       identity,
       elicit,
@@ -233,7 +247,7 @@ export class TurnContextBuilder {
     const denied = new Set(this.d.users.get(userId)?.disabled_tools ?? []);
     if (mode === 'plan') {
       for (const tool of live.session.getAllTools?.() ?? []) {
-        if (!live.planSafeToolNames.has(tool.name)) denied.add(tool.name);
+        if (!PLAN_MODE_CLAMPED_TOOLS.has(tool.name) && !live.planSafeToolNames.has(tool.name)) denied.add(tool.name);
       }
     }
     const policy = denied.size ? { deny: denied } : undefined;

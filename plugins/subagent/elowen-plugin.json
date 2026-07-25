@@ -26,5 +26,11 @@
     "WorkflowStart": "\ud83d\udd00",
     "WorkflowAddNodes": "\u2795",
     "WorkflowStatus": "\ud83d\udcca"
-  }
+  },
+  "planSafe": [
+    "DelegateStatus",
+    "DelegateResult",
+    "DelegateModels",
+    "WorkflowStatus"
+  ]
 }

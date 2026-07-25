@@ -52,6 +52,36 @@ export const READ_ONLY_BASH_ALLOW: readonly string[] = [
   'git status*', 'git diff*', 'git log*', 'ls', 'ls *', 'pwd', 'cat *', 'grep *', 'which *',
 ];
 
+/** The full shell clamp for a context that must not mutate: deny every command, re-permit only the
+ *  read-only allow-list above, then claw back the ways an otherwise-allowed command can still write or
+ *  execute. Order is load-bearing (last-match-wins). The re-denies, and why each is needed:
+ *   - `*>*` — an output redirection (`>` / `>>`) is a write; `cat x > victim` would otherwise ride the
+ *     `cat *` allow (the `>` is not a command separator, so it stays in the same segment);
+ *   - `git difftool*` / `git mergetool*` and `*--ext-diff*` / `*--extcmd*` / `*GIT_EXTERNAL_DIFF*` — every
+ *     path by which git runs an arbitrary external command, which the broad `git diff*` allow would admit;
+ *   - `*--output*` — `git diff`/`git log --output=FILE` writes a file, and carries no `>` to catch;
+ *   - `*GIT_CONFIG*=*` / `*GIT_PAGER=*` — a leading env assignment of the GIT_CONFIG* family (GIT_CONFIG,
+ *     GIT_CONFIG_GLOBAL/SYSTEM, GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS) or
+ *     GIT_PAGER injects core.pager/diff.external/textconv → arbitrary exec. segmentMatchValues strips
+ *     these leading `VAR=val` assignments off the canonical form (so `… git diff` still matches the allow),
+ *     but they survive in the VERBATIM value these patterns match; the `=` keeps a safe read of a file
+ *     merely NAMED like the var (`cat GIT_CONFIG_notes.md`) out of the net.
+ *  Shared by the unattended read-only agent boundary (brain/agents/readOnlyBoundary.ts) and by plan mode
+ *  (brain/service/turnContextBuilder.ts), so "read-only shell" has exactly ONE definition. */
+export const READ_ONLY_BASH_RULES: readonly PermissionRule[] = [
+  { scope: 'bash', pattern: '*', action: 'deny' },
+  ...READ_ONLY_BASH_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
+  { scope: 'bash', pattern: '*>*', action: 'deny' },
+  { scope: 'bash', pattern: 'git difftool*', action: 'deny' },
+  { scope: 'bash', pattern: 'git mergetool*', action: 'deny' },
+  { scope: 'bash', pattern: '*--ext-diff*', action: 'deny' },
+  { scope: 'bash', pattern: '*--extcmd*', action: 'deny' },
+  { scope: 'bash', pattern: '*GIT_EXTERNAL_DIFF*', action: 'deny' },
+  { scope: 'bash', pattern: '*--output*', action: 'deny' },
+  { scope: 'bash', pattern: '*GIT_CONFIG*=*', action: 'deny' },
+  { scope: 'bash', pattern: '*GIT_PAGER=*', action: 'deny' },
+];
+
 /** Built-in defaults, conservative but usable: everything not otherwise named is allowed (read-only
  *  tools stay frictionless), file edits ask, and shell commands ask except for a small read-only
  *  allow-list. User rules are appended AFTER these, so any of them can be overridden per user. */

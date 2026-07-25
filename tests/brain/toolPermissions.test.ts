@@ -9,6 +9,7 @@ import {
   resolveToolPermission,
   sanitizePermissionSettings,
   splitBashSegments,
+  READ_ONLY_BASH_RULES,
   APPROVAL_LABELS,
   type PermissionRule,
   summarizePermissions,
@@ -16,6 +17,51 @@ import {
 
 const settings = (over: Partial<{ tools: Record<string, 'allow' | 'ask' | 'deny'>; bash: Record<string, 'allow' | 'ask' | 'deny'>; yolo: boolean }> = {}) =>
   sanitizePermissionSettings({ tools: {}, bash: {}, yolo: false, ...over });
+
+describe('READ_ONLY_BASH_RULES — the shared shell clamp', () => {
+  /** How plan mode composes it: the user's own effective rules, then the clamp appended last. */
+  const clamped = (over?: Parameters<typeof settings>[0]): PermissionRule[] =>
+    [...buildPermissionRuleset(settings(over)), ...READ_ONLY_BASH_RULES];
+  const act = (ruleset: PermissionRule[], command: string) => resolveToolPermission(ruleset, 'Bash', command).action;
+
+  it('permits the look-only commands planning actually needs', () => {
+    for (const command of ['git status', 'git diff HEAD', 'git log --oneline -5', 'ls -la', 'pwd', 'cat src/x.ts', 'grep -rn foo src/', 'which node']) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+  });
+
+  it('DENIES anything that could mutate — not ask, which YOLO would promote to allow', () => {
+    for (const command of ['rm -rf /', 'npm install', 'git commit -m x', 'git push', 'mkdir foo', 'node script.js']) {
+      expect(act(clamped(), command), command).toBe('deny');
+    }
+  });
+
+  it('closes the redirection and git-exec escapes the allow-list would otherwise admit', () => {
+    for (const command of [
+      'cat secrets > victim',
+      'git difftool --extcmd=sh',
+      'git diff --ext-diff',
+      'git log --output=/tmp/x',
+      'GIT_PAGER=sh git log',
+      'GIT_CONFIG_PARAMETERS=x git status',
+    ]) {
+      expect(act(clamped(), command), command).toBe('deny');
+    }
+  });
+
+  // Appended LAST, so last-match-wins puts the clamp over the user's own rules: a planning turn must not
+  // mutate even for an operator who allowed the command in Settings.
+  it('overrides a permissive user rule rather than inheriting it', () => {
+    const permissive = { bash: { 'rm *': 'allow' as const, '*': 'allow' as const } };
+    expect(act(buildPermissionRuleset(settings(permissive)), 'rm -rf /')).toBe('allow');
+    expect(act(clamped(permissive), 'rm -rf /')).toBe('deny');
+  });
+
+  it('leaves an unclamped ruleset alone, so build mode is untouched', () => {
+    expect(act(buildPermissionRuleset(settings()), 'git status')).toBe('allow');
+    expect(act(buildPermissionRuleset(settings()), 'npm install')).toBe('ask');
+  });
+});
 
 describe('matchPermissionPattern — opencode wildcard semantics', () => {
   it('* matches zero or more of any character', () => {
