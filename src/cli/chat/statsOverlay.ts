@@ -109,11 +109,13 @@ class StatsOverlay implements Component, Focusable {
         const totalCache = models.reduce((sum, m) => sum + m.usage.cacheRead + m.usage.cacheWrite, 0);
         const costs = models.map((m) => m.usage.costUsd).filter((c): c is number => c != null);
         const totalCost = costs.length ? costs.reduce((sum, c) => sum + c, 0) : null;
-        // Duration-weighted average speed across the models that measured one (output/tps = seconds).
+        // Duration-weighted average speed across the models that measured one — a model's seconds are its
+        // MEASURED output over its rate; total `output` would overweight untimed history.
         let measuredOutput = 0, measuredSeconds = 0;
         for (const m of models) {
           const tps = m.usage.outputTps;
-          if (tps != null && tps > 0) { measuredOutput += m.usage.output; measuredSeconds += m.usage.output / tps; }
+          const measured = m.usage.measuredOutput ?? 0;
+          if (tps != null && tps > 0 && measured > 0) { measuredOutput += measured; measuredSeconds += measured / tps; }
         }
         const avgTps = measuredSeconds > 0 ? `${Math.round(measuredOutput / measuredSeconds)}` : '—';
         body.push(`${pad}${color.faint('─'.repeat(execW + tokW + cacheW + tpsW + costW))}`);

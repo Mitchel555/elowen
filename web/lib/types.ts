@@ -646,6 +646,10 @@ export interface TokenUsage {
   costSource?: CostSource;
   /** Average output tokens/sec over measured generations (brain sessions only); null when unmeasured. */
   outputTps?: number | null;
+  /** The output tokens `outputTps` was measured over — a subset of `output`. Weight an average across
+   *  buckets by this (their seconds are measuredOutput / outputTps), never by `output`. 0 when nothing was
+   *  measured; absent on older daemons, which makes the bucket unweightable → keep it out of the average. */
+  measuredOutput?: number;
 }
 
 /** Total token/cost usage aggregated for one model (exec spec). */

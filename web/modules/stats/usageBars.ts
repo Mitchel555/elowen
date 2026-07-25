@@ -58,13 +58,16 @@ export function buildUsageSummary(data: ModelUsage[] | undefined): UsageSummary 
   const totalCacheTokens = items.reduce((sum, m) => sum + m.usage.cacheRead + m.usage.cacheWrite, 0);
   const costs = items.map((m) => m.usage.costUsd).filter((c): c is number => c != null);
   const totalCost = costs.length ? costs.reduce((sum, c) => sum + c, 0) : null;
-  // Average speed is duration-weighted: recover each measured row's generation seconds from
-  // output/tps, sum, re-divide — an arithmetic mean of per-model tps would overweight small runs.
+  // Average speed is duration-weighted: recover each row's generation seconds from its MEASURED output
+  // over its rate, sum, re-divide — an arithmetic mean of per-model tps would overweight small runs, and
+  // weighting by total `output` would credit a row for untimed history its rate never covered. A row
+  // without the measured pair (older daemon) is unweightable, so it stays out of the average.
   let measuredOutput = 0;
   let measuredSeconds = 0;
   for (const m of items) {
     const tps = m.usage.outputTps;
-    if (tps != null && tps > 0) { measuredOutput += m.usage.output; measuredSeconds += m.usage.output / tps; }
+    const measured = m.usage.measuredOutput ?? 0;
+    if (tps != null && tps > 0 && measured > 0) { measuredOutput += measured; measuredSeconds += measured / tps; }
   }
 
   return {

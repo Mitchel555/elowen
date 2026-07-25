@@ -24,17 +24,23 @@ function mergeModelUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     ? 'unavailable'
     : costed.every((u) => u.costSource === 'provider_reported') ? 'provider_reported' : 'calculated';
   // Speed merges as a duration-weighted average over the sides that MEASURED one (task-worker buckets
-  // carry none): recover each side's generation seconds from output/tps, sum, re-divide.
-  const seconds = (u: TokenUsage): number | null => (u.outputTps != null && u.outputTps > 0 ? u.output / u.outputTps : null);
-  const secA = seconds(a); const secB = seconds(b);
-  const measuredOutput = (secA != null ? a.output : 0) + (secB != null ? b.output : 0);
-  const measuredSeconds = (secA ?? 0) + (secB ?? 0);
+  // carry none): a side's generation seconds are its MEASURED output over its rate — weighting by total
+  // `output` would credit a side for untimed history it never timed. The merged pair goes back on the
+  // wire so the next consumer up (Stats page, CLI Σ row) can weight the same way.
+  const measured = (u: TokenUsage): { output: number; seconds: number } => {
+    const tps = u.outputTps;
+    const output = u.measuredOutput ?? 0;
+    return tps != null && tps > 0 && output > 0 ? { output, seconds: output / tps } : { output: 0, seconds: 0 };
+  };
+  const mA = measured(a); const mB = measured(b);
+  const measuredOutput = mA.output + mB.output;
+  const measuredSeconds = mA.seconds + mB.seconds;
   return {
     input: a.input + b.input, output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite,
     total: a.total + b.total, reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0),
     costUsd, currency: a.currency ?? b.currency ?? (costUsd != null ? 'USD' : null), costSource,
-    outputTps: measuredSeconds > 0 ? measuredOutput / measuredSeconds : null,
+    measuredOutput, outputTps: measuredSeconds > 0 ? measuredOutput / measuredSeconds : null,
   };
 }
 

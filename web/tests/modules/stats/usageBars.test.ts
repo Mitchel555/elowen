@@ -33,13 +33,32 @@ describe('buildUsageSummary', () => {
   it('labels per-row speed and a duration-weighted average, dashing unmeasured rows', () => {
     const s = buildUsageSummary([
       // 100 out at 100 tok/s (1 s) + 50 out at 10 tok/s (5 s) → avg 150/6 = 25 tok/s; 'c' unmeasured.
-      { exec: 'a', usage: { input: 0, output: 100, cacheRead: 0, cacheWrite: 0, total: 100, costUsd: null, outputTps: 100 } },
-      { exec: 'b', usage: { input: 0, output: 50, cacheRead: 0, cacheWrite: 0, total: 50, costUsd: null, outputTps: 10 } },
+      { exec: 'a', usage: { input: 0, output: 100, cacheRead: 0, cacheWrite: 0, total: 100, costUsd: null, outputTps: 100, measuredOutput: 100 } },
+      { exec: 'b', usage: { input: 0, output: 50, cacheRead: 0, cacheWrite: 0, total: 50, costUsd: null, outputTps: 10, measuredOutput: 50 } },
       { exec: 'c', usage: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0, total: 10, costUsd: null } },
     ]);
     expect(s.rows.find((r) => r.exec === 'a')!.speedLabel).toBe('100 tok/s');
     expect(s.rows.find((r) => r.exec === 'c')!.speedLabel).toBe('—');
     expect(s.avgSpeedLabel).toBe('25 tok/s');
+  });
+
+  it('weights the average by each row MEASURED output, not its total output', () => {
+    const s = buildUsageSummary([
+      // X only measured 10k of its 1.01M output (200 s → 50 tok/s); Y measured all 20k (200 s → 100 tok/s).
+      // Honest duration-weighted average: 30k over 400 s = 75 tok/s. Reconstructing X's seconds from its
+      // TOTAL output would credit it with 20 200 s and drag the average back down to ~50.
+      { exec: 'x', usage: { input: 0, output: 1_010_000, cacheRead: 0, cacheWrite: 0, total: 1_010_000, costUsd: null, outputTps: 50, measuredOutput: 10_000 } },
+      { exec: 'y', usage: { input: 0, output: 20_000, cacheRead: 0, cacheWrite: 0, total: 20_000, costUsd: null, outputTps: 100, measuredOutput: 20_000 } },
+    ]);
+    expect(s.avgSpeedLabel).toBe('75 tok/s');
+  });
+
+  it('leaves a row without the measured pair out of the average (older daemon), keeping its own label', () => {
+    const s = buildUsageSummary([
+      { exec: 'a', usage: { input: 0, output: 100, cacheRead: 0, cacheWrite: 0, total: 100, costUsd: null, outputTps: 40 } },
+    ]);
+    expect(s.rows[0].speedLabel).toBe('40 tok/s');
+    expect(s.avgSpeedLabel).toBe('—');
   });
 
   it('dashes the average speed when nothing measured one', () => {

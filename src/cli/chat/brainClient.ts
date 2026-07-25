@@ -35,8 +35,10 @@ export interface BrainUsageView {
   /** Average output tokens/sec over the session's measured generations; null when none measured. */
   outputTps?: number | null;
 }
-/** Per-model token/cost usage, one record per model (exec spec), matching the /usage/by-model wire shape. */
-export interface ModelUsageView { exec: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; costUsd: number | null; costSource?: string; outputTps?: number | null } }
+/** Per-model token/cost usage, one record per model (exec spec), matching the /usage/by-model wire shape.
+ *  `measuredOutput` is the output slice `outputTps` was measured over — the weight for the Σ average (its
+ *  seconds are measuredOutput / outputTps); `output` would overstate an untimed-heavy bucket. */
+export interface ModelUsageView { exec: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; costUsd: number | null; costSource?: string; outputTps?: number | null; measuredOutput?: number } }
 export type BrainWorkMode = 'build' | 'plan' | 'workflow';
 /** Single source of truth for the chat work-mode label (status chip / modal) and the toggle notice.
  *  Keyed by BrainWorkMode so adding a mode is one edit here, not scattered ternaries. */

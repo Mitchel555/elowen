@@ -548,6 +548,16 @@ describe('BrainStore', () => {
       expect(row!.usage.outputTps).toBeCloseTo(25);
     });
 
+    it('EXCLUDES an aborted generation (timing but NO output) from the tok/s denominator', () => {
+      store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+      usageMsg('brain-a', 'm1', { output: 5000, totalTokens: 6000 }, Date.now(), undefined, 100_000); // 50 tok/s
+      // An aborted stream: pi-ai only fills `usage` from a final chunk that never arrived, yet the
+      // projector still stamps the wall time. Its 45 s must not drag the model's speed down forever.
+      usageMsg('brain-a', 'm2', { output: 0, totalTokens: 0 }, Date.now(), undefined, 45_000);
+      const [row] = store.usageByModel(1);
+      expect(row!.usage.outputTps).toBeCloseTo(50); // NOT 5000/145 s ≈ 34
+    });
+
     it('sums a chat session per model with provider-reported cost, folding into an `elowen:<model>` bucket', () => {
       store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
       usageMsg('brain-a', 'm1', { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, reasoning: 3, totalTokens: 100, cost: 0.1 });
@@ -708,6 +718,64 @@ describe('BrainStore', () => {
         store.compactSessionMessages('brain-a', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary', summary: 's' } }, 1);
         const [row] = store.usageByModel(1);
         expect(row!.usage.outputTps).toBeCloseTo(30);
+      });
+
+      it('rolls up only the MEASURED output, so untimed dropped rows never inflate tok/s', () => {
+        store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+        // A legacy row predating the timing stamp: real output, no measurable speed.
+        usageMsg('brain-a', 'old1', { output: 40_000, totalTokens: 41_000 });
+        // One measured generation: 5000 output over 100 s → the session's honest 50 tok/s.
+        usageMsg('brain-a', 'old2', { output: 5_000, totalTokens: 6_000 }, Date.now(), undefined, 100_000);
+        usageMsg('brain-a', 'keep1', { output: 10, totalTokens: 20 });
+        store.compactSessionMessages('brain-a', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary', summary: 's' } }, 1);
+        const [row] = store.usageByModel(1);
+        expect(row!.usage.total).toBe(47_020);            // totals still count every dropped row
+        expect(row!.usage.outputTps).toBeCloseTo(50);     // NOT 45 000 / 100 s = 450
+      });
+
+      it('reads a rollup bucket written BEFORE measuredOutput existed as unmeasured', () => {
+        store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+        // A pre-fix divider, shaped by hand: total output and wall time, no `measuredOutput`. How much of
+        // that output was timed is unknowable, so the bucket must report "no data" — not an invented rate.
+        store.appendMessage({
+          id: 'sum', sessionId: 'brain-a', parentId: null, role: 'compaction',
+          content: {
+            role: 'compactionSummary', summary: 's',
+            usageRollup: [{ model: 'claude-opus-4-8', input: 0, output: 40_000, cacheRead: 0, cacheWrite: 0, totalTokens: 41_000, reasoning: 0, at: Date.now(), durationMs: 100_000 }],
+          },
+        });
+        expect(store.usageByModel(1)[0]!.usage.total).toBe(41_000); // spend still counted
+        expect(store.usageByModel(1)[0]!.usage.outputTps).toBeNull();
+        // …and it neither inflates nor dilutes a measured generation standing next to it.
+        usageMsg('brain-a', 'm1', { output: 5_000, totalTokens: 6_000 }, Date.now(), undefined, 100_000);
+        expect(store.usageByModel(1)[0]!.usage.outputTps).toBeCloseTo(50);
+      });
+
+      it('carries a legacy bucket through a SECOND compaction without reviving its output as measured', () => {
+        store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+        store.appendMessage({
+          id: 'sum1', sessionId: 'brain-a', parentId: null, role: 'compaction',
+          content: {
+            role: 'compactionSummary', summary: 's',
+            usageRollup: [{ model: 'claude-opus-4-8', input: 0, output: 40_000, cacheRead: 0, cacheWrite: 0, totalTokens: 41_000, reasoning: 0, at: Date.now(), durationMs: 100_000 }],
+          },
+        });
+        usageMsg('brain-a', 'm1', { output: 5_000, totalTokens: 6_000 }, Date.now(), undefined, 100_000);
+        usageMsg('brain-a', 'keep1', { output: 10, totalTokens: 20 });
+        store.compactSessionMessages('brain-a', { id: 'sum2', role: 'compaction', content: { role: 'compactionSummary', summary: 's' } }, 1);
+        const [row] = store.usageByModel(1);
+        expect(row!.usage.total).toBe(47_020);
+        expect(row!.usage.outputTps).toBeCloseTo(50); // the legacy 40k stays unmeasured across the chain
+      });
+
+      it('carries a measured rollup through a second compaction (speed survives chaining)', () => {
+        store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+        usageMsg('brain-a', 'm1', { output: 5_000, totalTokens: 6_000 }, Date.now(), undefined, 100_000);
+        usageMsg('brain-a', 'k1', { output: 10, totalTokens: 20 });
+        store.compactSessionMessages('brain-a', { id: 'sum1', role: 'compaction', content: { role: 'compactionSummary', summary: 's' } }, 1);
+        usageMsg('brain-a', 'k2', { output: 10, totalTokens: 20 });
+        store.compactSessionMessages('brain-a', { id: 'sum2', role: 'compaction', content: { role: 'compactionSummary', summary: 's' } }, 1);
+        expect(store.usageByModel(1)[0]!.usage.outputTps).toBeCloseTo(50);
       });
 
       it('keeps dropped assistant rows spend in usageByModel + usageByDay', () => {

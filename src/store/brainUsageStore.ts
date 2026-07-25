@@ -8,7 +8,9 @@ import { TASK_PREFIX } from '../brain/sessionId.js';
 // contributes nothing). `ts` is the ms-epoch attribution point: a live row's own `$.timestamp`, or a
 // rolled-up bucket's `at` (newest dropped row of that model) — so compaction NEVER moves spend to the
 // compaction moment. `model` is the row's own producing model, falling back to the session's model only
-// for legacy rows that predate per-message model capture. Purely static SQL (no user input) → safe to
+// for legacy rows that predate per-message model capture. `measured_output` is the slice of `output` that
+// `duration_ms` actually timed (see {@link UsageRollupBucket}) — the tok/s numerator, kept separate so
+// untimed history can never be read as measured. Purely static SQL (no user input) → safe to
 // interpolate. Callers add the user/window/day filters + GROUP BY.
 const USAGE_ROWS = `
   SELECT s.user_id AS user_id, s.id AS session_id,
@@ -21,6 +23,9 @@ const USAGE_ROWS = `
          COALESCE(json_extract(m.content, '$.usage.totalTokens'), 0) AS total,
          COALESCE(json_extract(m.content, '$.usage.reasoning'), 0) AS reasoning,
          COALESCE(json_extract(m.content, '$.durationMs'), 0) AS duration_ms,
+         CASE WHEN COALESCE(json_extract(m.content, '$.durationMs'), 0) > 0
+               AND COALESCE(json_extract(m.content, '$.usage.output'), 0) > 0
+              THEN json_extract(m.content, '$.usage.output') ELSE 0 END AS measured_output,
          json_extract(m.content, '$.usage.cost.total') AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id
    WHERE m.role = 'assistant'
@@ -35,6 +40,7 @@ const USAGE_ROWS = `
          COALESCE(json_extract(je.value, '$.totalTokens'), 0) AS total,
          COALESCE(json_extract(je.value, '$.reasoning'), 0) AS reasoning,
          COALESCE(json_extract(je.value, '$.durationMs'), 0) AS duration_ms,
+         COALESCE(json_extract(je.value, '$.measuredOutput'), 0) AS measured_output,
          json_extract(je.value, '$.cost.total') AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id,
          json_each(json_extract(m.content, '$.usageRollup')) je
@@ -62,12 +68,16 @@ export interface BrainDescendantUsage {
  *  `usage`, so PI's live session and `usageOf` (statusline) never double-count it after rehydrate.
  *  `model` preserves per-model attribution across compaction; `at` is the ms-epoch of the newest dropped
  *  row of that model (the day/window attribution basis, standing in for a live row's `$.timestamp`).
- *  `durationMs` sums the dropped generations' measured wall time, so their output tokens/sec survives
- *  compaction too (0 for rows that predate timing). */
+ *  `durationMs` and `measuredOutput` are the MEASURED pair — wall time and output tokens of the dropped
+ *  generations that carried both — so their tokens/sec survives compaction. They are a subset of `output`:
+ *  untimed rows (predating the timing stamp) and aborts (a duration with an empty `usage`) contribute to
+ *  neither, and a bucket written before `measuredOutput` existed reads as unmeasured rather than having a
+ *  speed invented for it. */
 export interface UsageRollupBucket {
   model: string;
   input: number; output: number; cacheRead: number; cacheWrite: number;
-  totalTokens: number; reasoning: number; at: number; durationMs?: number; cost?: { total: number };
+  totalTokens: number; reasoning: number; at: number;
+  durationMs?: number; measuredOutput?: number; cost?: { total: number };
 }
 
 /** Fold the usage of the rows a compaction is about to delete into PER-MODEL rollup buckets: assistant
@@ -81,16 +91,22 @@ export function rollupDroppedUsage(dropped: readonly { content: string }[]): Usa
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   const bucketFor = (model: string): UsageRollupBucket => {
     let b = byModel.get(model);
-    if (!b) { b = { model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, reasoning: 0, at: 0, durationMs: 0 }; byModel.set(model, b); }
+    if (!b) { b = { model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, reasoning: 0, at: 0, durationMs: 0, measuredOutput: 0 }; byModel.set(model, b); }
     return b;
   };
-  const fold = (b: UsageRollupBucket, u: Record<string, unknown>, at: number, durationMs?: number): void => {
+  const fold = (b: UsageRollupBucket, u: Record<string, unknown>, at: number, measured: { durationMs: number; output: number }): void => {
     b.input += num(u.input); b.output += num(u.output);
     b.cacheRead += num(u.cacheRead); b.cacheWrite += num(u.cacheWrite);
     b.reasoning += num(u.reasoning); b.totalTokens += num(u.totalTokens);
-    // For a prior rollup bucket `u` IS the bucket (durationMs top-level); for an assistant row the
-    // timing lives on the MESSAGE, next to `usage`, so the caller passes it explicitly.
-    b.durationMs = (b.durationMs ?? 0) + (durationMs ?? num(u.durationMs));
+    // Only a generation with BOTH wall time and output tokens carries a speed, so both sides of the
+    // tok/s fraction move together — an untimed legacy row would otherwise inflate it and an abort
+    // (duration, empty `usage`) would deflate it, permanently, since compaction drops the per-row
+    // timings. The caller resolves the pair: an assistant row keeps its timing on the MESSAGE next to
+    // `usage`, while a prior bucket already carries its own measured slice.
+    if (measured.durationMs > 0 && measured.output > 0) {
+      b.durationMs = (b.durationMs ?? 0) + measured.durationMs;
+      b.measuredOutput = (b.measuredOutput ?? 0) + measured.output;
+    }
     const cost = (u as { cost?: { total?: unknown } }).cost;
     if (cost && typeof cost === 'object' && typeof cost.total === 'number') b.cost = { total: (b.cost?.total ?? 0) + cost.total };
     if (at > b.at) b.at = at; // newest dropped row of this model wins as its attribution point
@@ -105,12 +121,12 @@ export function rollupDroppedUsage(dropped: readonly { content: string }[]): Usa
       for (const raw of c.usageRollup) {
         if (!raw || typeof raw !== 'object') continue;
         const pb = raw as Record<string, unknown>;
-        fold(bucketFor(typeof pb.model === 'string' ? pb.model : ''), pb, num(pb.at));
+        fold(bucketFor(typeof pb.model === 'string' ? pb.model : ''), pb, num(pb.at), { durationMs: num(pb.durationMs), output: num(pb.measuredOutput) });
       }
     } else if (c.usage && typeof c.usage === 'object') {
       // An assistant message — attribute to the model it recorded (empty → resolved to the session model
       // in SQL for legacy rows that predate per-message model capture).
-      fold(bucketFor(typeof c.model === 'string' ? c.model : ''), c.usage, typeof c.timestamp === 'number' ? c.timestamp : 0, num(c.durationMs));
+      fold(bucketFor(typeof c.model === 'string' ? c.model : ''), c.usage, typeof c.timestamp === 'number' ? c.timestamp : 0, { durationMs: num(c.durationMs), output: num(c.usage.output) });
     }
   }
   const buckets = [...byModel.values()].filter((b) => b.totalTokens !== 0 || b.cost != null);
@@ -176,8 +192,8 @@ export class BrainUsageStore {
               COALESCE(SUM(cache_write), 0) AS cache_write,
               COALESCE(SUM(total), 0) AS total,
               COALESCE(SUM(reasoning), 0) AS reasoning,
-              COALESCE(SUM(CASE WHEN duration_ms > 0 THEN output ELSE 0 END), 0) AS measured_output,
-              COALESCE(SUM(duration_ms), 0) AS duration_ms,
+              COALESCE(SUM(measured_output), 0) AS measured_output,
+              COALESCE(SUM(CASE WHEN measured_output > 0 THEN duration_ms ELSE 0 END), 0) AS duration_ms,
               CASE WHEN COUNT(cost) = 0 THEN NULL ELSE SUM(cost) END AS cost
          FROM usage_rows
         WHERE ${clauses.join(' AND ')}
@@ -190,9 +206,12 @@ export class BrainUsageStore {
         const usage: TokenUsage = {
           input: r.input, output: r.output, cacheRead: r.cache_read, cacheWrite: r.cache_write,
           total: r.total, reasoning: r.reasoning, costUsd: r.cost, currency: r.cost != null ? 'USD' : null, costSource,
-          // Weighted average over ONLY the generations that carried timing — rows predating the
-          // durationMs stamp contribute neither output nor ms, so they dilute nothing (and a bucket
-          // with no timing at all reports null, not a bogus figure).
+          // Weighted average over ONLY the generations that carried BOTH timing and output — untimed
+          // legacy rows and aborts contribute to neither side, so they can neither inflate nor dilute it
+          // (and a bucket with nothing measured reports null, not a bogus figure). `measuredOutput` ships
+          // with the rate because `output` is the WRONG weight for it: a consumer averaging across buckets
+          // needs the measured seconds, which are measuredOutput / outputTps.
+          measuredOutput: r.measured_output,
           outputTps: r.duration_ms > 0 ? (r.measured_output / (r.duration_ms / 1000)) : null,
         };
         return { exec: `elowen:${r.model}`, usage };

@@ -189,6 +189,24 @@ describe('GET /usage/by-model — brain session merge', () => {
     expect(body[0].usage.costSource).toBe('provider_reported');
   });
 
+  it('puts the MEASURED tok/s pair on the wire so a consumer can weight the average', async () => {
+    const { app, db, taskUsage, adminId, adminTok } = setup();
+    taskUsage.record('t1', 1, 'elowen:claude-opus-4-8', { ...usage, total: 200, costUsd: 0.2 }); // worker: no timing
+    db.prepare("INSERT INTO brain_sessions (id, user_id, title, model) VALUES ('brain-1', ?, 't', 'claude-opus-4-8')").run(adminId);
+    const assistant = (id: string, output: number, durationMs: number | null) =>
+      db.prepare("INSERT INTO brain_messages (id, session_id, role, content) VALUES (?, 'brain-1', 'assistant', ?)").run(id, JSON.stringify({
+        role: 'assistant', timestamp: Date.now(), ...(durationMs == null ? {} : { durationMs }),
+        usage: { input: 0, output, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: output },
+      }));
+    assistant('m1', 1_000_000, null);   // legacy row, no timing → not measured
+    assistant('m2', 10_000, 200_000);   // measured: 10k over 200 s → 50 tok/s
+    const body = await (await app.request('/usage/by-model', auth(adminTok))).json();
+    expect(body).toHaveLength(1);
+    expect(body[0].usage.output).toBe(1_010_050);      // every output token, task worker's 50 included
+    expect(body[0].usage.measuredOutput).toBe(10_000); // …but only the timed slice carries the speed
+    expect(body[0].usage.outputTps).toBeCloseTo(50);
+  });
+
   it('keeps tasks-only semantics under a project_id filter (chat spend has no project)', async () => {
     const { app, db, taskUsage, adminId, adminTok } = setup();
     taskUsage.record('t1', 1, 'sonnet', usage);
