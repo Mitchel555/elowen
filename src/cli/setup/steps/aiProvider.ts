@@ -267,8 +267,13 @@ async function waitForFlow(ctx: WizardCtx, flowId: string, until: (f: OAuthFlowS
   }
 }
 
-/** Persist a config entry for a connected OAuth account (no key — the credential lives in AuthStorage),
- *  choosing a default model from the account's catalog so the model registry resolves it. */
+/** Persist a config entry for a connected OAuth account (no key — the credential lives in AuthStorage).
+ *
+ *  The entry is saved with an EMPTY model list, which is what "the whole account catalog" means: the list
+ *  is the operator's allowlist (settings → Models), and stamping the default into it here would silently
+ *  narrow a freshly connected account to one model. Nothing needs the stamp — `PREFERRED_DEFAULT` exists
+ *  precisely so a bare connected account resolves a sensible model on its own. The chosen model is still
+ *  reported onward, so the wizard's summary and smoke test name the model the account will actually run. */
 async function persistOauthEntry(ctx: WizardCtx, type: BrainProviderType, providers: PublicProvider[]): Promise<StepResult> {
   const ch = OAUTH_CHOICES.find((c) => c.type === type)!;
   const cat = (await apiJson<{ models?: string[] }>(ctx, 'GET', `/brain/oauth/${type}/catalog`)).data?.models ?? [];
@@ -277,7 +282,7 @@ async function persistOauthEntry(ctx: WizardCtx, type: BrainProviderType, provid
   const id = `oauth-${ch.builtin}`;
   // The OAuth credential connected, but the run isn't usable until the config entry lands too — a failed
   // save must NOT claim "Connected" (the later smoke test would then fail on a provider that isn't there).
-  const ok = await saveProvider(ctx, { id, label: stripSignIn(ch.label), type, baseUrl: '', models: model ? [model] : [] }, providers);
+  const ok = await saveProvider(ctx, { id, label: stripSignIn(ch.label), type, baseUrl: '', models: [] }, providers);
   if (!ok) { p.log.error('Saving the provider failed.'); return skip(ctx); }
   p.log.success(`Connected ${stripSignIn(ch.label)}.`);
   return done(ctx, stripSignIn(ch.label), model, id, type, false);

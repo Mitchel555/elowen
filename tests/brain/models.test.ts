@@ -105,16 +105,42 @@ describe('listBrainModels', () => {
     ]));
   });
 
-  it('adds the complete OpenAI OAuth account catalog', async () => {
+  it('offers the complete OAuth account catalog when nothing is selected', async () => {
     const f = vi.fn() as unknown as typeof fetch;
     const cfg: BrainRuntimeConfig = {
-      providers: [{ id: 'openai', label: 'OpenAI account', type: 'oauth-openai-codex', baseUrl: '', models: ['gpt-5.5'], apiKey: null }],
+      providers: [{ id: 'openai', label: 'OpenAI account', type: 'oauth-openai-codex', baseUrl: '', models: [], apiKey: null }],
     };
     const ids = (await listBrainModels(cfg, f)).map((model) => model.model);
     expect(ids).toEqual(expect.arrayContaining([
       'gpt-5.3-codex-spark', 'gpt-5.5', 'gpt-5.6-luna', 'gpt-image-1.5', 'gpt-image-2',
       'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.6-sol', 'gpt-5.6-terra',
     ]));
+  });
+
+  // An OAuth account's stored list is the operator's ALLOWLIST — the settings picker says so in as many
+  // words ("pick which of this account's models Elowen offers"). It used to be appended to the full
+  // catalog instead of replacing it, so every unticked model stayed on offer and the picker meant nothing.
+  it('offers only the selected models when the account has a selection', async () => {
+    const f = vi.fn() as unknown as typeof fetch;
+    const cfg: BrainRuntimeConfig = {
+      providers: [{ id: 'claude', label: 'Claude account', type: 'oauth-anthropic', baseUrl: '', models: ['claude-opus-5', 'claude-haiku-4-5'], apiKey: null }],
+    };
+    const ids = (await listBrainModels(cfg, f)).map((model) => model.model);
+    expect(ids).toEqual(['claude-opus-5', 'claude-haiku-4-5']);
+    expect(ids).not.toContain('claude-fable-5'); // in the account's catalog, but not ticked
+  });
+
+  // The selection narrows what is OFFERED, never what the account can resolve: a picked model still
+  // carries the built-in descriptor's capabilities rather than degrading to the unknown-model fallback.
+  it('keeps a selected model its native capabilities', async () => {
+    const f = vi.fn() as unknown as typeof fetch;
+    const cfg: BrainRuntimeConfig = {
+      providers: [{ id: 'claude', label: 'Claude account', type: 'oauth-anthropic', baseUrl: '', models: ['claude-opus-5'], apiKey: null }],
+    };
+    const [only] = await listBrainModels(cfg, f);
+    expect(only.model).toBe('claude-opus-5');
+    expect(only.reasoningLevels?.length).toBeGreaterThan(0);
+    expect(only.default).toBe(true);
   });
 
   it('propagates the provider origin as the model source', async () => {

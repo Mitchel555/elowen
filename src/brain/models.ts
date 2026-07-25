@@ -111,12 +111,13 @@ export async function listBrainModels(cfg: BrainRuntimeConfig, fetchImpl: typeof
         entries = entries.map((e) => ({ id: e.id, contextWindow: ctxById.get(e.id) }));
       }
     } else if (p.type in OAUTH_BUILTIN) {
-      const builtin = registryProviderName(p);
-      const listed = new Set(entries.map((entry) => entry.id));
-      const catalog = registry.getAll().filter((m) => m.provider === builtin && !listed.has(m.id)).map((m) => ({ id: m.id }));
-      // A stored OAuth model is the user's preferred/default model, not an allowlist. Always append
-      // the complete account catalog so adding a default never makes every other OAuth model vanish.
-      entries = [...entries, ...catalog];
+      // An OAuth account's stored model list IS an allowlist — exactly what the settings picker promises
+      // ("pick which of this account's models Elowen offers; no selection = the full catalog"). So an
+      // empty list means the whole account catalog, and a non-empty one means those models and no others.
+      if (entries.length === 0) {
+        const builtin = registryProviderName(p);
+        entries = registry.getAll().filter((m) => m.provider === builtin).map((m) => ({ id: m.id }));
+      }
     }
     const toOption = (e: FetchedModel): BrainModelOption => {
       const pinned = cfg.contextWindows?.[`${p.id}/${e.id}`];
