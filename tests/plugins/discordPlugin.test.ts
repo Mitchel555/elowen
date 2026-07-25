@@ -1549,18 +1549,58 @@ describe('discord plugin prompt-commands (native registration + RAW dispatch)', 
 
     it('strips only our own messages when building history context', async () => {
       const { adapter } = await makeAdapter([]);
+      adapter.botId = 'BOT';
       adapter.cfg.historyLimit = 10;
       adapter.rest = async () => [
         // newest-first, the order Discord's API returns
-        { content: 'Filipe, hotovo.\n\n-# qwen3.8-max-preview · 4 %', author: { username: 'Elowen', bot: true } },
-        { content: 'a co tohle\n-# můj vlastní subtext', author: { username: 'dragocz95' } },
+        { content: 'Filipe, hotovo.\n\n-# qwen3.8-max-preview · 4 %', author: { id: 'BOT', username: 'Elowen', bot: true } },
+        { content: 'build passed\n-# ci-runner #481', author: { id: 'CI', username: 'CI', bot: true } },
+        { content: 'a co tohle\n-# můj vlastní subtext', author: { id: 'U1', username: 'dragocz95' } },
       ];
       const history = await adapter.fetchHistory('C', 'before');
       // Our footer is gone…
       expect(history).toContain('[Elowen] Filipe, hotovo.');
       expect(history).not.toContain('qwen3.8-max-preview');
-      // …but a person's own subtext line is theirs and survives verbatim.
+      // …but another bot's trailing subtext is ITS text, not our metadata…
+      expect(history).toContain('-# ci-runner #481');
+      // …and a person's own subtext line is theirs and survives verbatim.
       expect(history).toContain('-# můj vlastní subtext');
+    });
+
+    // The reply quote is the OTHER door into the prompt, and unlike history it fires on every single reply
+    // to one of our messages — the quoted body is taken verbatim, so any answer short enough to fit the
+    // excerpt carried its footer straight back in.
+    it('quotes our own message without its footer, a foreign subtext line verbatim', async () => {
+      const reg = await loadPlugins({
+        dirs: [join(repoRoot, 'plugins')], enabled: ['discord'], logger: log,
+        config: { discord: { botToken: 'tok', rolePolicies: [{ roleId: 'R1', name: 'Dev', projectIds: [1] }], streaming: false, reactions: false } },
+      });
+      const adapter = reg.platforms[0] as unknown as {
+        botId: string | null;
+        rest: (method: string, path: string, body?: unknown) => Promise<unknown>;
+        listen: (h: (src: Record<string, unknown>, text: string) => Promise<string | undefined>) => void;
+        onMessage: (m: unknown) => Promise<void>;
+      };
+      adapter.botId = 'BOT';
+      adapter.rest = async () => ({});
+      const seen: string[] = [];
+      adapter.listen(async (_src, text) => { seen.push(text); return 'ok'; });
+      const turn = {
+        type: 19, guild_id: 'G', channel_id: '100',
+        author: { id: 'U1', username: 'anna' }, member: { roles: ['R1'] }, mentions: [], attachments: [],
+      };
+
+      await adapter.onMessage({
+        ...turn, id: 'M1', content: 'a proč?',
+        referenced_message: { author: { id: 'BOT', username: 'Elowen' }, content: 'Hotovo.\n\n-# qwen3.8-max-preview · 4 %' },
+      });
+      expect(seen[0]).toBe('[Replying to Elowen: "Hotovo."]\n[anna] a proč?');
+
+      await adapter.onMessage({
+        ...turn, id: 'M2', content: 'jak to myslíš?',
+        referenced_message: { author: { id: 'U2', username: 'bob' }, content: 'tohle\n-# můj vlastní subtext' },
+      });
+      expect(seen[1]).toBe('[Replying to bob: "tohle\n-# můj vlastní subtext"]\n[anna] jak to myslíš?');
     });
   });
 });

@@ -4,7 +4,7 @@
 import { Bot, InputFile, GrammyError } from 'grammy';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseModelExec, buildReplyContext, stripForSpeech } from './format.mjs';
+import { parseModelExec, buildReplyContext, stripForSpeech, withoutFooter } from './format.mjs';
 import { senderIds, senderIsAdmin, matchesId, displayNameOf } from './ids.mjs';
 import { buildAskKeyboard } from './ask.mjs';
 import { MESSAGES } from './messages.mjs';
@@ -302,7 +302,11 @@ export class TelegramAdapter {
     // Chat sessions are SHARED (one conversation per chat), so every message names its speaker — and a
     // Telegram reply carries the quoted original as context.
     const reply = m.reply_to_message;
-    const replyCtx = reply ? buildReplyContext(displayNameOf(reply.from), reply.text ?? reply.caption ?? '') : '';
+    // Quoting one of OUR messages must not carry the runtime footer back into the prompt: shown that line
+    // as the house style, the model starts forging it itself, with a model name it never ran on. Someone
+    // else's trailing dim line is their text and stays.
+    const quoted = reply?.text ?? reply?.caption ?? '';
+    const replyCtx = reply ? buildReplyContext(displayNameOf(reply.from), reply.from?.id === this.botId ? withoutFooter(quoted) : quoted) : '';
     const senderName = displayNameOf(from);
     const prefixed = `${replyCtx ? `${replyCtx}\n` : ''}[${senderName}] ${text}`;
 

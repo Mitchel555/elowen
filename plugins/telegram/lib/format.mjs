@@ -4,7 +4,7 @@
 // Telegram messages are sent as PLAIN TEXT (no parse_mode), so no markup ever needs escaping and a stray
 // `<`, `&` or unbalanced `*` in a model answer can never crash a send — the safe, consistent choice for
 // arbitrary agent output (see the plugin README/notes on the HTML-vs-plaintext trade-off).
-import { splitContent as splitAtChunk, extractImageRefs, stripThinking, parseModelExec, stripForSpeech, runtimeFooter } from '../../_shared/format.mjs';
+import { splitContent as splitAtChunk, extractImageRefs, stripThinking, parseModelExec, stripForSpeech, runtimeFooter, stripRuntimeFooter } from '../../_shared/format.mjs';
 export { extractImageRefs, stripThinking, parseModelExec, stripForSpeech };
 
 export const CHUNK = 4000; // Telegram caps a text message at 4096 chars — stay comfortably under it
@@ -22,11 +22,14 @@ export function buildReplyContext(name, body) {
   return `[Replying to ${name || 'someone'}: "${excerpt}"]`;
 }
 
-/** The markup Telegram's runtime footer is wrapped in — consumed by `footerLine` here and by
- *  `stripRuntimeFooter` should this surface ever read its channel history back into a prompt. */
+/** The markup Telegram's runtime footer is wrapped in — shared by the writer (`footerLine`) and the
+ *  reader (`withoutFooter`), so the two can never drift into recognising different shapes. */
 const FOOTER_FENCE = { open: '— ', close: '' };
 
 /** Runtime footer: `model · 42 %` as a dim line under the final answer. Empty when the idle event
  *  carried no usable data (defensive: never render a `?%` footer). */
 export const footerLine = (idle) => runtimeFooter(idle, FOOTER_FENCE);
+
+/** Drop our own trailing footer from a message before it is fed back as prompt context. */
+export const withoutFooter = (text) => stripRuntimeFooter(text, FOOTER_FENCE);
 

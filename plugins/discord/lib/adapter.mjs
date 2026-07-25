@@ -348,9 +348,9 @@ export class DiscordAdapter {
     for (const m of [...msgs].reverse()) { // API returns newest-first
       // Our own runtime footer comes off first: it is metadata we appended, not something anyone said, and
       // a model shown it as house style starts forging that line itself (with a model name it never ran
-      // on). Only for messages WE authored — a person's own subtext line is theirs and stays.
+      // on). Only for messages WE authored — another bot's, or a person's, own subtext line is theirs.
       const raw = String(m.content ?? '');
-      const body = (m.author?.bot ? withoutFooter(raw) : raw).trim();
+      const body = (m.author?.id === this.botId ? withoutFooter(raw) : raw).trim();
       if (!body) continue;
       lines.push(`[${displayNameOf(m)}] ${body.length > 400 ? `${body.slice(0, 400)}…` : body}`);
     }
@@ -440,7 +440,7 @@ export class DiscordAdapter {
 
     // Channel sessions are SHARED (one conversation per channel), so every message names its speaker —
     // and a Discord reply carries the quoted original as context.
-    const replyCtx = buildReplyContext(m.referenced_message);
+    const replyCtx = buildReplyContext(m.referenced_message, this.botId);
     const prefixed = `${replyCtx ? `${replyCtx}\n` : ''}[${displayNameOf(m)}] ${text}`;
 
     // The conversation key folds in the /new "generation" so a reset yields a clean session.

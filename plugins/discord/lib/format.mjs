@@ -43,10 +43,14 @@ export function resolveMentions(text, mentions, rolePolicies, channelNames) {
 }
 
 /** Quote context for a reply: who is being answered + a capped excerpt of what they said.
- *  `referenced_message` may be absent/null (not a reply, or the original was deleted) → ''. */
-export function buildReplyContext(ref) {
+ *  `referenced_message` may be absent/null (not a reply, or the original was deleted) → ''.
+ *  `ourId` is the bot's own user id: quoting a message WE wrote drops our runtime footer first (see
+ *  `withoutFooter`) — the excerpt is short enough that the footer would otherwise survive the clip and
+ *  re-enter the prompt on every single reply to the bot. */
+export function buildReplyContext(ref, ourId) {
   if (!ref) return '';
-  const content = String(ref.content ?? '').trim();
+  const raw = String(ref.content ?? '');
+  const content = (ourId && ref.author?.id === ourId ? withoutFooter(raw) : raw).trim();
   const excerpt = content.length > REPLY_EXCERPT ? `${content.slice(0, REPLY_EXCERPT)}…` : content;
   return `[Replying to ${displayNameOf(ref)}: "${excerpt}"]`;
 }

@@ -7,7 +7,7 @@ import {
 import QRCode from 'qrcode';
 import { readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseModelExec, buildReplyContext, splitContent, stripThinking } from './format.mjs';
+import { parseModelExec, buildReplyContext, splitContent, stripThinking, withoutFooter } from './format.mjs';
 import { parseAskReply } from './ask.mjs';
 import { sameId, isGroup, numberOf, toJid, senderIsAdmin } from './jid.mjs';
 import { MESSAGES } from './messages.mjs';
@@ -432,8 +432,13 @@ export class WhatsAppAdapter {
     return ctx.participant ? numberOf(ctx.participant) : '';
   }
   quotedText(m) {
-    const q = m.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-    return q ? this.extractText(q) : '';
+    const ctx = m.message?.extendedTextMessage?.contextInfo;
+    if (!ctx?.quotedMessage) return '';
+    const text = this.extractText(ctx.quotedMessage);
+    // Quoting one of OUR messages must not carry the runtime footer back into the prompt: shown that line
+    // as the house style, the model starts forging it itself, with a model name it never ran on. Someone
+    // else's trailing italic line is their text and stays.
+    return sameId(ctx.participant, this.meId) ? withoutFooter(text) : text;
   }
 
   /** Download an inbound image (base64, capped) for vision; other media becomes a textual note. */

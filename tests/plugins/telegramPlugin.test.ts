@@ -169,3 +169,41 @@ describe('telegram paged pickers + /context', () => {
     expect(sent.at(-1)!.text).toContain('Only the operator');
   });
 });
+
+// Regression: the reply quote fed our own runtime footer (`— model · n %`) straight back into the prompt.
+// Shown that line as the house style, the model starts writing it itself, inventing a model name it never
+// ran on — and the forged line then rides the NEXT reply quote, reinforcing the pattern.
+describe('telegram reply quote', () => {
+  const makeAdapter = async () => {
+    const { TelegramAdapter } = await import(join(repoRoot, 'plugins/telegram/lib/adapter.mjs')) as { TelegramAdapter: new (...args: unknown[]) => any };
+    const state = { get: () => ({}), patch: () => {} };
+    const adapter = new TelegramAdapter(
+      { language: 'en', rolePolicies: [{ roleId: '42' }], streaming: false, reactions: false },
+      log, state, async () => [],
+    );
+    adapter.botId = 7;
+    adapter.bot = { api: { sendChatAction: async () => {} } };
+    const seen: string[] = [];
+    adapter.listen(async (_src: unknown, text: string) => { seen.push(text); return ''; });
+    return { adapter, seen };
+  };
+
+  const turn = (reply: unknown) => ({
+    message: {
+      message_id: 1, chat: { id: 5, type: 'private' }, from: { id: 42, first_name: 'Anna' },
+      text: 'a proč?', reply_to_message: reply,
+    },
+  });
+
+  it('drops the footer when quoting our own message', async () => {
+    const { adapter, seen } = await makeAdapter();
+    await adapter.onMessage(turn({ from: { id: 7, first_name: 'Elowen', is_bot: true }, text: 'Hotovo.\n\n— qwen3.8-max-preview · 4 %' }));
+    expect(seen[0]).toBe('[Replying to Elowen: "Hotovo."]\n[Anna] a proč?');
+  });
+
+  it('keeps a person\'s own trailing dim line verbatim', async () => {
+    const { adapter, seen } = await makeAdapter();
+    await adapter.onMessage(turn({ from: { id: 99, first_name: 'Bob' }, text: 'tohle\n— můj vlastní řádek' }));
+    expect(seen[0]).toBe('[Replying to Bob: "tohle\n— můj vlastní řádek"]\n[Anna] a proč?');
+  });
+});
