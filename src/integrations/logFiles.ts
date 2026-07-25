@@ -1,4 +1,4 @@
-import { readdirSync, lstatSync, readFileSync, unlinkSync } from 'node:fs';
+import { readdirSync, lstatSync, readFileSync, unlinkSync, openSync, closeSync, constants } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { LOG_DIR } from '../shared/logger.js';
 
@@ -103,14 +103,26 @@ export function readLogFile(name: string, limit: number = DEFAULT_LOG_TAIL_LINES
   if (!st) return { ok: false, reason: 'missing' };
   if (st.bytes > MAX_LOG_READ_BYTES) return { ok: false, reason: 'too-large' };
   let text: string;
+  // Read the file the lstat above approved, not whatever the NAME resolves to now: readFileSync(path)
+  // re-resolves, so a symlink swapped in after the check would have been followed out of the log
+  // directory. O_NOFOLLOW makes the open itself fail on a symlinked final component.
+  let fd: number | undefined;
   try {
-    text = readFileSync(path, 'utf8');
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    text = readFileSync(fd, 'utf8');
   } catch {
     return { ok: false, reason: 'missing' };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   // A trailing newline ends the last record; it is not an extra blank line.
   const all = text === '' ? [] : text.replace(/\n$/, '').split('\n');
-  const take = Math.min(Math.max(1, Math.floor(limit)), MAX_LOG_TAIL_LINES);
+  // Non-finite has to be rejected BEFORE the clamp, not by it: Math.floor(NaN) is NaN, Math.max/min
+  // propagate it, and `all.length > NaN` is false — so the arithmetic that exists to bound the read
+  // silently returned the entire file instead.
+  const take = Number.isFinite(limit)
+    ? Math.min(Math.max(1, Math.floor(limit)), MAX_LOG_TAIL_LINES)
+    : DEFAULT_LOG_TAIL_LINES;
   const lines = all.length > take ? all.slice(all.length - take) : all;
   return { ok: true, content: { name, lines, totalLines: all.length, truncated: lines.length < all.length, bytes: st.bytes } };
 }

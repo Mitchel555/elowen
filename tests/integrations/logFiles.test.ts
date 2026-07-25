@@ -89,12 +89,30 @@ describe('readLogFile', () => {
     expect(result.content.truncated).toBe(true);
   });
 
+  // The previous version of this test ran against a 2-line file and only asserted `ok`, so every hostile
+  // value passed trivially — including the one that was actually broken. The file must be LONGER than the
+  // clamp for the clamp to be observable at all.
   it('clamps a hostile limit instead of trusting it', () => {
-    write('daemon-2026-07-25.log', 'a\nb\n');
-    for (const limit of [0, -5, Number.NaN, MAX_LOG_TAIL_LINES * 10]) {
+    const total = DEFAULT_LOG_TAIL_LINES + 1;
+    write('daemon-2026-07-25.log', `${Array.from({ length: total }, (_, i) => `line ${i}`).join('\n')}\n`);
+    const read = (limit: number) => {
       const result = readLogFile('daemon-2026-07-25.log', limit, dir);
-      expect(result.ok, String(limit)).toBe(true);
-    }
+      if (!result.ok) throw new Error(`expected a read for ${limit}`);
+      return result.content;
+    };
+    // Below the floor clamps up to a single line — the last one, since this is a tail — never to zero
+    // or a negative slice.
+    expect(read(0).lines).toEqual([`line ${total - 1}`]);
+    expect(read(-5).lines).toEqual([`line ${total - 1}`]);
+    // A float is floored, not passed to slice() as-is.
+    expect(read(2.7).lines).toEqual([`line ${total - 2}`, `line ${total - 1}`]);
+    // Non-finite is the case that regressed: Math.floor(NaN) is NaN, every comparison against it is
+    // false, and the read silently returned the WHOLE file. It must fall back to the default bound.
+    expect(read(Number.NaN).lines).toHaveLength(DEFAULT_LOG_TAIL_LINES);
+    expect(read(Number.NaN).truncated).toBe(true);
+    expect(read(Number.POSITIVE_INFINITY).lines).toHaveLength(DEFAULT_LOG_TAIL_LINES);
+    // Above the ceiling is capped, but the cap is far above this file, so it reads whole.
+    expect(read(MAX_LOG_TAIL_LINES * 10).lines).toHaveLength(total);
   });
 
   it('reads an empty file as no lines, not one blank one', () => {
