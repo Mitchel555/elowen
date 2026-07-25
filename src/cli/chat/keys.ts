@@ -71,7 +71,7 @@ export const KEYBIND_ACTIONS: readonly KeybindAction[] = [
  *  - `"none"` unbinds the action. */
 const DEFAULT_KEYBINDS: Readonly<Record<KeybindAction, string>> = {
   leader: 'ctrl+x',
-  quit: 'ctrl+c',
+  quit: 'ctrl+c,ctrl+z',
   mode_toggle: 'shift+tab,ctrl+tab',
   reasoning_cycle: 'ctrl+r',
   stash: 'ctrl+s',

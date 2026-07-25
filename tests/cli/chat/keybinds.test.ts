@@ -148,6 +148,7 @@ describe('createKeymap — defaults and overrides', () => {
     const keymap = createKeymap();
     expect(keymap.matches('reasoning_cycle', CTRL('r'))).toBe(true);
     expect(keymap.matches('quit', CTRL('c'))).toBe(true);
+    expect(keymap.matches('quit', CTRL('z'))).toBe(true); // ctrl+z also quits (SIGTSTP is disabled in raw mode)
     expect(keymap.matches('stash', CTRL('s'))).toBe(true);
     expect(keymap.matches('subagent_cycle', CTRL('o'))).toBe(true);
     expect(keymap.matches('subagent_background', CTRL('b'))).toBe(true);
