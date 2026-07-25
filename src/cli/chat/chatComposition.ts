@@ -1044,14 +1044,15 @@ export function createChatComposition(
     return false;
   };
 
-  // ↑ with an empty composer recalls the most recent queued message (LIFO). Optimistic pop; the
-  // server's queue snapshot reconciles if the item was already delivered in the meantime.
+  // ↑ with an empty composer recalls the most recent queued message (LIFO). Optimistic pop for an instant
+  // composer refill; the server authoritatively pops the real queue tail (by value, race-free) and the
+  // `queue` snapshot reconciles.
   editor.onQueueRecall = (): string | null => {
     const last = rt.queued.at(-1);
     if (!last) return null;
-    rt.queued = rt.queued.slice(0, -1); // optimistic; the queue_update snapshot reconciles
+    rt.queued = rt.queued.slice(0, -1); // optimistic; the queue snapshot reconciles
     lifetime.runSession(
-      () => client.queueRemove(last.id),
+      () => client.queueRecall(),
       () => {},
       (e) => { rt.notice = color.error(`error: ${e.message}`); render('input:queue-remove-error'); },
     );
@@ -1234,14 +1235,15 @@ export function createChatComposition(
           render('input:foreground-background');
           return;
         }
-        // Drop the most recent pending mid-turn queued message. Optimistic local pop; the server's `queue`
-        // snapshot reconciles (and is authoritative if the item was already delivered in the meantime).
+        // Drop the most recent pending mid-turn queued message. Optimistic local pop; the server pops the
+        // real queue tail by value and its `queue` snapshot reconciles (authoritative if the item was
+        // already delivered in the meantime).
         case 'queue_remove': {
           const last = rt.queued.at(-1);
           if (!last) { rt.notice = color.dim('no queued messages'); render('input:queue-remove-empty'); return; }
-          rt.queued = rt.queued.slice(0, -1); // optimistic; the queue_update snapshot reconciles
+          rt.queued = rt.queued.slice(0, -1); // optimistic; the queue snapshot reconciles
           lifetime.runSession(
-            () => client.queueRemove(last.id),
+            () => client.queueRecall(),
             () => {},
             (e) => { rt.notice = color.error(`error: ${e.message}`); render('input:queue-remove-error'); },
           );

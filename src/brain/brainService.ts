@@ -635,6 +635,34 @@ export class BrainService {
     return true;
   }
 
+  /** Pop the LAST pending mid-turn message and hand back its text — the CLI ↑-recall (restores it to the
+   *  composer) and ctrl+x remove-last (drops it). Unlike queueRemove's positional targeting, this pops by
+   *  VALUE from the daemon's authoritative queue mirror. A client's cached positional id goes stale the
+   *  moment PI delivers a queued message between steps, so a positional remove issued mid-stream can
+   *  mis-target or no-op and leave the message both queued and re-sendable — the duplicate the ↑-recall
+   *  produced. Popping the real current tail server-side removes that race. Returns { text: null } when
+   *  nothing is pending (e.g. the message was delivered before the key landed). */
+  queueRecall(userId: number, session?: string): { text: string | null } {
+    const sessionId = session ? this.lifecycle.ownedUserSession(userId, session) : this.sessions.activeIdFor(userId);
+    const live = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (!live) return { text: null };
+    const steering = live.queuedSteer ?? [];
+    const followUp = live.queuedFollowUp ?? [];
+    if (steering.length + followUp.length === 0) return { text: null };
+    // Snapshot WITH images before clearQueue empties both PI's queue and (via queue_update) our mirror —
+    // then re-queue every survivor except the tail, preserving order and each message's attachments.
+    const combined = [
+      ...steering.map((m) => ({ kind: 'steer' as const, ...m })),
+      ...followUp.map((m) => ({ kind: 'followUp' as const, ...m })),
+    ];
+    const target = combined[combined.length - 1]!;
+    const text = target.echo?.displayText ?? target.text;
+    live.session.clearQueue();
+    clearDeliveredUserEchoes(live);
+    combined.slice(0, -1).forEach((m) => void enqueueMirrored(live, m.kind, m.text, m.images, m.echo));
+    return { text };
+  }
+
   /** Flip the SESSION-scoped YOLO override (the CLI `/yolo` command) — see PermissionApprovalService.
    *  Throws when no conversation is live. */
   setYolo(userId: number, on?: boolean, session?: string): { yolo: boolean } {

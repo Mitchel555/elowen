@@ -279,12 +279,13 @@ export class BrainClient {
     return (await res.json()) as BrainRateLimits | null;
   }
 
-  /** Remove one pending mid-turn queued message from the bound conversation (the queue-remove keybind).
+  /** Pop the LAST pending mid-turn message from the bound conversation and return its text — the CLI
+   *  ↑-recall and ctrl+x remove-last. The server pops by VALUE (not a positional id that goes stale the
+   *  moment PI delivers a queued message), so it can never leave the message both queued and re-sendable.
    *  The reduced snapshot rides back on the `queue` stream event — the server is authoritative. */
-  async queueRemove(id: string): Promise<void> {
-    const res = await this.f(`${this.o.base}/brain/queue/${encodeURIComponent(id)}${this.boundQs()}`, { method: 'DELETE', headers: this.headers() });
-    if (res.status === 401) throw new Unauthorized();
-    if (!res.ok) throw new Error(`elowen brain ${res.status} on /brain/queue`);
+  async queueRecall(): Promise<{ text: string | null }> {
+    const res = await this.post(`/brain/queue/recall${this.boundQs()}`, {});
+    return (await res.json()) as { text: string | null };
   }
 
   /** The owner's background shell processes (terminal plugin's `Bash(background:true)` children)

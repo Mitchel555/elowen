@@ -273,20 +273,21 @@ describe('BrainClient', () => {
     }));
   });
 
-  it('queueRemove DELETEs /brain/queue/:id (no session suffix before start binds one)', async () => {
-    const f = vi.fn(async () => j(200, { removed: true })) as unknown as typeof fetch;
+  it('queueRecall POSTs /brain/queue/recall and returns the popped text (no session suffix before start)', async () => {
+    const f = vi.fn(async () => j(200, { text: 'the recalled message' })) as unknown as typeof fetch;
     const c = new BrainClient({ base: 'http://x', token: 't', fetchImpl: f });
-    await c.queueRemove('q-42');
-    expect(f).toHaveBeenCalledWith('http://x/brain/queue/q-42', expect.objectContaining({ method: 'DELETE' }));
+    const out = await c.queueRecall();
+    expect(out).toEqual({ text: 'the recalled message' });
+    expect(f).toHaveBeenCalledWith('http://x/brain/queue/recall', expect.objectContaining({ method: 'POST' }));
   });
 
-  it('queueRemove appends the bound session id once start() resolved one', async () => {
+  it('queueRecall appends the bound session id once start() resolved one', async () => {
     const f = vi.fn(async () => j(201, { sessionId: 'brain-7' })) as unknown as typeof fetch;
     const c = new BrainClient({ base: 'http://x', token: 't', fetchImpl: f });
     await c.start();
-    f.mockImplementation(async () => j(200, { removed: false }) as Response);
-    await c.queueRemove('q-9');
-    expect(f).toHaveBeenCalledWith('http://x/brain/queue/q-9?session=brain-7', expect.objectContaining({ method: 'DELETE' }));
+    f.mockImplementation(async () => j(200, { text: null }) as Response);
+    await c.queueRecall();
+    expect(f).toHaveBeenCalledWith('http://x/brain/queue/recall?session=brain-7', expect.objectContaining({ method: 'POST' }));
   });
 
   it('maps a 401 to Unauthorized', async () => {

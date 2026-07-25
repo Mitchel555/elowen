@@ -596,6 +596,15 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     catch { return c.json({ error: 'unknown session' }, 404); }
   }));
 
+  // Pop the LAST pending mid-turn message and return its text — the CLI ↑-recall (restores it to the
+  // composer) and ctrl+x remove-last. Pops by value from the authoritative queue, not the fragile
+  // positional id, so it can never leave a message both queued and re-sendable. { text: null } when the
+  // queue is already empty. The reduced snapshot fans out via the `queue` stream event.
+  app.post('/brain/queue/recall', withBrain((c, brain) => {
+    try { return c.json(brain.queueRecall(c.get('user').id, c.req.query('session'))); }
+    catch { return c.json({ error: 'unknown session' }, 404); }
+  }));
+
   // Answer a parked AskUserQuestion. Deliberately bypasses the per-turn send() lock (the parked turn
   // holds it) — it just resolves the registry Promise, so it never deadlocks. An unknown/expired id is a
   // tolerated no-op (matched:false) rather than an error, so a late double-click is harmless.

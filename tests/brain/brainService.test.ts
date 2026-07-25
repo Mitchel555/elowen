@@ -1043,6 +1043,38 @@ describe('BrainService', () => {
     expect(d.session.abortBranchSummary).toHaveBeenCalledOnce();
   });
 
+  it('queueRecall pops the LAST pending message by value and returns its text (the ↑-recall / ctrl+x pop)', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    d.session.isStreaming = true;
+    await svc.send({ userId: 1, text: 'alpha' }); // steered
+    await svc.send({ userId: 1, text: 'beta' });  // steered
+    expect(svc.queueList(1).map((q) => q.text)).toEqual(['alpha', 'beta']);
+    // Pops the tail regardless of any positional id the client cached — the fix for the mid-stream race.
+    expect(svc.queueRecall(1)).toEqual({ text: 'beta' });
+    expect(svc.queueList(1).map((q) => q.text)).toEqual(['alpha']);
+    expect(svc.queueRecall(1)).toEqual({ text: 'alpha' });
+    expect(svc.queueList(1)).toEqual([]);
+    // Nothing pending → a clean null, never a bogus removal.
+    expect(svc.queueRecall(1)).toEqual({ text: null });
+  });
+
+  it('queueRecall keeps the surviving messages\' image attachments when it pops the tail', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    d.session.isStreaming = true;
+    await svc.send({ userId: 1, text: 'look at this', images: [{ data: 'BASE64PNG', mimeType: 'image/png' }] }); // steered WITH an image
+    await svc.send({ userId: 1, text: 'and a note' }); // steered, text only — the tail
+    expect(svc.queueRecall(1)).toEqual({ text: 'and a note' });
+    expect(svc.queueList(1).map((q) => q.text)).toEqual(['look at this']);
+    // The survivor was re-steered carrying its image (PI's clearQueue drops attachments; the mirror restores).
+    const lastSteer = d.session.steer.mock.calls.at(-1);
+    expect(lastSteer?.[0]).toBe('look at this');
+    expect(lastSteer?.[1]).toEqual([{ type: 'image', data: 'BASE64PNG', mimeType: 'image/png' }]);
+  });
+
   it('interruptQueued promotes the oldest queued message with clean model-facing text (no marker, one reminder)', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
