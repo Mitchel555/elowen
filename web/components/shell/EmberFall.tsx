@@ -29,8 +29,15 @@ export function EmberFall() {
     let last = performance.now();
 
     const size = () => {
-      width = canvas.clientWidth;
-      height = canvas.clientHeight;
+      // Measured off the HOST, never off the canvas. A canvas is a replaced element whose layout size
+      // follows its bitmap attributes, so measuring itself and then writing `canvas.width` feeds straight
+      // back into the observer: each pass multiplies by `dpr` and the element runs away exponentially
+      // (dpr 2 reached 33M px within a second, drawing one giant blurred ember over the whole rail). The
+      // host is absolutely-positioned-out-of, so its size can never depend on ours.
+      const host = canvas.parentElement;
+      if (!host) return;
+      width = host.clientWidth;
+      height = host.clientHeight;
       if (width === 0 || height === 0) { embers = []; return; } // collapsed/hidden rail — nothing to draw
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = Math.round(width * dpr);
@@ -76,9 +83,9 @@ export function EmberFall() {
 
     size();
     // The rail resizes on its own (rail↔full pin, dock side, drawer) without the window ever changing, so
-    // this observes the element rather than listening for `resize`.
+    // this observes the element rather than listening for `resize` — the host, matching what `size` reads.
     const observer = new ResizeObserver(size);
-    observer.observe(canvas);
+    observer.observe(canvas.parentElement ?? canvas);
     raf = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(raf);
