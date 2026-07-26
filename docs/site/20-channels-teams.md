@@ -1,14 +1,14 @@
 ---
 title: Microsoft Teams
 slug: channels-teams
-order: 20
+order: 21
 eyebrow: Channels
 group: Channels
 ---
 
 # Microsoft Teams
 
-Unlike Discord and WhatsApp, Teams delivers messages by **webhook**: Microsoft POSTs each activity to your Elowen instance over HTTPS. That means the daemon's `/hooks/` path must be reachable from the internet on your domain with a valid certificate. Installs provisioned by `elowen install` already route `/hooks/` to the daemon in the generated nginx/Apache vhost; for a hand-written proxy config, add the location from the [Deployment guide](../DEPLOYMENT.md).
+Unlike Discord and WhatsApp, Teams delivers messages by **webhook**: Microsoft POSTs each activity to your Elowen instance over HTTPS. That means the daemon's `/hooks/` path must be reachable from the internet on your domain with a valid certificate. Installs provisioned by `elowen install` already route `/hooks/` to the daemon in the generated nginx/Apache vhost (see [Production & Updates](production-updates)); for a hand-written proxy config, add an equivalent `/hooks/` location yourself.
 
 For what every channel shares — reactions, reasoning, service language, and the security model — see [Channels](channels).
 

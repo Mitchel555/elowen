@@ -1,7 +1,7 @@
 ---
 title: Configuration
 slug: configuration
-order: 25
+order: 26
 eyebrow: Administration
 group: Administration
 ---
@@ -40,6 +40,27 @@ Elowen AI providers can be OpenAI-compatible or Anthropic API-key entries, or su
 
 The same section contains guarded runtime limits for tool-output display, elicitation waits, memory recall, autonomous goals, and live channel sessions. Values are validated and clamped by the daemon, so a stale or malformed client cannot persist an unsafe bound.
 
+### OAuth subscription usage
+
+Each connected OAuth provider — Anthropic, GitHub Copilot, OpenAI Codex, and Kimi — gets a slim usage rail next to its account entry. The rail shows the fill of every usage window the provider exposes (typically the 5-hour and weekly windows) and shifts color as pressure builds: normal, warning at 70%, and danger at 90%. Hover a rail for a tooltip with the window's reset time.
+
+Watch these rails before launching a long autonomous run. A provider at warning pressure can rate-limit the brain mid-task; pick a different model or wait for the reset.
+
+### Brain limits
+
+The limits modal in Elowen AI exposes the eight runtime knobs that bound a single brain turn. Every value is clamped to a safe range, both in the form and again by the daemon.
+
+| Limit | What it bounds |
+| --- | --- |
+| Tool output max lines | How many lines of a tool result the brain sees before truncation. |
+| Tool output max chars | Character cap on the same tool output, applied alongside the line cap. |
+| Elicitation timeout | How long the brain waits for an answer to a question it asks you. |
+| Memory recall count | How many memories are recalled into a turn's context. |
+| Memory recall chars | Character budget for the recalled memory block. |
+| Goal turn budget | Total turns an autonomous goal may spend before stopping. |
+| Goal max turns | Hard ceiling on turns for a single goal step. |
+| Channel session cap | How many live agent sessions one channel may hold at once. |
+
 ## Models and CLI agents
 
 **Models** is the workspace catalog for task executors. It controls which known presets are visible, custom model entries, and notes that help planning select a suitable executor. Per-user allowed executors only narrow this workspace-wide ceiling.
@@ -59,6 +80,18 @@ GitHub settings keep credentials write-only and define the PR workflow defaults:
 Plugins render their own config from `elowen-plugin.json`; use their documentation and help affordances for specialized fields. The Memory section chooses the embedding and categorization models. API-key and OpenAI-compatible providers can supply those credentials without duplication; OAuth-only accounts cannot, because they do not expose an embedding endpoint.
 
 Leaving embeddings unconfigured keeps memory usable with keyword retrieval. Reindexing or recategorizing performs a deliberate background operation; it is not a hidden side effect of changing the visual UI.
+
+## Plugin editors: subagents and skills
+
+Under **Plugins**, the subagent and skills plugins each ship a full editor so you can create, edit, and delete entries without touching the filesystem.
+
+The **subagents editor** manages custom sub-agents. Each entry is a Markdown file: frontmatter declares the name, description, and tools mode — read-only, all, inherit, or an explicit custom tool list — and the body is the prompt the sub-agent runs with. The built-in explore and plan agents are read-only; you can inspect them but not modify them. Changes hot-reload, so a saved sub-agent is available to the next delegation immediately.
+
+The **skills editor** follows the same pattern for skills: a Markdown body with frontmatter, listed and editable in place. See [Skills](skills) for how skills are discovered and applied.
+
+## LSP diagnostics
+
+Elowen can run language-server diagnostics after file edits, surfacing live type and lint errors in the session. It is on by default. The `/lsp` command in the CLI toggles it, and the choice persists across restarts. See [Slash Commands](slash-commands) for the command syntax.
 
 ## Accounts and permissions
 

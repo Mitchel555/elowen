@@ -1,7 +1,7 @@
 ---
 title: Plugins
 slug: plugins
-order: 22
+order: 23
 eyebrow: Extending
 group: Extending
 ---
@@ -50,7 +50,7 @@ The manifest must match the daemon's plugin API version and includes a name, ver
 }
 ```
 
-For the full developer contract, validation rules, and examples, read [Plugin development](../PLUGIN_DEV.md).
+For the full developer contract, validation rules, and examples, see the plugin development documentation shipped in the Elowen repository.
 
 ## Scoped capabilities
 

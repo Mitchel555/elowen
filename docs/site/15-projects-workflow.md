@@ -1,7 +1,7 @@
 ---
 title: Projects & Workflow
 slug: projects-workflow
-order: 15
+order: 16
 eyebrow: Automation
 group: Automation
 ---

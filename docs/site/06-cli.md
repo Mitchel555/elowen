@@ -31,10 +31,9 @@ elowen status                # daemon and Web UI health
 
 The terminal chat streams assistant text, tool calls, diffs, approvals, todos, and sub-agent state. Diffs and Markdown code fences are syntax-highlighted — token colors are composited over the add/delete/context rows using the edited file's language — so a small edit inside a long changed line stays visible. Its telemetry rail shows the current conversation's model, context, project, branch, language-server state, and usage. For any connected OAuth subscription account — ChatGPT, Claude, or Kimi — it also surfaces that provider's subscription usage windows (a 5-hour window plus weekly ones, whatever windows the provider reports), keyed to the active model's provider; a cached reading is marked when it is no longer fresh. This is live state from the daemon, not a terminal-only copy.
 
-- Use **`@`** to attach a file through the picker. Text is attached as context; supported images remain image attachments.
-- Use **`@clipboard`** to attach supported clipboard content.
+The exact command menu is served by the daemon, so built-in and plugin commands remain aligned across surfaces. Type `/` in chat to browse it, and see [Slash Commands](slash-commands) for the full reference. Common ones:
+
 - Start a line with **`!`** to run a local shell command. Its output is shown and made available to the next prompt.
-- Use **`Esc`** to deny a pending approval; it does not silently abort the whole conversation.
 - Use **`/cd [path]`** to show or change the CLI working directory. It affects later prompts, `!` commands, attachments, exports, and local history; it never widens the daemon's project permissions.
 - Use **`/tools`** to inspect the currently available plugin tools, their owner, description, and input schema. It is an inspector, not a plugin-management screen.
 - Use **`/fast`** with a ChatGPT/OpenAI OAuth model to toggle priority processing for this conversation when that model supports it.
@@ -44,7 +43,44 @@ The terminal chat streams assistant text, tool calls, diffs, approvals, todos, a
 
 While Elowen is working, the CLI shows live activity and elapsed time. A tool call that takes longer to compose shows a localized action label describing what the tool is doing. **`Ctrl+B`** moves a running foreground sub-agent or `Bash` command into the background without cancelling it; its result returns to the conversation when it completes.
 
-The exact command menu is served by the daemon, so built-in and plugin commands remain aligned across surfaces. Type `/` in chat to browse it.
+### Mouse support
+
+The chat is fully usable with a mouse when your terminal reports it:
+
+- **Scroll wheel** scrolls the transcript history.
+- **Click** expands or collapses Thought rows, tool outputs, and diffs; click a sub-agent row to open it, or a workflow row to open the DAG modal.
+- **Click a rail section header** to collapse or expand that section of the telemetry rail.
+- **Click a process ✕** in the rail to kill that background process.
+- **Drag the rail edge** to resize it between 36 and 68 columns.
+- **Drag-select transcript text** to copy it to the clipboard (OSC 52); a `Copied N lines` notice confirms it.
+
+### Prompt history and stash
+
+Press **`↑`** with an empty input to walk back through previous prompts. History is per-project and keeps the last 100 entries; a half-typed draft is remembered and restored when you walk back down to the bottom.
+
+**`Ctrl+S`** stashes the current draft onto a LIFO stack (up to 10, session-local). Press **`Ctrl+S`** with an empty input to pop the most recent stash back into the input.
+
+### Editing and attachments
+
+- **`/editor`** composes the prompt in `$VISUAL`/`$EDITOR`. The TUI suspends while the editor runs; saving replaces the draft, and a non-zero exit keeps the draft untouched.
+- **`/paste`** attaches a clipboard image.
+- **`@clipboard`** attaches supported clipboard content at send time.
+- **`@path/to/image.png`** attaches an image file directly (max ~5 MB, up to 4 per message). For other files, **`@`** opens the picker — text is attached as context, supported images stay image attachments.
+
+Pending attachments appear as chips above the input; **`Esc`** drops them.
+
+### Queue and interrupt
+
+Sending a message while the agent is working queues it for delivery after the current turn settles:
+
+- **`↑`** with an empty input recalls the last queued message for editing. The server reconciles — if it was already delivered, it tells you so.
+- **leader `x`** drops the last queued message.
+- **`Esc`** while the agent is thinking arms a 1.8-second window; a second **`Esc`** within it aborts the turn, and a third hard-kills a pinned foreground command.
+- **`Esc`** with a non-empty queue injects the queued message immediately instead of waiting for the turn to settle.
+
+### Sub-agent interaction
+
+**`Ctrl+O`** cycles focus from the main conversation through each running child sub-agent and back. While you are viewing a child, plain text you send goes directly to that sub-agent, so you can steer it without leaving the parent. **`Esc`** returns focus to the parent.
 
 ## Conversations, context, and limits
 
@@ -56,7 +92,7 @@ elowen run --resume <session-id> "continue"
 elowen run --new "start a clean investigation"
 ```
 
-If you send a message while a turn is running, Elowen stores it in that session's durable queue and delivers it after the current turn settles. Press **`↑`** while the queue is non-empty to recall (edit or remove) a queued message before it is delivered — the same recall works in the web chat dock. `/compact` compacts older history when needed, retaining a summary and the useful tail. Context, output, goal, and channel limits are controlled by the instance owner in **Settings → Elowen AI**.
+The message queue is durable per session, and the same recall works in the web chat dock. `/compact` compacts older history when needed, retaining a summary and the useful tail. Context, output, goal, and channel limits are controlled by the instance owner in **Settings → Elowen AI**.
 
 ### Background commands
 
@@ -68,19 +104,36 @@ The chat control (`shift+tab`) cycles three working modes, and each slash comman
 
 **Build** is the default: the agent works the task itself, in one thread.
 
-**Plan mode** (`/plan`) hides mutating tools while the agent works out an approach. When a plan is ready, choose whether to implement it or keep refining it. This is a real policy boundary, not just a visual label.
+**Plan mode** (`/plan`) hides mutating tools while the agent works out an approach. When the agent produces a plan, a decision modal opens: **Implement plan** switches the conversation to build mode and starts the work, or **Cancel** keeps refining in plan mode. This is a real policy boundary, not just a visual label.
 
 **Workflow mode** (`/workflow`) asks the agent to orchestrate rather than execute: decompose the request into a DAG of self-contained sub-tasks and run it, so independent work happens in parallel and each step gets a fresh, focused sub-agent. Unlike Plan mode this is a prompt bias, not a policy boundary — the agent keeps its full toolset and still does a trivial request directly rather than wrapping it in a workflow. It does not ask before running; the plan is the workflow.
 
 Switching mode mid-conversation is recorded in the transcript, and the agent is told what changed, so it adopts the new mode on its next turn instead of carrying on as before.
 
-Approvals remain explicit for actions the policy requires. `/yolo` can enable session-level auto-approval where the account permits it, but deny rules and hard safety boundaries still apply. Use it only when you understand the scope of the current session.
+### Approvals and questions
+
+When the policy requires approval, the ask renders as a numbered dock:
+
+| Key | Action |
+| --- | --- |
+| `1` | Allow once |
+| `2` | Always allow |
+| `3` | Deny |
+| `Esc` | Deny (the turn continues) |
+
+When the agent needs an answer rather than a permission, a content question renders as a checklist dock: **Space** toggles options, **Enter** submits, and wide terminals get a preview pane beside the list.
+
+`/yolo` can enable session-level auto-approval where the account permits it, but deny rules and hard safety boundaries still apply. Use it only when you understand the scope of the current session.
+
+### Model picker extras
+
+Inside `/model`, **`Ctrl+P`** opens provider management: add a provider from the presets or a custom OpenAI-compatible URL, paste the API key, and choose the wire API — without leaving the chat.
 
 ## Goals and sub-agents
 
 `/goal` gives a conversation a persistent objective so it can continue through multiple turns until it completes, pauses, or needs help. The daemon applies the configured turn budget and hard ceiling to prevent an unattended loop from running indefinitely.
 
-The sub-agent plugin can delegate a focused, bounded task. The parent transcript shows a live child row; open it to review the child conversation or steer it directly. Delegation inherits the caller's allowed scope rather than granting a broader set of tools.
+The sub-agent plugin can delegate a focused, bounded task. The parent transcript shows a live child row; open it to review the child conversation or steer it directly (see Sub-agent interaction above). Delegation inherits the caller's allowed scope rather than granting a broader set of tools.
 
 ![Elowen terminal chat showing a live todo list](../screenshots/cli/09-todos.png)
 
@@ -106,6 +159,10 @@ Nodes are positioned by their dependency edges; the detail panel beside the canv
 | `Esc` | Close |
 
 The marker stays in the transcript after the workflow ends, so a finished DAG can be reopened and read later — including its nodes' transcripts. A workflow interrupted by a daemon restart is recorded as cancelled rather than left looking like it is still running.
+
+## Start screen and footer
+
+A fresh conversation opens on a welcome screen: the mascot and wordmark, a few hint lines, the current project and branch, and the version. Once the conversation has content, the footer takes over — its hints adapt to the state (idle, thinking, or viewing a child sub-agent) and to the terminal width, so narrow windows keep the most useful keys.
 
 ## Non-interactive runs
 
@@ -141,6 +198,6 @@ elowen status
 elowen update
 ```
 
-API-backed commands can start a local daemon when necessary; lifecycle commands manage services explicitly. See [Configuration](configuration) for environment variables and [Architecture](docs/ARCHITECTURE.md) for the process boundary.
+API-backed commands can start a local daemon when necessary; lifecycle commands manage services explicitly. See [Configuration](configuration) for environment variables and [Production & Updates](production-updates) for the service layout.
 
-[Next: CLI Keybinds](cli-keybinds)
+[Next: Slash Commands](slash-commands)

@@ -1,7 +1,7 @@
 ---
 title: MCP Integration
 slug: mcp
-order: 24
+order: 25
 eyebrow: Extending
 group: Extending
 ---
@@ -47,6 +47,6 @@ The GitHub config above gives the agent issue management, pull-request review, a
 
 ## Elowen as an MCP server
 
-The direction works the other way too: the daemon exposes a stateless MCP endpoint at `POST /mcp`, so external MCP-compatible clients can call Elowen's own tools. The details are developer material — see the [API docs](docs/API.md).
+The direction works the other way too: the daemon exposes a stateless MCP endpoint at `POST /mcp`, so external MCP-compatible clients can call Elowen's own tools. The details are developer material — see the API documentation shipped in the Elowen repository.
 
 [Next: Configuration](configuration)

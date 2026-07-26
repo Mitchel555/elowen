@@ -12,7 +12,25 @@ The Web UI is the place to observe and steer Elowen without interrupting the wor
 
 Desktop navigation uses one shared spatial rail. Account and Settings use a focused section surface; operational pages use wide workspaces with dense lists, filters, and an in-context detail drawer. On smaller screens the same information becomes a linear layout with drawers rather than a compressed desktop composition.
 
-![Elowen's dashboard](images/web-ui-dashboard.png)
+## The shell
+
+Every page sits inside the same shell, so navigation and global controls never move.
+
+- **Orbital navigation rail** — the left rail arranges modules as nodes; the active node grows to mark where you are. Collapse the rail when you want the workspace full-width.
+- **Command palette** — press `Ctrl+K` (or the search button in the top bar) to run quick actions: create a new task or mission, or jump to any module, even ones outside the compact primary navigation.
+- **Notification bell** — the top bar bell collects agents waiting on you and escalations. Items with a decision offer inline **Allow / Reject** buttons right in the dropdown, so most approvals never need a page change.
+- **Advisor dock** — the floating button opens the brain chat dock from anywhere. A dot on the button means an agent is running for you right now.
+- **Language and account** — the top bar carries the language switcher and your account avatar, which opens account settings.
+
+## Dashboard
+
+`/dash` is the landing view: a quick read on what Elowen is doing and what needs you.
+
+- **Hero** — a time-of-day greeting with a live clock, the agent presence state (resting, working, or waiting on you), and an animated mascot that reacts to that state.
+- **Quick composer** — a prompt field on the dashboard. Type and press Enter to open the brain dock with your text already in the composer.
+- **Activity tile** — a live journal of daemon events as they happen.
+- **Today's tasks tile** — running tasks marked with a *now* pill, plus what is scheduled and what finished today.
+- **Banners** — pending decisions and unfinished setup appear as banners at the top, so nothing blocks silently.
 
 ## Workspaces
 
@@ -31,41 +49,69 @@ Desktop navigation uses one shared spatial rail. Account and Settings use a focu
 | `/settings` | Configuring the instance, models, tools, and automation. |
 | `/users` | Managing users, project scope, and per-user tool access. |
 
-The command palette keeps every module reachable even when it is not in the compact primary navigation.
+![Elowen's dashboard](images/web-ui-dashboard.png)
 
 ## Tasks, Kanban, and Sessions
 
 The **Tasks** workspace is the primary operational surface. Its header exposes the important action, summary, search, and filters; the main area stays wide enough for a useful list. Selecting a task opens a right-side detail drawer so you can inspect output, changes, usage, dependencies, or mission state without losing the filtered list behind it.
 
+- **Filters** — narrow the list by status, free-text search, date range, and project. Bulk actions apply to the selection, and pagination keeps long lists fast.
+- **Detail pane** — shows a live tail of the task's output, its dependencies, and a result summary. Actions include start, stop, interrupt, approve, re-run, open terminal, and copy id. Missions render their flow as a visualization inside the same pane.
+
 ![Task list and detail drawer](images/web-ui-tasks.png)
 
-**Kanban** presents the same task state as columns.
+**Kanban** presents the same task state as five columns you can drag cards between. Dropping a card onto another card sets a dependency between them. Autopilot missions appear as epic cards whose phases collapse and expand. A **calendar view** shows the same work laid out over time.
 
 ![Kanban board](images/web-ui-kanban.png)
 
-**Sessions** shows live tmux-backed workers and allows you to open a terminal view when the executor supports it. Its second tab keeps the brain conversation history from every surface — web, CLI, channels, and task agents — in one place. Administrators can optionally enable **Automatic conversation cleanup** there: the hourly janitor removes only a user's old, inactive top-level conversations. It never removes running, active, channel, task, delegated-child, or child-bearing conversations.
+**Sessions** shows live tmux-backed workers as cards, each with a live rolling tail of output. Header metrics count what is live, what needs input, and how many workers are running. A session waiting on a decision shows inline **Allow / Reject** — with individual choices when the agent asked a multiple-choice question — alongside interrupt, kill, and open-terminal actions.
+
+Its second tab keeps the brain conversation history from every surface — web, CLI, channels, and task agents — in one place. Administrators can optionally enable **Automatic conversation cleanup** there: the hourly janitor removes only a user's old, inactive top-level conversations. It never removes running, active, channel, task, delegated-child, or child-bearing conversations.
 
 ![Sessions and conversation history](images/web-ui-sessions.png)
 
-**Timeline** and **Stats** provide the historical side: activity, commits, and usage rather than another competing task list. Stats shows tokens, model cost, generation speed (tokens/s per model with an average in the hero), cache hit rate, and the input/output token split. A provider-reported cost is authoritative; a `~` amount is an estimate from the models.dev catalog, used for proxy or custom-model turns when the provider does not report a price. The `/stats` slash command opens the same data as a modal (web) or an overlay with ⇄-switchable sections (CLI).
+## Timeline, Escalations, and Stats
+
+**Timeline** shows activity two ways: an axis view and a swimlane view. Drilling into an event shows the project diff behind it, and the changes-over-time view summarizes commits inside a window, filterable by type, project, and range.
+
+**Escalations** has two inboxes. *Pending asks* are questions from agents that you reply to inline. *Review escalations* carry the overseer's reasoning, and you either approve & continue or send the work back for a re-run.
+
+**Stats** breaks cost down by model in a table: tokens, cache, tokens/s, price, and a share bar per model, with a date-range filter. Generation speed (tokens/s per model with an average in the hero), cache hit rate, and the input/output token split sit alongside. A provider-reported cost is authoritative; a `~` amount is an estimate from the models.dev catalog, used for proxy or custom-model turns when the provider does not report a price. Administrators can reset usage accounting from here. The `/stats` slash command opens the same data as a modal (web) or an overlay with ⇄-switchable sections (CLI).
 
 ![Timeline of commits and active files](images/web-ui-timeline.png)
 
+## Chat
+
+The chat dock is available across the product, and `/chat` expands the same conversation into a full-page view that can go fullscreen; both lay out responsively on small screens. Either surface opens the same server-side brain conversation as the terminal, including streaming activity, tool traces, model selection, queued messages, and permission questions. The transcript mirrors the CLI: tool calls are grouped into collapsible runs, a completed tool's output appears live, and session changes (a model or mode switch) and workflow runs render as inline markers.
+
+- **Composer** — typing `/` opens the slash command menu; see [Slash Commands](slash-commands). Attach files with the paperclip button or by pasting.
+- **Model picker** — switch models mid-conversation; the next message uses the new model without reconnecting.
+- **Queued messages** — messages sent while the agent is busy queue up; press ↑ to recall and edit the last one.
+- **History rail** — search past conversations, rename, export, delete, or start a new chat.
+- **Agents table** — live sub-agents of the conversation, with drill-in to each one's work.
+- **Process panel** — background shell processes the agent started, with live output.
+- **Stats modal** — tokens, context usage, and cost for the current conversation.
+
+Long conversations load lazily — opening one fetches the most recent messages and older ones load as you scroll up, with your reading position preserved; streaming never yanks you back to the newest message. See [Brain & Chat](brain-chat) for conversation behavior.
+
 ## Projects and editor
 
-Projects define the repositories Elowen may work in. From a project you can review Git state, commits, changed files, and related work. The built-in editor is for inspecting or making a focused change yourself; opening a commit or file from a table keeps it in a bounded modal or drawer so the original workspace remains visible.
+Projects define the repositories Elowen may work in. From a project you can review Git state, commits, changed files, and related work. Opening a commit or file from a table keeps it in a bounded modal or drawer so the original workspace remains visible.
+
+The built-in **editor** is a full code editor for inspecting or making a focused change yourself:
+
+- **File tree** — with a context menu: new, rename, duplicate, delete, copy path.
+- **Editing** — Monaco with tabs; `Ctrl+S` saves.
+- **Diff and preview** — diff the current file against HEAD, preview Markdown and images, and review full commit diffs.
+- **Layout** — fullscreen mode and a resizable panel height.
 
 ![Projects workspace](images/projects-list.png)
 
 Read [Projects & Workflow](projects-workflow) before enabling PR automation or assigning projects to other users.
 
-## Memory and chat
+## Memory
 
-**Memory** is where you inspect, search, categorize, merge, restore, or purge durable facts. It is intentionally a workspace, not a hidden prompt cache: the list and selected-memory drawer keep the current selection and surrounding results visible together.
-
-The chat dock is available across the product, and `/chat` expands the same conversation into a full-page view that can go fullscreen; both lay out responsively on small screens. Either surface opens the same server-side brain conversation as the terminal, including streaming activity, tool traces, model selection, queued messages, and permission questions. The transcript mirrors the CLI: tool calls are grouped into collapsible runs, a completed tool's output appears live, and session changes (a model or mode switch) and workflow runs render as inline markers.
-
-Long conversations load lazily — opening one fetches the most recent messages and older ones load as you scroll up, with your reading position preserved; streaming never yanks you back to the newest message. See [Brain & Chat](brain-chat) for conversation behavior.
+The **Memory** workspace is where you inspect, search, categorize, merge, restore, or purge durable facts. It is intentionally a workspace, not a hidden prompt cache: the list and selected-memory drawer keep the current selection and surrounding results visible together. See [Memory & Embeddings](memory) for how memory works and how it is configured.
 
 ## Settings and account
 
@@ -81,7 +127,7 @@ Settings has one ordered set of sections:
 8. **Plugins** — installed capabilities, their settings, marketplace, and runtime details.
 9. **Memory** — embedding and categorization configuration.
 
-Account settings are personal: profile, security, notifications, communication preferences, memory and terminal preferences, and the user's Elowen AI choices. Routine settings save as you change them; high-impact actions such as OAuth connections, permission changes, deletion, and unattended modes retain explicit confirmation.
+Account settings are personal: profile, security, notifications, communication preferences, memory and terminal preferences, and the user's Elowen AI choices. Routine settings save as you change them; high-impact actions such as OAuth connections, permission changes, deletion, and unattended modes retain explicit confirmation. See [Account & Preferences](account-preferences).
 
 ![Settings surface](images/settings-overview.png)
 

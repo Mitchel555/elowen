@@ -1,7 +1,7 @@
 ---
 title: Telegram
 slug: channels-telegram
-order: 19
+order: 20
 eyebrow: Channels
 group: Channels
 ---
@@ -40,13 +40,13 @@ Configure in **Settings → Plugins → Telegram → Role policies**.
 | `/reasoning` | Toggle extended-thinking output |
 | `/fast` | Toggle fast mode (priority processing) |
 | `/voice` | Toggle spoken-audio replies (TTS) |
-| `/display` | Override tool activity and answer mode |
+| `/display` | Override display axes: tool activity, answer mode, tool message mode, and tool output (hidden / summary / tail) |
 | `/new` | Start a fresh conversation |
 | `/status` | Model + context usage of the live session |
 | `/stop` | Stop the current turn |
 | `/help` | Show available commands |
 
-**AskUserQuestion** renders as native inline-keyboard buttons: a single-select question is answered with one tap, a multi-select question has a Submit button, plus a free-text "Other" field.
+**AskUserQuestion** renders as native inline-keyboard buttons: a single-select question is answered with one tap, a multi-select question has a Submit button, plus an "Other" button that switches to free-text capture. Only the person the question was addressed to (or an admin) can answer.
 
 ## Groups
 
@@ -57,9 +57,15 @@ Configure in **Settings → Plugins → Telegram → Role policies**.
 
 With an OpenAI-compatible provider configured (Settings → Brain), the bot transcribes incoming voice messages (STT, default `whisper-1`) and can attach a spoken-audio version of replies (TTS, default `gpt-4o-mini-tts`) — toggle per chat with `/voice`.
 
+Voice is Telegram and [Discord](channels-discord) only — [WhatsApp](channels-whatsapp) has no voice features.
+
 ## Vision
 
 Attach images to a message and the bot sends them to a vision-capable model. Configure `visionModel`, `maxImageBytes`, and `maxImages` in the plugin settings.
+
+## Conversation behavior
+
+Steering mid-turn, idle rollover, quoted replies, and message splitting work the same on every platform — see [How conversations work in channels](channels). Long answers split at Telegram's message limit without breaking code fences.
 
 ## Proactive pushes
 

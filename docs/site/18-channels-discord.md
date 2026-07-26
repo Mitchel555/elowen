@@ -1,7 +1,7 @@
 ---
 title: Discord
 slug: channels-discord
-order: 18
+order: 19
 eyebrow: Channels
 group: Channels
 ---
@@ -39,20 +39,26 @@ Configure in **Settings → Plugins → Discord → Role policies**:
 | `/model` | Switch the model for this channel (paged picker) |
 | `/context` | Bind this channel to one of your existing conversations (paged picker) |
 | `/reasoning` | Toggle extended-thinking output |
-| `/display` | Override tool activity and answer mode per channel |
+| `/fast` | Toggle OpenAI OAuth priority processing |
+| `/stop` | Abort the current turn, including any child work it spawned |
+| `/status` | Show the live session's model, context usage %, and usage |
+| `/compact` | Summarize the conversation to free context |
+| `/display` | Override display axes per channel (see below) |
 | `/new` | Start a fresh conversation |
 | `/voice` | Toggle spoken-audio replies (TTS) |
+| `/restart` | Restart the daemon (admin only) |
 | `/help` | Show available commands |
 
 ## Per-channel display
 
-Each channel can override how the bot presents its work:
+Each channel can override how the bot presents its work along four axes:
 
 - **Tool activity** — Off (hide trace), Live status (tool start/completion), Live output (also streams bounded Bash progress)
 - **Answer mode** — Final (one complete answer below the trace) or Live (edits the answer as it's written)
 - **Tool message mode** — one compact live message, or one bubble per tool call
+- **Tool output** — how much bounded tool output appears under each status line: hidden, summary, or tail
 
-Override with `/display` or set defaults in the plugin config.
+Per-channel overrides layer on top of the global config; axes you leave unset inherit the global default. Override with `/display` or set defaults in the plugin config.
 
 ## Voice
 
@@ -66,6 +72,16 @@ Configure the voice provider, STT model (default `whisper-1`), TTS model (defaul
 ## Vision
 
 Attach images to a message and the bot sends them to a vision-capable model. Configure `visionModel`, `maxImageBytes`, and `maxImages` in the plugin settings.
+
+## Conversation behavior
+
+Steering mid-turn, idle rollover, quoted replies, and message splitting work the same on every platform — see [How conversations work in channels](channels). Long answers split at Discord's message limit without breaking code fences.
+
+## Server and thread scope
+
+- `guildId` — restrict the bot to one server. Empty = any server it's invited to.
+- `threadIds` — restrict the bot to specific threads (comma-separated IDs). Empty = respond anywhere allowed.
+- `historyLimit` (0–100, default 0) — backfill that many recent channel messages as untrusted background context when a brand-new conversation starts here.
 
 ## Proactive pushes
 
