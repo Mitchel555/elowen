@@ -117,6 +117,9 @@ function ToolPills({ tools, full }: { tools: ToolItem[]; full?: boolean }) {
   return (
     <div className={`flex flex-col pl-4 font-mono leading-relaxed ${full ? 'text-[0.6875rem]' : 'text-tiny'}`}>
       {tools.map((tool, i) => {
+        // A submitted plan REPLACES its tool row: the row would say only "ExitPlanMode", which tells the
+        // reader nothing the panel does not say better.
+        if (tool.plan) return <PlanBlock key={i} plan={tool.plan} />;
         const rich = !!(tool.diff || tool.output || tool.progress);
         const head = (
           <>
@@ -149,6 +152,22 @@ function ToolPills({ tools, full }: { tools: ToolItem[]; full?: boolean }) {
 /** Live rolling tail of a running Bash (the `tool_progress` event): the last lines of its output
  *  as it streams, in a muted terminal block. Cleared once the final `output`/`diff` lands, so it never
  *  doubles the final dump. */
+/** A plan submitted through `ExitPlanMode`, rendered as a labelled panel in place of the tool row. It is
+ *  the turn's actual deliverable — a document the user reads and decides on — so unlike a diff or a
+ *  command output it is never collapsed behind a chevron. The body stays plain text: it comes off disk
+ *  and out of whatever the model read, so it is displayed, never interpreted. */
+function PlanBlock({ plan }: { plan: string }) {
+  const { t } = useTranslation();
+  return (
+    <div data-testid="chat-plan" className="my-1 overflow-hidden rounded-md border border-border bg-surface-muted">
+      <div className="border-b border-border px-2.5 py-1 text-tiny uppercase tracking-wide text-text-muted">
+        {t.brainChat.proposedPlan}
+      </div>
+      <div className="whitespace-pre-wrap break-words px-2.5 py-1.5 text-text">{plan}</div>
+    </div>
+  );
+}
+
 function ProgressBlock({ text }: { text: string }) {
   return (
     <div className="my-1 overflow-hidden rounded-md bg-elevated/40 px-2.5 py-1.5 text-text-muted">

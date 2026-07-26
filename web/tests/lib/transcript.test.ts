@@ -145,6 +145,42 @@ describe('web transcript prependHistory: lazy-load scroll-up', () => {
 });
 
 describe('web transcript reducer', () => {
+  // ExitPlanMode's result text is addressed to the model and withheld from the transcript by tool policy,
+  // so the plan arrives on `tool_end` — an event this fold ignored entirely. The daemon carried the plan
+  // and the web dropped it, which meant the web client showed a bare "ExitPlanMode" row and the plan
+  // itself was visible nowhere at all.
+  it('attaches a submitted plan arriving on tool_end, and keeps it out of the fold', () => {
+    let view = emptyView();
+    view = reduce(view, { type: 'tool', name: 'ExitPlanMode', id: 'p1' });
+    view = reduce(view, { type: 'tool_end', id: 'p1', plan: '# Ship it\n\n1. Wire the store' });
+
+    const turn = view.turns.at(-1);
+    const items = turn?.role === 'elowen' && turn.segments[0]?.kind === 'tools' ? turn.segments[0].items : [];
+    expect(items[0]?.plan).toBe('# Ship it\n\n1. Wire the store');
+  });
+
+  // A panel is not a row: two plans are two documents, and folding them into a `×2` pill would show one
+  // and silently discard the other.
+  it('never folds two submitted plans into one pill', () => {
+    let view = emptyView();
+    view = reduce(view, { type: 'tool', name: 'ExitPlanMode', id: 'p1' });
+    view = reduce(view, { type: 'tool_end', id: 'p1', plan: '# First' });
+    view = reduce(view, { type: 'tool', name: 'ExitPlanMode', id: 'p2' });
+    view = reduce(view, { type: 'tool_end', id: 'p2', plan: '# Second' });
+
+    const turn = view.turns.at(-1);
+    const items = turn?.role === 'elowen' && turn.segments[0]?.kind === 'tools' ? turn.segments[0].items : [];
+    expect(groupToolItems(items).map((g) => g.item.plan)).toEqual(['# First', '# Second']);
+  });
+
+  it('ignores a tool_end that carries no plan', () => {
+    let view = emptyView();
+    view = reduce(view, { type: 'tool', name: 'Read', id: 'r1' });
+    const before = view.turns.at(-1);
+    view = reduce(view, { type: 'tool_end', id: 'r1' });
+    expect(view.turns.at(-1)).toBe(before);
+  });
+
   it('attaches diff and tool output by tool call id', () => {
     let view = emptyView();
     view = reduce(view, { type: 'tool', name: 'first', id: 'a' });

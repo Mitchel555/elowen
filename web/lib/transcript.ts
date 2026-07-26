@@ -21,7 +21,10 @@ export type TranscriptEvent =
    *  to the in-progress tool row by id; the final `tool_output`/`diff` supersedes it (no doubled dump). */
   | { type: 'tool_progress'; id: string; text: string }
   | { type: 'diff'; diff: string; id?: string }
-  | { type: 'tool_output'; output: ToolOutputView; id?: string }
+  | { type: 'tool_output'; output: ToolOutputView; id?: string; plan?: string }
+  /** A tool that settled with nothing to display. Carried for its `plan`: ExitPlanMode's result text is
+   *  addressed to the model and withheld from the transcript, so this is the only live event it has. */
+  | { type: 'tool_end'; id?: string; plan?: string }
   | { type: 'notice'; kind: 'retry' | 'compaction'; message: string; done?: boolean }
   | { type: 'session'; sessionId: string }
   | { type: 'subagent'; id: string; sessionId: string; status: 'running' | 'done' | 'error'; task: string; detail?: string; tools: number; tokens?: number; seconds: number; model?: string; background?: boolean; autoDeliver?: boolean; resultDelivery?: 'pending' | 'acknowledged' }
@@ -38,6 +41,10 @@ export interface ToolItem { name: string; detail?: string; diff?: string; icon?:
   /** The workflow DAG a `WorkflowStart` call is running, attached by its tool call id exactly as `sub` is
    *  for a delegate call. Durable — rebuilt from history on every hydration. */
   wf?: WorkflowState;
+  /** The markdown an `ExitPlanMode` call submitted, attached by its tool call id like `sub`/`wf`.
+   *  Renders as the plan panel instead of a tool row — a submitted plan is a tool CALL, never a shape
+   *  recognized in the model's prose. */
+  plan?: string;
   /** Live rolling tail of a still-running `Bash` (from the `tool_progress` event), rendered under
    *  the tool pill while it streams. LIVE-only — never persisted; the final `output`/`diff` clears it. */
   progress?: string }
@@ -73,7 +80,7 @@ export interface ToolGroup { item: ToolItem; count: number;
   members?: ToolItem[] }
 
 function isCollapsibleTool(item: ToolItem): boolean {
-  return !item.diff && !item.output && !item.sub && !item.wf && !item.command && !item.progress;
+  return !item.diff && !item.output && !item.sub && !item.wf && !item.command && !item.progress && !item.plan;
 }
 
 /** The kind of failure a tool result is, or undefined when it is not one. Four refusals that differ only
@@ -157,7 +164,7 @@ export function fromHistory(msgs: BrainMessage[]): ChatView {
       if (seg.kind === 'text') {
         segments.push({ kind: 'text', text: seg.text });
       } else {
-        const item: ToolItem = { name: seg.name, id: seg.id, detail: seg.detail, diff: seg.diff, output: seg.output, command: seg.command, sub: seg.sub, wf: seg.wf };
+        const item: ToolItem = { name: seg.name, id: seg.id, detail: seg.detail, diff: seg.diff, output: seg.output, command: seg.command, sub: seg.sub, wf: seg.wf, plan: seg.plan };
         const tail = segments[segments.length - 1];
         if (tail?.kind === 'tools') tail.items.push(item);
         else segments.push({ kind: 'tools', items: [item] });
@@ -240,7 +247,12 @@ export function reduce(view: ChatView, e: TranscriptEvent): ChatView {
     case 'tool_output': {
       // The final output supersedes any live `progress` tail (reconcile → no doubled dump).
       const t = ensureElowen();
-      attachToTool(t, e.id, ({ progress: _drop, ...item }) => ({ ...item, output: e.output }));
+      attachToTool(t, e.id, ({ progress: _drop, ...item }) => ({ ...item, output: e.output, ...(e.plan ? { plan: e.plan } : {}) }));
+      return { turns, thinking: true, notice: view.notice };
+    }
+    case 'tool_end': {
+      if (!e.plan) return view;
+      attachToTool(ensureElowen(), e.id, (item) => ({ ...item, plan: e.plan }));
       return { turns, thinking: true, notice: view.notice };
     }
     case 'subagent': {

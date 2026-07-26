@@ -1563,6 +1563,7 @@ export const sk = {
     askSubmit: 'Odoslať odpoveď',
     askPreviewHint: 'Prejdite na možnosť a zobrazí sa náhľad',
     contextCompacted: 'Kontext zhustený',
+    proposedPlan: 'Navrhnutý plán',
     queued: 'Vo fronte',
     removeFromQueue: 'Odobrať z frontu',
   },

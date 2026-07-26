@@ -1563,6 +1563,7 @@ export const en = {
     askSubmit: 'Send answer',
     askPreviewHint: 'Hover an option to preview it',
     contextCompacted: 'Context compacted',
+    proposedPlan: 'Proposed plan',
     queued: 'Queued',
     removeFromQueue: 'Remove from queue',
   },

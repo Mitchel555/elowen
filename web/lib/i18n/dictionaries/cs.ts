@@ -1563,6 +1563,7 @@ export const cs = {
     askSubmit: 'Odeslat odpověď',
     askPreviewHint: 'Najeďte na možnost a zobrazí se náhled',
     contextCompacted: 'Kontext zhuštěn',
+    proposedPlan: 'Navržený plán',
     queued: 'Ve frontě',
     removeFromQueue: 'Odebrat z fronty',
   },
