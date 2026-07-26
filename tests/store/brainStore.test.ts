@@ -1036,6 +1036,85 @@ describe('BrainStore', () => {
     });
   });
 
+  // The plan is a markdown file under ~/.config/elowen/plans, not a row — so the store owns exactly the
+  // lifecycle edges the DB would have given for free: purge on delete, follow a rollover re-key, and go
+  // with the user. A plan left behind is worse than an orphan spill: it is re-injected into prompts.
+  describe('plan files', () => {
+    const planDir = (home: string, join: (...p: string[]) => string) => join(home, '.config/elowen/plans');
+
+    it('removes the conversation plan file along with its rows', async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const home = mkdtempSync(join(tmpdir(), 'elowen-plan-purge-'));
+      vi.stubEnv('HOME', home);
+      try {
+        store.createSession({ id: 's1', userId: 7, model: 'm' });
+        store.createSession({ id: 's2', userId: 7, model: 'm' });
+        const dir = planDir(home, join);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 's1.md'), '# mine');
+        writeFileSync(join(dir, 's2.md'), '# theirs');
+        store.deleteSession('s1');
+        expect(existsSync(join(dir, 's1.md'))).toBe(false);
+        expect(existsSync(join(dir, 's2.md'))).toBe(true); // the other conversation keeps its plan
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('moves the plan file along with the re-keyed conversation', async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const home = mkdtempSync(join(tmpdir(), 'elowen-plan-move-'));
+      vi.stubEnv('HOME', home);
+      try {
+        store.createSession({ id: 'chan-x', userId: 7, model: 'm' });
+        const dir = planDir(home, join);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'chan-x.md'), '# Ship it');
+        store.reassignSession('chan-x', 'arch-1');
+        expect(existsSync(join(dir, 'chan-x.md'))).toBe(false);
+        expect(readFileSync(join(dir, 'arch-1.md'), 'utf8')).toBe('# Ship it');
+        // …so a later delete of the archived conversation actually cleans the plan up.
+        store.deleteSession('arch-1');
+        expect(existsSync(join(dir, 'arch-1.md'))).toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('removes every plan file belonging to a removed user, and only theirs', async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const home = mkdtempSync(join(tmpdir(), 'elowen-plan-user-'));
+      vi.stubEnv('HOME', home);
+      try {
+        store.createSession({ id: 'mine-a', userId: 7, model: 'm' });
+        store.createSession({ id: 'mine-b', userId: 7, model: 'm' });
+        store.createSession({ id: 'theirs', userId: 9, model: 'm' });
+        const dir = planDir(home, join);
+        mkdirSync(dir, { recursive: true });
+        for (const id of ['mine-a', 'mine-b', 'theirs']) writeFileSync(join(dir, `${id}.md`), `# ${id}`);
+        store.removeForUser(7);
+        expect(existsSync(join(dir, 'mine-a.md'))).toBe(false);
+        expect(existsSync(join(dir, 'mine-b.md'))).toBe(false);
+        expect(existsSync(join(dir, 'theirs.md'))).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('deleting or re-keying a conversation with no plan file is fine', () => {
+      store.createSession({ id: 'a', userId: 7, model: 'm' });
+      expect(() => store.reassignSession('a', 'b')).not.toThrow();
+      expect(() => store.deleteSession('b')).not.toThrow();
+      expect(() => store.removeForUser(7)).not.toThrow();
+    });
+  });
+
   describe('workflow runs', () => {
     const wf = (over: Record<string, unknown> = {}) => ({
       id: 'wf-1', toolCallId: 'call-1', title: 'Ship it', status: 'running',

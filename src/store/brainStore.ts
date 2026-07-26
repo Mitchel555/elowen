@@ -3,7 +3,7 @@ import { renameSync, rmSync } from 'node:fs';
 import type { Db } from './db.js';
 import { extractText } from '../brain/messageView.js';
 import { dbTsToIso } from '../shared/time.js';
-import { toolResultSpillDir } from '../shared/paths.js';
+import { planFilePath, toolResultSpillDir } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
 import { CHANNEL_PREFIX, TASK_PREFIX } from '../brain/sessionId.js';
 import {
@@ -559,6 +559,17 @@ export class BrainStore {
     // their conversation. Best-effort: a missing or unwritable spill dir must not fail the delete.
     try { rmSync(toolResultSpillDir(process.env, id), { recursive: true, force: true }); }
     catch (e) { logger('brain-store').warn(`failed to remove tool-result spills for ${id}`, e); }
+    // The plan file is outside the DB for the same reason and needs the same sweep — and a leftover one
+    // is worse than a leftover spill: nothing reads a stale spill, but a plan is re-injected into the
+    // prompt of whatever session next lands on this id.
+    this.removePlanFile(id);
+  }
+
+  /** Drop a conversation's plan file. Best-effort and ENOENT-tolerant: a conversation that never
+   *  proposed a plan simply has no file, which is not an error worth failing a delete over. */
+  private removePlanFile(sessionId: string): void {
+    try { rmSync(planFilePath(process.env, sessionId), { force: true }); }
+    catch (e) { logger('brain-store').warn(`failed to remove plan file for ${sessionId}`, e); }
   }
 
   /** Re-key a session — its row, messages and goal — to a new id, atomically (a crash mid-move would
@@ -591,6 +602,14 @@ export class BrainStore {
     catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
         logger('brain-store').warn(`failed to move tool-result spills ${oldId} → ${newId}`, e);
+      }
+    }
+    // The plan follows the conversation for the same reason: left under the freed old id it would be
+    // orphaned forever AND would surface in the next session minted onto that id.
+    try { renameSync(planFilePath(process.env, oldId), planFilePath(process.env, newId)); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger('brain-store').warn(`failed to move plan file ${oldId} → ${newId}`, e);
       }
     }
   }
@@ -648,6 +667,9 @@ export class BrainStore {
 
   /** Delete every conversation (+ goals + messages) for a user atomically — same orphan concern. */
   removeForUser(userId: number): void {
+    // Collected BEFORE the transaction: plan files are keyed by session id, and once the session rows
+    // are gone there is nothing left to enumerate them from — they would linger unreachable forever.
+    const planned = (this.db.prepare('SELECT id FROM brain_sessions WHERE user_id = ?').all(userId) as { id: string }[]).map((r) => r.id);
     this.db.transaction(() => {
       this.db.prepare(
         `DELETE FROM brain_subagent_results
@@ -668,6 +690,7 @@ export class BrainStore {
       this.db.prepare('DELETE FROM brain_messages WHERE session_id IN (SELECT id FROM brain_sessions WHERE user_id = ?)').run(userId);
       this.db.prepare('DELETE FROM brain_sessions WHERE user_id = ?').run(userId);
     })();
+    for (const id of planned) this.removePlanFile(id);
   }
 
   upsertGoal(input: { sessionId: string; userId: number; goal: string; status?: BrainGoalRow['status']; draft?: string; turnBudget?: number }): BrainGoalRow {

@@ -44,3 +44,12 @@ export function fsSafeSegment(id: string): string {
 export function toolResultSpillDir(env: NodeJS.ProcessEnv, sessionId: string): string {
   return join(dataDir(env), 'tool-results', fsSafeSegment(sessionId));
 }
+
+/** Where a conversation's active implementation plan lives — one markdown file per session. A FILE
+ *  rather than a DB row on purpose: the plan is a document the user may want to open, read and edit by
+ *  hand between turns, and markdown on disk is the only shape that allows it. It sits beside the other
+ *  per-session state under `~/.config/elowen` so an `npm update` never touches it. Same fsSafeSegment
+ *  reasoning as the spill dir: the id becomes a path component, so it must not escape `plans/`. */
+export function planFilePath(env: NodeJS.ProcessEnv, sessionId: string): string {
+  return join(dataDir(env), 'plans', `${fsSafeSegment(sessionId)}.md`);
+}
