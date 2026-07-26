@@ -9,7 +9,7 @@ type StoredTurnRow = { id?: string; role: string; content: string; created_at?: 
 // wireContract.ts for why they live outside src/brain.
 import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView } from '../shared/wireContract.js';
 import { parseDbTs } from '../shared/time.js';
-import { EXIT_PLAN_MODE_TOOL } from './tools/exitPlanMode.js';
+import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 // Only these two have daemon consumers that import them from here; BrainSubagentView/BrainWorkflowView/
 // BrainSegment are used internally by the shaping code below, and anything else that needs them imports

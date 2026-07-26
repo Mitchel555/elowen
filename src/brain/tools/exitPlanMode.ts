@@ -3,10 +3,7 @@ import { Type } from 'typebox';
 import { currentSessionId, currentTurnMode } from '../../plugins/policyContext.js';
 import { readPlan } from '../continuity/planStore.js';
 import { planFilePath } from '../../shared/paths.js';
-
-/** The name the model sees. Matches Claude Code exactly, on purpose: the models being driven here have
- *  seen this tool under this name, and a private spelling would throw away that familiarity for nothing. */
-export const EXIT_PLAN_MODE_TOOL = 'ExitPlanMode';
+import { EXIT_PLAN_MODE_TOOL } from '../../shared/planTool.js';
 
 /** Refusal when the tool is called outside plan mode. Adapted from the reference's validateInput text,
  *  which already answers the question the model asks next ("was my plan approved earlier?"). */

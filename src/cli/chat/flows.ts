@@ -45,9 +45,9 @@ export function createFlows(
     });
   };
 
-  /** Plan-mode follow-up: the agent finished a turn containing a <proposed_plan> block — ask whether to
-   *  implement it now. "Implement" flips to build mode and sends the go-ahead through the normal submit
-   *  path; "Cancel" stays in plan mode for further refinement. */
+  /** Plan-mode follow-up: the agent finished a turn whose ExitPlanMode call submitted a plan — ask
+   *  whether to implement it now. "Implement" flips to build mode and sends the go-ahead through the
+   *  normal submit path; "Cancel" stays in plan mode for further refinement. */
   const openPlanDecision = (): void => {
     openPicker({
       tui, editor, title: 'Plan ready',

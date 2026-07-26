@@ -1,6 +1,6 @@
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import { isContextOverflow } from '@earendil-works/pi-ai';
-import { toolCommand, toolDetail, toolDisplay, toolOutputView } from './messageView.js';
+import { submittedPlan, toolCommand, toolDetail, toolDisplay, toolOutputView } from './messageView.js';
 import type { ToolOutputView } from './messageView.js';
 import type { ProcessInfo } from './processRegistry.js';
 import { extractReason } from './toolReason.js';
@@ -49,10 +49,15 @@ export type BrainEvent =
    *  "formatted a.ts with prettier" — see `details.notes`) the reducer attaches alongside the diff;
    *  clients that ignore it lose only the note, never the diff. */
   | { type: 'diff'; diff: string; id?: string; output?: ToolOutputView }
-  | { type: 'tool_output'; output: ToolOutputView; id?: string }
+  | { type: 'tool_output'; output: ToolOutputView; id?: string; plan?: string }
   /** A tool completed without a displayable output block. This closes status-only renderers (Discord)
-   *  while transcript clients may safely ignore it; output/diff events already imply completion. */
-  | { type: 'tool_end'; id?: string; isError?: boolean }
+   *  while transcript clients may safely ignore it; output/diff events already imply completion.
+   *
+   *  `plan` is the markdown a settled `ExitPlanMode` call submitted — the live twin of the durable
+   *  `BrainSegment.plan`, so the plan panel and the "implement it?" decision are driven by the CALL on
+   *  the live path too, not only after a history refetch. It rides both settle events because a
+   *  hook-annotated result would take the `tool_output` branch instead. */
+  | { type: 'tool_end'; id?: string; isError?: boolean; plan?: string }
   /** A structured display card a plugin pushed via `ctx.emitCard` — a live panel (CLI above the status
    *  bar, Discord in the streamed message, web in a cards region) keyed by `card.id` so a re-emit
    *  replaces it; an empty card (no items/body) removes it. Generalizes what the todo checklist used to
@@ -505,8 +510,9 @@ export function toBrainEvent(e: AgentSessionEvent, now: number = Date.now()): Br
       // `anyE.args` is absent on the end event; the command is threaded via the reducer instead. The
       // event-level `isError` flag IS authoritative here, so pass it through for a correct live tone.
       const output = toolOutputView(anyE.toolName, anyE.args, anyE.result, anyE.isError === true);
-      if (output) return { type: 'tool_output', output, id: anyE.toolCallId };
-      return { type: 'tool_end', id: anyE.toolCallId, ...(anyE.isError === true ? { isError: true } : {}) };
+      const plan = submittedPlan(anyE.toolName, anyE.result);
+      if (output) return { type: 'tool_output', output, id: anyE.toolCallId, ...(plan ? { plan } : {}) };
+      return { type: 'tool_end', id: anyE.toolCallId, ...(anyE.isError === true ? { isError: true } : {}), ...(plan ? { plan } : {}) };
     }
   }
   return null;

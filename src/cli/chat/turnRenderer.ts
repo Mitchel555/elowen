@@ -1,8 +1,7 @@
 import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import type { MarkdownTheme } from '@earendil-works/pi-tui';
 import type { ChatTurn, ToolItem } from '../../brain/transcript.js';
-import { groupToolItems, failureSignature } from '../../brain/transcript.js';
-import { proposedPlanMatcher, proposedPlanOpenMatcher } from '../../brain/continuity/planCapture.js';
+import { groupToolItems, failureSignature, submittedPlanOf } from '../../brain/transcript.js';
 import { formatDuration, formatK, padAnsi, terminalInlineText, terminalPlainText } from '../ui/text.js';
 import { framedDiffBlock, toolOutputBlock, UserBlock, workflowCounts, workflowTitle } from './components.js';
 import { ensureLang, langForPath } from './codeHighlight.js';
@@ -141,6 +140,13 @@ export class TurnRenderer {
           if (item.wf) {
             for (const row of this.workflowBlock(item.wf, width)) add(row.line, row.kind, row.key);
           }
+          // A submitted plan renders as the panel INSTEAD of a tool row: the call carries no argument
+          // worth a line, and the plan is the whole content of the marker.
+          const plan = submittedPlanOf(item);
+          if (plan) {
+            if (rows.length > 0 && rows.at(-1)?.line !== '') addBlank();
+            for (const line of this.planBlock(plan, width)) add(line);
+          }
           if (item.diff) {
             const diffKey = `${key}:diff`;
             // The file path in the tool detail picks the grammar (unknown extension → plain colors);
@@ -200,7 +206,7 @@ export class TurnRenderer {
                 rows[index] = { ...rows[index]!, kind: 'expandable', key, turnIndex };
               }
             }
-          } else if (!item.diff && !item.sub && !item.wf) {
+          } else if (!item.diff && !item.sub && !item.wf && !plan) {
             if (item.command) {
               const command = terminalInlineText(item.command);
               // A silent shell command is shown-output work, so it leads with the same arrow as the blocks —
@@ -240,7 +246,7 @@ export class TurnRenderer {
 
       hasText = true;
       if (segmentIndex > 0 && rows.length > 0 && rows.at(-1)?.line !== '') addBlank();
-      for (const line of this.renderTextWithPlans(segment.text, width)) add(line);
+      for (const line of new Markdown(terminalPlainText(segment.text), 2, 0, this.mdTheme).render(width)) add(line);
     }
     // While the model is writing a tool call whose marker hasn't rendered yet, the transcript would
     // otherwise sit frozen (the text is done, the tool row not started). Only surface it once the window
@@ -319,30 +325,7 @@ export class TurnRenderer {
     ];
   }
 
-  private renderTextWithPlans(text: string, width: number): string[] {
-    text = terminalPlainText(text);
-    const rows: string[] = [];
-    const plan = proposedPlanMatcher();
-    let last = 0;
-    let match: RegExpExecArray | null;
-    while ((match = plan.exec(text))) {
-      const before = text.slice(last, match.index);
-      if (before.trim()) rows.push(...new Markdown(before, 2, 0, this.mdTheme).render(width));
-      rows.push(...this.planBlock(match[1] ?? '', width));
-      last = match.index + match[0].length;
-    }
-    const after = text.slice(last);
-    const open = proposedPlanOpenMatcher().exec(after);
-    if (open) {
-      const before = after.slice(0, open.index);
-      if (before.trim()) rows.push(...new Markdown(before, 2, 0, this.mdTheme).render(width));
-      rows.push(...this.planBlock(after.slice(open.index + open[0].length), width));
-    } else if (after.trim() || rows.length === 0) {
-      rows.push(...new Markdown(after, 2, 0, this.mdTheme).render(width));
-    }
-    return rows;
-  }
-
+  /** The framed panel a submitted plan renders as — raised by an `ExitPlanMode` call, never by prose. */
   private planBlock(markdown: string, width: number): string[] {
     const inner = Math.max(12, Math.max(28, width) - 4);
     const border = color.faint;

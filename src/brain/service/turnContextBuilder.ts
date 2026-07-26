@@ -22,7 +22,7 @@ import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
 import { turnWorkDir } from './workDir.js';
 import { drainPostCompactionContext } from '../continuity/postCompactionContext.js';
-import { EXIT_PLAN_MODE_TOOL } from '../tools/exitPlanMode.js';
+import { EXIT_PLAN_MODE_TOOL } from '../../shared/planTool.js';
 import { planFilePath } from '../../shared/paths.js';
 
 interface TurnContextBuilderDeps {

@@ -1,5 +1,6 @@
 import type { BrainCard, WorkflowUpdate } from './events.js';
 import { isEmptyCard } from './cards.js';
+import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import type { ToolOutputView } from './messageView.js';
 
 /** The CLI/web projection of a live `workflow` snapshot — structurally the event payload itself (a
@@ -24,9 +25,20 @@ export interface ToolItem { name: string; detail?: string; diff?: string; icon?:
    *  is for a delegate call. Durable: this is what the panel projection is rebuilt from on every
    *  hydration, so it is also what lets a finished workflow still open its modal from the transcript. */
   wf?: WorkflowState;
+  /** The markdown an `ExitPlanMode` call submitted, attached by its tool call id like `sub`/`wf`. It is
+   *  what the plan panel renders and what raises the "implement it?" decision — a submitted plan is a
+   *  tool CALL, never a shape recognized in the model's prose. */
+  plan?: string;
   /** Live rolling tail of a still-running `Bash` (from the `tool_progress` event), shown under the
    *  tool row while it streams. LIVE-only — never persisted; the final `output`/`diff` clears it. */
   progress?: string }
+
+/** The plan a tool item submitted, or undefined when it submitted none. Keyed on the tool name as well
+ *  as the field, so no other tool can raise a plan panel by shipping a `plan` of its own. */
+export function submittedPlanOf(item: ToolItem): string | undefined {
+  if (item.name !== EXIT_PLAN_MODE_TOOL) return undefined;
+  return item.plan?.trim() ? item.plan : undefined;
+}
 
 /** Live progress of a delegated sub-agent, attached to its `delegate` tool item by call id — what the
  *  CLI renders as the `↳ …` line under the tool row (current child tool, counters, drill-in target). */
@@ -74,7 +86,7 @@ export interface ToolGroup {
 /** True when an item is a bare tool row (no block of its own), the only kind that collapses. A live
  *  `progress` tail is a block of its own, so a streaming command never folds into a collapsed run. */
 function isCollapsibleTool(item: ToolItem): boolean {
-  return !item.diff && !item.output && !item.sub && !item.wf && !item.command && !item.progress;
+  return !item.diff && !item.output && !item.sub && !item.wf && !item.plan && !item.command && !item.progress;
 }
 
 /** The kind of failure a tool result is, or undefined when it is not one. Four refusals that differ only
@@ -153,7 +165,7 @@ export type ChatTurn = YouTurn | ElowenTurn | DividerTurn | EventTurn;
 export interface HistoryMessage {
   role: string;
   text: string;
-  segments?: ({ kind: 'text'; text: string } | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: SubagentState; wf?: WorkflowState })[];
+  segments?: ({ kind: 'text'; text: string } | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: SubagentState; wf?: WorkflowState; plan?: string })[];
   /** The source's own id: the store row's for a `user`/`assistant`/`compaction` row, the session-change
    *  marker's for a `role:'event'` row. Absent only when the source had none. */
   id?: string;
@@ -183,7 +195,7 @@ export function turnsFromHistory(msgs: HistoryMessage[]): ChatTurn[] {
       if (seg.kind === 'text') {
         segments.push({ kind: 'text', text: seg.text });
       } else {
-        const item: ToolItem = { name: seg.name, id: seg.id, detail: seg.detail, diff: seg.diff, output: seg.output, command: seg.command, sub: seg.sub, wf: seg.wf };
+        const item: ToolItem = { name: seg.name, id: seg.id, detail: seg.detail, diff: seg.diff, output: seg.output, command: seg.command, sub: seg.sub, wf: seg.wf, plan: seg.plan };
         const tail = segments[segments.length - 1];
         if (tail?.kind === 'tools') tail.items.push(item);
         else segments.push({ kind: 'tools', items: [item] });

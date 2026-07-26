@@ -2,12 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildExitPlanModeTool, EXIT_PLAN_MODE_TOOL } from '../../../src/brain/tools/exitPlanMode.js';
+import { buildExitPlanModeTool } from '../../../src/brain/tools/exitPlanMode.js';
+import { EXIT_PLAN_MODE_TOOL } from '../../../src/shared/planTool.js';
 import { writePlan } from '../../../src/brain/continuity/planStore.js';
 import { runWithPolicy } from '../../../src/plugins/policyContext.js';
 import { planSlug } from '../../../src/shared/planSlug.js';
 import type { Policy } from '../../../src/plugins/policy.js';
-import type { TurnWorkMode } from '../../../src/shared/types.js';
+import type { TurnWorkMode } from '../../../src/plugins/policyContext.js';
 
 const POLICY: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
 const SESSION = 'brain-ch-owner-1';

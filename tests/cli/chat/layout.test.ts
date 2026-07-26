@@ -417,9 +417,10 @@ describe('chat layout components', () => {
     expect(rendered).toContain('Edit test.php');
   });
 
-  it('renders proposed plan tags as a nested plan block', () => {
+  it('renders a submitted plan as a panel, taking the place of the ExitPlanMode tool row', () => {
     const view = transcriptWith([], [
-      { type: 'text', delta: '<proposed_plan>\n# Migration\n- Move prompt into CLI prompts.\n</proposed_plan>' },
+      { type: 'tool', name: 'ExitPlanMode', id: 'plan-1' },
+      { type: 'tool_end', id: 'plan-1', plan: '# Migration\n- Move prompt into CLI prompts.' },
       { type: 'idle' },
     ]);
     const viewport = new ChatViewport(
@@ -432,12 +433,14 @@ describe('chat layout components', () => {
     const rendered = viewport.render(80).join('\n');
     expect(rendered).toContain('Proposed plan');
     expect(rendered).toContain('Migration');
-    expect(rendered).not.toContain('<proposed_plan>');
+    expect(rendered).not.toContain('ExitPlanMode');
   });
 
-  it('renders a streaming proposed plan block before the closing tag arrives', () => {
-    const view = transcriptWith([], [
-      { type: 'text', delta: '<proposed_plan>\n# Draft\n- Check tests' },
+  it('renders a submitted plan carried by durable history, not only by the live event', () => {
+    const view = transcriptWith([
+      { role: 'assistant', text: '', segments: [
+        { kind: 'tool', id: 'plan-1', name: 'ExitPlanMode', plan: '# Rewire\n- Drive the panel from the call.' },
+      ] },
     ]);
     const viewport = new ChatViewport(
       viewportState(view),
@@ -448,8 +451,25 @@ describe('chat layout components', () => {
     );
     const rendered = viewport.render(80).join('\n');
     expect(rendered).toContain('Proposed plan');
-    expect(rendered).toContain('Draft');
-    expect(rendered).not.toContain('<proposed_plan>');
+    expect(rendered).toContain('Rewire');
+  });
+
+  it('renders no plan panel for prose that merely quotes the plan tag', () => {
+    const view = transcriptWith([], [
+      { type: 'text', delta: 'Plan mode used to sniff my answer for a <proposed_plan> tag.' },
+      { type: 'idle' },
+    ]);
+    const viewport = new ChatViewport(
+      viewportState(view),
+      getMarkdownTheme(),
+      () => 12,
+      () => 1,
+      () => 80,
+    );
+    const rendered = viewport.render(80).join('\n');
+    expect(rendered).toContain('used to sniff my answer');
+    expect(rendered).not.toContain('Proposed plan');
+    expect(rendered).not.toContain('╭');
   });
 
   it('renders slash overlay rows to the full requested width', () => {

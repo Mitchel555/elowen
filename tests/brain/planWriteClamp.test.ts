@@ -7,7 +7,7 @@ import { composeSessionTools } from '../../src/brain/session/capabilities.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import { buildPermissionRuleset, sanitizePermissionSettings, type TurnPermissions } from '../../src/brain/toolPermissions.js';
 import type { Policy } from '../../src/plugins/policy.js';
-import type { TurnWorkMode } from '../../src/shared/types.js';
+import type { TurnWorkMode } from '../../src/plugins/policyContext.js';
 import { planSlug } from '../../src/shared/planSlug.js';
 
 const POLICY: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };

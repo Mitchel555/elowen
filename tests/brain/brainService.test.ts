@@ -165,7 +165,9 @@ describe('BrainService', () => {
 
     await svc.send({ userId: 1, text: 'ORCHESTRATE THIS', mode: 'workflow', session: 'brain-1' });
     const wfPrompt = d.session.prompt.mock.calls.at(-1)?.[0] as string;
-    expect(d.prompts.render).toHaveBeenCalledWith('cli/workflow-mode', {}, 1);
+    // Both mode directives are rendered with the plan file path: plan mode NAMES it (the model cannot
+    // write a plan to a path it was never told), and workflow simply does not mention the var.
+    expect(d.prompts.render).toHaveBeenCalledWith('cli/workflow-mode', { planFile: expect.stringMatching(/\/plans\/[a-z0-9-]+\.md$/) }, 1);
     expect(wfPrompt).toContain('PERSONA:cli/workflow-mode:');
     expect(wfPrompt).toContain('ORCHESTRATE THIS');
 

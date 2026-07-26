@@ -171,6 +171,36 @@ describe('TranscriptModel', () => {
     expect(model.lastAssistantText()).toBe('');
   });
 
+  describe('submitted plan', () => {
+    it('exposes the plan of a settled ExitPlanMode call in the tail turn', () => {
+      const model = new TranscriptModel();
+      model.apply({ type: 'tool', id: 'plan-1', name: 'ExitPlanMode' });
+      model.apply({ type: 'tool_end', id: 'plan-1', plan: '# Migration' });
+
+      expect(model.lastSubmittedPlan()).toBe('# Migration');
+    });
+
+    it('ignores a plan shipped by any other tool', () => {
+      const model = new TranscriptModel();
+      model.apply({ type: 'tool', id: 'read-1', name: 'Read' });
+      model.apply({ type: 'tool_end', id: 'read-1', plan: '# Not a plan submission' });
+
+      expect(model.lastSubmittedPlan()).toBeUndefined();
+    });
+
+    it('drops the previous turn\'s plan once a newer turn is the tail', () => {
+      const model = new TranscriptModel([
+        { role: 'assistant', text: '', segments: [{ kind: 'tool', id: 'plan-1', name: 'ExitPlanMode', plan: '# Old' }] },
+      ]);
+      expect(model.lastSubmittedPlan()).toBe('# Old');
+
+      model.apply({ type: 'user', text: 'refine it' });
+      model.apply({ type: 'text', delta: 'here is the refinement' });
+
+      expect(model.lastSubmittedPlan()).toBeUndefined();
+    });
+  });
+
   it('folds streamed text, reasoning, tool lifecycle, notice, idle and error without changing UX state', () => {
     const model = new TranscriptModel();
     model.apply({ type: 'user', text: 'run it' });

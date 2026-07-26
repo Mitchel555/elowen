@@ -1,7 +1,6 @@
 import { color } from './theme.js';
 import { upsertCard } from '../../brain/transcript.js';
 import { TranscriptModel } from '../../brain/transcriptModel.js';
-import { proposedPlanOpenMatcher } from '../../brain/continuity/planCapture.js';
 import { SnapshotHydrator, SnapshotTimeoutError, type SnapshotLaneLease } from './snapshotHydrator.js';
 import type { BrainEvent } from '../../brain/events.js';
 import type { BrainMessageView } from '../../brain/messageView.js';
@@ -149,10 +148,9 @@ export class StreamCoordinator implements StreamCoordinatorPort {
           if (!rt.conversationTitle) {
             void refreshMeta().then(() => { if (current() && lease.isCurrent()) render('metadata:idle-title'); });
           }
-          if (rt.workMode === 'plan' && !rt.childView) {
-            const text = rt.transcript.lastAssistantText();
-            if (proposedPlanOpenMatcher().test(text)) flows.openPlanDecision();
-          }
+          // The decision follows an explicit ExitPlanMode call in the settled turn — prose that merely
+          // quotes or discusses a plan can never raise it.
+          if (rt.workMode === 'plan' && !rt.childView && rt.transcript.lastSubmittedPlan()) flows.openPlanDecision();
         }
         // A parent step means a turn is running — arm the periodic poll for very long turns (idempotent).
         if (event.type === 'step') onTurnActive();

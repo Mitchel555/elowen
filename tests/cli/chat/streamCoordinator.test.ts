@@ -1540,3 +1540,56 @@ describe('StreamCoordinator — sub-agent drill-in hydration', () => {
     stream.closeSubagent();
   });
 });
+
+describe('StreamCoordinator — plan decision', () => {
+  /** Run a plan-mode turn to `idle` and report how often the implement/cancel decision was raised. */
+  function planDecisionsFor(events: BrainEvent[]): number {
+    let onEvent!: (event: BrainEvent) => void;
+    const client = {
+      stream: (cb: (event: BrainEvent) => void) => { onEvent = cb; return Promise.resolve(); },
+      history: () => Promise.resolve([]),
+      rebind: () => {},
+    } as unknown as BrainClient;
+    const rt = state([], { conversationTitle: 'seeded', workMode: 'plan' });
+    const ac = new AbortController();
+    rt.streamAc = ac;
+    let decisions = 0;
+    const flows = { launchAsk: () => {}, openPlanDecision: () => { decisions += 1; } } as unknown as Flows;
+    const stream = new StreamCoordinator(
+      rt, { client }, actions(), flows,
+      new SnapshotHydrator<BrainEvent>(), new HydrationNoticeOwner(),
+    );
+    stream.openStream(ac);
+    for (const event of events) onEvent(event);
+    stream.stop();
+    return decisions;
+  }
+
+  it('raises the decision when the settled turn submitted a plan through ExitPlanMode', () => {
+    expect(planDecisionsFor([
+      { type: 'tool', name: 'ExitPlanMode', id: 'plan-1' },
+      { type: 'tool_end', id: 'plan-1', plan: '# Migration\n- Step one.' },
+      { type: 'idle' },
+    ])).toBe(1);
+  });
+
+  // The whole reason the signal moved off the prose: a turn ABOUT plan mode quotes the tag, and a text
+  // matcher cannot tell that apart from a turn proposing a plan.
+  it('stays silent when the assistant only quotes the plan tag in its prose', () => {
+    expect(planDecisionsFor([
+      { type: 'text', delta: 'Plan mode used to look for a <proposed_plan> block in my answer.' },
+      { type: 'idle' },
+    ])).toBe(0);
+  });
+
+  it('stays silent when a later turn settles without submitting a plan', () => {
+    expect(planDecisionsFor([
+      { type: 'tool', name: 'ExitPlanMode', id: 'plan-1' },
+      { type: 'tool_end', id: 'plan-1', plan: '# Migration\n- Step one.' },
+      { type: 'idle' },
+      { type: 'user', text: 'not yet — refine it' },
+      { type: 'text', delta: 'Here is the refinement.' },
+      { type: 'idle' },
+    ])).toBe(1);
+  });
+});

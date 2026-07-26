@@ -1,5 +1,6 @@
 import type { BrainEvent } from './events.js';
 import {
+  submittedPlanOf,
   turnsFromHistory,
   type ChatTurn,
   type ElowenTurn,
@@ -120,6 +121,19 @@ export class TranscriptModel implements TranscriptRead {
   subagents(): readonly SubagentState[] { return this.subagentProjection; }
   workflows(): readonly WorkflowState[] { return this.workflowProjection; }
   lastAssistantText(): string { return this.lastAssistant; }
+  /** The plan an `ExitPlanMode` call submitted in the TAIL turn, or undefined. Tail-only on purpose, like
+   *  `lastAssistantText`: it answers "did the turn that just settled propose a plan?", so a later turn
+   *  without one must not resurrect the previous turn's plan decision. */
+  lastSubmittedPlan(): string | undefined {
+    const tail = this.turns.at(-1);
+    if (tail?.role !== 'elowen') return undefined;
+    let found: string | undefined;
+    for (const segment of tail.segments) {
+      if (segment.kind !== 'tools') continue;
+      for (const item of segment.items) found = submittedPlanOf(item) ?? found;
+    }
+    return found;
+  }
 
   replaceHistory(history: HistoryMessage[]): void {
     this.rebuild(history);
@@ -182,11 +196,20 @@ export class TranscriptModel implements TranscriptRead {
           diff: event.diff,
           ...(event.output ? { output: event.output } : {}),
         }));
-      case 'tool_output':
+      case 'tool_output': {
+        const { plan } = event;
         return this.patchToolEvent(event.id, ({ progress: _drop, ...item }) => ({
           ...item,
           output: item.command && !event.output.command ? { ...event.output, command: item.command } : event.output,
+          ...(plan ? { plan } : {}),
         }));
+      }
+      // Ignored except when it carries a submitted plan: that is the only content a settle-without-output
+      // event has, and the plan panel/decision must not wait for a history refetch to see it.
+      case 'tool_end': {
+        const { plan } = event;
+        return plan ? this.patchToolEvent(event.id, (item) => ({ ...item, plan })) : false;
+      }
       case 'subagent':
         return this.applySubagent(event);
       case 'workflow':
