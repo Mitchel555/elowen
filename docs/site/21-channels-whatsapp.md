@@ -1,9 +1,9 @@
 ---
 title: WhatsApp
 slug: channels-whatsapp
-order: 17
+order: 21
 eyebrow: Channels
-group: Extending
+group: Channels
 ---
 
 # WhatsApp
@@ -54,4 +54,4 @@ With `streaming` enabled (default), the bot edits its reply in place as it strea
 
 Set `notifyChat` to a phone number or JID and the bot posts cron/tick results, escalations, and restart notices there. Empty = no proactive pushes.
 
-[Next: Troubleshooting](troubleshooting)
+[Next: Plugins](plugins)

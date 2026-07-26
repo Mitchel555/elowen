@@ -1,9 +1,9 @@
 ---
 title: Scheduling
 slug: scheduling
-order: 22
+order: 16
 eyebrow: Automation
-group: Reference
+group: Automation
 ---
 
 # Scheduling
@@ -132,4 +132,4 @@ ScheduleWakeup({
 })
 ```
 
-[Next: Memory & Embeddings](memory)
+[Next: Channels](channels)

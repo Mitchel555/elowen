@@ -159,13 +159,21 @@ another only chat, choose which models each person may run, and scope each user
 to specific projects.
 
 This per-user tools-and-rights model is a headline feature, not an afterthought.
-The full depth lives in [Account & Security](account-security).
+The full depth lives in [Users & Access](users-access).
 
-## What's next
+## I want to…
 
-- [Install](install) — detailed installation options, Docker, and build-from-source
-- [Brain & Chat](brain-chat) — the agent core you talk to
-- [Web UI](web-ui) — a tour of the surfaces that let you observe and steer the agent
-- [Plugins](plugins) — extend Elowen with Discord, Telegram, Microsoft Teams, WhatsApp, cron, skills, and more
+| Goal | Go to |
+|------|-------|
+| Install on a server | [Install](install) |
+| Run in Docker | [Docker](docker) |
+| Connect a chat channel | [Channels](channels) |
+| Change the model | [Brain & Chat](brain-chat) |
+| Automate a recurring task | [Scheduling](scheduling) |
+| Let it work unattended safely | [Autonomy & Safety](autonomy-safety) |
+| See token usage | [Usage & Costs](usage-costs) |
+| Add a teammate | [Users & Access](users-access) |
+| Teach it my preferences | [Account & Preferences](account-preferences) |
+| Fix a problem | [Troubleshooting](troubleshooting) |
 
 [Next: Install](install)

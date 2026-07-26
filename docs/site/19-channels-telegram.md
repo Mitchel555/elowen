@@ -1,9 +1,9 @@
 ---
 title: Telegram
 slug: channels-telegram
-order: 15
+order: 19
 eyebrow: Channels
-group: Extending
+group: Channels
 ---
 
 # Telegram

@@ -1,9 +1,9 @@
 ---
 title: CLI Keybinds
 slug: cli-keybinds
-order: 26
-eyebrow: Surfaces
-group: Surfaces
+order: 7
+eyebrow: Everyday use
+group: Everyday use
 ---
 
 # CLI Keybinds
@@ -85,4 +85,4 @@ everything at once.
 - [CLI](cli) — the full terminal chat surface
 - [Web UI](web-ui) — the browser equivalent (keybinds are CLI-only)
 
-[Back to start](getting-started)
+[Next: Brain & Chat](brain-chat)

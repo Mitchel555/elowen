@@ -1,8 +1,8 @@
 ---
 title: Plugins
 slug: plugins
-order: 8
-eyebrow: Extend Elowen
+order: 22
+eyebrow: Extending
 group: Extending
 ---
 
@@ -90,4 +90,4 @@ Changing plugin enablement or configuration reloads the registry so future turns
 
 Skills are applied live: creating or deleting a skill through the `CreateSkill` / `DeleteSkill` tools takes effect from the next message onward without a daemon restart. The same is true for sub-agent type definitions edited through the plugin detail card.
 
-[Next: Projects & Workflow](projects-workflow)
+[Next: Skills](skills)

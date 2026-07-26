@@ -2,8 +2,8 @@
 title: CLI
 slug: cli
 order: 6
-eyebrow: Terminal agent
-group: Surfaces
+eyebrow: Everyday use
+group: Everyday use
 ---
 
 # CLI
@@ -141,6 +141,6 @@ elowen status
 elowen update
 ```
 
-API-backed commands can start a local daemon when necessary; lifecycle commands manage services explicitly. See [Configuration](configuration) for environment variables and [Architecture](architecture) for the process boundary.
+API-backed commands can start a local daemon when necessary; lifecycle commands manage services explicitly. See [Configuration](configuration) for environment variables and [Architecture](docs/ARCHITECTURE.md) for the process boundary.
 
-[Next: Brain & Chat](brain-chat)
+[Next: CLI Keybinds](cli-keybinds)

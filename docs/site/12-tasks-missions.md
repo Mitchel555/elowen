@@ -1,9 +1,9 @@
 ---
 title: Tasks & Missions
 slug: tasks-missions
-order: 3
-eyebrow: Core concepts
-group: Core concepts
+order: 12
+eyebrow: Automation
+group: Automation
 ---
 
 # Tasks & Missions
@@ -54,7 +54,7 @@ Create a mission from a goal in the Tasks workspace. Elowen can accept a manual 
 
 An optional **pilot** plans work. An optional **overseer** can stay available during the mission to judge routine decisions, review completion, or escalate uncertain cases. Each mission can select its own pilot and overseer executors, independently from the workspace defaults. If no dedicated executor is configured, Elowen uses the configured fallback behavior rather than inventing a hidden agent.
 
-Autonomy levels control how far the mission can proceed before it asks for help. They do not bypass permission or destructive-action safeguards; use the [Agents & Autonomy](agents-autonomy) guide to choose the appropriate level.
+Autonomy levels control how far the mission can proceed before it asks for help. They do not bypass permission or destructive-action safeguards; use the [Autonomy & Safety](autonomy-safety) guide to choose the appropriate level.
 
 ### TDD and pull requests
 
@@ -72,4 +72,4 @@ The optional PR workflow uses a mission worktree and can create a branch, run a 
 
 You can pause or resume a mission, answer a worker, change a task's schedule, or open the associated project without losing the surrounding context. For repository setup and PR behavior, continue to [Projects & Workflow](projects-workflow).
 
-[Next: Agents & Autonomy](agents-autonomy)
+[Next: Agents & Providers](agents-providers)
