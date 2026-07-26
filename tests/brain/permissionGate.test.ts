@@ -31,7 +31,9 @@ const perms = (over: Partial<TurnPermissions> & { user?: unknown } = {}): TurnPe
 
 const composed = (name: string) => {
   const { tool, ran } = fakeTool(name);
-  const [gated] = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool] });
+  // By NAME, not by position: an owner-chat session composes built-ins of its own (ExitPlanMode), so the
+  // tool under test is not reliably first in the returned set.
+  const gated = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool] }).find((t) => t.name === name);
   return { gated: gated!, ran };
 };
 
@@ -45,7 +47,8 @@ describe('permission gate — the single tool-call choke point (composeSessionTo
 
   it('gates built-in (non-plugin) tools too — the Elowen*/Memory* set passes the same choke point', async () => {
     const { tool, ran } = fakeTool('ElowenCreateTask');
-    const [gated] = composeSessionTools({ kind: 'owner-chat', elowenTools: () => [tool], pluginTools: [] });
+    const gated = composeSessionTools({ kind: 'owner-chat', elowenTools: () => [tool], pluginTools: [] })
+      .find((t) => t.name === 'ElowenCreateTask');
     const p = perms({ user: { tools: { ElowenCreateTask: 'deny' } } });
     const res = await callTool(gated!, {}, p);
     expect(ran()).toBe(0);

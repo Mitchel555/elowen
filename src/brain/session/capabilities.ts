@@ -1,6 +1,7 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { currentSessionId, currentToolPolicy, currentTurnMode, currentTurnPermissions, toolPermitted, type ToolPolicy } from '../../plugins/policyContext.js';
 import { isSessionPlanPath } from '../continuity/planStore.js';
+import { buildExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { BASH_PERMISSION_TOOLS, bashAlwaysPattern, resolveToolPermission, type ApprovalDecision } from '../toolPermissions.js';
 import type { ToolActivationTarget } from '../toolSearch/toolSearchTool.js';
 import { withReason, stripReason } from '../toolReason.js';
@@ -229,11 +230,16 @@ export function composeSessionTools(spec: CapabilitySpec): ToolDefinition[] {
   // user's own deny can still hide it) but never the plugin hook wrapper. Only present when the session
   // actually defers tools; otherwise the list is empty and the composed set is byte-identical to before.
   const toolSearchTools = spec.kind !== 'task-worker' ? (spec.toolSearch?.() ?? []) : [];
+  // Plan mode is an owner-chat concept — a channel, cron or sub-agent turn carries no mode at all
+  // (currentTurnMode), so there would be nothing for this tool to exit. Composed unconditionally for the
+  // owner rather than only while planning, mirroring the reference: the tool is what REFUSES outside plan
+  // mode, and a tool that vanishes cannot explain itself to a model that reaches for it.
+  const planTools = ownerChat ? [buildExitPlanModeTool()] : [];
   const pluginTools = spec.pluginTools.map((t) => gateToolAccess(t, spec.onToolResult, spec.onToolCall));
   // Every composed tool gains an optional leading `_reason` (withReason augments the schema; excluded tools
   // — ToolSearch, mcp__* — pass through), then the whole set takes the permission gate, then stripReason
   // wraps OUTERMOST so `_reason` is removed from the arguments before any inner wrapper or handler sees it.
-  return [...elowenTools, ...memoryTools, ...toolSearchTools, ...pluginTools]
+  return [...elowenTools, ...memoryTools, ...toolSearchTools, ...pluginTools, ...planTools]
     .map(withReason).map(gatePermissions).map(stripReason);
 }
 

@@ -22,6 +22,7 @@ import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
 import { turnWorkDir } from './workDir.js';
 import { drainPostCompactionContext } from '../continuity/postCompactionContext.js';
+import { EXIT_PLAN_MODE_TOOL } from '../tools/exitPlanMode.js';
 
 interface TurnContextBuilderDeps {
   store: BrainStore;
@@ -50,13 +51,16 @@ interface TurnContextBuilderDeps {
  *   - `Delegate` — `scopeOptions` puts the turn's mode on the AsyncLocalStorage, and
  *     pathGuard.currentAccess stamps `readOnly` on every delegation a planning turn makes, which the
  *     host bakes into the child's toolset and permission boundary (brain/platforms.ts).
+ *   - `ExitPlanMode` — the whole point of the mode is to leave it, so the tool that does so has to be
+ *     reachable from inside. It writes nothing; it reads the plan file and ends the turn for the user's
+ *     decision, which is why it is here rather than claiming `planSafe` (that means "only reads").
  *   - `Write` — the model authors its plan as a FILE, so it needs exactly one writable path. The
  *     permission choke point (session/capabilities.ts, planWriteDenial) refuses any planning write that
  *     does not resolve to this session's plan file, symlinks and `..` included. Admitted ONLY because
  *     that clamp exists; `Edit` stays withheld because editing a plan is a rewrite of it.
  *  `WorkflowStart` stays withheld: it would inherit the same forcing, but its nodes expand through
  *  `WorkflowAddNodes`, and admitting one without the other only buys a workflow that cannot grow. */
-const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate', 'Write']);
+const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate', 'Write', EXIT_PLAN_MODE_TOOL]);
 
 /** How often a mode's FULL directive is resent while the mode stays on — entry, then every Nth turn.
  *  Low enough that the rules never scroll out of steering range, high enough that a long planning

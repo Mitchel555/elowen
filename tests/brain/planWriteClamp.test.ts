@@ -26,7 +26,8 @@ function fakeTool(name: string): { tool: ToolDefinition; ran: () => number } {
 
 const composed = (name: string) => {
   const { tool, ran } = fakeTool(name);
-  const [gated] = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool] });
+  // By NAME, not by position: owner-chat composes ExitPlanMode too, so position is not stable.
+  const gated = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool] }).find((t) => t.name === name);
   return { gated: gated!, ran };
 };
 
