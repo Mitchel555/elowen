@@ -29,7 +29,8 @@
     "dot",
     "gh",
     "elowen",
-    "ollama"
+    "ollama",
+    "pgrep"
   ],
   "ignoreIssues": {
     "web/lib/i18n/types.ts": [
