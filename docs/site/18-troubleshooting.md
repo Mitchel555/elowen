@@ -157,4 +157,4 @@ Everything lives in a single SQLite database file in the data directory (default
 **The bot answered in the wrong language.**
 Set the `language` field in the channel plugin config (`en`, `cs` or `sk`) for service messages. For the agent's reply language, add an instruction to the role/sender policy's prompt.
 
-[Back to start](getting-started)
+[Next: Scheduling](scheduling)
