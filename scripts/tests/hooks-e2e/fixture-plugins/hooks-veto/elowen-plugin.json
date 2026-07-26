@@ -1,0 +1,10 @@
+{
+  "name": "hooks-veto",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "description": "E2E fixture: refuses tool calls that touch a marked path, and fails on purpose alongside.",
+  "entry": "index.mjs",
+  "capabilities": {
+    "mutates": ["tools"]
+  }
+}

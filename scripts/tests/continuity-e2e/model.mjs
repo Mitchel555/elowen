@@ -63,8 +63,10 @@ export async function startScriptedModel() {
     }
 
     const messages = Array.isArray(body?.messages) ? body.messages : [];
-    // Within ONE turn this still separates the initial call from the post-tool follow-up.
-    const hasToolResult = messages.some((m) => m && m.role === 'tool');
+    // Whether THIS request is the follow-up to a tool call — i.e. the conversation ends in a tool result.
+    // Deliberately not "does one exist anywhere": that stays true for the rest of the session once any
+    // turn has used a tool, so a later tool turn would skip its own call and answer immediately.
+    const hasToolResult = messages.at(-1)?.role === 'tool';
 
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
