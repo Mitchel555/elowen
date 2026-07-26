@@ -46,7 +46,7 @@ export interface PluginToolResultEvent { tool: string; params: unknown; result: 
  *  tool's input object (second `execute` argument). A subscriber returns a reason string to BLOCK the
  *  call; anything else lets it proceed. Fired only for a call the permission gate already allowed, so a
  *  hook never sees (or can second-guess) a call the user's own rules already refused. */
-export interface PluginToolCallEvent { tool: string; params: unknown }
+interface PluginToolCallEvent { tool: string; params: unknown }
 
 export interface CapabilitySpec {
   kind: SessionKind;

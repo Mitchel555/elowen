@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { openDb, type Db } from '../../src/store/db.js';
 import { BrainStore, SESSION_EVENT_KINDS, syntheticRestartResultId } from '../../src/store/brainStore.js';
+import { planSlug } from '../../src/shared/planSlug.js';
 
 describe('BrainStore', () => {
   let store: BrainStore;
@@ -1041,6 +1042,8 @@ describe('BrainStore', () => {
   // with the user. A plan left behind is worse than an orphan spill: it is re-injected into prompts.
   describe('plan files', () => {
     const planDir = (home: string, join: (...p: string[]) => string) => join(home, '.config/elowen/plans');
+    // The file is named by the derived slug, not the session id — the store must resolve it the same way.
+    const planName = (sessionId: string) => `${planSlug(sessionId)}.md`;
 
     it('removes the conversation plan file along with its rows', async () => {
       const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import('node:fs');
@@ -1053,11 +1056,11 @@ describe('BrainStore', () => {
         store.createSession({ id: 's2', userId: 7, model: 'm' });
         const dir = planDir(home, join);
         mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, 's1.md'), '# mine');
-        writeFileSync(join(dir, 's2.md'), '# theirs');
+        writeFileSync(join(dir, planName('s1')), '# mine');
+        writeFileSync(join(dir, planName('s2')), '# theirs');
         store.deleteSession('s1');
-        expect(existsSync(join(dir, 's1.md'))).toBe(false);
-        expect(existsSync(join(dir, 's2.md'))).toBe(true); // the other conversation keeps its plan
+        expect(existsSync(join(dir, planName('s1')))).toBe(false);
+        expect(existsSync(join(dir, planName('s2')))).toBe(true); // the other conversation keeps its plan
       } finally {
         vi.unstubAllEnvs();
       }
@@ -1073,13 +1076,13 @@ describe('BrainStore', () => {
         store.createSession({ id: 'chan-x', userId: 7, model: 'm' });
         const dir = planDir(home, join);
         mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, 'chan-x.md'), '# Ship it');
+        writeFileSync(join(dir, planName('chan-x')), '# Ship it');
         store.reassignSession('chan-x', 'arch-1');
-        expect(existsSync(join(dir, 'chan-x.md'))).toBe(false);
-        expect(readFileSync(join(dir, 'arch-1.md'), 'utf8')).toBe('# Ship it');
+        expect(existsSync(join(dir, planName('chan-x')))).toBe(false);
+        expect(readFileSync(join(dir, planName('arch-1')), 'utf8')).toBe('# Ship it');
         // …so a later delete of the archived conversation actually cleans the plan up.
         store.deleteSession('arch-1');
-        expect(existsSync(join(dir, 'arch-1.md'))).toBe(false);
+        expect(existsSync(join(dir, planName('arch-1')))).toBe(false);
       } finally {
         vi.unstubAllEnvs();
       }
@@ -1097,11 +1100,11 @@ describe('BrainStore', () => {
         store.createSession({ id: 'theirs', userId: 9, model: 'm' });
         const dir = planDir(home, join);
         mkdirSync(dir, { recursive: true });
-        for (const id of ['mine-a', 'mine-b', 'theirs']) writeFileSync(join(dir, `${id}.md`), `# ${id}`);
+        for (const id of ['mine-a', 'mine-b', 'theirs']) writeFileSync(join(dir, planName(id)), `# ${id}`);
         store.removeForUser(7);
-        expect(existsSync(join(dir, 'mine-a.md'))).toBe(false);
-        expect(existsSync(join(dir, 'mine-b.md'))).toBe(false);
-        expect(existsSync(join(dir, 'theirs.md'))).toBe(true);
+        expect(existsSync(join(dir, planName('mine-a')))).toBe(false);
+        expect(existsSync(join(dir, planName('mine-b')))).toBe(false);
+        expect(existsSync(join(dir, planName('theirs')))).toBe(true);
       } finally {
         vi.unstubAllEnvs();
       }

@@ -3,10 +3,11 @@ import { mkdtempSync, existsSync, writeFileSync, mkdirSync, rmSync, symlinkSync 
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PLAN_MAX_CHARS, isSessionPlanPath, readPlan, writePlan } from '../../../src/brain/continuity/planStore.js';
+import { planSlug } from '../../../src/shared/planSlug.js';
 
 describe('continuity/planStore', () => {
   let home: string;
-  const planFile = (sessionId: string) => join(home, '.config/elowen/plans', `${sessionId}.md`);
+  const planFile = (sessionId: string) => join(home, '.config/elowen/plans', `${planSlug(sessionId)}.md`);
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'elowen-plans-'));
@@ -66,7 +67,8 @@ describe('continuity/planStore', () => {
     expect(readPlan('s1')).toBeUndefined();
   });
 
-  // A session id becomes a path component, so a separator in it must not escape the plans directory.
+  // The filename is now a derived slug rather than the id itself, which is what makes an escape
+  // impossible; asserted end-to-end here so the guarantee is pinned at the level the caller sees.
   it('keeps an id carrying path separators inside the plans directory', () => {
     writePlan('brain-ch-a/../../escape', 'contained');
     expect(existsSync(join(home, '.config/elowen/plans'))).toBe(true);
@@ -79,6 +81,7 @@ describe('continuity/planStore', () => {
   // "somewhere else" gets its own case.
   describe('isSessionPlanPath', () => {
     const plansDir = () => join(home, '.config/elowen/plans');
+    const planName = `${planSlug('s1')}.md`;
 
     it('accepts exactly this session\'s plan file', () => {
       writePlan('s1', 'x');
@@ -94,7 +97,7 @@ describe('continuity/planStore', () => {
 
     it('refuses a traversal that spells the right name from outside', () => {
       writePlan('s1', 'x');
-      expect(isSessionPlanPath('s1', join(plansDir(), '..', 'plans', 's1.md'))).toBe(true); // still the same file
+      expect(isSessionPlanPath('s1', join(plansDir(), '..', 'plans', planName))).toBe(true); // still the same file
       expect(isSessionPlanPath('s1', join(plansDir(), '..', 'elowen.db'))).toBe(false);
       expect(isSessionPlanPath('s1', join(plansDir(), '..', '..', '..', 'etc', 'passwd'))).toBe(false);
     });
@@ -105,14 +108,14 @@ describe('continuity/planStore', () => {
       mkdirSync(plansDir(), { recursive: true });
       const outside = join(home, 'outside.md');
       writeFileSync(outside, 'victim');
-      symlinkSync(outside, join(plansDir(), 's1.md'));
+      symlinkSync(outside, join(plansDir(), planName));
       expect(isSessionPlanPath('s1', planFile('s1'))).toBe(false);
     });
 
     it('refuses a symlink in the plans directory pointing at a neighbour', () => {
       mkdirSync(plansDir(), { recursive: true });
       writeFileSync(join(plansDir(), 'other.md'), 'other');
-      symlinkSync(join(plansDir(), 'other.md'), join(plansDir(), 's1.md'));
+      symlinkSync(join(plansDir(), 'other.md'), join(plansDir(), planName));
       expect(isSessionPlanPath('s1', planFile('s1'))).toBe(false);
     });
 
@@ -121,15 +124,15 @@ describe('continuity/planStore', () => {
       writePlan('s1', 'x');
       const link = join(home, 'link-to-plans');
       symlinkSync(plansDir(), link);
-      expect(isSessionPlanPath('s1', join(link, 's1.md'))).toBe(true);
+      expect(isSessionPlanPath('s1', join(link, planName))).toBe(true);
     });
 
     it('refuses empty, relative and near-miss paths', () => {
       writePlan('s1', 'x');
       expect(isSessionPlanPath('s1', '')).toBe(false);
-      expect(isSessionPlanPath('s1', 's1.md')).toBe(false);
+      expect(isSessionPlanPath('s1', planName)).toBe(false);
       expect(isSessionPlanPath('s1', `${planFile('s1')}.bak`)).toBe(false);
-      expect(isSessionPlanPath('s1', join(plansDir(), 'sub', 's1.md'))).toBe(false);
+      expect(isSessionPlanPath('s1', join(plansDir(), 'sub', planName))).toBe(false);
     });
 
     // The file need not exist yet: the model writes it for the first time from inside plan mode.

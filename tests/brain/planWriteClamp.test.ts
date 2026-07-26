@@ -8,6 +8,7 @@ import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import { buildPermissionRuleset, sanitizePermissionSettings, type TurnPermissions } from '../../src/brain/toolPermissions.js';
 import type { Policy } from '../../src/plugins/policy.js';
 import type { TurnWorkMode } from '../../src/shared/types.js';
+import { planSlug } from '../../src/shared/planSlug.js';
 
 const POLICY: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
 const SESSION = 'brain-ch-plan';
@@ -48,7 +49,7 @@ function call(
  *  it, admitting the tool simply hands plan mode arbitrary write access. */
 describe('plan-mode write clamp', () => {
   let home: string;
-  const planPath = join('.config/elowen/plans', `${SESSION}.md`);
+  const planPath = join('.config/elowen/plans', `${planSlug(SESSION)}.md`);
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'elowen-clamp-'));

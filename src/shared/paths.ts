@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { planSlug } from './planSlug.js';
 
 /** Single source of truth for where a globally-installed elowen keeps its state. Everything persistent
  *  lives OUTSIDE the npm package (which `npm update` overwrites): the SQLite DB, logs and the run
@@ -48,8 +49,14 @@ export function toolResultSpillDir(env: NodeJS.ProcessEnv, sessionId: string): s
 /** Where a conversation's active implementation plan lives — one markdown file per session. A FILE
  *  rather than a DB row on purpose: the plan is a document the user may want to open, read and edit by
  *  hand between turns, and markdown on disk is the only shape that allows it. It sits beside the other
- *  per-session state under `~/.config/elowen` so an `npm update` never touches it. Same fsSafeSegment
- *  reasoning as the spill dir: the id becomes a path component, so it must not escape `plans/`. */
+ *  per-session state under `~/.config/elowen` so an `npm update` never touches it.
+ *
+ *  Named by a readable slug (`brave-otter-3f9a.md`) rather than the session id, because a filename like
+ *  `brain-ch-owner-1-1753...md` is not something a person opens on purpose. The slug is derived from the
+ *  id, so this stays a pure function of its arguments — see planSlug for why deriving beats generating.
+ *  fsSafeSegment is applied on the way out even though the slug is `[a-z0-9-]` by construction: this
+ *  builds a path component, and that guarantee belongs at the boundary that depends on it, not in the
+ *  memory of whoever last read the generator. */
 export function planFilePath(env: NodeJS.ProcessEnv, sessionId: string): string {
-  return join(dataDir(env), 'plans', `${fsSafeSegment(sessionId)}.md`);
+  return join(dataDir(env), 'plans', `${fsSafeSegment(planSlug(sessionId))}.md`);
 }
