@@ -200,7 +200,7 @@ export class LiveSessionSpawner {
       text: message.queuedText ?? message.text,
       images: message.images,
     }));
-    const { session } = await this.d.factory.create({
+    const { session, applyCompaction } = await this.d.factory.create({
       sessionId, ownerUserId, parentSessionId: opts.parentSessionId, delegatedAccess: opts.delegatedAccess,
       runtime: this.d.runtime, model, compactionFallbackModel: route.compactionFallback, cwd,
       systemPrompt: persona, appendSystemPrompt: append, skills, promptTemplates,
@@ -273,7 +273,7 @@ export class LiveSessionSpawner {
       session, sessionId, model: model.id, providerId, provider: model.provider, thinkingLevel: opts.thinkingLevel,
       requestProfile, fastAvailable: capabilities.fast,
       thinkingLabels: Object.fromEntries(capabilities.levels.map((level) => [level, capabilities.labels[level] ?? level])),
-      policy: opts.policy, listeners, replay, turnContext,
+      policy: opts.policy, applyCompaction, listeners, replay, turnContext,
       pluginToolNames: new Set(pluginTools.map((t) => t.name)),
       // The deferred-tool handle (undefined when nothing is deferred). Carried on the live so each turn's
       // visibility pass keeps already-fetched tools advertised and withheld ones hidden.

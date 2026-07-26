@@ -6,6 +6,7 @@ import type { LiveEventReplay } from './liveEventReplay.js';
 import type { DelegatedExecutionScope } from '../delegatedScope.js';
 import type { TurnMode } from '../service/turnRequest.js';
 import type { ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
+import type { ApplyCompaction } from './factory.js';
 
 /** A queued mid-turn message's image attachments, in PI's ImageContent shape. */
 export type QueuedImage = { type: 'image'; data: string; mimeType: string };
@@ -61,6 +62,10 @@ export interface LiveBrain {
   fastAvailable: boolean;
   thinkingLabels: Record<string, string>;
   policy: Policy;
+  /** Re-apply this session's auto-compact threshold IN PLACE — PI reads its compaction settings at each
+   *  check, so a saved Account change takes effect on the running conversation instead of waiting for the
+   *  next respawn (model switch, rollover, daemon restart). See BrainService.applyAutoCompactSettings. */
+  applyCompaction: ApplyCompaction;
   listeners: Set<(e: BrainEvent) => void>;
   /** Bounded current-run event journal + the canonical fan-out seam. Used by opt-in sub-agent stream
    *  snapshots to reconstruct output emitted before the user opened the drill-in view. */

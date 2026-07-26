@@ -10,7 +10,7 @@ import { buildBrainRegistry, resolveBrainModelRoute } from '../providers.js';
 import { newCostMeter, runWithMeter, type CostMeter } from '../openrouterMeter.js';
 import { projectUserTurn } from '../persistence.js';
 import { taskSessionId } from '../sessionId.js';
-import { BrainSessionFactory } from '../session/factory.js';
+import { BrainSessionFactory, resolveAutoCompactPct } from '../session/factory.js';
 import type { BrainResourceLoaderOptions } from '../session/factory.js';
 import { DEFAULT_AUTO_COMPACT_PCT } from '../session/liveBrain.js';
 import { abortSessionWork } from '../session/abortSessionWork.js';
@@ -46,6 +46,9 @@ export interface BrainWorkerDeps {
   /** The daemon-wide shared plugin registry — the SAME provider the chat brain uses, so a plugin
    *  toggle invalidates both at once (a worker launched afterwards composes from the fresh registry). */
   plugins?: PluginRegistryProvider;
+  /** The task owner's auto-compact settings — a worker runs on THEIR account, so it compacts at their
+   *  threshold (global percentage plus any per-model override) instead of a fixed default. */
+  userSettings?: (userId: number) => { autoCompactAt?: number; autoCompactAtByModel?: Record<string, number> };
   now?: () => number;
   idleMs?: number;
   createSession?: typeof createAgentSession;
@@ -148,6 +151,12 @@ export class BrainWorkerService {
     const { model } = route;
     const sessionId = taskSessionId(input.taskId);
     const resumed = !!this.d.store.getSession(sessionId);
+    // Same resolution the chat spawner runs: the owner's per-model override for THIS model wins over
+    // their global percentage, which in turn wins over the built-in default.
+    const ownerSettings = input.ownerId ? this.d.userSettings?.(input.ownerId) : undefined;
+    const autoCompactAtPct = resolveAutoCompactPct(
+      ownerSettings?.autoCompactAtByModel, route.providerId, model.id, ownerSettings?.autoCompactAt ?? DEFAULT_AUTO_COMPACT_PCT,
+    );
 
     const cwd = input.projectPath;
     const plugins = await this.d.plugins?.get();
@@ -212,8 +221,9 @@ export class BrainWorkerService {
       systemPrompt, appendSystemPrompt: append, skills,
       tools: [closeTool, ...pluginTools],
       // Task workers run long and unattended — keep their context bounded with PI-native compaction (the
-      // factory persists each compaction into the store, so a rehydrated/resumed task keeps the savings).
-      autoCompact: true, autoCompactAtPct: DEFAULT_AUTO_COMPACT_PCT,
+      // factory persists each compaction into the store, so a rehydrated/resumed task keeps the savings)
+      // at the owner's own threshold. An ownerless task has nobody to read a setting from → the default.
+      autoCompact: true, autoCompactAtPct,
       title: `${input.taskId}${input.taskTitle ? `: ${input.taskTitle}` : ''}`,
       onSpawned: toolHookBus ? (e) => toolHookBus.emit('brain.session.afterSpawn', e) : undefined,
     });

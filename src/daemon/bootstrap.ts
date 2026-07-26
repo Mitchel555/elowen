@@ -781,6 +781,7 @@ export async function buildApp(opts: BuildOpts) {
     config: brainConfig, runtime: brainRuntime, prompts,
     url: elowenCli.url, token: elowenCli.token,
     plugins: pluginProvider, // the SAME shared registry — a plugin toggle reaches workers too
+    userSettings: (userId) => userSettings.cliSettings(userId), // the task owner's auto-compact threshold
   });
   spawn.attachBrainWorker(brainWorkers);
   // Brain workers have no tmux pane — the stuck detector and startup reconcile must see their live

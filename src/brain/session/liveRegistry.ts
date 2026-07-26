@@ -125,6 +125,7 @@ export class LiveSessionRegistry<T extends { sessionId: string; session: { dispo
     ch.session.dispose();
     this.channels.delete(channelId);
   }
+  channelEntries(): [string, T][] { return [...this.channels]; }
   /** Insert (or LRU re-insert: delete first, so Map order stays most-recently-used-last). */
   channelTouch(channelId: string, ch: T): void {
     this.channels.delete(channelId);

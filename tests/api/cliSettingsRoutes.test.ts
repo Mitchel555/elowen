@@ -21,15 +21,16 @@ function setup() {
   config.update({ autopilot: { model: 'claude-opus-4-8' } });
   const restart = vi.fn(async () => {});
   const applyPersonalityChange = vi.fn(async () => {});
+  const applyAutoCompactSettings = vi.fn();
   const app = createServer({
     tasks: new TaskStore(db), readiness: new Readiness(db), missions: new MissionStore(db), bus: new EventBus(),
     engine: null as never, spawn: null as never, tmux: null as never,
     project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
     clock: new FakeClock(0), config, users, projects: new ProjectStore(db), userProjects: new UserProjectStore(db),
     userSettings: new UserSettingStore(db),
-    brain: { restart, applyPersonalityChange } as never,
+    brain: { restart, applyPersonalityChange, applyAutoCompactSettings } as never,
   });
-  return { app, restart, applyPersonalityChange, users, config, amyTok: users.issueToken(amy.id) };
+  return { app, restart, applyPersonalityChange, applyAutoCompactSettings, users, config, amyId: amy.id, amyTok: users.issueToken(amy.id) };
 }
 const auth = (t: string) => ({ headers: { authorization: `Bearer ${t}` } });
 const patch = (t: string, body: unknown) => ({ method: 'PATCH', headers: { authorization: `Bearer ${t}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -43,10 +44,13 @@ describe('cli-settings routes', () => {
   });
 
   it('PATCH saves the override and restarts a running brain', async () => {
-    const { app, restart, amyTok } = setup();
+    const { app, restart, applyAutoCompactSettings, amyId, amyTok } = setup();
     const res = await app.request('/auth/me/cli-settings', patch(amyTok, { model: 'ollama/kimi-k2.7-code', modelProvider: 'relay', autoCompact: true, autoCompactAt: 70 }));
     expect(await res.json()).toEqual({ model: 'ollama/kimi-k2.7-code', modelProvider: 'relay', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: true, autoCompactAt: 70, autoCompactAtByModel: {}, advisorStyle: 'professional', personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoSave: true, serverDefault: 'claude-opus-4-8' });
     expect(restart).toHaveBeenCalledTimes(1);
+    // The threshold also reaches conversations that are ALREADY live — the restart above only covers this
+    // user's active chat, not their other sessions or the channel sessions they own.
+    expect(applyAutoCompactSettings).toHaveBeenCalledWith(amyId);
   });
 
   it('PATCH saves the personality body and applies it via applyPersonalityChange (not a plain restart)', async () => {
@@ -75,7 +79,7 @@ describe('cli-settings routes', () => {
       project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
       clock: new FakeClock(0), config, users, projects: new ProjectStore(db), userProjects: new UserProjectStore(db),
       userSettings: new UserSettingStore(db),
-      brain: { restart: vi.fn(async () => {}), applyPersonalityChange } as never,
+      brain: { restart: vi.fn(async () => {}), applyPersonalityChange, applyAutoCompactSettings: vi.fn() } as never,
     });
     const res = await app.request('/auth/me/cli-settings', patch(users.issueToken(amy.id), { personalityBody: 'Be concise.' }));
     expect(res.status).toBe(200);

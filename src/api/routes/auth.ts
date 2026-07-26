@@ -183,6 +183,10 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
       }
       throw e;
     }
+    // The auto-compact threshold applies to the RUNNING conversations right away — the respawn below only
+    // covers this user's active chat, so without this a change would silently miss their other live
+    // conversations and every channel session they own (Discord), which is where it matters most.
+    d.brain?.applyAutoCompactSettings(u.id);
     // Apply live in the BACKGROUND: a running brain respawns with the new settings (history rehydrates
     // from SQLite) so a model/persona change takes effect immediately instead of on the next chat restart.
     // A changed personality body feeds the global persona on EVERY platform, so it also drops the shared

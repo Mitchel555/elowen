@@ -7,11 +7,12 @@ import { syntheticRestartResultId } from '../store/brainStore.js';
 import { MemoryCurator } from './memoryCurator.js';
 import { ConversationTitler } from './conversationTitler.js';
 import { logger } from '../shared/logger.js';
-import { BrainSessionFactory } from './session/factory.js';
+import { BrainSessionFactory, resolveAutoCompactPct } from './session/factory.js';
 import { abortSessionWork } from './session/abortSessionWork.js';
 import { IdentityResolver } from './identity.js';
 import { LiveSessionRegistry } from './session/liveRegistry.js';
 import type { LiveBrain, QueuedMsg } from './session/liveBrain.js';
+import { DEFAULT_AUTO_COMPACT_PCT } from './session/liveBrain.js';
 import { clearDeliveredUserEchoes, enqueueMirrored, queuedWithPending } from './session/queueMirror.js';
 import { ChannelSessionService } from './channels.js';
 import type { ChannelSendOpts } from './channels.js';
@@ -1270,6 +1271,31 @@ export class BrainService {
   /** Restart a user's live session so changed settings apply — see ConversationLifecycle.restart. */
   async restart(userId: number): Promise<void> {
     return this.lifecycle.restart(userId);
+  }
+
+  /** A user saved their auto-compact settings: re-apply the threshold to every conversation of theirs that
+   *  is ALREADY live — their own chats and the channel sessions they own. Without this the new percentage
+   *  only reached a session on its next respawn (model switch, rollover, daemon restart), so the setting
+   *  looked broken: it was saved, and nothing happened to the conversation the user was sitting in.
+   *
+   *  No respawn happens here — PI reads its compaction settings at each check, so replacing the reserve in
+   *  place is enough. Channels keep proactive compaction ALWAYS on (long-lived and unattended); only the
+   *  threshold follows the owner, exactly as at spawn. */
+  applyAutoCompactSettings(userId: number): void {
+    const settings = this.d.userSettings?.(userId);
+    const globalPct = settings?.autoCompactAt ?? DEFAULT_AUTO_COMPACT_PCT;
+    // The same per-model resolution the spawner does, against the model this session actually runs on.
+    const pctFor = (live: LiveBrain): number => (live.providerId
+      ? resolveAutoCompactPct(settings?.autoCompactAtByModel, live.providerId, live.model, globalPct)
+      : globalPct);
+    for (const [sessionId, live] of this.sessions.liveEntries()) {
+      if (this.d.store.getSession(sessionId)?.user_id !== userId) continue;
+      live.applyCompaction(!!settings?.autoCompact, pctFor(live));
+    }
+    for (const [, live] of this.sessions.channelEntries()) {
+      if (this.d.store.getSession(live.sessionId)?.user_id !== userId) continue;
+      live.applyCompaction(true, pctFor(live));
+    }
   }
 
   /** A user changed their active personality profile: respawn so the new persona chunk lands in the

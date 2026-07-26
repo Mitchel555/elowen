@@ -127,6 +127,11 @@ export function compactionReserveTokens(contextWindow: number, proactive: boolea
   return Math.max(256, Math.min(4_096, Math.round(contextWindow * 0.05)));
 }
 
+/** Re-applies a live session's compaction threshold: `proactive` is the auto-compact toggle,
+ *  `atPercent` the context-fill percentage it fires at. Returned by the factory so a settings change
+ *  reaches the running conversation without a respawn. */
+export type ApplyCompaction = (proactive: boolean, atPercent: number) => void;
+
 /** The effective auto-compact percentage for one model: the user's per-model override (keyed
  *  `providerId/model`, the same convention as the operator context-window map) when set, else the global
  *  default. Each model has its own context window, so the same percentage yields a different absolute
@@ -223,7 +228,7 @@ function defaultResourceLoaderFactory(o: BrainResourceLoaderOptions): ResourceLo
 export class BrainSessionFactory {
   constructor(private d: SessionFactoryDeps) {}
 
-  async create(spec: SessionSpec): Promise<{ session: AgentSession }> {
+  async create(spec: SessionSpec): Promise<{ session: AgentSession; applyCompaction: ApplyCompaction }> {
     // Ensure the store row (sole source of truth) exists before rehydration.
     const existing = this.d.store.getSession(spec.sessionId);
     if (!existing) {
@@ -342,8 +347,16 @@ export class BrainSessionFactory {
     // pass AND context-overflow recovery behind `enabled` — turning it off would leave an overflowing
     // conversation hard-erroring on every turn until a manual /compact. "Proactive off" therefore uses
     // only the small emergency reserve described above, rather than PI's normal early threshold.
-    const reserveTokens = compactionReserveTokens(spec.model.contextWindow, spec.autoCompact, spec.autoCompactAtPct);
-    settingsManager.applyOverrides({ compaction: { enabled: true, reserveTokens } });
+    //
+    // Kept as a re-callable closure (returned to the caller) because PI reads compaction lazily at each
+    // check: re-applying it turns a saved threshold change into an immediate effect on a RUNNING
+    // conversation, instead of one that only appears after the next respawn.
+    const applyCompaction = (proactive: boolean, atPercent: number): void => {
+      settingsManager.applyOverrides({
+        compaction: { enabled: true, reserveTokens: compactionReserveTokens(spec.model.contextWindow, proactive, atPercent) },
+      });
+    };
+    applyCompaction(spec.autoCompact, spec.autoCompactAtPct);
     const boundaryCompactionInstalled = installTurnBoundaryAutoCompaction(
       session, sessionManager, spec.autoCompact, spec.pendingCompactionMessages,
     );
@@ -364,6 +377,6 @@ export class BrainSessionFactory {
     ));
     // Last, so observers see the finished session — and before the caller can run a turn on it.
     await spec.onSpawned?.({ sessionId: spec.sessionId, messages: session.messages });
-    return { session };
+    return { session, applyCompaction };
   }
 }

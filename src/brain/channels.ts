@@ -108,8 +108,9 @@ export interface ChannelServiceDeps {
   curator?: MemoryCurator;
   /** Names a brand-new channel conversation from its first message (shared with owner chat). */
   titler?: ConversationTitler;
-  /** Per-user memory toggles (autoRecall/autoSave), read fresh per turn for the verified writer. */
-  userSettings?: (userId: number) => { autoRecall?: boolean; autoSave?: boolean };
+  /** Per-user settings: the memory toggles (autoRecall/autoSave), read fresh per turn for the verified
+   *  writer, plus the channel OWNER's auto-compact threshold applied when a channel session spawns. */
+  userSettings?: (userId: number) => { autoRecall?: boolean; autoSave?: boolean; autoCompactAt?: number };
   /** Parked AskUserQuestion registry (shared with BrainService) — lets a channel turn's `ctx.askUser`
    *  emit an `ask` event to the channel's clients and await the answer (settled by a Discord interaction). */
   elicitation?: ElicitationRegistry;
@@ -302,7 +303,11 @@ export class ChannelSessionService {
           thinkingLevel: opts.thinkingLevel,
           fast: opts.fast,
           autoCompact: true, // channels are long-lived and unattended — keep their context bounded
-          autoCompactAtPct: DEFAULT_AUTO_COMPACT_PCT,
+          // …but at the OWNER'S threshold, not a fixed default: a channel session is their conversation
+          // too, and a hardcoded percentage here meant the Account setting silently never applied to
+          // Discord/WhatsApp. Only the global percentage is resolved at this level — the spawner layers
+          // the owner's per-model override on top (resolveAutoCompactPct), so the decision stays in one place.
+          autoCompactAtPct: this.d.userSettings?.(opts.ownerUserId)?.autoCompactAt ?? DEFAULT_AUTO_COMPACT_PCT,
           // A delegated child inherits its parent's working directory (set only for subagent sends); an
           // ordinary platform channel leaves this undefined and resolves its cwd from the policy root.
           clientCwd: opts.clientCwd,
