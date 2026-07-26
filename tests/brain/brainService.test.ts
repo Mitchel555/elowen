@@ -2170,6 +2170,71 @@ describe('BrainService', () => {
     detachWeb();
   });
 
+  // The ctrl+c wedge: a running turn HOLDS the session lock, so a teardown that serializes before
+  // interrupting waits for the very turn it exists to stop — ctrl+c did nothing until the work finished on
+  // its own. The interrupt must therefore reach the session while the turn is still in flight.
+  it('a stop during a running turn interrupts it instead of queueing behind it', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
+
+    let turnStarted!: () => void;
+    const running = new Promise<void>((r) => { turnStarted = r; });
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((r) => { releaseTurn = r; });
+    d.session.prompt.mockImplementationOnce(async () => { turnStarted(); await turnGate; });
+
+    const turn = svc.send({ userId: 1, text: 'long running work', session: sessionId });
+    await running; // the turn now owns the session lock
+    d.session.abort.mockClear();
+
+    const stopping = svc.stopSession(1, sessionId, 'cli-a', 1);
+    // Must land while the turn is STILL in flight — the gate below has not been opened yet.
+    await vi.waitFor(() => expect(d.session.abort).toHaveBeenCalled());
+
+    releaseTurn();
+    const [, stopped] = await Promise.all([turn, stopping]);
+    // The interrupt is only half of it: the serialized teardown must still run to completion behind it.
+    expect(stopped).toEqual({ stopped: true, disposed: true });
+    expect(d.session.dispose).toHaveBeenCalled();
+  });
+
+  // The same wedge in the state it bites hardest: a turn parked on AskUserQuestion is NOT PI-level work, so
+  // aborting the session cannot unwind it. Without releasing the parked ask the lock stays held until the
+  // question is answered or times out (5 min), and the stop waits it out exactly as the original bug did.
+  it('a stop releases a turn parked on a question instead of waiting the prompt out', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
+    const internals = svc as unknown as {
+      elicitation: {
+        ask: (sessionId: string, questions: { question: string; header: string; multiSelect: boolean; options: never[] }[], emit: () => void) => Promise<unknown>;
+        pendingForSession: (sessionId: string) => unknown;
+      };
+    };
+
+    let parked!: () => void;
+    const isParked = new Promise<void>((r) => { parked = r; });
+    // The tool awaits the user's answer INSIDE the turn, so the session lock is held the whole time.
+    d.session.prompt.mockImplementationOnce(async () => {
+      const answer = internals.elicitation.ask(sessionId, [{
+        question: 'Continue?', header: 'Continue', multiSelect: false, options: [],
+      }], () => {});
+      parked();
+      await answer.catch(() => undefined); // the stop must be what rejects this
+    });
+
+    const turn = svc.send({ userId: 1, text: 'ask me something', session: sessionId });
+    await isParked;
+    expect(internals.elicitation.pendingForSession(sessionId)).not.toBeNull();
+
+    // Would hang until the elicitation timeout if the stop did not release the parked ask first.
+    const stopped = await svc.stopSession(1, sessionId, 'cli-a', 1);
+    expect(internals.elicitation.pendingForSession(sessionId)).toBeNull();
+    expect(stopped).toEqual({ stopped: true, disposed: true });
+    await turn;
+  });
+
   it('stopSession detaches its identified stream before SSE teardown and disposes a sole client', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

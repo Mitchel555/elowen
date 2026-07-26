@@ -471,6 +471,19 @@ export class BrainService {
     clearDeliveredUserEchoes(b);
   }
 
+  /** Whether a client-initiated stop may interrupt this session's turn (Invariant 2). A detaching client
+   *  must not abort a turn ANOTHER interactive client is watching. A stable client id identifies a terminal
+   *  ending its own run, so only another stable client — or one mid-boot, which is on its way to watch —
+   *  holds it off; an anonymous web-dock subscription merely watches and does not own the turn, so letting
+   *  it veto meant an open browser tab silently disabled ctrl+c. A caller with no id cannot be told apart
+   *  from a passive stream, so it keeps the conservative any-attachment rule. */
+  private mayAbortOnStop(sessionId: string, clientId?: string): boolean {
+    if (this.attachments.hasPendingStartClaim(sessionId)) return false;
+    return clientId
+      ? !this.attachments.hasLiveStableClient(sessionId)
+      : this.attachments.attachedCount(sessionId) === 0;
+  }
+
   /** A CLI is closing: stop its bound run and release the live PI session unless another INTERACTIVE
    *  client (one identifying itself with a stable client id) is still on this conversation. A passive
    *  web-dock subscription does not hold the turn open — it only watches. History stays in SQLite and can
@@ -515,15 +528,10 @@ export class BrainService {
       // respawns. availableForDefaultStart already treats a claim as occupancy for the same reason.
       const attachedBefore = this.attachments.attachedCount(sessionId);
       const bootingBefore = this.attachments.hasPendingStartClaim(sessionId);
-      // Who may veto depends on WHO is stopping. Invariant 2 exists so one interactive client cannot kill a
-      // turn another interactive client is watching — not so a passive viewer can disable ctrl+c. A stable
-      // client id means a terminal deliberately ending its own run, so only ANOTHER stable client (or one
-      // mid-boot) holds it off; an anonymous web-dock subscription watches without owning the turn, and
-      // letting it veto meant an open browser tab silently made ctrl+c do nothing. A legacy caller with no
-      // id can't be told apart from a passive stream, so it keeps the conservative any-attachment rule.
       const otherInteractive = this.attachments.hasLiveStableClient(sessionId);
-      const vetoed = clientId ? otherInteractive || bootingBefore : attachedBefore !== 0 || bootingBefore;
-      if (vetoed) {
+      // Same predicate the pre-lock abort used, re-evaluated because a client can attach while this waited
+      // on the session lock. Deciding it twice with two copies of the rule is how they drift apart.
+      if (!this.mayAbortOnStop(sessionId, clientId)) {
         const held = clientId ? `${otherInteractive ? 'another interactive client' : 'no interactive client'}` : `${attachedBefore} attachment(s)`;
         log.info(`stop ${sessionId}: ${held}${bootingBefore ? ' + a booting client' : ''} remain — leaving the turn running (streaming=${live.session.isStreaming}, attached=${attachedBefore}, holders=[${this.attachments.describeStableClients(sessionId)}])`);
         return { stopped: true, disposed: false };
@@ -570,11 +578,35 @@ export class BrainService {
     // can race a replacement start (and can deadlock when that lifecycle holder waits on this cleanup).
     // Once queued here, a start either finishes first and this stops that exact live instance, or waits
     // behind us and creates a fresh one only after the old instance was disposed.
-    if (bound) {
-      return this.serial(bound, async () => cleanUp(this.lifecycle.ownedUserSession(userId, bound)));
+    const target = bound
+      ? this.lifecycle.ownedUserSession(userId, bound)
+      : session ? this.lifecycle.ownedUserSession(userId, session) : this.lifecycle.activeSessionId(userId);
+    // Interrupt the in-flight work BEFORE queueing on the session lock. A running turn HOLDS that lock, so
+    // a teardown that serializes first waits for the very turn it exists to interrupt: ctrl+c did nothing
+    // until the work ended on its own. (`/stop` never had the bug — it calls abort() straight out.)
+    // Only the PI-level interrupt, never the full abort(): abort() throws on an already-stopped session
+    // and stopSession must stay idempotent. The serialized teardown below still does the real cascade.
+    const runningLive = this.sessions.get(target);
+    if (runningLive && this.mayAbortOnStop(target, clientId)) {
+      // Signal only — deliberately NOT awaited, so cleanUp reserves the lock in THIS tick. Awaiting would
+      // let a start arriving during the interrupt take the lock first, breaking "a start racing a teardown
+      // respawns behind the dispose". This DOES leave a window where the turn is dying but the session is
+      // not yet marked disposing (the marker is set under the lock): what closes it is cleanUp re-checking
+      // claims and attachments, not the marker. Note the cost — a veto there can no longer save the turn,
+      // because the interrupt has already landed.
+      // A turn parked on AskUserQuestion or a permission prompt is NOT PI-level work: the agent loop is
+      // awaiting the tool's own promise and only re-checks the abort signal once that settles, so the
+      // interrupt below cannot unwind it and the lock would stay held until the question is answered or
+      // times out (5 min by default). Release the parked turn first — synchronous, so the lock is still
+      // reserved in this tick. abortLive does the same in the same order for the same reason.
+      this.elicitation.cancelForSession(target, 'client closed');
+      void abortSessionWork(runningLive.session).catch((err: unknown) => {
+        // The serialized abort below normally reports the outcome — but if this interrupt is what failed,
+        // the turn may never release the lock and the teardown silently waits it out again. Leave a trace.
+        logger('brain').warn(`stop ${target}: interrupt failed — ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
-    const sessionId = session ? this.lifecycle.ownedUserSession(userId, session) : this.lifecycle.activeSessionId(userId);
-    return this.serial(sessionId, async () => cleanUp(sessionId));
+    return this.serial(target, async () => cleanUp(target));
   }
 
   /** Settle a parked `AskUserQuestion` with the user's picks (from POST /brain/answer or a Discord

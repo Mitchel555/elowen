@@ -315,7 +315,10 @@ describe('BrainService — resuming a conversation whose turn is still running',
     const aborting = new Promise<void>((resolve) => { abortStarted = resolve; });
     let releaseAbort!: () => void;
     const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
-    d.session.abort.mockImplementationOnce(async () => { abortStarted(); await abortGate; });
+    // NOT mockImplementationOnce: stopSession fires a pre-lock interrupt before the serialized teardown, so
+    // a one-shot gate is spent on the interrupt and leaves the teardown's own abort ungated — the test then
+    // passes on incidental microtask ordering instead of on the window it means to hold open.
+    d.session.abort.mockImplementation(async () => { abortStarted(); await abortGate; });
 
     const stopping = svc.stopSession(1, sessionId, 'cli-a', 1);
     await aborting;
@@ -340,7 +343,8 @@ describe('BrainService — resuming a conversation whose turn is still running',
     const aborting = new Promise<void>((resolve) => { abortStarted = resolve; });
     let releaseAbort!: () => void;
     const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
-    d.session.abort.mockImplementationOnce(async () => { abortStarted(); await abortGate; });
+    // Persistent, not one-shot: the pre-lock interrupt would otherwise spend the gate (see above).
+    d.session.abort.mockImplementation(async () => { abortStarted(); await abortGate; });
 
     const stopping = svc.stopSession(1, sessionId, 'cli-a', 1);
     await aborting;
