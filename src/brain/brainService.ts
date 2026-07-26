@@ -479,9 +479,18 @@ export class BrainService {
     // Consume the authenticated client's attachment FIRST. Its binding follows idle rollover inside the
     // daemon, so it is more authoritative than the (possibly pre-rollover) id the CLI last observed.
     // Releasing invokes only this client's stream disposer; every other attachment remains counted.
+    // TEMP diagnostics (ctrl+c wedge): record what the caller identified as and what its release resolved,
+    // so a later "another interactive client" veto can be attributed to a real second client or to this
+    // caller's own re-attached stream. Remove with the rest of the brain-stop tracing.
+    if (clientId) {
+      logger('brain-stop').info(`stop: client=${clientId} gen=${clientGeneration ?? '-'} session=${session ?? '-'} bindings-before=[${this.attachments.describeStableClients(session ?? '')}]`);
+    }
     const released = clientId
       ? this.attachments.release(userId, clientId, clientGeneration)
       : { accepted: true as const, sessionId: undefined };
+    if (clientId) {
+      logger('brain-stop').info(`stop: release accepted=${released.accepted} resolved=${released.sessionId ?? '-'} bindings-after=[${this.attachments.describeStableClients(released.sessionId ?? session ?? '')}]`);
+    }
     // A delayed stop from generation N must not abort a newer N+1 selection owned by the same CLI id.
     if (!released.accepted) { logger('brain-stop').info(`stop: release rejected for client ${clientId ?? '—'} (stale generation)`); return { stopped: false, disposed: false }; }
     const bound = released.sessionId;
@@ -516,7 +525,7 @@ export class BrainService {
       const vetoed = clientId ? otherInteractive || bootingBefore : attachedBefore !== 0 || bootingBefore;
       if (vetoed) {
         const held = clientId ? `${otherInteractive ? 'another interactive client' : 'no interactive client'}` : `${attachedBefore} attachment(s)`;
-        log.info(`stop ${sessionId}: ${held}${bootingBefore ? ' + a booting client' : ''} remain — leaving the turn running (streaming=${live.session.isStreaming})`);
+        log.info(`stop ${sessionId}: ${held}${bootingBefore ? ' + a booting client' : ''} remain — leaving the turn running (streaming=${live.session.isStreaming}, attached=${attachedBefore}, holders=[${this.attachments.describeStableClients(sessionId)}])`);
         return { stopped: true, disposed: false };
       }
       if (attachedBefore !== 0) log.info(`stop ${sessionId}: ${attachedBefore} passive stream(s) still watching — aborting anyway on an explicit client stop`);

@@ -122,6 +122,19 @@ export class ClientAttachments {
     return false;
   }
 
+  /** TEMP diagnostics (ctrl+c wedge): the stable bindings currently sitting on a session, so a teardown
+   *  that refuses to abort can say WHICH client held it off — and whether that client is the caller's own
+   *  re-attached stream. Remove with the rest of the brain-stop tracing. */
+  describeStableClients(sessionId: string): string {
+    this.pruneDetached();
+    const out: string[] = [];
+    for (const [key, b] of this.stableClients) {
+      if (b.sessionId !== sessionId) continue;
+      out.push(`${key}{listener=${b.listener ? 'live' : 'none'},pendingStart=${b.pendingStart},reqGen=${b.requestGeneration ?? '-'}}`);
+    }
+    return out.length ? out.join(' ') : '(none)';
+  }
+
   /** A client whose /brain/start has claimed this conversation but whose SSE stream has not opened yet.
    *  It is an observer in every sense that matters — it is mid-boot, on its way to watch — so a teardown
    *  that counts only live streams would dispose the session out from under it. */
