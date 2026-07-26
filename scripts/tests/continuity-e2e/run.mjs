@@ -142,7 +142,13 @@ async function main() {
     // In plan mode, because that is the only mode where the model may write the file at all: the clamp
     // admits Write solely for this path, and ExitPlanMode refuses outside it. Running the planning turn
     // in build mode would test neither.
-    await turn('How would you ship the widget?', 'plan', { workMode: 'plan' });
+    const planning = await turn('How would you ship the widget?', 'plan', { workMode: 'plan' });
+    // The directive has to tell the model whether the file is already there. It walks into the file
+    // tools' read guard otherwise: an overwrite of a file this session never read is refused, and the
+    // two ordinary ways to get there — a daemon restart, or the user editing the plan the directive
+    // invites them to edit — both leave a model that thinks it is resuming its own document.
+    check('the first planning turn is told the plan file does not exist yet',
+      planning.includes('does not exist yet'), excerpt(planning));
 
     const plansDir = join(dataDir, '.config/elowen/plans');
     check('the plan was written to the data dir', existsSync(planFile),
@@ -203,6 +209,8 @@ async function main() {
     console.log('\n— a mode directive is restated in full on entry, then sparsely —');
     const entered = await turn('plan one', 'plain', { workMode: 'plan' });
     check('entering plan mode sends the full directive', entered.includes('<when-ready>'), excerpt(entered));
+    check('…and now says the plan file already exists, since an earlier turn wrote one',
+      entered.includes('ALREADY EXISTS'), excerpt(entered));
     const second = await turn('plan two', 'plain', { workMode: 'plan' });
     check('the next plan turn sends the one-liner instead',
       second.includes('STILL ACTIVE') && !second.includes('<when-ready>'), excerpt(second));
