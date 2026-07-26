@@ -21,6 +21,7 @@ import { xmlEscape } from '../../shared/xml.js';
 import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
 import { turnWorkDir } from './workDir.js';
+import { drainPostCompactionContext } from '../continuity/postCompactionContext.js';
 
 interface TurnContextBuilderDeps {
   store: BrainStore;
@@ -91,6 +92,9 @@ export class TurnContextBuilder {
           // mode reminder (volatile per-turn context, cache-friendly), so it is composed only for a real
           // prompt turn — never on the prompt-command path, which would drain it without showing it.
           const sessionChanges = drainSessionNotices(live);
+          // A compaction just destroyed the messages holding the agreed plan and every trace of which
+          // files were open. Re-orient the model exactly once, next to the other one-shot notices.
+          const postCompaction = drainPostCompactionContext(this.d.store, live);
           // The mode directive is volatile per-turn content (it flips when the user switches mode), so it
           // rides UNDER the user message as a <system-reminder> — alongside runningSubagents — rather than
           // prefixing the user's words. Keeps the user message body stable/contiguous across mode switches
@@ -99,6 +103,7 @@ export class TurnContextBuilder {
             + request.text
             + (turnContext.afterUser ? `\n\n${turnContext.afterUser}` : '')
             + (sessionChanges ? `\n\n${sessionChanges}` : '')
+            + (postCompaction ? `\n\n${postCompaction}` : '')
             + (modeReminder ? `\n\n${modeReminder}` : '')
             + (runningSubagents ? `\n\n${runningSubagents}` : '');
         }

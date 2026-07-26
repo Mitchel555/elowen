@@ -37,6 +37,15 @@ function latestWorkingSet(store: PostCompactionStore, sessionId: string): Workin
  *  Paths, never file contents: see workingSet.ts. The instruction line exists because the summary
  *  paraphrases what happened, and a model that trusts a paraphrase about file contents will edit from
  *  a stale mental copy. */
+export function drainPostCompactionContext(
+  store: PostCompactionStore,
+  live: { sessionId: string; pendingPostCompaction?: boolean; session: { messages: readonly unknown[] } },
+): string {
+  if (!live.pendingPostCompaction) return '';
+  live.pendingPostCompaction = false; // one-shot: the model is oriented once, not every turn after
+  return buildPostCompactionContext(store, live.sessionId, live.session.messages);
+}
+
 export function buildPostCompactionContext(
   store: PostCompactionStore,
   sessionId: string,

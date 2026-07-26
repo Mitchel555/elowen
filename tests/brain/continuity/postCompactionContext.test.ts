@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildPostCompactionContext, type PostCompactionStore } from '../../../src/brain/continuity/postCompactionContext.js';
+import { buildPostCompactionContext, drainPostCompactionContext, type PostCompactionStore } from '../../../src/brain/continuity/postCompactionContext.js';
 import { writePlan } from '../../../src/brain/continuity/planStore.js';
 
 describe('continuity/postCompactionContext', () => {
@@ -87,5 +87,33 @@ describe('continuity/postCompactionContext', () => {
   it('tells the model not to trust the summary about file contents', () => {
     writePlan('s1', 'x');
     expect(buildPostCompactionContext(empty, 's1', [])).toContain('do not assume file contents from the summary');
+  });
+
+  describe('drain', () => {
+    const liveOn = (store: PostCompactionStore, pending: boolean) =>
+      ({ sessionId: 's1', pendingPostCompaction: pending, session: { messages: [] as unknown[] } });
+
+    it('stays silent when no compaction is pending', () => {
+      writePlan('s1', '# Ship it');
+      const live = liveOn(empty, false);
+      expect(drainPostCompactionContext(empty, live)).toBe('');
+    });
+
+    // One-shot: the model is oriented once, not reminded on every turn for the rest of the session.
+    it('yields the block once and then goes quiet', () => {
+      writePlan('s1', '# Ship it');
+      const live = liveOn(empty, true);
+      expect(drainPostCompactionContext(empty, live)).toContain('<active-plan>');
+      expect(live.pendingPostCompaction).toBe(false);
+      expect(drainPostCompactionContext(empty, live)).toBe('');
+    });
+
+    // The flag is consumed even when there was nothing to say, so a later unrelated turn cannot
+    // suddenly surface a stale compaction's orientation.
+    it('consumes the flag even when there is nothing to report', () => {
+      const live = liveOn(empty, true);
+      expect(drainPostCompactionContext(empty, live)).toBe('');
+      expect(live.pendingPostCompaction).toBe(false);
+    });
   });
 });

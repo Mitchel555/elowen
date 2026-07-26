@@ -17,6 +17,7 @@ import { extractText, frameUntrusted, isThinkingOnlyReply, NO_REPLY_NUDGE, lastA
 import { channelSessionId, archivedChannelSessionId, isChannelSession, channelIdOf } from './sessionId.js';
 import { isPromptCommand } from './slashCommands.js';
 import { rolloverDue, SESSION_IDLE_ROLLOVER_MS } from './session/idleRollover.js';
+import { drainPostCompactionContext } from './continuity/postCompactionContext.js';
 import { applyToolVisibility } from './session/capabilities.js';
 import { buildPermissionRuleset, noninteractiveTurnPermissions } from './toolPermissions.js';
 import type { PermissionSettings, TurnPermissions } from './toolPermissions.js';
@@ -399,8 +400,13 @@ export class ChannelSessionService {
             let prompted = turnText;
             if (!isPromptCommand(turnText, ch.session)) {
               const turnContext = ch.turnContext();
+              // Channel turns compose their prompt here rather than through TurnContextBuilder, so the
+              // post-compaction re-orientation needs its own drain — wiring it only into the builder
+              // would leave it working in the CLI and silently doing nothing on every channel.
+              const postCompaction = drainPostCompactionContext(this.d.store, ch);
               prompted = memoryBlock + turnContext.beforeUser + turnText
-                + (turnContext.afterUser ? `\n\n${turnContext.afterUser}` : '');
+                + (turnContext.afterUser ? `\n\n${turnContext.afterUser}` : '')
+                + (postCompaction ? `\n\n${postCompaction}` : '');
             }
             if (this.d.registry.consumePendingAbort(sessionId)) throw new Error('delegation aborted');
             if (opts.internalSystem) {

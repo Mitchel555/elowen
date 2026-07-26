@@ -139,6 +139,15 @@ export interface LiveBrain {
    *  Ephemeral like the mode reminder — never persisted. The durable, user-visible marker is the
    *  separate brain_session_events row emitted alongside each notice. */
   pendingSessionNotices?: string[];
+  /** A real compaction has landed and the model has not been re-oriented yet. Drained into the NEXT
+   *  turn as the post-compaction <system-reminder> (plan + working set) and cleared — see
+   *  continuity/postCompactionContext. Ephemeral like the notices above: the durable half is the
+   *  compaction divider row, which is what the reminder is actually built from, so a daemon restart
+   *  between the compaction and the next turn costs the reminder but never the data.
+   *
+   *  Carried across every in-memory respawn (model switch, idle rollover, vision hop) for the same
+   *  reason as lastTurnMode: a respawn immediately after a compaction would otherwise swallow it. */
+  pendingPostCompaction?: boolean;
   /** A reasoning-effort change riding out its debounce window before the visible marker lands (see
    *  scheduleReasoningMarker) — rapid ctrl+r cycling coalesces here into ONE marker showing the settled
    *  level. `baseline` is the level the transcript last reflected, `level` the latest target; the level

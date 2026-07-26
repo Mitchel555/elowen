@@ -72,6 +72,13 @@ export function createSpawnEventReducer(deps: SpawnEventReducerDeps): (e: AgentS
     const raw = (e as { type?: string }).type;
     let suppressAgentEndIdle = raw === 'agent_end' && (e as { willRetry?: boolean }).willRetry === true;
     let emitFailedRecoveryIdle = false;
+    // A REAL compaction has settled. Two consequences, and they must stay together: attached clients
+    // refetch the shrunk transcript, and the model gets re-oriented on its next turn — the compaction
+    // just deleted the rows holding the agreed plan and every trace of which files were open.
+    const announceCompacted = (): void => {
+      if (live) live.pendingPostCompaction = true;
+      replay.publish({ type: 'compacted' });
+    };
     const agentEndMessages = raw === 'agent_end'
       ? ((e as { messages?: { role?: string; stopReason?: string; errorMessage?: string; content?: unknown; usage?: unknown }[] }).messages ?? [])
       : [];
@@ -160,7 +167,7 @@ export function createSpawnEventReducer(deps: SpawnEventReducerDeps): (e: AgentS
     // compaction (result present, not aborted) — a no-op/failed run leaves the transcript as-is.
     if (raw === 'compaction_end' && (e as { result?: unknown }).result != null && (e as { aborted?: boolean }).aborted !== true) {
       if (agentRunOpen || deferredCompacted) deferredCompacted = true;
-      else replay.publish({ type: 'compacted' });
+      else announceCompacted();
     }
     if (raw === 'compaction_end' && (e as { reason?: string }).reason === 'overflow') {
       const ce = e as { result?: unknown; aborted?: boolean; willRetry?: boolean; errorMessage?: string };
@@ -177,10 +184,10 @@ export function createSpawnEventReducer(deps: SpawnEventReducerDeps): (e: AgentS
         // The factory listener just persisted the deferred current-run prefix and atomically replaced
         // its earlier threshold summary with this overflow summary. Refetch now; the retry's later
         // agent_end contains only the recovered assistant and must not emit a duplicate refresh.
-        replay.publish({ type: 'compacted' });
+        announceCompacted();
         deferredCompacted = false;
       } else if (!recovering && deferredCompacted && !agentRunOpen) {
-        replay.publish({ type: 'compacted' });
+        announceCompacted();
         deferredCompacted = false;
       }
     }
