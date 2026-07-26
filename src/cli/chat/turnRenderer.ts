@@ -327,9 +327,14 @@ export class TurnRenderer {
 
   /** The framed panel a submitted plan renders as — raised by an `ExitPlanMode` call, never by prose. */
   private planBlock(markdown: string, width: number): string[] {
-    const inner = Math.max(12, Math.max(28, width) - 4);
+    // Clamped DOWN from the terminal width, never up to a minimum: `max(28, width)` made the frame wider
+    // than the screen below ~32 columns, so the borders wrapped and the panel came apart. The sibling
+    // blocks all clamp the same direction.
+    const inner = Math.max(12, width - 4);
     const border = color.faint;
-    const title = ` ${color.bold(color.text('Proposed plan'))} ${color.faint('ready to implement')} `;
+    // The title is clipped too, or on a very narrow terminal the header alone outgrows the frame it is
+    // supposed to sit in — the rule going to zero only stops the padding, not the text.
+    const title = truncateToWidth(` ${color.bold(color.text('Proposed plan'))} ${color.faint('ready to implement')} `, inner, '…');
     const rule = Math.max(0, inner - visibleWidth(title));
     const row = (content: string): string => {
       const clipped = truncateToWidth(content, inner, '…');
