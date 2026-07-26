@@ -149,6 +149,7 @@ export function bottomHintItems(
   hasQueued = false,
   hasForegroundSubagent = false,
   hasForegroundCommand = false,
+  stopRequested = false,
 ): HintSegment[] {
   const k = (action: KeybindAction, label: string): string => {
     const chord = keymap.chordLabel(action);
@@ -169,7 +170,11 @@ export function bottomHintItems(
   }
   if (state === 'thinking') {
     return [
-      ...seg(hasQueued ? 'esc inject queued' : interruptArmed ? 'esc again to interrupt' : 'esc interrupt', 100),
+      // After the abort was issued, a turn still shown as thinking is pinned by its running command —
+      // advertise the escalation instead of the interrupt the loop already received.
+      ...seg(hasQueued ? 'esc inject queued'
+        : stopRequested && hasForegroundCommand ? 'esc kill command'
+          : interruptArmed ? 'esc again to interrupt' : 'esc interrupt', 100),
       ...seg(backgroundHint, 40),
       ...seg('/help commands', 50),
       ...seg(k('reasoning_cycle', 'reasoning'), 20),
@@ -238,6 +243,18 @@ export function interruptPress(armedUntil: number, now: number, windowMs = INTER
   return armedUntil > now
     ? { armedUntil: 0, abort: true }
     : { armedUntil: now + windowMs, abort: false };
+}
+
+/** Pure half of the ESCALATING stop contract, layered over {@link interruptPress}. Once an abort has been
+ *  requested for this turn (`stopRequested`), the turn may still be pinned by a long foreground command —
+ *  PI's agent loop only re-checks its abort signal between tool calls — so a further Esc press escalates
+ *  to a hard kill of that command instead of re-sending an abort the loop cannot act on. The escalation
+ *  state lives client-side on purpose: the daemon never auto-escalates, so another client's innocent stop
+ *  can never surprise-SIGKILL a running command. */
+export function escalationPress(stopRequested: boolean, armedUntil: number, now: number, windowMs = INTERRUPT_CONFIRM_MS): { armedUntil: number; action: 'arm' | 'abort' | 'kill' } {
+  if (stopRequested) return { armedUntil: 0, action: 'kill' };
+  const next = interruptPress(armedUntil, now, windowMs);
+  return { armedUntil: next.armedUntil, action: next.abort ? 'abort' : 'arm' };
 }
 
 /** The composer's meta line. `generating` (the spinner + elapsed chip) sits directly after the mode label
@@ -615,9 +632,15 @@ export function createChatComposition(
    *  ONLY then may the next Esc bypass the queue branch; a window armed by an ordinary first press must not,
    *  or an Esc following a message the user queued in between would destroy it instead of injecting it. */
   let queueMirrorStale = false;
+  /** An abort has been requested for the CURRENT turn (Esc-Esc already fired). While the turn is still
+   *  thinking past that point it is pinned by a long foreground command, and the next Esc escalates to a
+   *  hard kill of that command. Cleared with the arm state: on turn settle, session switch, and the
+   *  queue-interrupt path (which starts a fresh turn the old escalation must not leak onto). */
+  let stopRequested = false;
   const clearInterruptArm = (): void => {
     interruptArmedUntil = 0;
     queueMirrorStale = false;
+    stopRequested = false;
     animations.cancelVisual('interrupt-arm');
   };
   // Arm (or re-arm) the destructive-stop confirmation window and schedule its own visual disarm. Shared by
@@ -682,6 +705,7 @@ export function createChatComposition(
       rt.queued.length > 0,
       currentAgents.some((agent) => agent.status === 'running' && agent.background !== true),
       rt.processes.some((proc) => proc.running && proc.completionMode === 'foreground'),
+      stopRequested,
     );
     const suffix = footerState === 'idle' && shellContext.pending
       ? `   ${color.warning('· ! output → next message')}`
@@ -1024,9 +1048,29 @@ export function createChatComposition(
         );
         return true;
       }
-      const next = interruptPress(interruptArmedUntil, Date.now());
-      if (next.abort) {
+      const next = escalationPress(stopRequested, interruptArmedUntil, Date.now());
+      if (next.action === 'kill') {
+        // The abort already fired and the turn is still pinned — hard-kill the foreground command so the
+        // parked agent loop can unwind. Idempotent server-side: a settled run kills 0.
+        rt.notice = color.dim('killing the foreground command…');
+        rt.noticeSticky = true; // live progress — the outcome below replaces it and expires normally
+        lifetime.runSession(
+          () => client.killCommands(),
+          ({ killed }) => {
+            rt.notice = killed > 0
+              ? color.success(`killed ${killed} foreground command${killed === 1 ? '' : 's'}`)
+              : color.dim('no foreground command left to kill');
+            render('state:interrupt-kill-complete');
+          },
+          (error) => { rt.notice = color.error(error.message); render('state:interrupt-kill-error'); },
+        );
+      } else if (next.action === 'abort') {
         clearInterruptArm();
+        stopRequested = true; // set AFTER the clear: the escalation window opens the moment the abort fires
+        // Only a running foreground command can pin the aborted turn — advertise the escalation only then.
+        if (rt.processes.some((proc) => proc.running && proc.completionMode === 'foreground')) {
+          rt.notice = color.dim('interrupting · esc again to kill the running command');
+        }
         lifetime.runSession(() => client.abort(), () => {}, () => { /* already idle */ });
       } else {
         armInterrupt(next.armedUntil);

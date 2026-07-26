@@ -156,6 +156,60 @@ describe('installExitGuards — process listener lifecycle', () => {
     dispose();
   });
 
+  // The escalating stop: PI's agent loop only re-checks its abort signal between tool calls, so the
+  // graceful stop can be waited out by a long foreground command. A REPEAT quit gesture is the user
+  // escalating — it must fire the hard kill without disturbing the pending shutdown transaction.
+  it('a repeat ctrl+c escalates to the foreground kill while the stop is still in flight', async () => {
+    const calls: string[] = [];
+    let finishStop!: () => void;
+    const shutdown = createShutdownCoordinator({
+      teardown: () => { calls.push('teardown'); },
+      stopBoundSession: () => new Promise<void>((resolve) => { calls.push('stop-session'); finishStop = resolve; }),
+      escalate: () => { calls.push('escalate'); },
+      timeoutMs: 5_000,
+    });
+    const dispose = installExitGuards({
+      shutdown, teardownNow: shutdown.teardownNow,
+      escalate: () => { calls.push('escalate'); },
+      exit: (code) => { calls.push(`exit:${code}`); },
+    });
+    const sigint = process.listeners('SIGINT').at(-1) as () => void;
+
+    // First press: the ordinary graceful stop — never an escalation.
+    sigint();
+    await Promise.resolve();
+    expect(calls).toEqual(['teardown', 'stop-session']);
+    // Second press while the release is in flight: escalate, and still don't kill the pending release.
+    sigint();
+    expect(calls).toEqual(['teardown', 'stop-session', 'escalate']);
+    // The keyboard-path repeat (keymap quit → coordinator, no signal latch) escalates the same way.
+    void shutdown();
+    expect(calls).toEqual(['teardown', 'stop-session', 'escalate', 'escalate']);
+
+    finishStop();
+    await shutdown();
+    await Promise.resolve();
+    expect(calls).toContain('exit:130');
+    dispose();
+  });
+
+  // A supervisor re-sending SIGTERM/SIGHUP is a retry, never a human escalating — it must not SIGKILL a
+  // command the graceful stop would have left running.
+  it('a repeat SIGTERM does not escalate', async () => {
+    const calls: string[] = [];
+    const shutdown = vi.fn(() => new Promise<void>(() => { calls.push('shutdown'); }));
+    const dispose = installExitGuards({
+      shutdown, teardownNow: () => {},
+      escalate: () => { calls.push('escalate'); },
+      exit: () => {},
+    });
+    const sigterm = process.listeners('SIGTERM').at(-1) as () => void;
+    sigterm();
+    sigterm();
+    expect(calls).toEqual(['shutdown']);
+    dispose();
+  });
+
   it('process exit guarantees synchronous local teardown while daemon stop remains best-effort', async () => {
     const calls: string[] = [];
     let finishStop!: () => void;

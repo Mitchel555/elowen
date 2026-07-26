@@ -89,6 +89,10 @@ export interface ShutdownCoordinatorOptions {
   teardown(): void | Promise<void>;
   /** Detached from the aborted application signal; bounded independently below. */
   stopBoundSession(signal: AbortSignal): Promise<void>;
+  /** A REPEAT quit gesture while the stop is still in flight: the graceful stop is being waited out by a
+   *  long foreground command the daemon cannot interrupt between tool calls — escalate to a hard kill of
+   *  that command. Fire-and-forget; the pending shutdown transaction stays the single exit path. */
+  escalate?(): void;
   timeoutMs?: number;
 }
 
@@ -110,7 +114,10 @@ export function createShutdownCoordinator(options: ShutdownCoordinatorOptions): 
     try { localCleanup = options.teardown(); } catch { /* server stop must still be attempted */ }
   };
   const shutdown = (): Promise<void> => {
-    if (pending) return pending;
+    // A second quit while the first is still releasing the session is the user escalating, not a retry:
+    // the raw-mode ctrl+c path (keymap quit → this coordinator) has no signal latch of its own, so the
+    // repeat lands here rather than in the SIGINT guard below.
+    if (pending) { options.escalate?.(); return pending; }
     let finish!: () => void;
     pending = new Promise<void>((resolve) => { finish = resolve; });
     teardownNow();
@@ -152,12 +159,21 @@ export function installExitGuards(options: {
   shutdown(): Promise<void>;
   /** Explicit last-chance boundary: must not rely on a Promise continuation or timer. */
   teardownNow(): void;
+  /** A repeat ctrl+c while the first one's stop is still in flight — see ShutdownCoordinatorOptions.
+   *  SIGINT only: a supervisor re-sending SIGTERM/SIGHUP is a retry, never a human escalating, and must
+   *  not SIGKILL a command the graceful stop would have left running. */
+  escalate?(): void;
   exit?(code: number): void;
 }): () => void {
   const exit = options.exit ?? ((code: number): void => { process.exit(code); });
   let exiting = false;
-  const onSignal = (code: number) => (): void => {
-    if (exiting) return;
+  const onSignal = (code: number, escalate = false) => (): void => {
+    if (exiting) {
+      // The latch keeps a repeat press from killing the in-flight session release; on ctrl+c it doubles
+      // as the escalation gesture — the user is telling us the graceful stop is being waited out.
+      if (escalate) options.escalate?.();
+      return;
+    }
     exiting = true;
     options.teardownNow();
     void options.shutdown().finally(() => exit(code));
@@ -179,7 +195,7 @@ export function installExitGuards(options: {
   // still-running editor — SIGKILLing it after the bounded wait (a stopped process cannot service SIGTERM),
   // deleting the draft temp file, and writing the alt-screen reset into a terminal the editor owned. Suspend
   // is not exit: the default disposition stops the group, and `fg` resumes it with the session still bound.
-  const onSigInt = onSignal(130);
+  const onSigInt = onSignal(130, true);
   // Node does not wait for asynchronous work from `exit` or an uncaught-exception monitor. Entering the
   // coordinator still guarantees its synchronous terminal teardown; the detached daemon stop is strictly
   // best-effort on these last-chance hooks. The signal handlers above explicitly await the bounded promise.

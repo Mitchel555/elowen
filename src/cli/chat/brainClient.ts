@@ -258,6 +258,18 @@ export class BrainClient {
     return await res.json() as { detached: number };
   }
 
+  /** Hard-kill the conversation's running foreground Bash command(s) — the stop escalation (a further
+   *  Esc or a repeat Ctrl+C after the graceful interrupt). `afterStop` drops the client-generation fence:
+   *  the quit path has already released this client's binding via stopSession, so a fenced request would
+   *  be rejected as stale — session ownership still authorizes the kill server-side. */
+  async killCommands(opts: { afterStop?: boolean; signal?: AbortSignal } = {}): Promise<{ killed: number }> {
+    const binding = !opts.afterStop && this.bound && this.boundGeneration !== undefined
+      ? { session: this.bound, client: this.clientId, generation: this.boundGeneration }
+      : this.bound ? { session: this.bound } : {};
+    const res = await this.post('/brain/commands/kill', binding, opts.signal);
+    return await res.json() as { killed: number };
+  }
+
   /** Detach a foreground workflow so its DAG keeps running and delivers its summary asynchronously. */
   async backgroundWorkflows(): Promise<{ detached: number }> {
     const binding = this.bound && this.boundGeneration !== undefined

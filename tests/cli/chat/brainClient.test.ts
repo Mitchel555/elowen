@@ -134,6 +134,29 @@ describe('BrainClient', () => {
     }));
   });
 
+  it('kills foreground commands with the current CLI generation, and unfenced after a stop', async () => {
+    const f = vi.fn(async (url: string) => url.endsWith('/brain/start')
+      ? j(201, { sessionId: 'brain-1' })
+      : j(200, { killed: 1 })) as unknown as typeof fetch;
+    const c = new BrainClient({ base: 'http://x', token: 't', fetchImpl: f, clientId: 'cli-a' });
+    await c.start({ session: 'brain-1' });
+
+    // The Esc escalation: the client is still attached, so the generation fence rides along.
+    await expect(c.killCommands()).resolves.toEqual({ killed: 1 });
+    expect(f).toHaveBeenLastCalledWith('http://x/brain/commands/kill', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ session: 'brain-1', client: 'cli-a', generation: 1 }),
+    }));
+
+    // The Ctrl+C escalation: stopSession already tombstoned this client's binding — a fenced request
+    // would be rejected as stale, so the kill goes out with the session alone.
+    await expect(c.killCommands({ afterStop: true })).resolves.toEqual({ killed: 1 });
+    expect(f).toHaveBeenLastCalledWith('http://x/brain/commands/kill', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ session: 'brain-1' }),
+    }));
+  });
+
   it('history GETs /brain/messages', async () => {
     const f = vi.fn(async () => j(200, [{ role: 'user', text: 'hi' }])) as unknown as typeof fetch;
     const c = new BrainClient({ base: 'http://x', token: 't', fetchImpl: f });

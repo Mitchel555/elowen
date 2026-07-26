@@ -3,7 +3,7 @@ import {
   chordFromInput, createKeymap, createLeaderState, keybindDefault, keybindRows, parseKeybind, KEYBIND_ACTIONS,
 } from '../../../src/cli/chat/keys.js';
 import {
-  bottomHintItems, INTERRUPT_CONFIRM_MS, interruptPress, noticeAction, startScreenHintItems, quitHint, modelMetaLine,
+  bottomHintItems, escalationPress, INTERRUPT_CONFIRM_MS, interruptPress, noticeAction, startScreenHintItems, quitHint, modelMetaLine,
 } from '../../../src/cli/chat/chatComposition.js';
 
 // The live footer/start screen render through `*Items` + `fitSegments`; these mirror the removed
@@ -89,6 +89,18 @@ describe('stream interrupt + shell row budget', () => {
     expect(noticeAction('', 'reasoning effort: max', false)).toBe('cancel');
   });
 
+  // The escalating stop: arm → abort → kill. PI's agent loop only re-checks its abort signal between
+  // tool calls, so a turn still thinking after the abort is pinned by a long foreground command and the
+  // next press must hard-kill that command instead of re-sending an abort the loop cannot act on.
+  it('escalates to a kill once a stop was already requested for the turn', () => {
+    // No stop requested yet: behaves exactly like the two-press interrupt contract.
+    expect(escalationPress(false, 0, 10_000)).toEqual({ armedUntil: 10_000 + INTERRUPT_CONFIRM_MS, action: 'arm' });
+    expect(escalationPress(false, 10_000 + INTERRUPT_CONFIRM_MS, 10_500)).toEqual({ armedUntil: 0, action: 'abort' });
+    // Stop already requested: the press is the escalation, regardless of any armed window.
+    expect(escalationPress(true, 0, 10_000)).toEqual({ armedUntil: 0, action: 'kill' });
+    expect(escalationPress(true, 99_999, 10_000)).toEqual({ armedUntil: 0, action: 'kill' });
+  });
+
   it('changes the thinking footer while interrupt is armed', () => {
     const map = createKeymap();
     expect(bottomHints(map, 'thinking', false, false)).toContain('esc interrupt');
@@ -105,6 +117,15 @@ describe('stream interrupt + shell row budget', () => {
     expect(bottomHints(map, 'thinking', false, false, false, false, true)).toContain('background command');
     // A delegate takes precedence in the label when both are foreground (the chord detaches both).
     expect(bottomHints(map, 'thinking', false, false, false, true, true)).toContain('background sub-agent');
+  });
+
+  it('advertises the kill escalation once a stop was requested and a command still runs', () => {
+    const map = createKeymap();
+    expect(bottomHints(map, 'thinking', false, false, false, false, true, true)).toContain('esc kill command');
+    // Without a running foreground command there is nothing to kill — keep the plain interrupt hint.
+    expect(bottomHints(map, 'thinking', false, false, false, false, false, true)).toContain('esc interrupt');
+    // A queued message still wins: injecting what the user just typed beats re-advertising the kill.
+    expect(bottomHints(map, 'thinking', false, false, true, false, true, true)).toContain('esc inject queued');
   });
 
 });

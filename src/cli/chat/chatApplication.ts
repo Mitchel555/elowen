@@ -93,12 +93,20 @@ export class ChatApplication {
     if (this.stopped) throw new Error('stopped ChatApplication cannot be restarted');
     let done!: () => void;
     const finished = new Promise<void>((resolve) => { done = resolve; });
+    // A repeat ctrl+c while the stop is in flight: the graceful stop is being waited out by a long
+    // foreground command (PI only re-checks its abort signal between tool calls) — hard-kill it so the
+    // wedged turn can unwind. `afterStop` skips the client-generation fence (stopSession has already
+    // tombstoned this client's binding), and the own bounded signal bypasses the aborted app lifetime.
+    const escalate = (): void => {
+      void this.client.killCommands({ afterStop: true, signal: AbortSignal.timeout(2_000) }).catch(() => {});
+    };
     const shutdown = createShutdownCoordinator({
       teardown: () => this.stopLocal(),
       stopBoundSession: (signal) => this.client.stopSession(signal),
+      escalate,
     });
     this.quitImpl = () => { void shutdown().then(done); };
-    this.removeExitGuards = installExitGuards({ shutdown, teardownNow: shutdown.teardownNow });
+    this.removeExitGuards = installExitGuards({ shutdown, teardownNow: shutdown.teardownNow, escalate });
     try {
       await this.bootstrap(this.launch);
       if (this.stopped) return;
