@@ -63,7 +63,7 @@ async function waitForHealth(baseUrl, deadlineMs) {
  * @param {string} [opts.providerId]     Config id for the injected provider (default 'e2e').
  * @param {string} [opts.model]          Model id the provider advertises (default 'mock-model').
  * @param {number} [opts.healthTimeoutMs] Hard deadline for boot readiness (default 30000).
- * @returns {Promise<{ baseUrl: string, token: string, dataDir: string, port: number, providerId: string, model: string, stop: ()=>Promise<void> }>}
+ * @returns {Promise<{ baseUrl: string, token: string, dataDir: string, port: number, providerId: string, model: string, stop: ()=>Promise<void>, restart: ()=>Promise<string> }>}
  */
 export async function spawnRealDaemon(opts) {
   if (!opts?.providerBaseUrl) throw new Error('spawnRealDaemon requires providerBaseUrl');
@@ -98,37 +98,67 @@ export async function spawnRealDaemon(opts) {
     ELOWEN_BOOTSTRAP_PASS: bootstrapPass,
   });
 
-  const child = spawn(process.execPath, [daemonEntry], { cwd: dataDir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
-  const logs = [];
-  child.stdout.on('data', (d) => logs.push(d.toString()));
-  child.stderr.on('data', (d) => logs.push(d.toString()));
+  let child = null;
+  let logs = [];
   let exited = null;
-  child.on('exit', (code, signal) => { exited = { code, signal }; });
 
-  const stop = async () => {
-    try {
-      if (exited === null) {
-        child.kill('SIGTERM');
-        for (let i = 0; i < 30 && exited === null; i += 1) await sleep(100);
-        if (exited === null) child.kill('SIGKILL');
-      }
-    } finally {
-      try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  /** (Re)start the daemon child on the SAME port and data dir, capturing its output. */
+  const launch = () => {
+    logs = [];
+    exited = null;
+    child = spawn(process.execPath, [daemonEntry], { cwd: dataDir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (d) => logs.push(d.toString()));
+    child.stderr.on('data', (d) => logs.push(d.toString()));
+    child.on('exit', (code, signal) => { exited = { code, signal }; });
+  };
+
+  /** Terminate the child and WAIT for the exit, so its port is free again. Leaves the data dir intact —
+   *  that is what separates a restart from a teardown. */
+  const kill = async () => {
+    if (!child || exited !== null) return;
+    child.kill('SIGTERM');
+    for (let i = 0; i < 30 && exited === null; i += 1) await sleep(100);
+    if (exited === null) {
+      child.kill('SIGKILL');
+      for (let i = 0; i < 20 && exited === null; i += 1) await sleep(100);
     }
   };
 
-  try {
-    await waitForHealth(baseUrl, healthTimeoutMs);
-
-    // Authenticate as the bootstrapped admin → bearer token.
-    const loginRes = await fetch(`${baseUrl}/auth/login`, {
+  /** Authenticate as the bootstrapped admin → bearer token. */
+  const login = async () => {
+    const res = await fetch(`${baseUrl}/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username: bootstrapUser, password: bootstrapPass }),
     });
-    if (!loginRes.ok) throw new Error(`login failed: HTTP ${loginRes.status} ${await loginRes.text()}`);
-    const { token } = await loginRes.json();
+    if (!res.ok) throw new Error(`login failed: HTTP ${res.status} ${await res.text()}`);
+    const { token } = await res.json();
     if (!token) throw new Error('login returned no token');
+    return token;
+  };
+
+  const stop = async () => {
+    try { await kill(); } finally {
+      try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    }
+  };
+
+  /** Restart the daemon over the SAME data dir and port. Everything it held in memory (live sessions,
+   *  caches, timers) is provably gone, while every persisted row survives — the only way a suite can
+   *  show that behaviour after the restart came out of SQLite rather than out of RAM. Returns a FRESH
+   *  bearer token; the caller must use it from then on. */
+  const restart = async () => {
+    await kill();
+    launch();
+    await waitForHealth(baseUrl, healthTimeoutMs);
+    return login();
+  };
+
+  launch();
+
+  try {
+    await waitForHealth(baseUrl, healthTimeoutMs);
+    const token = await login();
 
     // Inject the custom brain provider pointing at the scripted model server. brainConfigFromElowen reads
     // this live on the next brain start, so no daemon restart is required.
@@ -141,7 +171,7 @@ export async function spawnRealDaemon(opts) {
     });
     if (!cfgRes.ok) throw new Error(`config PUT failed: HTTP ${cfgRes.status} ${await cfgRes.text()}`);
 
-    return { baseUrl, token, dataDir, port, providerId, model, stop };
+    return { baseUrl, token, dataDir, port, providerId, model, stop, restart };
   } catch (e) {
     const tail = logs.join('').split('\n').slice(-40).join('\n');
     await stop();

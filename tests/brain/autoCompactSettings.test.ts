@@ -55,13 +55,16 @@ function fakeSession() {
   return session;
 }
 
-/** Minimal BrainService wiring. `settings` is read live, so a test can change it mid-conversation
- *  exactly like a saved Account edit does. Every spawned session's SettingsManager and resolved model
- *  are captured in creation order. */
-function brainHarness(settings: () => CliSettings | undefined) {
+/** Minimal BrainService wiring. `settings` is read live and PER USER ID, so a test can both change it
+ *  mid-conversation exactly like a saved Account edit does and prove that production looked the settings
+ *  up under the OWNER'S id — a lookup under any other id yields a different threshold here. Every spawned
+ *  session's SettingsManager and resolved model are captured in creation order, and every user id the
+ *  code asked about is recorded in `settingsReads`. */
+function brainHarness(settings: (userId: number) => CliSettings | undefined) {
   const session = fakeSession();
   const spawned: { settings: SettingsManager }[] = [];
   const models: { contextWindow: number }[] = [];
+  const settingsReads: number[] = [];
   const createSession = vi.fn(async (opts: { customTools?: { name: string }[]; model?: { contextWindow: number } }) => {
     session.__tools = opts.customTools ?? [];
     session.__active = session.__tools.map((t) => t.name);
@@ -76,10 +79,10 @@ function brainHarness(settings: () => CliSettings | undefined) {
     prompts: { render: () => 'PERSONA' },
     url: 'http://x',
     createSession,
-    userSettings: () => settings(),
+    userSettings: (userId: number) => { settingsReads.push(userId); return settings(userId); },
     resourceLoaderFactory: (o: { settingsManager: SettingsManager }) => { spawned.push({ settings: o.settingsManager }); return undefined; },
   };
-  return { svc: new BrainService(d as never), createSession, spawned, models };
+  return { svc: new BrainService(d as never), createSession, spawned, models, settingsReads };
 }
 
 const reserveOf = (manager: SettingsManager): number => manager.getCompactionReserveTokens();
@@ -89,26 +92,33 @@ describe('auto-compact threshold on channel sessions', () => {
   it('spawns a channel at the OWNER’S percentage instead of the built-in default', async () => {
     // Regression: channels hardcoded DEFAULT_AUTO_COMPACT_PCT, so an owner running their clients on
     // Discord never got the threshold they configured in Account → CLI.
-    const { svc, spawned, models } = brainHarness(() => ({ autoCompact: true, autoCompactAt: 50 }));
+    const { svc, spawned, models, settingsReads } = brainHarness((id) => (id === 1
+      ? { autoCompact: true, autoCompactAt: 50 }
+      : { autoCompact: true, autoCompactAt: 25 }));
 
     await svc.channelSend({ channelId: 'c-1', ownerUserId: 1, policy }, 'ahoj');
 
     expect(spawned).toHaveLength(1);
+    // The threshold must come from the CHANNEL OWNER's row, so no lookup may use another id.
+    expect(settingsReads).toContain(1);
+    expect([...new Set(settingsReads)]).toEqual([1]);
     expect(reserveOf(spawned[0]!.settings)).toBe(compactionReserveTokens(models[0]!.contextWindow, true, 50));
   });
 
   it('lets the owner’s per-model override win for a channel session', async () => {
-    const { svc, spawned, models } = brainHarness(() => ({
-      autoCompact: true, autoCompactAt: 50, autoCompactAtByModel: { 'relay/m': 35 },
-    }));
+    const { svc, spawned, models, settingsReads } = brainHarness((id) => (id === 1
+      ? { autoCompact: true, autoCompactAt: 50, autoCompactAtByModel: { 'relay/m': 35 } }
+      : { autoCompact: true, autoCompactAt: 25 }));
 
     await svc.channelSend({ channelId: 'c-2', ownerUserId: 1, policy }, 'ahoj');
 
+    expect([...new Set(settingsReads)]).toEqual([1]);
     expect(reserveOf(spawned[0]!.settings)).toBe(compactionReserveTokens(models[0]!.contextWindow, true, 35));
   });
 
   it('falls back to the default when the owner has no settings, and keeps compaction proactive', async () => {
-    const { svc, spawned, models } = brainHarness(() => undefined);
+    // Only the owner (1) is unconfigured — reading anyone else's row would produce 20 %, not the default.
+    const { svc, spawned, models } = brainHarness((id) => (id === 1 ? undefined : { autoCompact: true, autoCompactAt: 20 }));
 
     await svc.channelSend({ channelId: 'c-3', ownerUserId: 1, policy }, 'ahoj');
 
@@ -121,15 +131,25 @@ describe('auto-compact threshold on live sessions', () => {
   it('re-applies a saved threshold to running owner and channel conversations without respawning them', async () => {
     // Regression: applyOverrides ran only at spawn, so changing the percentage mid-conversation did
     // nothing until a model switch/rollover/restart — the user saw a setting that appeared broken.
-    let settings: CliSettings = { autoCompact: true, autoCompactAt: 80 };
-    const { svc, createSession, spawned, models } = brainHarness(() => settings);
+    let settings: Record<number, CliSettings> = {
+      1: { autoCompact: true, autoCompactAt: 80 },
+      2: { autoCompact: true, autoCompactAt: 20 },
+    };
+    const { svc, createSession, spawned, models, settingsReads } = brainHarness((id) => settings[id]);
     await svc.start(1);
     await svc.channelSend({ channelId: 'c-live', ownerUserId: 1, policy }, 'ahoj');
     expect(spawned).toHaveLength(2);
     const spawnCalls = createSession.mock.calls.length;
 
-    settings = { autoCompact: true, autoCompactAt: 45 };
+    settings = {
+      1: { autoCompact: true, autoCompactAt: 45 },
+      2: { autoCompact: true, autoCompactAt: 20 },
+    };
+    settingsReads.length = 0;
     svc.applyAutoCompactSettings(1);
+
+    // Re-applying is keyed on the user whose settings were saved — reading any other row is the bug.
+    expect([...new Set(settingsReads)]).toEqual([1]);
 
     expect(reserveOf(spawned[0]!.settings)).toBe(compactionReserveTokens(models[0]!.contextWindow, true, 45));
     expect(reserveOf(spawned[1]!.settings)).toBe(compactionReserveTokens(models[1]!.contextWindow, true, 45));
@@ -137,12 +157,18 @@ describe('auto-compact threshold on live sessions', () => {
   });
 
   it('honours a per-model override and leaves another user’s live sessions untouched', async () => {
-    let settings: CliSettings = { autoCompact: true, autoCompactAt: 80 };
-    const { svc, spawned, models } = brainHarness(() => settings);
+    let settings: Record<number, CliSettings> = {
+      1: { autoCompact: true, autoCompactAt: 80 },
+      2: { autoCompact: true, autoCompactAt: 80 },
+    };
+    const { svc, spawned, models } = brainHarness((id) => settings[id]);
     await svc.start(1);
     await svc.start(2);
 
-    settings = { autoCompact: true, autoCompactAt: 45, autoCompactAtByModel: { 'relay/m': 30 } };
+    settings = {
+      1: { autoCompact: true, autoCompactAt: 45, autoCompactAtByModel: { 'relay/m': 30 } },
+      2: { autoCompact: true, autoCompactAt: 80 },
+    };
     svc.applyAutoCompactSettings(1);
 
     expect(reserveOf(spawned[0]!.settings)).toBe(compactionReserveTokens(models[0]!.contextWindow, true, 30));
@@ -159,13 +185,14 @@ describe('auto-compact threshold on task workers', () => {
     tasks.setStatus('T-1', 'in_progress');
     const spawned: { settings: SettingsManager }[] = [];
     const models: { contextWindow: number }[] = [];
+    const settingsReads: number[] = [];
     const session = fakeSession();
     const svc = new BrainWorkerService({
       store: new BrainStore(db), tasks, bus: new EventBus(),
       runtime: sharedRuntime,
       config: () => ({ providers: [{ id: 'relay', label: 'Relay', type: 'openai', baseUrl: 'http://x/v1', models: ['m'], apiKey: 'k' }] }),
       url: 'http://daemon', token: 'tok',
-      userSettings,
+      userSettings: (userId: number) => { settingsReads.push(userId); return userSettings?.(userId); },
       createSession: vi.fn(async (opts: { model?: { contextWindow: number } }) => {
         if (opts.model) models.push(opts.model);
         return { session };
@@ -173,22 +200,29 @@ describe('auto-compact threshold on task workers', () => {
       resourceLoaderFactory: (o) => { spawned.push({ settings: o.settingsManager }); return undefined; },
     });
     const launch = { projectId: 1, projectPath: '/repo', taskId: 'T-1', agentName: 'a1', spec: { program: 'elowen', model: 'relay/m' } };
-    return { svc, launch, spawned, models };
+    return { svc, launch, spawned, models, settingsReads };
   }
 
   it('compacts at the task owner’s threshold, per-model override included', async () => {
-    const { svc, launch, spawned, models } = workerHarness(() => ({ autoCompactAt: 50, autoCompactAtByModel: { 'relay/m': 40 } }));
+    // Only owner 7 carries the override; every other row is a plain 20 %, so a lookup under the wrong id
+    // lands on a visibly different reserve.
+    const { svc, launch, spawned, models, settingsReads } = workerHarness((id) => (id === 7
+      ? { autoCompactAt: 50, autoCompactAtByModel: { 'relay/m': 40 } }
+      : { autoCompactAt: 20 }));
 
     await svc.launch({ ...launch, ownerId: 7 });
 
+    expect([...new Set(settingsReads)]).toEqual([7]);
     expect(reserveOf(spawned[0]!.settings)).toBe(compactionReserveTokens(models[0]!.contextWindow, true, 40));
   });
 
   it('falls back to the default for an ownerless task', async () => {
-    const { svc, launch, spawned, models } = workerHarness(() => ({ autoCompactAt: 50 }));
+    const { svc, launch, spawned, models, settingsReads } = workerHarness(() => ({ autoCompactAt: 50 }));
 
     await svc.launch(launch);
 
+    // Nobody owns this task, so there is no row to read at all.
+    expect(settingsReads).toEqual([]);
     expect(reserveOf(spawned[0]!.settings)).toBe(compactionReserveTokens(models[0]!.contextWindow, true, 80));
   });
 });

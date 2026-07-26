@@ -35,7 +35,11 @@ describe('BrainStore.listDelegatedChildren', () => {
     expect(rows[0]!.model).toBe('claude');
     expect(rows[0]!.messages).toBe(2);
     expect(rows[0]!.title).toBe('Audit the auth module');
-    expect(rows[0]!.startedAt).toBeTruthy();
+    // The listing renders this as the child's age, so it has to be the child session's own creation
+    // stamp — any other value would date the sub-agent wrongly in the parent's listing.
+    const created = db.prepare('SELECT created_at FROM brain_sessions WHERE id = ?')
+      .get('brain-ch-subagent-sub-a') as { created_at: string };
+    expect(rows[0]!.startedAt).toBe(created.created_at);
   });
 
   // A workflow node is a real delegated child with a real transcript, but the engine records the DAG

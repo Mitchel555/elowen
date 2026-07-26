@@ -3,10 +3,12 @@
 // resume with its own context?
 //
 // Drives a REAL daemon: a parent conversation delegates one task, then FOUR unrelated ones so the live
-// channel-session LRU (pinned to its minimum of 4 here) genuinely drops the first child from memory.
-// Only then does the parent call DelegateList, pick that child OUT OF THE LISTING, and DelegateContinue
-// it. Because the child is no longer live, the follow-up can only be answered from a transcript
-// rehydrated out of SQLite — which is exactly what this suite exists to prove.
+// channel-session LRU (pinned to its minimum of 4 here) drops the first child from memory. The daemon is
+// then RESTARTED over the same data dir, which is what makes the claim airtight: whatever the LRU did or
+// did not evict, a fresh process holds nothing in RAM. Only then does the parent call DelegateList, pick
+// that child OUT OF THE LISTING, and DelegateContinue it. Because nothing of the child is live, the
+// follow-up can only be answered from a transcript rehydrated out of SQLite — which is exactly what this
+// suite exists to prove.
 //
 // The decisive assertion is made twice, from two independent angles:
 //   * on the WIRE — the continuation request the daemon sent still carries the original task and the
@@ -97,7 +99,8 @@ async function main() {
   let daemon = null;
   try {
     daemon = await spawnRealDaemon({ providerBaseUrl: model.baseUrl, providerId: 'e2e-subagent' });
-    const { baseUrl, token, dataDir } = daemon;
+    const { baseUrl, dataDir } = daemon;
+    let token = daemon.token; // re-minted by the restart below — every request reads it live
 
     const api = async (path, body) => {
       const res = await fetch(`${baseUrl}${path}`, {
@@ -172,12 +175,25 @@ async function main() {
       `SELECT id FROM brain_sessions WHERE parent_session_id = ? AND id LIKE 'brain-ch-subagent-%'`
     ).all(sessionA);
     // With the cap pinned at CHANNEL_SESSION_CAP, spawning this many children means the oldest idle one —
-    // the target — was disposed. From here, continuing it MUST rehydrate from SQLite.
+    // the target — was disposed.
     check(`${FILLER_DELEGATIONS} further sub-agents ran, so the target no longer fits the cap of ${CHANNEL_SESSION_CAP}`,
       allChildren.length === FILLER_DELEGATIONS + 1, `children persisted: ${allChildren.length}`);
 
+    // …but "was disposed" is an inference about the daemon's memory, and this suite must not rest on an
+    // inference. Restarting over the SAME data dir settles it: the process that held every live session
+    // is gone, so from here nothing at all can be served out of RAM — not the child's transcript, not the
+    // parent's. Everything below therefore comes from SQLite or it does not come at all.
+    console.log('\n— the daemon restarts: no live session survives, only what SQLite holds —');
+    streamA.close();
+    token = await daemon.restart();
+    const restarted = await getJson(baseUrl, `/brain/messages?session=${encodeURIComponent(sessionA)}`, token);
+    check('the parent conversation is still readable after the restart',
+      JSON.stringify(restarted).includes(MARKERS.task));
+    const streamA2 = await openStream(baseUrl, token, sessionA);
+    await sleep(200);
+
     console.log('\n— DelegateList finds it, DelegateContinue resumes it WITH its context —');
-    const continued = await turnA('Check what you delegated and follow it up.', 'listcontinue');
+    const continued = await turnOn(sessionA, streamA2)('Check what you delegated and follow it up.', 'listcontinue');
 
     const listing = continued.map(toolResultText).find((t) => t.includes(LISTING_HEADER)) ?? '';
     check('DelegateList reported the past sub-agents to the parent', !!listing);
@@ -229,7 +245,7 @@ async function main() {
 
     db.close();
     streamB.close();
-    streamA.close();
+    streamA2.close();
   } finally {
     if (daemon) await daemon.stop();
     await model.close();
