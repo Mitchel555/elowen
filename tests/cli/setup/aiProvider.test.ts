@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { runAiStep, shouldWireAutopilot } from '../../../src/cli/setup/steps/aiProvider.js';
+import { runAiStep } from '../../../src/cli/setup/steps/aiProvider.js';
 import { keepProvider, type PublicProvider } from '../../../src/cli/setup/steps/shared.js';
 import type { WizardCtx } from '../../../src/cli/setup/types.js';
 
@@ -19,16 +19,6 @@ vi.mock('../../../src/cli/ui/prompts.js', () => ({
   cancel: () => {},
   isCancel: () => false,
 }));
-
-describe('cli/setup.shouldWireAutopilot', () => {
-  it('wires only an openai-type provider that has a key (the relay trap guard)', () => {
-    expect(shouldWireAutopilot('openai', true)).toBe(true);
-    expect(shouldWireAutopilot('openai', false)).toBe(false); // no key → relay unusable
-    expect(shouldWireAutopilot('anthropic', true)).toBe(false); // relay is OpenAI-only
-    expect(shouldWireAutopilot('oauth-anthropic', true)).toBe(false);
-    expect(shouldWireAutopilot('oauth-openai-codex', true)).toBe(false); // no stored key
-  });
-});
 
 describe('cli/setup.keepProvider', () => {
   it('re-sends an existing provider WITHOUT its key (keyless round-trip keeps the stored secret)', () => {
@@ -104,12 +94,13 @@ describe('cli/setup.runAiStep — reuse-provider wiring', () => {
     expect(result).toEqual({ status: 'done' });
     expect(ctx.answers.ai).toEqual({ status: 'done', summary: 'Relay (m1)', providerId: 'relay', providerType: 'openai', model: 'm1', hasKey: true });
 
-    // autopilot relay wiring (openai + key) + the embedded task exec both PUT /config. The exec PUT sends
-    // ONLY { defaults: { exec } } — the config store merges defaults per-field, so autonomy/maxSessions are
-    // preserved without a read-then-write race.
+    // The AI step wires ONLY the embedded task exec now — it PUTs { defaults: { exec } } (the config store
+    // merges defaults per-field, so autonomy/maxSessions survive without a read-then-write race). Autopilot
+    // is no longer configured here: it's a separate, final, opt-in step, so the AI step must NOT touch the
+    // autopilot config.
     const puts = calls.filter((c) => c.method === 'PUT' && c.path === '/config');
-    expect(puts).toContainEqual({ method: 'PUT', path: '/config', body: { autopilot: { providerId: 'relay', model: 'm1' } } });
     expect(puts).toContainEqual({ method: 'PUT', path: '/config', body: { defaults: { exec: 'elowen:relay/m1' } } });
+    expect(puts.some((c) => (c.body as { autopilot?: unknown }).autopilot !== undefined)).toBe(false);
 
     // the smoke test ran against the just-embedded provider/model
     const smoke = calls.find((c) => c.method === 'POST' && c.path === '/brain/test');

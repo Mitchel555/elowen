@@ -76,12 +76,26 @@ describe('cli/setup deployment-step gating (install/setup parity)', () => {
 
   it('buildSteps inserts the Deployment step after Account when it applies', () => {
     const steps = buildSteps({ info: installInfo(), isRoot: true, embedded: false });
-    expect(steps.map((s) => s.id)).toEqual(['account', 'deployment', 'project', 'ai', 'memory', 'lsp']);
+    expect(steps.map((s) => s.id)).toEqual(['account', 'deployment', 'project', 'ai', 'preferences', 'memory', 'lsp', 'autopilot']);
   });
 
   it('buildSteps omits the Deployment step off a systemd box', () => {
     const steps = buildSteps({ info: null, isRoot: true, embedded: false });
-    expect(steps.map((s) => s.id)).toEqual(['account', 'project', 'ai', 'memory', 'lsp']);
+    expect(steps.map((s) => s.id)).toEqual(['account', 'project', 'ai', 'preferences', 'memory', 'lsp', 'autopilot']);
     expect(steps.some((s) => s.id === 'deployment')).toBe(false);
+  });
+});
+
+describe('cli/setup step order (personal agent first, autopilot last)', () => {
+  it('sets up the personal assistant before the optional bonuses, with autopilot the final step', () => {
+    const steps = buildSteps({ info: null, isRoot: false, embedded: false }).map((s) => s.id);
+    // Autopilot (the orchestrator) is a bonus: it must come AFTER code intelligence, never before the
+    // provider the user's own conversations run on.
+    expect(steps[steps.length - 1]).toBe('autopilot');
+    expect(steps.indexOf('ai')).toBeLessThan(steps.indexOf('autopilot'));
+    expect(steps.indexOf('lsp')).toBeLessThan(steps.indexOf('autopilot'));
+    // Preferences tune the assistant right after it's connected, before the optional add-ons.
+    expect(steps.indexOf('ai')).toBeLessThan(steps.indexOf('preferences'));
+    expect(steps.indexOf('preferences')).toBeLessThan(steps.indexOf('memory'));
   });
 });

@@ -102,7 +102,6 @@ async function reuseApiKey(ctx: WizardCtx, id: string, providers: PublicProvider
   const pr = providers.find((x) => x.id === id);
   if (!pr) return { status: 'back' };
   const model = pr.models[0] ?? (pr.type === 'anthropic' ? PREFERRED_DEFAULT.anthropic : '') ?? '';
-  await maybeWireAutopilot(ctx, pr.type, true, pr.id, model);
   return done(ctx, pr.label, model, pr.id, pr.type, true);
 }
 
@@ -136,7 +135,6 @@ async function apiKeyFlow(ctx: WizardCtx, custom: boolean, providers: PublicProv
   s.stop(ok ? 'Provider saved.' : 'Saving the provider failed.', ok ? 'success' : 'error');
   if (!ok) return skip(ctx);
 
-  await maybeWireAutopilot(ctx, type, !!apiKey, id, model);
   return done(ctx, label, model, id, type, !!apiKey);
 }
 
@@ -288,7 +286,7 @@ async function persistOauthEntry(ctx: WizardCtx, type: BrainProviderType, provid
   return done(ctx, stripSignIn(ch.label), model, id, type, false);
 }
 
-// ── persistence + wiring ───────────────────────────────────────────────────────────────────────
+// ── persistence ──────────────────────────────────────────────────────────────────────────────────
 /** Save `entry` into the brain provider list. The list replaces wholesale, so the OTHER entries are
  *  re-sent WITHOUT their apiKey — the config store keeps each stored key when apiKey is omitted, so no
  *  secret is echoed or lost. */
@@ -296,21 +294,6 @@ async function saveProvider(ctx: WizardCtx, entry: ProviderEntry, others: Public
   const kept = others.filter((e) => e.id !== entry.id).map(keepProvider);
   const r = await apiJson(ctx, 'PUT', '/config', { brain: { providers: [...kept, entry] } });
   return r.ok;
-}
-
-/** The autopilot relay is OpenAI-compatible and needs a key — only an openai-type provider WITH a key
- *  can back it (autopilotRelay() returns null without a key; Anthropic/OAuth can't speak the protocol). */
-export function shouldWireAutopilot(type: BrainProviderType, hasKey: boolean): boolean {
-  return type === 'openai' && hasKey;
-}
-
-async function maybeWireAutopilot(ctx: WizardCtx, type: BrainProviderType, hasKey: boolean, providerId: string, model: string): Promise<void> {
-  if (!shouldWireAutopilot(type, hasKey)) {
-    p.log.info('Autopilot (planner/overseer) needs an agent CLI or a separate OpenAI-compatible key — set it up later in Settings.');
-    return;
-  }
-  const r = await apiJson(ctx, 'PUT', '/config', { autopilot: { providerId, ...(model ? { model } : {}) } });
-  if (r.ok) p.log.info('Autopilot will use this provider too.');
 }
 
 // ── verified hand-off ────────────────────────────────────────────────────────────────────────────
