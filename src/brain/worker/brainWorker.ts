@@ -163,6 +163,11 @@ export class BrainWorkerService {
     const pluginTools = composeSessionTools({
       kind: 'task-worker', pluginTools: plugins?.tools ?? [],
       onToolResult: toolHookBus ? (e) => toolHookBus.emit('tools.call.after', e) : undefined,
+      // Task workers take the same veto gate. Wiring only the chat path would leave every guard a user
+      // installs silently unenforced for exactly the sessions that run unattended.
+      onToolCall: toolHookBus
+        ? async (e) => (await toolHookBus.emitBlocking('tools.call.before', e)).deny
+        : undefined,
     });
     const skills = plugins?.skills ?? [];
     const append = [...(plugins?.promptFragments ?? [])].filter((s) => s.length > 0);

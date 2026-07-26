@@ -35,6 +35,12 @@ type SessionKind =
  *  e.g. the formatters plugin pushes "formatted <file> with <name>" so the note reaches the transcript. */
 export interface PluginToolResultEvent { tool: string; params: unknown; result: unknown }
 
+/** A plugin tool call about to run — the payload the `tools.call.before` hook receives. `params` is the
+ *  tool's input object (second `execute` argument). A subscriber returns a reason string to BLOCK the
+ *  call; anything else lets it proceed. Fired only for a call the permission gate already allowed, so a
+ *  hook never sees (or can second-guess) a call the user's own rules already refused. */
+export interface PluginToolCallEvent { tool: string; params: unknown }
+
 export interface CapabilitySpec {
   kind: SessionKind;
   /** Built lazily so the owner's API token is never even minted for sessions that must not have it. */
@@ -57,6 +63,11 @@ export interface CapabilitySpec {
    *  read currentWorkDir etc.) and a throwing/rejecting observer never fails the tool result; the hook
    *  bus bounds each hook by its event budget, so a hung hook delays the result at most that long. */
   onToolResult?: (e: PluginToolResultEvent) => void | Promise<void>;
+  /** Veto point fired just BEFORE a permitted plugin tool executes. The caller forwards it to the hook
+   *  bus as `tools.call.before`; a returned string blocks the call and becomes the model's reason. Runs
+   *  inside the tool's ALS turn scope like `onToolResult`, and is fail-open at every layer — a rejecting
+   *  gate blocks nothing, and the bus bounds each hook by the event's (deliberately short) budget. */
+  onToolCall?: (e: PluginToolCallEvent) => Promise<string | undefined>;
 }
 
 /** Wrap a plugin tool so its access is decided at EXECUTE time from the current turn's ToolPolicy.
@@ -66,13 +77,22 @@ export interface CapabilitySpec {
  *  clear locked no-op instead of running, so the model always gets something to reason over. Because a
  *  channel session is shared across senders, the tool SET is fixed at spawn; this per-turn gate is what
  *  makes access correct for whoever is actually speaking. */
-function gateToolAccess(tool: ToolDefinition, onToolResult?: (e: PluginToolResultEvent) => void | Promise<void>): ToolDefinition {
+function gateToolAccess(
+  tool: ToolDefinition,
+  onToolResult?: (e: PluginToolResultEvent) => void | Promise<void>,
+  onToolCall?: (e: PluginToolCallEvent) => Promise<string | undefined>,
+): ToolDefinition {
   if (typeof tool.execute !== 'function') return tool; // defensive (test stubs) — nothing to gate
   const run = tool.execute.bind(tool);
   const execute = (async (...args: Parameters<ToolDefinition['execute']>) => {
     if (!toolPermitted(tool.name, currentToolPolicy())) {
       return { content: [{ type: 'text' as const, text: `The tool "${tool.name}" is not available to you in this conversation.` }], details: {} };
     }
+    // Give `tools.call.before` subscribers a veto, AFTER the permission gate: the user's own rules are
+    // policy and no plugin may widen them — a hook can only refuse further. Fail-open, so a hook that
+    // throws blocks nothing; one broken plugin must never be able to refuse every call in the session.
+    const denied = onToolCall ? await onToolCall({ tool: tool.name, params: args[1] }).catch(() => undefined) : undefined;
+    if (denied) return refused(`The "${tool.name}" call was blocked by a plugin: ${denied}`);
     const result = await run(...args);
     // Observe AFTER a permitted execute resolved, still inside the turn's ALS scope, and AWAIT it
     // BEFORE returning: a hook that rewrites the written file (formatters) must finish before the
@@ -165,7 +185,7 @@ export function composeSessionTools(spec: CapabilitySpec): ToolDefinition[] {
   // user's own deny can still hide it) but never the plugin hook wrapper. Only present when the session
   // actually defers tools; otherwise the list is empty and the composed set is byte-identical to before.
   const toolSearchTools = spec.kind !== 'task-worker' ? (spec.toolSearch?.() ?? []) : [];
-  const pluginTools = spec.pluginTools.map((t) => gateToolAccess(t, spec.onToolResult));
+  const pluginTools = spec.pluginTools.map((t) => gateToolAccess(t, spec.onToolResult, spec.onToolCall));
   // Every composed tool gains an optional leading `_reason` (withReason augments the schema; excluded tools
   // — ToolSearch, mcp__* — pass through), then the whole set takes the permission gate, then stripReason
   // wraps OUTERMOST so `_reason` is removed from the arguments before any inner wrapper or handler sees it.

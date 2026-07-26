@@ -141,6 +141,12 @@ export class LiveSessionSpawner {
       // Plugin tools are gated at EXECUTE time from the turn's ToolPolicy (set in runWithPolicy), not
       // filtered at compose — one shared mechanism for owner chat and shared channels alike.
       onToolResult: toolHookBus ? (e) => toolHookBus.emit('tools.call.after', e) : undefined,
+      // The matching veto point: a `tools.call.before` subscriber may refuse a call outright. Same bus
+      // and the same fail-open guarantees, but a much shorter budget — this one is latency the user
+      // waits through in FRONT of every call, not after it.
+      onToolCall: toolHookBus
+        ? async (e) => (await toolHookBus.emitBlocking('tools.call.before', e)).deny
+        : undefined,
     });
     const skills = plugins?.skills ?? [];
     // Plugin prompt-command macros → PI PromptTemplate[]: PI exposes them as `/name` slash commands and

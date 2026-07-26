@@ -20,7 +20,13 @@ export interface HookExecutionRecord {
  *  only after its hooks settle) and its main consumer — the formatters plugin — runs a real formatter
  *  with a 10s exec timeout of its own, so the budget must exceed that without raising the global
  *  default for every other hook. */
-const EVENT_BUDGETS: Partial<Record<PluginHookName, number>> = { 'tools.call.after': 12_000 };
+const EVENT_BUDGETS: Partial<Record<PluginHookName, number>> = {
+  'tools.call.after': 12_000,
+  // `tools.call.before` sits IN FRONT of the tool, so its budget is latency the user waits through on
+  // every single call. Kept well under the `after` budget: a gate that needs twelve seconds to decide
+  // is not a gate, it is an outage.
+  'tools.call.before': 3_000,
+};
 
 interface HookBusDeps {
   /** Every hook registered across all plugins (the flat `PluginRegistry.hooks` list). */
@@ -121,6 +127,33 @@ export class PluginHookBus {
     return accepted.length > 0 ? { appendContext: accepted.join('') } : {};
   }
 
+  /** Fire every hook registered for `name` SEQUENTIALLY until one VETOES the operation, returning that
+   *  hook's reason. A veto is honoured only when the owning plugin declared `mutates:['tools']`; without
+   *  it the veto is dropped and audited as 'rejected', exactly as `emitMutating` treats an unearned
+   *  patch. The first veto short-circuits — this sits on the tool-call hot path, and once the call is
+   *  refused the remaining opinions cannot change the outcome.
+   *
+   *  Fail-open is not negotiable here: a hook that throws or outruns its budget vetoes NOTHING. A
+   *  blocking hook that failed closed would let one broken plugin refuse every tool call and leave the
+   *  agent unable to do anything at all. */
+  async emitBlocking(name: PluginHookName, payload: unknown): Promise<{ deny?: string }> {
+    for (let i = 0; i < this.hooks.length; i++) {
+      const hook = this.hooks[i];
+      if (hook === undefined || hook.name !== name) continue;
+      const plugin = this.hookOwners?.[i] ?? '<unknown>';
+      const { outcome, result, durationMs } = await this.runTraced(name, hook, payload);
+      const deny = outcome === 'ok' ? asDenyToolCall(result) : undefined;
+      if (deny === undefined) {
+        this.audit?.({ plugin, hook: name, durationMs, outcome });
+        continue;
+      }
+      const allowed = this.capabilities?.get(plugin)?.mutates?.includes('tools') === true;
+      this.audit?.({ plugin, hook: name, durationMs, outcome: allowed ? 'ok' : 'rejected', changed: allowed ? 'tools' : undefined });
+      if (allowed) return { deny };
+    }
+    return {};
+  }
+
   /** Run a single hook under its event's timeout budget, capturing its outcome + return value without
    *  ever rejecting. A throw or timeout is warned about and reported as 'threw'/'timeout' with no
    *  result (fail-open). */
@@ -154,4 +187,13 @@ export class PluginHookBus {
 function asAppendContext(outcome: HookOutcome): string | undefined {
   if (!outcome || typeof outcome !== 'object') return undefined;
   return (outcome as HookResult).patch?.appendContext;
+}
+
+/** Extract a hook's `patch.denyToolCall` veto reason if it returned one, else undefined. An empty or
+ *  whitespace-only reason is NOT a veto: blocking a call without telling the model why leaves it
+ *  retrying the same thing forever. */
+function asDenyToolCall(outcome: HookOutcome): string | undefined {
+  if (!outcome || typeof outcome !== 'object') return undefined;
+  const reason = (outcome as HookResult).patch?.denyToolCall;
+  return typeof reason === 'string' && reason.trim() ? reason.trim() : undefined;
 }

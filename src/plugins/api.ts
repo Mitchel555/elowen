@@ -24,7 +24,13 @@ export type PluginSkill = Skill;
  *  where `messages` is its REHYDRATED history, and is AWAITED before the caller may run a turn. It is
  *  the seam for per-conversation state that lives in daemon memory while its evidence lives in the
  *  transcript: the files plugin re-seeds its read-before-write guard there, so reopening a conversation
- *  after a restart does not make the agent re-read files it has already seen. */
+ *  after a restart does not make the agent re-read files it has already seen.
+ *
+ *  `tools.call.before` fires just before a PERMITTED plugin tool executes, with a
+ *  `PluginToolCallEvent`-shaped payload `{ tool, params }`. A subscriber whose plugin declared
+ *  `mutates:['tools']` may return `patch.denyToolCall` to block the call outright (a lint gate, a
+ *  protected path, a guarded config); the reason reaches the model in place of the result. Fail-open
+ *  like every other hook: one that throws or times out blocks nothing. */
 export type PluginHookName =
   | 'platform.message.received' | 'platform.message.normalized'
   | 'brain.session.beforeSpawn' | 'brain.session.afterSpawn'
@@ -35,11 +41,18 @@ export type PluginHookName =
   | 'memory.write.before' | 'memory.write.after'
   | 'plugin.reload.before' | 'plugin.reload.after';
 
-/** A patch a hook may return to enrich the live turn. v1 wires ONLY `appendContext` (turnContext
- *  enrichment): the string is appended, UNTRUSTED-framed, to the live prompt in owner chat — never
- *  persisted, never the system prompt. prompt/tools/memory are declarable capability VALUES but not
- *  patch-wired yet, so the patch type stays minimal until they are. */
-export interface HookPatch { appendContext?: string }
+/** A patch a hook may return to change the live turn. Two are wired:
+ *
+ *  `appendContext` (needs `mutates:['turnContext']`) — the string is appended, UNTRUSTED-framed, to the
+ *  live prompt in owner chat; never persisted, never the system prompt.
+ *
+ *  `denyToolCall` (needs `mutates:['tools']`) — returned from a `tools.call.before` hook, it BLOCKS the
+ *  call: the tool never runs and the string is handed to the model as the reason, so it can adapt
+ *  instead of retrying blindly. Deliberately runs AFTER the permission gate: permissions are the
+ *  user's own policy and no plugin may widen or override them — a hook may only refuse further.
+ *
+ *  `prompt`/`memory` remain declarable capability VALUES without a patch shape yet. */
+export interface HookPatch { appendContext?: string; denyToolCall?: string }
 
 /** What a hook may return. `patch` is the runtime-wired mutation (gated by the owner's declared
  *  capabilities); `annotations`/`audit` are free-form observability the host may record. A hook that

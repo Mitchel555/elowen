@@ -86,3 +86,87 @@ describe('composeSessionTools — onToolResult observer (tools.call.after wiring
     expect((res.content[0] as { text: string }).text).toBe('ran:Write');
   });
 });
+
+describe('composeSessionTools — onToolCall veto (tools.call.before wiring)', () => {
+  /** A tool that records whether it ever actually ran. */
+  const spyTool = (): { tool: ToolDefinition; ran: () => boolean } => {
+    let ran = false;
+    const tool = execTool('Write', (async () => {
+      ran = true;
+      return { content: [{ type: 'text' as const, text: 'ran:Write' }], details: { ok: true } };
+    }) as ToolDefinition['execute']);
+    return { tool, ran: () => ran };
+  };
+
+  it('sees the tool name and params before the call runs', async () => {
+    const seen: { tool: string; params: unknown }[] = [];
+    const gate = async (e: { tool: string; params: unknown }) => { seen.push(e); return undefined; };
+    const tools = composeSessionTools({ kind: 'owner-chat', pluginTools: [execTool('Write')], onToolCall: gate });
+    await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({ path: '/p/a.ts' })));
+    expect(seen).toEqual([{ tool: 'Write', params: { path: '/p/a.ts' } }]);
+  });
+
+  it('lets the call through when the gate returns nothing', async () => {
+    const { tool, ran } = spyTool();
+    const tools = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool], onToolCall: async () => undefined });
+    const res = await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({})));
+    expect((res.content[0] as { text: string }).text).toBe('ran:Write');
+    expect(ran()).toBe(true);
+  });
+
+  // The point of the whole feature: a vetoed call must not reach the tool at all.
+  it('blocks the call outright and never runs the tool', async () => {
+    const { tool, ran } = spyTool();
+    const tools = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool], onToolCall: async () => 'lint is failing' });
+    const res = await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({})));
+    expect(ran()).toBe(false);
+    expect((res.content[0] as { text: string }).text).toContain('lint is failing');
+  });
+
+  // The model has to learn WHY, or it just retries the same call forever.
+  it('hands the reason to the model, naming the tool', async () => {
+    const tools = composeSessionTools({ kind: 'owner-chat', pluginTools: [execTool('Write')], onToolCall: async () => 'protected path' });
+    const res = await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({})));
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toContain('Write');
+    expect(text).toContain('blocked by a plugin');
+  });
+
+  // Fail-open: one broken gate must never be able to refuse every call in the session.
+  it('a rejecting gate blocks nothing', async () => {
+    const { tool, ran } = spyTool();
+    const gate = vi.fn(async () => { await Promise.resolve(); throw new Error('gate broke'); });
+    const tools = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool], onToolCall: gate });
+    const res = await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({})));
+    expect(ran()).toBe(true);
+    expect((res.content[0] as { text: string }).text).toBe('ran:Write');
+    expect(gate).toHaveBeenCalledOnce();
+  });
+
+  // Permissions are the user's own policy: a plugin gate must not even be consulted about a call the
+  // user's rules already refused, let alone be able to widen them.
+  it('is not consulted for a policy-denied call', async () => {
+    const gate = vi.fn(async () => 'should never be asked');
+    const tools = composeSessionTools({ kind: 'foreign-channel', pluginTools: [execTool('Write')], onToolCall: gate });
+    const res = await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({})), { toolPolicy: { deny: new Set(['Write']) } });
+    expect((res.content[0] as { text: string }).text).toContain('not available');
+    expect(gate).not.toHaveBeenCalled();
+  });
+
+  it('a vetoed call never reaches the result observer either', async () => {
+    const seen: PluginToolResultEvent[] = [];
+    const tools = composeSessionTools({
+      kind: 'owner-chat', pluginTools: [execTool('Write')],
+      onToolCall: async () => 'no', onToolResult: (e) => seen.push(e),
+    });
+    await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({})));
+    expect(seen).toHaveLength(0);
+  });
+
+  it('composing without a gate keeps the plain gated behavior', async () => {
+    const { tool, ran } = spyTool();
+    const tools = composeSessionTools({ kind: 'owner-chat', pluginTools: [tool] });
+    await runWithPolicy(POLICY, () => tools[0]!.execute(...callArgs({})));
+    expect(ran()).toBe(true);
+  });
+});

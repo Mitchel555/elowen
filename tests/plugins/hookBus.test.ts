@@ -314,3 +314,112 @@ describe('PluginHookBus.emitMutating', () => {
     expect(audit[0]?.changed).toBeUndefined();
   });
 });
+
+describe('PluginHookBus.emitBlocking', () => {
+  let logger: ReturnType<typeof makeLogger>;
+  let audit: HookExecutionRecord[];
+  const sink = (e: HookExecutionRecord) => { audit.push(e); };
+  const capsOf = (entries: Record<string, PluginCapabilities>) => new Map(Object.entries(entries));
+  const vetoing = (reason: string): PluginHook => ({ name: 'tools.call.before', run: () => ({ patch: { denyToolCall: reason } }) });
+
+  beforeEach(() => { logger = makeLogger(); audit = []; });
+
+  it('honours a veto when the owning plugin declared mutates:[tools]', async () => {
+    const bus = new PluginHookBus({
+      hooks: [vetoing('lint is failing')], hookOwners: ['gate'],
+      capabilities: capsOf({ gate: { mutates: ['tools'] } }), audit: sink, logger,
+    });
+
+    expect(await bus.emitBlocking('tools.call.before', { tool: 'Write' })).toEqual({ deny: 'lint is failing' });
+    expect(audit[0]).toMatchObject({ plugin: 'gate', outcome: 'ok', changed: 'tools' });
+  });
+
+  // Deny-by-default, exactly as an unearned appendContext patch is dropped.
+  it('drops a veto from a plugin without the capability, and audits it rejected', async () => {
+    const bus = new PluginHookBus({
+      hooks: [vetoing('no')], hookOwners: ['nosy'],
+      capabilities: capsOf({ nosy: { mutates: ['turnContext'] } }), audit: sink, logger,
+    });
+
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({});
+    expect(audit[0]).toMatchObject({ plugin: 'nosy', outcome: 'rejected' });
+  });
+
+  it('rejects a veto when no capabilities map is wired at all', async () => {
+    const bus = new PluginHookBus({ hooks: [vetoing('no')], hookOwners: ['x'], audit: sink });
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({});
+    expect(audit[0]).toMatchObject({ plugin: 'x', outcome: 'rejected' });
+  });
+
+  it('allows the call when nothing vetoes', async () => {
+    const hooks: PluginHook[] = [{ name: 'tools.call.before', run: () => { /* observer */ } }];
+    const bus = new PluginHookBus({ hooks, hookOwners: ['obs'], capabilities: capsOf({ obs: { mutates: ['tools'] } }), audit: sink });
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({});
+    expect(audit[0]).toMatchObject({ plugin: 'obs', outcome: 'ok' });
+  });
+
+  // This sits on the tool-call hot path: once refused, later opinions cannot change the outcome.
+  it('short-circuits on the first honoured veto', async () => {
+    const ran: string[] = [];
+    const hooks: PluginHook[] = [
+      { name: 'tools.call.before', run: () => { ran.push('first'); return { patch: { denyToolCall: 'stop' } }; } },
+      { name: 'tools.call.before', run: () => { ran.push('second'); } },
+    ];
+    const bus = new PluginHookBus({ hooks, hookOwners: ['a', 'b'], capabilities: capsOf({ a: { mutates: ['tools'] }, b: { mutates: ['tools'] } }) });
+
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({ deny: 'stop' });
+    expect(ran).toEqual(['first']);
+  });
+
+  // …but a REJECTED veto is not an outcome, so later hooks still get their say.
+  it('keeps going past a veto it had to drop', async () => {
+    const hooks: PluginHook[] = [vetoing('unearned'), vetoing('earned')];
+    const bus = new PluginHookBus({
+      hooks, hookOwners: ['nosy', 'gate'],
+      capabilities: capsOf({ nosy: {}, gate: { mutates: ['tools'] } }),
+    });
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({ deny: 'earned' });
+  });
+
+  // Fail-open is the whole safety story: one broken plugin must never be able to refuse every call.
+  it('blocks nothing when a hook throws', async () => {
+    const hooks: PluginHook[] = [{ name: 'tools.call.before', run: () => { throw new Error('boom'); } }];
+    const bus = new PluginHookBus({ hooks, hookOwners: ['broken'], capabilities: capsOf({ broken: { mutates: ['tools'] } }), logger });
+
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({});
+    expect(logger.warnings[0]).toContain('threw');
+  });
+
+  it('blocks nothing when a hook outruns its budget', async () => {
+    const hooks: PluginHook[] = [
+      { name: 'tools.call.before', run: async () => { await tick(50); return { patch: { denyToolCall: 'too late' } }; } },
+    ];
+    const bus = new PluginHookBus({
+      hooks, hookOwners: ['slow'], capabilities: capsOf({ slow: { mutates: ['tools'] } }),
+      eventBudgets: { 'tools.call.before': 5 }, logger,
+    });
+
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({});
+    expect(logger.warnings[0]).toContain('timed out');
+  });
+
+  // Blocking a call without saying why leaves the model retrying the same thing forever.
+  it('treats an empty or whitespace-only reason as no veto', async () => {
+    const hooks: PluginHook[] = [vetoing('   '), vetoing('')];
+    const bus = new PluginHookBus({ hooks, hookOwners: ['a', 'b'], capabilities: capsOf({ a: { mutates: ['tools'] }, b: { mutates: ['tools'] } }) });
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({});
+  });
+
+  it('trims the reason it hands back', async () => {
+    const bus = new PluginHookBus({
+      hooks: [vetoing('  protected path  ')], hookOwners: ['gate'],
+      capabilities: capsOf({ gate: { mutates: ['tools'] } }),
+    });
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({ deny: 'protected path' });
+  });
+
+  it('allows the call when no hook is subscribed at all', async () => {
+    const bus = new PluginHookBus({ hooks: [], hookOwners: [] });
+    expect(await bus.emitBlocking('tools.call.before', {})).toEqual({});
+  });
+});
