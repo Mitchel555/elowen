@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
-import { currentToolPolicy, currentTurnPermissions, toolPermitted, type ToolPolicy } from '../../plugins/policyContext.js';
+import { currentSessionId, currentToolPolicy, currentTurnMode, currentTurnPermissions, toolPermitted, type ToolPolicy } from '../../plugins/policyContext.js';
+import { isSessionPlanPath } from '../continuity/planStore.js';
 import { BASH_PERMISSION_TOOLS, bashAlwaysPattern, resolveToolPermission, type ApprovalDecision } from '../toolPermissions.js';
 import type { ToolActivationTarget } from '../toolSearch/toolSearchTool.js';
 import { withReason, stripReason } from '../toolReason.js';
@@ -121,6 +122,34 @@ function gateToolAccess(
 /** A model-readable refusal result (the tool "ran" but reports why it did not act). */
 const refused = (text: string) => ({ content: [{ type: 'text' as const, text }], details: {} });
 
+/** Writing tools that plan mode must clamp to the session's plan file. `Write` is admitted to plan mode
+ *  (PLAN_MODE_CLAMPED_TOOLS) so the model can author its plan; `Edit` is withheld there and is listed
+ *  anyway, so that admitting it later cannot silently reopen the hole this clamp exists to close. */
+const PLAN_MODE_WRITE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit']);
+
+/** Why a writing tool may not run on this path during a planning turn, or undefined when it may.
+ *
+ *  Plan mode is read-only by WITHHOLDING every writing tool. Letting the model author its own plan file
+ *  means admitting one back, so this is the clamp that keeps the mode's promise: during a plan turn a
+ *  write may land on the session's plan file and nowhere else.
+ *
+ *  Deliberately checked BEFORE gatePermissions' `!perms` early return. The permission gate goes inert on
+ *  a turn that carries no TurnPermissions scope (task workers, tests); this clamp must not, or "plan mode
+ *  cannot write" would hold only for turns that happen to have permissions configured — exactly the
+ *  conditional guarantee that is worth nothing. */
+function planWriteDenial(toolName: string, params: unknown): string | undefined {
+  if (currentTurnMode() !== 'plan' || !PLAN_MODE_WRITE_TOOLS.has(toolName)) return undefined;
+  const sessionId = currentSessionId();
+  const rawPath = (params as { path?: unknown } | null | undefined)?.path;
+  // Deny by default: no session to scope a plan to, or a path that is not even a string, is refused
+  // rather than waved through. There is no benign call shaped like that in plan mode.
+  if (!sessionId || typeof rawPath !== 'string' || !isSessionPlanPath(sessionId, rawPath)) {
+    return `Plan mode is read-only: "${toolName}" may only write this conversation's plan file. `
+      + 'Finish planning and exit plan mode before changing anything else.';
+  }
+  return undefined;
+}
+
 /** Wrap ANY session tool with the granular permission gate — THE single choke point every tool call
  *  passes (built-in Elowen* and Memory* tools and plugin tools alike; composeSessionTools applies it
  *  to the whole composed set). The turn's rules resolve to allow/ask/deny (resolveToolPermission — last matching
@@ -138,6 +167,8 @@ function gatePermissions(tool: ToolDefinition): ToolDefinition {
   if (typeof tool.execute !== 'function') return tool; // defensive (test stubs) — nothing to gate
   const run = tool.execute.bind(tool);
   const execute = (async (...args: Parameters<ToolDefinition['execute']>) => {
+    const planDenial = planWriteDenial(tool.name, args[1]);
+    if (planDenial) return refused(planDenial);
     const perms = currentTurnPermissions();
     if (!perms) return run(...args);
     const bash = BASH_PERMISSION_TOOLS.has(tool.name);
