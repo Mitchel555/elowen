@@ -80,7 +80,10 @@ describe('PromptService.render', () => {
   });
 
   it('renders nested CLI prompt templates', () => {
-    expect(prompts.render('cli/plan-mode', {}, 1)).toContain('<proposed_plan>');
+    // The plan-mode directive has to NAME the plan file: the model authors the plan as a document, and
+    // it cannot write one to a path it was never told.
+    expect(prompts.render('cli/plan-mode', { planFile: '/tmp/plans/brave-otter-3f9a.md' }, 1))
+      .toContain('/tmp/plans/brave-otter-3f9a.md');
     store.set(1, 'cli/plan-mode', 'CUSTOM PLAN MODE');
     expect(prompts.render('cli/plan-mode', {}, 1)).toBe('CUSTOM PLAN MODE');
   });

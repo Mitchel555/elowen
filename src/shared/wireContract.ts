@@ -68,10 +68,15 @@ export interface BrainWorkflowView {
 
 /** One display piece of an assistant turn, in the order it happened: a text block, or a tool call (with a
  *  short argument summary and, for edits, the display diff). The call id stays on the wire so a
- *  post-parent-idle background update can patch the already-settled row. */
+ *  post-parent-idle background update can patch the already-settled row.
+ *
+ *  `plan` carries the markdown a finished ExitPlanMode call submitted, so the client can render the plan
+ *  panel and raise the decision from the CALL rather than by pattern-matching the assistant's prose. It
+ *  is a distinct field precisely because prose could never be trusted here: a model quoting a plan tag
+ *  while merely discussing plan mode is indistinguishable from one proposing a plan. */
 export type BrainSegment =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: BrainSubagentView; wf?: BrainWorkflowView };
+  | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: BrainSubagentView; wf?: BrainWorkflowView; plan?: string };
 
 /** A durable display row (the `GET /brain/messages` payload). `id` is the SQLite message UUID when the
  *  source is a real store row (the only case served over HTTP); structural callers may omit it. `text` is

@@ -23,6 +23,7 @@ import type { TurnMode, TurnRequest } from './turnRequest.js';
 import { turnWorkDir } from './workDir.js';
 import { drainPostCompactionContext } from '../continuity/postCompactionContext.js';
 import { EXIT_PLAN_MODE_TOOL } from '../tools/exitPlanMode.js';
+import { planFilePath } from '../../shared/paths.js';
 
 interface TurnContextBuilderDeps {
   store: BrainStore;
@@ -54,13 +55,14 @@ interface TurnContextBuilderDeps {
  *   - `ExitPlanMode` — the whole point of the mode is to leave it, so the tool that does so has to be
  *     reachable from inside. It writes nothing; it reads the plan file and ends the turn for the user's
  *     decision, which is why it is here rather than claiming `planSafe` (that means "only reads").
- *   - `Write` — the model authors its plan as a FILE, so it needs exactly one writable path. The
+ *   - `Write` / `Edit` — the model authors its plan as a FILE, so it needs exactly one writable path. The
  *     permission choke point (session/capabilities.ts, planWriteDenial) refuses any planning write that
- *     does not resolve to this session's plan file, symlinks and `..` included. Admitted ONLY because
- *     that clamp exists; `Edit` stays withheld because editing a plan is a rewrite of it.
+ *     does not resolve to this session's plan file, symlinks and `..` included, and it covers both tools.
+ *     `Edit` is here so a long plan can be built INCREMENTALLY: without it every revision means rewriting
+ *     the whole document, which is both wasteful and a good way to lose a section by accident.
  *  `WorkflowStart` stays withheld: it would inherit the same forcing, but its nodes expand through
  *  `WorkflowAddNodes`, and admitting one without the other only buys a workflow that cannot grow. */
-const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate', 'Write', EXIT_PLAN_MODE_TOOL]);
+const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate', 'Write', 'Edit', EXIT_PLAN_MODE_TOOL]);
 
 /** How often a mode's FULL directive is resent while the mode stays on — entry, then every Nth turn.
  *  Low enough that the rules never scroll out of steering range, high enough that a long planning
@@ -116,8 +118,15 @@ export class TurnContextBuilder {
           // a lie. And it must sit on the real-prompt path: rendering it in build() advanced the counter
           // even on prompt-command turns, which never show the reminder — so a `/command` landing on the
           // periodic full repeat silently consumed it and the next turns stayed sparse.
+          // The plan-mode directive NAMES the plan file, because the plan is authored as a document and
+          // the model cannot write one to a path it was never told. Passed to both modes' templates: the
+          // var is simply unused by the ones that do not mention it.
           const modeReminder = modeTemplate
-            ? this.d.prompts.render(this.modeTemplateFor(modeTemplate, mode, previousMode, live, compacted), {}, request.userId)
+            ? this.d.prompts.render(
+              this.modeTemplateFor(modeTemplate, mode, previousMode, live, compacted),
+              { planFile: planFilePath(process.env, live.sessionId) },
+              request.userId,
+            )
             : '';
           // The mode directive is volatile per-turn content (it flips when the user switches mode), so it
           // rides UNDER the user message as a <system-reminder> — alongside runningSubagents — rather than

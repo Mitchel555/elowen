@@ -9,6 +9,7 @@ type StoredTurnRow = { id?: string; role: string; content: string; created_at?: 
 // wireContract.ts for why they live outside src/brain.
 import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView } from '../shared/wireContract.js';
 import { parseDbTs } from '../shared/time.js';
+import { EXIT_PLAN_MODE_TOOL } from './tools/exitPlanMode.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 // Only these two have daemon consumers that import them from here; BrainSubagentView/BrainWorkflowView/
 // BrainSegment are used internally by the shaping code below, and anything else that needs them imports
@@ -68,6 +69,17 @@ function skillLoadDisplay(args: Record<string, unknown>): { name: string; detail
 
 /** Display name + detail for a tool call: the tool's own name with toolDetail(), except a skill-file
  *  Read, which renders as `Skill <name>` on every surface (CLI row, live platform trace, web). */
+/** The plan markdown a settled ExitPlanMode call submitted, for the client's plan panel and decision.
+ *  Read from the result's `details` (client-bound metadata) rather than from its text, which is addressed
+ *  to the model. Keyed on the tool name so no other tool can put a plan panel on screen by shipping a
+ *  `plan` detail of its own. */
+export function submittedPlan(toolName: string, result: unknown): string | undefined {
+  if (toolName !== EXIT_PLAN_MODE_TOOL) return undefined;
+  const details = (result as { details?: unknown } | null | undefined)?.details;
+  const plan = (details as { plan?: unknown } | null | undefined)?.plan;
+  return typeof plan === 'string' && plan.trim() ? plan : undefined;
+}
+
 export function toolDisplay(toolName: string, args: unknown): { name: string; detail?: string } {
   if (toolName === 'Read' && args && typeof args === 'object') {
     const skill = skillLoadDisplay(args as Record<string, unknown>);
@@ -400,6 +412,7 @@ export function shapeBrainMessages(
         const display = toolDisplay(p.name, p.arguments);
         const diff = p.id ? diffs.get(p.id) : undefined;
         const command = toolCommand(p.arguments);
+        const plan = submittedPlan(p.name, res?.result);
         segments.push({
           kind: 'tool', name: display.name,
           ...(p.id ? { id: p.id } : {}),
@@ -407,6 +420,7 @@ export function shapeBrainMessages(
           ...(diff ? { diff } : {}),
           ...(output ? { output } : {}),
           ...(command ? { command } : {}),
+          ...(plan ? { plan } : {}),
           ...(p.id && subagents.has(p.id) ? { sub: subagents.get(p.id) } : {}),
           ...(p.id && workflows.has(p.id) ? { wf: workflows.get(p.id) } : {}),
         });

@@ -43,12 +43,20 @@ export function buildExitPlanModeTool() {
       if (!plan) {
         return toolText(`No plan has been written yet. Write your plan to ${planFilePath(process.env, sessionId)} first, then call ${EXIT_PLAN_MODE_TOOL} again.`);
       }
+      // The plan rides `details`, which reaches the CLIENT but not the model — the approval UI needs the
+      // markdown to render, while the model has just written it and gains nothing from being handed it
+      // back. (`detail` on the wire event is derived from the call's ARGUMENTS, and this tool has none,
+      // so details is the carrier; the same channel the files plugin uses for its path metadata.)
+      //
       // The turn ENDS here. The user's decision is taken after it settles, so the model must not read this
       // as permission to start — an approval it has not been given yet.
-      return toolText('Your plan has been submitted for the user to review.\n\n'
-        + 'Stop here and wait for their decision. Do NOT begin implementing, and do not ask whether the plan '
-        + 'is acceptable — submitting it already asked. If they approve it, you will be told so and may then '
-        + 'start; the plan stays on disk so you can re-read it while you work.');
+      return {
+        content: [{ type: 'text' as const, text: 'Your plan has been submitted for the user to review.\n\n'
+          + 'Stop here and wait for their decision. Do NOT begin implementing, and do not ask whether the plan '
+          + 'is acceptable — submitting it already asked. If they approve it, you will be told so and may then '
+          + 'start; the plan stays on disk so you can re-read it while you work.' }],
+        details: { plan },
+      };
     },
   });
 }

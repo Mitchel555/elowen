@@ -4,8 +4,7 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import type { BrainRunMessage, BrainStore } from '../store/brainStore.js';
 import { extractText, NO_REPLY_NUDGE } from './messageView.js';
-import { extractProposedPlan } from './continuity/planCapture.js';
-import { writePlan } from './continuity/planStore.js';
+
 import { currentMeter } from './openrouterMeter.js';
 import { isErroredContextOverflow } from './events.js';
 
@@ -192,12 +191,6 @@ export function createSessionPersistenceProjector(
       // Generic retry errors remain in PI's SessionManager branch even when removed from live agent
       // state. Persist them too so a later compaction can align the same clean row sequence.
       projectEvent(store, sessionId, event);
-      // A planning turn ends with a <proposed_plan> block. Capture it HERE, while the message that
-      // holds it still exists: a later compaction drops every row before the kept tail, and nothing
-      // else on the server records that a plan was ever agreed. Deliberately mode-independent — the
-      // block itself is the marker, and the projector has no view of the turn's work mode anyway.
-      const proposed = extractProposedPlan(assistants.map((m) => extractText(m)).join('\n\n'));
-      if (proposed) writePlan(sessionId, proposed);
       // A threshold compaction can run between an assistant/tool batch and the next provider step. Its
       // kept PI tail contains rows that BrainStore receives only here at terminal agent_end. Rewriting the
       // store earlier aligns against unrelated old rows; rewrite now, after the complete run is durable.

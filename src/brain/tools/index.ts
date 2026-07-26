@@ -29,6 +29,9 @@ export const BUILTIN_TOOL_ICONS: Record<string, string> = {
  *  exact names or `prefix*` patterns. */
 export const BUILTIN_TOOL_OUTPUT_SHOWN: string[] = [
   'Lsp*',
+  // NOTE: ExitPlanMode is deliberately absent. Its result text is an instruction addressed to the MODEL
+  // ("stop here and wait"); the part worth showing is the plan, which travels separately as the `plan`
+  // field on the tool event and gets its own panel.
 ];
 
 /** Which of the brain's BUILT-IN tools only READ (the co-located equivalent of a plugin manifest's

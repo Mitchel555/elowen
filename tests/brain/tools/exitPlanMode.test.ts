@@ -12,7 +12,7 @@ import type { TurnWorkMode } from '../../../src/shared/types.js';
 const POLICY: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
 const SESSION = 'brain-ch-owner-1';
 
-type ToolResult = { content: { type: string; text: string }[] };
+type ToolResult = { content: { type: string; text: string }[]; details?: { plan?: string } };
 
 function call(opts: { mode?: TurnWorkMode; sessionId?: string } = {}): Promise<ToolResult> {
   const tool = buildExitPlanModeTool();
@@ -47,6 +47,11 @@ describe('ExitPlanMode', () => {
     writePlan(SESSION, '# Ship it\n\nStep one.');
     const text = textOf(await call({ mode: 'plan' }));
     expect(text).toContain('submitted');
+    // The plan goes to the CLIENT via details, not to the model via content: the approval UI needs the
+    // markdown to render, and the model just wrote it.
+    expect(text).not.toContain('Step one.');
+    const result = await call({ mode: 'plan' });
+    expect(result.details?.plan).toBe('# Ship it\n\nStep one.');
     // It must not read as approval — the decision has not been taken yet.
     expect(text).toContain('Stop here');
     expect(text).toMatch(/do not begin implementing/i);
