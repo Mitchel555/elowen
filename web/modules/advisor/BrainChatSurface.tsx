@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
@@ -366,8 +366,10 @@ function ThoughtsToggle({ full, on, onToggle }: { full?: boolean; on: boolean; o
  *  toggle, the slash keyboard cursor, DOM refs + autoscroll) live here, so unmounting it (Chat↔Terminál
  *  toggle, route change) never tears down the stream, draft or transcript. The conversation list / search
  *  / rename / export / delete are the shared ChatHistoryRail. `variant` selects the dock (compact) look or
- *  the wide /chat (full) look; `onOpenHistory` opens the mobile history drawer in the full variant. */
-export function BrainChatSurface({ variant = 'compact', onOpenHistory }: { variant?: 'compact' | 'full'; onOpenHistory?: () => void }) {
+ *  the wide /chat (full) look; `onOpenHistory` opens the mobile history drawer in the full variant, and
+ *  `onOpenTelemetry` the telemetry drawer — the host passes the latter only where the rail cannot be a
+ *  column (a phone), so on desktop no button appears beside the permanently visible rail. */
+export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTelemetry }: { variant?: 'compact' | 'full'; onOpenHistory?: () => void; onOpenTelemetry?: () => void }) {
   const { t } = useTranslation();
   const { toast } = useToast();
   const c = useBrainChat();
@@ -580,6 +582,17 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory }: { varia
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{active?.title || t.brainChat.newChat}</span>
           <ModelPicker variant="full" />
           <ThoughtsToggle full on={showThoughts} onToggle={() => setShowThoughts(!showThoughts)} />
+          {onOpenTelemetry ? (
+            <button
+              type="button"
+              onClick={onOpenTelemetry}
+              aria-label={t.telemetry.open}
+              title={t.telemetry.open}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
+            >
+              <Activity size={18} aria-hidden />
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={newChat}

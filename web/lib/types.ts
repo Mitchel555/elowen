@@ -131,7 +131,12 @@ export interface BrainUsage {
 }
 /** The statusline plugin's display toggles (null = plugin disabled). */
 export interface StatuslineConfig { showModel?: boolean; showContext?: boolean; showTokens?: boolean; showCost?: boolean }
-export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean }
+/** Where the conversation works: the live (or last stamped) directory and its git branch. Both null for
+ *  a chat that never reported a directory — an ordinary web conversation has no client cwd. */
+export interface BrainProject { cwd: string | null; branch: string | null }
+/** One MCP server of this daemon. `mcp: null` (non-admin, or the plugin is off) hides the section. */
+export interface McpServerStatus { name: string; status: string }
+export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean; project?: BrainProject; lspEnabled?: boolean; mcp?: McpServerStatus[] | null }
 /** One subscription rate-limit window of a connected OAuth account (mirrors the daemon's providerUsage). */
 interface UsageWindow { usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
 /** A connected OAuth account's usage rail: its windows (ordered shortest-first) plus plan/freshness meta. */

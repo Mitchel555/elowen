@@ -10,8 +10,9 @@ function windowLabel(minutes: number | null, weekly: string, windowWord: string)
   return `${Math.round(minutes)}m`;
 }
 
-/** Usage is pressure: the fill shifts accent → warning (70 %) → danger (90 %), matching the CLI meter. */
-function fillClass(pct: number): string {
+/** Usage is pressure: the fill shifts accent → warning (70 %) → danger (90 %), matching the CLI meter.
+ *  Shared with the chat telemetry panel's context meter so every usage bar reads the same. */
+export function usageFillClass(pct: number): string {
   return pct >= 90 ? 'bg-danger' : pct >= 70 ? 'bg-warning' : 'bg-accent';
 }
 
@@ -44,7 +45,7 @@ export function OAuthUsageRail({ usage }: { usage: ProviderUsage }) {
             </span>
             <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-elevated">
               <span
-                className={`block h-full rounded-full ${fillClass(pct)} transition-[width] duration-500`}
+                className={`block h-full rounded-full ${usageFillClass(pct)} transition-[width] duration-500`}
                 style={{ width: `${pct > 0 ? Math.max(pct, 3) : 0}%` }}
               />
             </span>

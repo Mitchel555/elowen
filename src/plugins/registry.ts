@@ -51,6 +51,7 @@ const KNOWN_CONTROL_METHODS: { [K in keyof KnownControls]: readonly (keyof Known
   terminal: ['detachForeground', 'killForeground'],
   cron: ['pendingWakeupOriginSessionIds'],
   workflow: ['cancelForSession', 'detachForeground'],
+  mcp: ['listServers'],
 };
 
 /** Aggregates every enabled plugin's contributions, and hands each plugin a PluginContext scoped to its

@@ -6,7 +6,7 @@ import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
-import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainUsage, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
+import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainProject, BrainStatus, BrainUsage, McpServerStatus, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
 import { fromHistory, prependHistory, reduce, upsertCard, type ChatTurn, type TranscriptEvent } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
@@ -56,6 +56,22 @@ const fold = (turns: ChatTurn[], e: TranscriptEvent): ChatTurn[] => reduce({ tur
 type Ask = { id: string; questions: AskQuestion[]; kind?: 'approval' };
 type SlashItem = { key: string; label: string; desc?: string; run: () => void };
 
+/** The non-numeric half of the daemon's status poll — everything the telemetry panel shows beside the
+ *  usage numbers. A null section is one the daemon does not report (no directory, MCP off or hidden from
+ *  this account, an older daemon) and the panel simply omits it. */
+interface BrainTelemetry {
+  project: BrainProject | null;
+  lspEnabled: boolean | null;
+  mcp: McpServerStatus[] | null;
+}
+const EMPTY_TELEMETRY: BrainTelemetry = { project: null, lspEnabled: null, mcp: null };
+/** Read the telemetry sections off a status response, normalizing "absent" to null. */
+const telemetryOf = (st: BrainStatus): BrainTelemetry => ({
+  project: st.project ?? null,
+  lspEnabled: st.lspEnabled ?? null,
+  mcp: st.mcp ?? null,
+});
+
 /** The single chat controller value: transcript + draft + attachments + cards + queue + ask + usage +
  *  notice state PLUS the session-scoped mutations. Consumed identically by the dock surface (compact) and
  *  — in a later phase — the full /chat surface. Owned by BrainChatProvider so a Chat↔Terminál toggle or a
@@ -75,6 +91,8 @@ export interface BrainChatValue {
   readOnly: string | null;
   activeSessionId: string | null;
   usage: BrainUsage | null;
+  /** Project / LSP / MCP sections of the daemon's status poll — the telemetry panel's non-numeric half. */
+  telemetry: BrainTelemetry;
   lineCfg: StatuslineConfig | null;
   input: string;
   setInput: React.Dispatch<React.SetStateAction<string>>;
@@ -163,6 +181,7 @@ function useBrainChatController(): BrainChatValue {
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [usage, setUsage] = useState<BrainUsage | null>(null);
+  const [telemetry, setTelemetry] = useState<BrainTelemetry>(EMPTY_TELEMETRY);
   const [lineCfg, setLineCfg] = useState<StatuslineConfig | null>(null);
   const [notice, setNotice] = useState('');
   const [ask, setAsk] = useState<Ask | null>(null);
@@ -258,7 +277,7 @@ function useBrainChatController(): BrainChatValue {
     if (generation !== genRef.current) return;
     const st = await elowenClient.brainStatus(boundSessionRef.current).catch(() => null);
     if (generation !== genRef.current) return;
-    if (st) { setUsage(st.usage); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); if (st.pendingAsk) setAsk(st.pendingAsk); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
+    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); if (st.pendingAsk) setAsk(st.pendingAsk); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
     // The identity rides purely as query params — native EventSource cannot set headers, and the daemon
     // parses session/client/generation off the URL (tapping the bound conversation, not the active pointer).
     const params = new URLSearchParams({ session: boundSessionRef.current, client: clientId(), generation: String(boundGenRef.current) });
@@ -371,7 +390,7 @@ function useBrainChatController(): BrainChatValue {
     es.addEventListener('session-event', () => {
       void loadHistory(genRef.current).catch(() => { /* transcript refetch is best-effort */ });
       void elowenClient.brainStatus(boundSessionRef.current)
-        .then((st) => { if (generation === genRef.current) { setUsage(st.usage); setLineCfg(st.statusline); setCurrentModel(st.model); } })
+        .then((st) => { if (generation === genRef.current) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); } })
         .catch(() => { /* status refresh is best-effort */ });
     });
     es.addEventListener('diff', (e) => {
@@ -622,7 +641,7 @@ function useBrainChatController(): BrainChatValue {
 
   return {
     turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
-    usage, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
+    usage, telemetry, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
     showThoughts: thoughts === 'show',

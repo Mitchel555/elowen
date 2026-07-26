@@ -86,7 +86,7 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     };
 
   app.get('/brain/status', async c => {
-    if (!d.brain) return c.json({ running: false, sessionId: null, model: '', usage: null, statusline: null });
+    if (!d.brain) return c.json({ running: false, sessionId: null, model: '', usage: null, statusline: null, project: { cwd: null, branch: null }, mcp: null });
     if (forbidden(c)) return c.json({ error: 'forbidden' }, 403);
     // The statusline plugin's display toggles ride along (no secrets in there), so any chat client —
     // web dock or CLI — renders the same user-configured statusline without an admin-only call.
@@ -95,8 +95,15 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
       : null;
     // Live LSP diagnostics state (the `/lsp` toggle's source of truth) so chat clients can show it.
     const { lspEnabled } = await import('../../brain/tools/lspTools.js');
+    // MCP servers are DAEMON-GLOBAL state, not the caller's: they stay behind the same admin gate as
+    // GET /plugins/mcp/servers. A non-admin gets null, which hides the section instead of naming another
+    // account's tooling. Reading the memoized registry costs no plugin load on this hot poll.
+    const mcp = c.get('user')?.is_admin
+      ? (await d.plugins?.get().catch(() => null))?.control('mcp')?.listServers()
+        .map((s) => ({ name: s.name, status: s.status })) ?? null
+      : null;
     // `?session=<id>`: a session-bound client (the CLI) asks about ITS conversation, not the active one.
-    try { return c.json({ ...d.brain.status(c.get('user').id, c.req.query('session')), statusline, lspEnabled: lspEnabled() }); }
+    try { return c.json({ ...d.brain.status(c.get('user').id, c.req.query('session')), statusline, lspEnabled: lspEnabled(), mcp }); }
     catch { return c.json({ error: 'unknown session' }, 404); }
   });
 

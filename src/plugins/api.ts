@@ -326,6 +326,16 @@ export interface WorkflowCancelControl {
   cancelForSession(input: { sessionId: string }): { cancelled: number };
 }
 
+/** One MCP server as the plugin's live table reports it. Core reads only the two fields a chat client's
+ *  telemetry rail renders; the plugin's own admin surface serves the full record (tools, last error). */
+export interface McpServerState { name: string; status: string }
+
+/** The MCP plugin's read-only listing seam: which servers this daemon is configured to talk to, and
+ *  whether each is currently connected. Daemon-global state, so every caller applies its own gate. */
+export interface McpListControl {
+  listServers(): McpServerState[];
+}
+
 /** The controls whose shape core needs to CALL by key. `registerControl` stays generic (a plugin may
  *  register any control), but `PluginRegistry.control(name)` returns these known keys already typed —
  *  the single place the registry narrows an opaque `PluginControl` to a usable contract. */
@@ -334,6 +344,7 @@ export interface KnownControls {
   terminal: DetachControl & KillForegroundControl;
   cron: PendingWakeupControl;
   workflow: WorkflowCancelControl & DetachControl;
+  mcp: McpListControl;
 }
 
 /** A plugin-contributed chat slash command (a reusable prompt macro, opencode-style). Invoking `/name args`

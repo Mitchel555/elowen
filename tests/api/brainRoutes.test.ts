@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { BrainCredentialAccess } from '../../src/brain/providerUsage.js';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { loadPlugins } from '../../src/plugins/loader.js';
+import { PluginRegistryProvider } from '../../src/plugins/pluginsProvider.js';
 import { openDb } from '../../src/store/db.js';
 import { TaskStore } from '../../src/store/taskStore.js';
 import { Readiness } from '../../src/store/readiness.js';
@@ -120,7 +122,16 @@ function fakeBrain() {
     /** Test helper: seed a user's pending mid-turn queue. */
     __enqueue: (id: number, item: { id: string; text: string }) => { queues.set(id, [...(queues.get(id) ?? []), item]); },
     __setProvider: (p: string) => { activeProvider = p; },
-    status: (id: number) => ({ running: started.has(id), sessionId: started.has(id) ? `brain-${id}` : null, model: 'm', provider: activeProvider, queued: queues.get(id) ?? [], fast: false, fastAvailable: true }),
+    // Mirrors the real service contract: an explicit session must be the caller's own conversation
+    // (`brain-<userId>` here) or the lookup throws, which the routes turn into a 404.
+    status: (id: number, session?: string) => {
+      if (session !== undefined && session !== `brain-${id}`) throw new Error('unknown session');
+      return {
+        running: started.has(id), sessionId: started.has(id) ? `brain-${id}` : null, model: 'm', provider: activeProvider,
+        queued: queues.get(id) ?? [], fast: false, fastAvailable: true,
+        project: { cwd: `/work/user-${id}`, branch: `branch-${id}` },
+      };
+    },
     start: async (id: number, opts?: { fresh?: boolean; clientId?: string; clientGeneration?: number }) => {
       startCalls.push({ id, opts });
       started.add(id);
@@ -246,7 +257,25 @@ function fakeBrain() {
   };
 }
 
-function setup(opts: { brainAuth?: BrainCredentialAccess } = {}) {
+/** A minimal on-disk MCP plugin registering the `listServers` control the telemetry rail reads. */
+function mcpPluginProvider(servers: { name: string; status: string }[]): PluginRegistryProvider {
+  const root = mkdtempSync(join(tmpdir(), 'brain-mcp-plugin-'));
+  const dir = join(root, 'mcp');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'elowen-plugin.json'), JSON.stringify({
+    name: 'mcp', version: '1.0.0', apiVersion: '1', description: 'mcp', entry: 'index.mjs',
+  }));
+  writeFileSync(join(dir, 'index.mjs'), `
+    export function register(ctx){
+      ctx.registerControl('mcp', { listServers: () => (${JSON.stringify(servers)}) });
+    }
+  `);
+  return new PluginRegistryProvider(() => loadPlugins({
+    dirs: [root], enabled: ['mcp'], logger: { info() {}, warn() {}, error() {} },
+  }));
+}
+
+function setup(opts: { brainAuth?: BrainCredentialAccess; plugins?: PluginRegistryProvider } = {}) {
   const db = openDb(':memory:');
   db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
   const users = new UserStore(db);
@@ -259,7 +288,7 @@ function setup(opts: { brainAuth?: BrainCredentialAccess } = {}) {
     engine: null as never, spawn: null as never, tmux: null as never,
     project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
     clock: new FakeClock(0), config, users, projects: new ProjectStore(db), userProjects: new UserProjectStore(db),
-    brain: brain as never, brainAuth: opts.brainAuth,
+    brain: brain as never, brainAuth: opts.brainAuth, plugins: opts.plugins,
   });
   return { app, adminTok: users.issueToken(admin.id), amyTok: users.issueToken(amy.id), agentTok: users.issueToken(amy.id, 'agent'), brain };
 }
@@ -765,6 +794,57 @@ describe('brain routes', () => {
     const res = await app.request('/brain/context', post(adminTok, { channel: 'discord-1', session: 'brain-1' }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: 'this conversation cannot be bound to a channel' });
+  });
+});
+
+// The telemetry payload the CLI rail renders and the web panel now shares: context usage, project
+// (cwd + branch), LSP state and the MCP server table — one poll, scoped to the caller.
+describe('GET /brain/status telemetry', () => {
+  it('carries the caller\'s own project section (cwd + branch) and the LSP state', async () => {
+    const { app, adminTok, amyTok } = setup();
+    const body = await (await app.request('/brain/status', auth(amyTok))).json() as {
+      project: { cwd: string | null; branch: string | null }; lspEnabled: boolean;
+    };
+    expect(body.project).toEqual({ cwd: '/work/user-2', branch: 'branch-2' });
+    expect(typeof body.lspEnabled).toBe('boolean');
+    // Each caller is described by THEIR conversation, never the other account's directory.
+    const other = await (await app.request('/brain/status', auth(adminTok))).json() as { project: { cwd: string | null } };
+    expect(other.project.cwd).toBe('/work/user-1');
+  });
+
+  it('lists MCP servers for an admin and hides the daemon-wide table from a non-admin', async () => {
+    const { app, adminTok, amyTok } = setup({
+      plugins: mcpPluginProvider([
+        { name: 'chrome-devtools', status: 'connected' },
+        { name: 'internal-notes', status: 'disconnected' },
+      ]),
+    });
+    const asAdmin = await (await app.request('/brain/status', auth(adminTok))).json() as { mcp: { name: string; status: string }[] | null };
+    expect(asAdmin.mcp).toEqual([
+      { name: 'chrome-devtools', status: 'connected' },
+      { name: 'internal-notes', status: 'disconnected' },
+    ]);
+    // A non-admin must not learn which servers this daemon talks to (same gate as /plugins/mcp/servers).
+    const asUser = await (await app.request('/brain/status', auth(amyTok))).json() as { mcp: unknown };
+    expect(asUser.mcp).toBeNull();
+  });
+
+  it('mcp is null when no MCP plugin is loaded, so the section simply disappears', async () => {
+    const { app, adminTok } = setup();
+    expect((await (await app.request('/brain/status', auth(adminTok))).json() as { mcp: unknown }).mcp).toBeNull();
+  });
+
+  // The scoping guarantee: guessing another account's session id must yield a 404 carrying no directory,
+  // branch, project or MCP name — not that user's telemetry.
+  it('404s a foreign ?session= and leaks no telemetry in the response', async () => {
+    const { app, amyTok } = setup({ plugins: mcpPluginProvider([{ name: 'chrome-devtools', status: 'connected' }]) });
+    const res = await app.request('/brain/status?session=brain-1', auth(amyTok)); // brain-1 belongs to the admin
+    expect(res.status).toBe(404);
+    const raw = await res.text();
+    expect(JSON.parse(raw)).toEqual({ error: 'unknown session' });
+    expect(raw).not.toContain('/work/user-1');
+    expect(raw).not.toContain('branch-1');
+    expect(raw).not.toContain('chrome-devtools');
   });
 });
 

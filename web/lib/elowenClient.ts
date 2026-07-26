@@ -294,6 +294,10 @@ export const elowenClient = {
   /** Subscription usage for every connected OAuth account, keyed by pi provider id (`openai-codex`,
    *  `kimi-coding`). Powers the per-account usage rail in Settings → Brain. */
   brainRateLimitsAll: () => req<Record<string, ProviderUsage>>('/brain/rate-limits/all'),
+  /** Subscription usage for the ACTIVE model's provider only — the same rail the CLI telemetry panel
+   *  renders. Null when the active model has no usage rail. Kept out of the hot status poll on purpose. */
+  brainRateLimits: (session?: string) =>
+    req<ProviderUsage | null>(`/brain/rate-limits${session ? `?session=${encodeURIComponent(session)}` : ''}`),
   brainOauthCatalog: (type: string) => req<{ models: string[] }>(`/brain/oauth/${encodeURIComponent(type)}/catalog`),
   brainProviderProbe: (body: { baseUrl: string; apiKey?: string; id?: string }) => req<{ models: string[] }>('/brain/providers/probe', { method: 'POST', body: JSON.stringify(body) }),
   brainOauthStart: (type: string) => req<OAuthFlowState>(`/brain/oauth/${encodeURIComponent(type)}/start`, { method: 'POST' }),

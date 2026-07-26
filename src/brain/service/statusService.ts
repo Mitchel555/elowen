@@ -19,6 +19,7 @@ import type { ConversationLifecycle } from './lifecycle.js';
 import type { PermissionApprovalService } from './permissionApproval.js';
 import type { BrainStreamSnapshot } from '../session/liveEventReplay.js';
 import { abortSessionWork } from '../session/abortSessionWork.js';
+import { gitBranch } from './gitBranch.js';
 
 /** One row in the caller's conversation list (the pickers' "attached" marker rides `attached`). */
 export interface SessionListItem { id: string; title: string; model: string; updated_at: string; running: boolean; active: boolean; attached: number }
@@ -67,7 +68,14 @@ export interface BrainStatusView {
   cards: BrainCard[];
   queued: { id: string; text: string }[];
   yolo: boolean;
+  project: BrainProjectView;
 }
+
+/** Where the conversation works: the live session's directory (else the stamped one) and its git branch.
+ *  Both null for a conversation that never reported a directory — a web chat has no client cwd. Scoped by
+ *  the same session resolution as the rest of {@link BrainStatusView}, so it can only ever describe a
+ *  conversation the caller owns. */
+interface BrainProjectView { cwd: string | null; branch: string | null }
 
 /** One row of the admin session-management panel ({@link BrainStatusService.listManagedSessions}). */
 export interface ManagedSessionView {
@@ -221,7 +229,11 @@ export class BrainStatusService {
     // The conversation's title (from the store, so it's present even before a live session exists)
     // — drives the CLI header and any client that wants to name the current chat.
     const activeId = explicit ?? b?.sessionId ?? this.d.lifecycle.activeSessionId(userId);
-    const title = (activeId && this.d.store.getSession(activeId)?.title) || '';
+    const row = activeId ? this.d.store.getSession(activeId) : undefined;
+    const title = row?.title || '';
+    // The live directory wins over the stored stamp: `/cd` moves the live conversation first. `gitBranch`
+    // reads `.git/HEAD` behind a short-lived cache, so this hot poll never forks a process.
+    const cwd = b?.workDir ?? (row?.work_dir || null);
     return {
       running: !!b, sessionId: b?.sessionId ?? null, title, model: b?.model ?? '', provider: b?.provider ?? '',
       usage: b ? sessionUsageSnapshot(b.session, this.d.store, b.sessionId) : null,
@@ -244,6 +256,7 @@ export class BrainStatusService {
       // Effective YOLO for the active conversation (session override, else the persisted default) —
       // drives the CLI's warning-toned indicator.
       yolo: this.d.permissions.effectiveYolo(userId, b),
+      project: { cwd, branch: cwd ? gitBranch(cwd) : null },
     };
   }
 
