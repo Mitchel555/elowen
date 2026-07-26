@@ -139,15 +139,17 @@ export interface LiveBrain {
    *  Ephemeral like the mode reminder — never persisted. The durable, user-visible marker is the
    *  separate brain_session_events row emitted alongside each notice. */
   pendingSessionNotices?: string[];
-  /** A real compaction has landed and the model has not been re-oriented yet. Drained into the NEXT
-   *  turn as the post-compaction <system-reminder> (plan + working set) and cleared — see
-   *  continuity/postCompactionContext. Ephemeral like the notices above: the durable half is the
-   *  compaction divider row, which is what the reminder is actually built from, so a daemon restart
-   *  between the compaction and the next turn costs the reminder but never the data.
+  /** Id of the compaction divider this session has already been re-oriented for. A newer divider means
+   *  the model just lost its plan and its bearings and gets the post-compaction <system-reminder> on
+   *  its next turn (see continuity/postCompactionContext).
    *
-   *  Carried across every in-memory respawn (model switch, idle rollover, vision hop) for the same
-   *  reason as lastTurnMode: a respawn immediately after a compaction would otherwise swallow it. */
-  pendingPostCompaction?: boolean;
+   *  Deliberately an id compared against the store rather than a flag armed by the compaction event:
+   *  the live session is not reliably resolvable at event time, so a flag could be written to nothing
+   *  while clients still saw the compaction — the reminder would then silently never appear.
+   *
+   *  Carried across every in-memory respawn (model switch, idle rollover, vision hop) so a respawn
+   *  right after a compaction does not re-send an orientation the model already had. */
+  orientedForCompaction?: string;
   /** A reasoning-effort change riding out its debounce window before the visible marker lands (see
    *  scheduleReasoningMarker) — rapid ctrl+r cycling coalesces here into ONE marker showing the settled
    *  level. `baseline` is the level the transcript last reflected, `level` the latest target; the level

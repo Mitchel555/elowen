@@ -23,20 +23,35 @@ const FILE_TOOLS: Record<string, boolean> = { Read: false, Write: true, Edit: tr
  *  read must not enter the set: it would point the model at a file it never actually saw. */
 export function rollupWorkingSet(dropped: readonly { content: string }[]): WorkingSetEntry[] | null {
   const byPath = new Map<string, boolean>();
-  for (const row of dropped) {
-    let details: Record<string, unknown> | undefined;
-    try { details = (JSON.parse(row.content) as { details?: Record<string, unknown> }).details; }
-    catch { continue; } // a row we cannot parse costs one entry, never the whole rollup
-    if (!details || details.ok !== true) continue;
-    const { path, tool } = details;
-    if (typeof path !== 'string' || !path || typeof tool !== 'string') continue;
-    const wrote = FILE_TOOLS[tool];
-    if (wrote === undefined) continue; // some other tool whose result happens to carry a path
+  const touch = (path: string, wrote: boolean): void => {
     // Re-insert so insertion order tracks the LAST touch, and OR the flag so a file that was edited at
     // any point keeps reading as edited even if a plain read came afterwards.
     const seen = byPath.get(path) ?? false;
     byPath.delete(path);
     byPath.set(path, seen || wrote);
+  };
+  for (const row of dropped) {
+    let parsed: { details?: Record<string, unknown>; workingSet?: unknown } | undefined;
+    try { parsed = JSON.parse(row.content) as typeof parsed; }
+    catch { continue; } // a row we cannot parse costs one entry, never the whole rollup
+    // An EARLIER compaction divider being dropped by this one carries its own rolled-up files. Fold
+    // them in — exactly as rollupDroppedUsage chains prior usage buckets — or a second compaction
+    // silently erases every file the first one recorded. Oldest-first, since the stored list is
+    // newest-first and `touch` treats each call as more recent than the last.
+    if (Array.isArray(parsed?.workingSet)) {
+      for (const entry of [...parsed.workingSet].reverse()) {
+        const e = entry as Partial<WorkingSetEntry>;
+        if (typeof e?.path === 'string' && e.path) touch(e.path, e.wrote === true);
+      }
+      continue;
+    }
+    const details = parsed?.details;
+    if (!details || details.ok !== true) continue;
+    const { path, tool } = details;
+    if (typeof path !== 'string' || !path || typeof tool !== 'string') continue;
+    const wrote = FILE_TOOLS[tool];
+    if (wrote === undefined) continue; // some other tool whose result happens to carry a path
+    touch(path, wrote);
   }
   if (byPath.size === 0) return null;
   return [...byPath].reverse().slice(0, WORKING_SET_MAX).map(([path, wrote]) => ({ path, wrote }));

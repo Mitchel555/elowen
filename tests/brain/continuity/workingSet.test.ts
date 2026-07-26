@@ -60,6 +60,36 @@ describe('continuity/workingSet', () => {
     expect(rollupWorkingSet([{ content: '{oops' }, row('Read', '/a.ts')])).toEqual([{ path: '/a.ts', wrote: false }]);
   });
 
+  // A second compaction drops the first one's divider. Without chaining, every file the first
+  // compaction recorded would be erased — the exact failure mode rollupDroppedUsage already guards
+  // against for spend.
+  describe('chaining across repeated compactions', () => {
+    const divider = (workingSet) => ({ content: JSON.stringify({ role: 'compactionSummary', workingSet }) });
+
+    it('folds an earlier divider\'s working set into the new one', () => {
+      const earlier = divider([{ path: '/b.ts', wrote: true }, { path: '/a.ts', wrote: false }]);
+      expect(rollupWorkingSet([earlier])).toEqual([
+        { path: '/b.ts', wrote: true },
+        { path: '/a.ts', wrote: false },
+      ]);
+    });
+
+    it('keeps files touched since the earlier compaction newer than the inherited ones', () => {
+      const earlier = divider([{ path: '/old.ts', wrote: false }]);
+      const set = rollupWorkingSet([earlier, row('Read', '/new.ts')]);
+      expect(set?.map((e) => e.path)).toEqual(['/new.ts', '/old.ts']);
+    });
+
+    it('merges a file that appears both inherited and freshly touched, keeping it written', () => {
+      const earlier = divider([{ path: '/a.ts', wrote: true }]);
+      expect(rollupWorkingSet([earlier, row('Read', '/a.ts')])).toEqual([{ path: '/a.ts', wrote: true }]);
+    });
+
+    it('ignores malformed inherited entries', () => {
+      expect(rollupWorkingSet([divider([{ nope: 1 }, { path: '' }, 'junk'])])).toBeNull();
+    });
+  });
+
   it('caps the list so the block stays orientation rather than a manifest', () => {
     const many = Array.from({ length: WORKING_SET_MAX + 8 }, (_, i) => row('Read', `/f${i}.ts`));
     const set = rollupWorkingSet(many);

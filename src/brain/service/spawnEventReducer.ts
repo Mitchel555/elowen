@@ -72,13 +72,11 @@ export function createSpawnEventReducer(deps: SpawnEventReducerDeps): (e: AgentS
     const raw = (e as { type?: string }).type;
     let suppressAgentEndIdle = raw === 'agent_end' && (e as { willRetry?: boolean }).willRetry === true;
     let emitFailedRecoveryIdle = false;
-    // A REAL compaction has settled. Two consequences, and they must stay together: attached clients
-    // refetch the shrunk transcript, and the model gets re-oriented on its next turn — the compaction
-    // just deleted the rows holding the agreed plan and every trace of which files were open.
-    const announceCompacted = (): void => {
-      if (live) live.pendingPostCompaction = true;
-      replay.publish({ type: 'compacted' });
-    };
+    // A REAL compaction has settled: attached clients refetch the shrunk transcript. The model-facing
+    // half is deliberately NOT armed here — it is derived from the compaction divider row on the next
+    // turn instead, because `live` is not reliably resolvable at this moment and a flag set here would
+    // sometimes be written to nothing (see continuity/postCompactionContext.drainPostCompactionContext).
+    const announceCompacted = (): void => { replay.publish({ type: 'compacted' }); };
     const agentEndMessages = raw === 'agent_end'
       ? ((e as { messages?: { role?: string; stopReason?: string; errorMessage?: string; content?: unknown; usage?: unknown }[] }).messages ?? [])
       : [];

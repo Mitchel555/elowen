@@ -90,30 +90,39 @@ describe('continuity/postCompactionContext', () => {
   });
 
   describe('drain', () => {
-    const liveOn = (store: PostCompactionStore, pending: boolean) =>
-      ({ sessionId: 's1', pendingPostCompaction: pending, session: { messages: [] as unknown[] } });
-
-    it('stays silent when no compaction is pending', () => {
-      writePlan('s1', '# Ship it');
-      const live = liveOn(empty, false);
-      expect(drainPostCompactionContext(empty, live)).toBe('');
+    const live = () => ({ sessionId: 's1', session: { messages: [] as unknown[] } } as
+      { sessionId: string; orientedForCompaction?: string; session: { messages: unknown[] } });
+    const withDivider = (id: string, workingSet?: unknown): PostCompactionStore => ({
+      getMessages: () => [
+        { id: 'u1', role: 'user', content: JSON.stringify({ role: 'user', content: 'hi' }) },
+        { id, role: 'compaction', content: JSON.stringify({ role: 'compactionSummary', ...(workingSet ? { workingSet } : {}) }) },
+      ],
     });
 
-    // One-shot: the model is oriented once, not reminded on every turn for the rest of the session.
+    it('stays silent when the conversation never compacted', () => {
+      writePlan('s1', '# Ship it');
+      expect(drainPostCompactionContext(empty, live())).toBe('');
+    });
+
+    // One-shot per compaction: the model is oriented once, not reminded every turn for the rest of it.
     it('yields the block once and then goes quiet', () => {
       writePlan('s1', '# Ship it');
-      const live = liveOn(empty, true);
-      expect(drainPostCompactionContext(empty, live)).toContain('<active-plan>');
-      expect(live.pendingPostCompaction).toBe(false);
-      expect(drainPostCompactionContext(empty, live)).toBe('');
+      const store = withDivider('div-1');
+      const l = live();
+      expect(drainPostCompactionContext(store, l)).toContain('<active-plan>');
+      expect(l.orientedForCompaction).toBe('div-1');
+      expect(drainPostCompactionContext(store, l)).toBe('');
     });
 
-    // The flag is consumed even when there was nothing to say, so a later unrelated turn cannot
-    // suddenly surface a stale compaction's orientation.
-    it('consumes the flag even when there is nothing to report', () => {
-      const live = liveOn(empty, true);
-      expect(drainPostCompactionContext(empty, live)).toBe('');
-      expect(live.pendingPostCompaction).toBe(false);
+    // The marker is recorded even when there was nothing worth saying, so the same compaction cannot
+    // resurface later — and a SECOND compaction still gets its own orientation.
+    it('records the divider even with nothing to report, and re-orients on a newer one', () => {
+      const l = live();
+      expect(drainPostCompactionContext(withDivider('div-1'), l)).toBe('');
+      expect(l.orientedForCompaction).toBe('div-1');
+      writePlan('s1', '# Ship it');
+      expect(drainPostCompactionContext(withDivider('div-2'), l)).toContain('<active-plan>');
+      expect(l.orientedForCompaction).toBe('div-2');
     });
   });
 });

@@ -6,7 +6,7 @@ import type { WorkingSetEntry } from './workingSet.js';
 /** The slice of BrainStore this needs: the conversation's rows, so the newest compaction divider can be
  *  found and its rolled-up working set read back. Structural so tests need no database. */
 export interface PostCompactionStore {
-  getMessages(sessionId: string): readonly { role: string; content: string }[];
+  getMessages(sessionId: string): readonly { id: string; role: string; content: string }[];
 }
 
 /** The working set the most recent compaction folded onto its divider, or null when there is none.
@@ -37,12 +37,24 @@ function latestWorkingSet(store: PostCompactionStore, sessionId: string): Workin
  *  Paths, never file contents: see workingSet.ts. The instruction line exists because the summary
  *  paraphrases what happened, and a model that trusts a paraphrase about file contents will edit from
  *  a stale mental copy. */
+/** Emit the orientation block once per compaction, deciding from DURABLE state rather than from having
+ *  caught an event.
+ *
+ *  An earlier version armed a flag when the `compaction_end` event arrived. That flag was set on the
+ *  live session looked up at event time — and during a compaction that lookup can come back empty, so
+ *  the flag was written to nothing while clients still saw the compaction. The feature then did exactly
+ *  nothing, silently, which is the worst possible failure for a safety net.
+ *
+ *  Comparing the newest divider's id against the last one this session was oriented for cannot fail
+ *  that way: the divider is a row in the store, so the decision survives whatever happens in memory. A
+ *  daemon restart re-orients once, which is right — the process lost its context too. */
 export function drainPostCompactionContext(
   store: PostCompactionStore,
-  live: { sessionId: string; pendingPostCompaction?: boolean; session: { messages: readonly unknown[] } },
+  live: { sessionId: string; orientedForCompaction?: string; session: { messages: readonly unknown[] } },
 ): string {
-  if (!live.pendingPostCompaction) return '';
-  live.pendingPostCompaction = false; // one-shot: the model is oriented once, not every turn after
+  const divider = [...store.getMessages(live.sessionId)].reverse().find((m) => m.role === 'compaction');
+  if (!divider || divider.id === live.orientedForCompaction) return '';
+  live.orientedForCompaction = divider.id;
   return buildPostCompactionContext(store, live.sessionId, live.session.messages);
 }
 

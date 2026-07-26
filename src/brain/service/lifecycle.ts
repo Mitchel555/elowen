@@ -324,9 +324,9 @@ export class ConversationLifecycle {
       // The user's mode survives the respawn: a host-initiated delivery reads it (buildScope) to stay
       // clamped, so dropping it here would silently rearm a plan turn's withheld tools.
       live.lastTurnMode = previous?.lastTurnMode;
-      // An undelivered post-compaction re-orientation survives the respawn too: a model switch right
-      // after a compaction would otherwise swallow the one turn the model had to learn where it was.
-      live.pendingPostCompaction = previous?.pendingPostCompaction;
+      // Which compaction the model was already oriented for survives the respawn: without it a model
+      // switch would re-send an orientation the model already has.
+      live.orientedForCompaction = previous?.orientedForCompaction;
       live.modeReminderTurns = previous?.modeReminderTurns; // a respawn is not a reason to restate the mode
       this.d.sessions.set(sessionId, live);
       // Carry the previous live's direct listeners onto the fresh one (mirrors maybeRollover/maybeVisionHop):
@@ -393,7 +393,7 @@ export class ConversationLifecycle {
     // Same client, same mode toggle — carry it so a delivery into the rolled-over conversation stays
     // clamped (buildScope reads it).
     fresh.lastTurnMode = b.lastTurnMode;
-    fresh.pendingPostCompaction = b.pendingPostCompaction;
+    fresh.orientedForCompaction = b.orientedForCompaction;
     fresh.modeReminderTurns = b.modeReminderTurns;
     fresh.replay.publish({ type: 'session', sessionId: fresh.sessionId });
     return fresh;
@@ -445,7 +445,7 @@ export class ConversationLifecycle {
     if (!fresh) throw new Error('brain not started for user');
     for (const listener of listeners) fresh.listeners.add(listener);
     fresh.lastTurnMode = b.lastTurnMode; // the hop is not a mode change (buildScope reads it)
-    fresh.pendingPostCompaction = b.pendingPostCompaction;
+    fresh.orientedForCompaction = b.orientedForCompaction;
     fresh.modeReminderTurns = b.modeReminderTurns;
     // Mark the fallback active only if the respawn actually reached the requested vision model (not the
     // configured default because the vision model was unavailable/disallowed) — so the NEXT text turn
