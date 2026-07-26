@@ -471,9 +471,10 @@ export class BrainService {
     clearDeliveredUserEchoes(b);
   }
 
-  /** A CLI is closing: stop its bound run and release the live PI session when it is the last attached
-   *  client. History stays in SQLite and can be resumed; another terminal/web stream keeps the shared
-   *  live session alive. Idempotent for an already-stopped conversation. */
+  /** A CLI is closing: stop its bound run and release the live PI session unless another INTERACTIVE
+   *  client (one identifying itself with a stable client id) is still on this conversation. A passive
+   *  web-dock subscription does not hold the turn open — it only watches. History stays in SQLite and can
+   *  be resumed. Idempotent for an already-stopped conversation. */
   async stopSession(userId: number, session?: string, clientId?: string, clientGeneration?: number): Promise<{ stopped: boolean; disposed: boolean }> {
     // Consume the authenticated client's attachment FIRST. Its binding follows idle rollover inside the
     // daemon, so it is more authoritative than the (possibly pre-rollover) id the CLI last observed.
@@ -505,10 +506,20 @@ export class BrainService {
       // respawns. availableForDefaultStart already treats a claim as occupancy for the same reason.
       const attachedBefore = this.attachments.attachedCount(sessionId);
       const bootingBefore = this.attachments.hasPendingStartClaim(sessionId);
-      if (attachedBefore !== 0 || bootingBefore) {
-        log.info(`stop ${sessionId}: ${attachedBefore} attachment(s)${bootingBefore ? ' + a booting client' : ''} remain — leaving the turn running (streaming=${live.session.isStreaming})`);
+      // Who may veto depends on WHO is stopping. Invariant 2 exists so one interactive client cannot kill a
+      // turn another interactive client is watching — not so a passive viewer can disable ctrl+c. A stable
+      // client id means a terminal deliberately ending its own run, so only ANOTHER stable client (or one
+      // mid-boot) holds it off; an anonymous web-dock subscription watches without owning the turn, and
+      // letting it veto meant an open browser tab silently made ctrl+c do nothing. A legacy caller with no
+      // id can't be told apart from a passive stream, so it keeps the conservative any-attachment rule.
+      const otherInteractive = this.attachments.hasLiveStableClient(sessionId);
+      const vetoed = clientId ? otherInteractive || bootingBefore : attachedBefore !== 0 || bootingBefore;
+      if (vetoed) {
+        const held = clientId ? `${otherInteractive ? 'another interactive client' : 'no interactive client'}` : `${attachedBefore} attachment(s)`;
+        log.info(`stop ${sessionId}: ${held}${bootingBefore ? ' + a booting client' : ''} remain — leaving the turn running (streaming=${live.session.isStreaming})`);
         return { stopped: true, disposed: false };
       }
+      if (attachedBefore !== 0) log.info(`stop ${sessionId}: ${attachedBefore} passive stream(s) still watching — aborting anyway on an explicit client stop`);
       const abortStartedAt = Date.now();
       log.info(`stop ${sessionId}: last observer gone — aborting (streaming=${live.session.isStreaming})`);
       // From here the record stays registered while we await, but it is doomed. Mark it so a concurrent

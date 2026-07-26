@@ -2150,6 +2150,26 @@ describe('BrainService', () => {
     detachOther();
   });
 
+  // An open browser tab must not disable ctrl+c in the terminal. The web dock subscribes anonymously, so
+  // it watches the turn without owning it; only another client that identifies itself (a second terminal)
+  // may hold the turn open against an explicit stop. The live session is still NOT disposed — the dock is
+  // genuinely watching the conversation — so ctrl+c stops the work without taking its view away.
+  it('an explicit CLI stop aborts the turn even while an anonymous web-dock stream is watching', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'a running turn the web dock is also showing' });
+    svc.tapSession(1, 'brain-1', () => {}, 'cli-a'); // the terminal, with a stable id
+    const detachWeb = svc.subscribe(1, () => {});    // the web dock: no client id, passive viewer
+    d.session.isStreaming = true;
+    d.session.abort.mockClear();
+
+    expect(await svc.stopSession(1, 'brain-1', 'cli-a')).toEqual({ stopped: true, disposed: false });
+    expect(d.session.abort).toHaveBeenCalled();  // the turn really stopped — the bug was that it did not
+    expect(d.session.dispose).not.toHaveBeenCalled(); // but the dock keeps its live view
+    detachWeb();
+  });
+
   it('stopSession detaches its identified stream before SSE teardown and disposes a sole client', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
