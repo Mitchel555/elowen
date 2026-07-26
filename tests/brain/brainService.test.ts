@@ -1992,11 +1992,13 @@ describe('BrainService', () => {
     expect(await variant('one')).toBe('cli/plan-mode');
     expect(await variant('two')).toBe('cli/plan-mode-sparse');
 
-    // A compaction lands. The divider carries a working set so the orientation block is non-empty —
-    // an empty block means nothing was lost worth mentioning, and must NOT restart the cadence.
+    // A compaction lands, and deliberately a QUIET one: no plan, no working set, so the orientation
+    // block is empty. It must restart the cadence anyway — the compaction deleted the full directive
+    // whether or not it had anything else worth naming, so keying the restart on "the block had
+    // content" would leave the sparse line insisting the full text is still earlier in the conversation.
     d.store.appendMessage({
       id: 'div-1', sessionId: 'brain-1', parentId: null, role: 'compaction',
-      content: { role: 'compactionSummary', workingSet: [{ path: '/a.ts', wrote: false }] },
+      content: { role: 'compactionSummary' },
     });
 
     expect(await variant('three')).toBe('cli/plan-mode');

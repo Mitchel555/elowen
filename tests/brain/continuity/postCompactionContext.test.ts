@@ -122,7 +122,7 @@ describe('continuity/postCompactionContext', () => {
 
     it('stays silent when the conversation never compacted', () => {
       writePlan('s1', '# Ship it');
-      expect(drainPostCompactionContext(empty, live())).toBe('');
+      expect(drainPostCompactionContext(empty, live())).toEqual({ block: '', compacted: false });
     });
 
     // One-shot per compaction: the model is oriented once, not reminded every turn for the rest of it.
@@ -130,20 +130,27 @@ describe('continuity/postCompactionContext', () => {
       writePlan('s1', '# Ship it');
       const store = withDivider('div-1');
       const l = live();
-      expect(drainPostCompactionContext(store, l)).toContain('<active-plan>');
+      expect(drainPostCompactionContext(store, l).block).toContain('<active-plan>');
       expect(l.orientedForCompaction).toBe('div-1');
-      expect(drainPostCompactionContext(store, l)).toBe('');
+      expect(drainPostCompactionContext(store, l)).toEqual({ block: '', compacted: false });
     });
 
     // The marker is recorded even when there was nothing worth saying, so the same compaction cannot
     // resurface later — and a SECOND compaction still gets its own orientation.
     it('records the divider even with nothing to report, and re-orients on a newer one', () => {
       const l = live();
-      expect(drainPostCompactionContext(withDivider('div-1'), l)).toBe('');
+      expect(drainPostCompactionContext(withDivider('div-1'), l).block).toBe('');
       expect(l.orientedForCompaction).toBe('div-1');
       writePlan('s1', '# Ship it');
-      expect(drainPostCompactionContext(withDivider('div-2'), l)).toContain('<active-plan>');
+      expect(drainPostCompactionContext(withDivider('div-2'), l).block).toContain('<active-plan>');
       expect(l.orientedForCompaction).toBe('div-2');
+    });
+
+    // The distinction the caller depends on: a QUIET compaction reports nothing to say but must still
+    // report that it happened, because it deleted every standing instruction along with everything else.
+    it('reports a compaction it has nothing to say about', () => {
+      expect(drainPostCompactionContext(withDivider('div-1'), live()))
+        .toEqual({ block: '', compacted: true });
     });
   });
 });

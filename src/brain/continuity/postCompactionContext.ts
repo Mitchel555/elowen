@@ -50,11 +50,16 @@ function latestWorkingSet(store: PostCompactionStore, sessionId: string): Workin
 export function drainPostCompactionContext(
   store: PostCompactionStore,
   live: { sessionId: string; orientedForCompaction?: string; session: { messages: readonly unknown[] } },
-): string {
+): { block: string; compacted: boolean } {
   const divider = [...store.getMessages(live.sessionId)].reverse().find((m) => m.role === 'compaction');
-  if (!divider || divider.id === live.orientedForCompaction) return '';
+  if (!divider || divider.id === live.orientedForCompaction) return { block: '', compacted: false };
   live.orientedForCompaction = divider.id;
-  return buildPostCompactionContext(store, live.sessionId, live.session.messages);
+  // `compacted` is reported SEPARATELY from the block, and the difference is load-bearing. The block is
+  // empty when the compaction had nothing worth naming — no plan, no files — but the compaction still
+  // happened, and it still deleted every standing instruction along with everything else. A caller that
+  // inferred "a compaction happened" from "the block is non-empty" would, after a quiet compaction, go on
+  // telling the model its full directive is earlier in the conversation when nothing of the sort remains.
+  return { block: buildPostCompactionContext(store, live.sessionId, live.session.messages), compacted: true };
 }
 
 export function buildPostCompactionContext(

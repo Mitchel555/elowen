@@ -277,7 +277,15 @@ export class ChannelSessionService {
       const modelChanged = !!opts.model?.model && ch?.model !== opts.model.model;
       const providerChanged = !!opts.model?.provider && ch?.providerId !== opts.model.provider;
       const thinkingChanged = !!ch && (ch.thinkingLevel ?? '') !== (opts.thinkingLevel ?? '');
-      if (ch && (providerChanged || modelChanged || thinkingChanged)) { this.d.registry.channelDispose(opts.channelId); ch = undefined; }
+      // A channel respawn is invisible to the model, so the compaction it was already oriented for has
+      // to survive it — otherwise every model switch re-sends the whole post-compaction block for a
+      // compaction the model has already been told about.
+      let carriedOrientation: string | undefined;
+      if (ch && (providerChanged || modelChanged || thinkingChanged)) {
+        carriedOrientation = ch.orientedForCompaction;
+        this.d.registry.channelDispose(opts.channelId);
+        ch = undefined;
+      }
       if (!ch) {
         this.d.registry.channelEvictOldestIfFull(this.maxChannels());
         ch = await this.d.spawn({
@@ -299,6 +307,7 @@ export class ChannelSessionService {
           // ordinary platform channel leaves this undefined and resolves its cwd from the policy root.
           clientCwd: opts.clientCwd,
         });
+        if (carriedOrientation !== undefined) ch.orientedForCompaction = carriedOrientation;
         if (this.d.registry.consumePendingAbort(sessionId)) {
           ch.session.dispose();
           throw new Error('delegation aborted');
@@ -403,7 +412,7 @@ export class ChannelSessionService {
               // Channel turns compose their prompt here rather than through TurnContextBuilder, so the
               // post-compaction re-orientation needs its own drain — wiring it only into the builder
               // would leave it working in the CLI and silently doing nothing on every channel.
-              const postCompaction = drainPostCompactionContext(this.d.store, ch);
+              const { block: postCompaction } = drainPostCompactionContext(this.d.store, ch);
               prompted = memoryBlock + turnContext.beforeUser + turnText
                 + (turnContext.afterUser ? `\n\n${turnContext.afterUser}` : '')
                 + (postCompaction ? `\n\n${postCompaction}` : '');

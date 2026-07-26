@@ -101,7 +101,7 @@ export class TurnContextBuilder {
           const sessionChanges = drainSessionNotices(live);
           // A compaction just destroyed the messages holding the agreed plan and every trace of which
           // files were open. Re-orient the model exactly once, next to the other one-shot notices.
-          const postCompaction = drainPostCompactionContext(this.d.store, live);
+          const { block: postCompaction, compacted } = drainPostCompactionContext(this.d.store, live);
           // Rendered HERE, not in build(), for two reasons the counter cannot survive otherwise. It must
           // be chosen AFTER the drain, because a compaction just deleted the full directive from context
           // and the sparse line's "the full instructions are earlier in this conversation" would then be
@@ -109,7 +109,7 @@ export class TurnContextBuilder {
           // even on prompt-command turns, which never show the reminder — so a `/command` landing on the
           // periodic full repeat silently consumed it and the next turns stayed sparse.
           const modeReminder = modeTemplate
-            ? this.d.prompts.render(this.modeTemplateFor(modeTemplate, mode, previousMode, live, postCompaction !== ''), {}, request.userId)
+            ? this.d.prompts.render(this.modeTemplateFor(modeTemplate, mode, previousMode, live, compacted), {}, request.userId)
             : '';
           // The mode directive is volatile per-turn content (it flips when the user switches mode), so it
           // rides UNDER the user message as a <system-reminder> — alongside runningSubagents — rather than

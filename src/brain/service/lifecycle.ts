@@ -532,8 +532,20 @@ export class ConversationLifecycle {
     await this.d.sessions.settled(sessionId); // let an in-flight turn settle before disposing the session
     const prevWorkDir = b.workDir; // the restart must not move the session cwd
     const prevFast = b.requestProfile.fast;
+    // The same per-session state the other respawn sites hand over. A settings reload is the LEAST
+    // eventful respawn there is — from the model's side nothing happened at all — so it must not
+    // re-deliver an orientation the model already read, nor restate a mode directive it can still see.
+    const prevMode = b.lastTurnMode;
+    const prevOriented = b.orientedForCompaction;
+    const prevModeTurns = b.modeReminderTurns;
     this.stop(userId);
     await this.ensureLive(userId, sessionId, { spawnCwd: prevWorkDir, fast: prevFast });
+    const fresh = this.activeLive(userId);
+    if (fresh) {
+      fresh.lastTurnMode = prevMode;
+      fresh.orientedForCompaction = prevOriented;
+      fresh.modeReminderTurns = prevModeTurns;
+    }
   }
 
   stop(userId: number): void {
