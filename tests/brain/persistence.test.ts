@@ -1,4 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { readPlan } from '../../src/brain/continuity/planStore.js';
 import { openDb } from '../../src/store/db.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { createSessionPersistenceProjector, persistCompaction, projectEvent, projectUserTurn, rehydrate } from '../../src/brain/persistence.js';
@@ -51,6 +55,57 @@ describe('brain persistence', () => {
     project({ type: 'message_start', message: { role: 'toolResult', content: '' } } as never);
     project({ type: 'message_end', message: toolResult } as never);
     expect(toolResult).not.toHaveProperty('durationMs');
+  });
+
+  // A compaction drops every row before the kept tail, so a plan has to be captured while the message
+  // that holds it still exists — the settled run is the last moment that is true.
+  describe('plan capture', () => {
+    let home: string;
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), 'elowen-plan-capture-'));
+      vi.stubEnv('HOME', home);
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    const settleRun = (...contents: string[]): void => {
+      const session = { messages: [] as unknown[] } as unknown as AgentSession;
+      const project = createSessionPersistenceProjector(store, session, 's1', 200_000);
+      project({
+        type: 'agent_end', willRetry: false,
+        messages: contents.map((content) => ({ role: 'assistant', content })),
+      } as never);
+    };
+
+    it('captures a proposed plan from the settled run', () => {
+      settleRun('Here it is.\n\n<proposed_plan>\n# Ship it\n\nStep one.\n</proposed_plan>');
+      expect(readPlan('s1')).toBe('# Ship it\n\nStep one.');
+    });
+
+    it('stores nothing when the run proposed no plan', () => {
+      settleRun('Just an ordinary answer.');
+      expect(readPlan('s1')).toBeUndefined();
+    });
+
+    it('scans the whole run, not only its final message', () => {
+      settleRun('<proposed_plan>from an earlier step</proposed_plan>', 'and a closing remark');
+      expect(readPlan('s1')).toBe('from an earlier step');
+    });
+
+    it('lets a later run supersede the plan of an earlier one', () => {
+      settleRun('<proposed_plan>first</proposed_plan>');
+      settleRun('<proposed_plan>second</proposed_plan>');
+      expect(readPlan('s1')).toBe('second');
+    });
+
+    // An ordinary follow-up turn must not wipe the plan the conversation is implementing.
+    it('leaves an existing plan alone when a later run proposes none', () => {
+      settleRun('<proposed_plan>keep me</proposed_plan>');
+      settleRun('Working on it now.');
+      expect(readPlan('s1')).toBe('keep me');
+    });
   });
 
   it('reorders pre-projected steering into the settled PI run instead of leaving it before earlier output', () => {

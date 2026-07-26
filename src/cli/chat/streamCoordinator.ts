@@ -1,6 +1,7 @@
 import { color } from './theme.js';
 import { upsertCard } from '../../brain/transcript.js';
 import { TranscriptModel } from '../../brain/transcriptModel.js';
+import { proposedPlanOpenMatcher } from '../../brain/continuity/planCapture.js';
 import { SnapshotHydrator, SnapshotTimeoutError, type SnapshotLaneLease } from './snapshotHydrator.js';
 import type { BrainEvent } from '../../brain/events.js';
 import type { BrainMessageView } from '../../brain/messageView.js';
@@ -150,7 +151,7 @@ export class StreamCoordinator implements StreamCoordinatorPort {
           }
           if (rt.workMode === 'plan' && !rt.childView) {
             const text = rt.transcript.lastAssistantText();
-            if (/<proposed_plan>/i.test(text)) flows.openPlanDecision();
+            if (proposedPlanOpenMatcher().test(text)) flows.openPlanDecision();
           }
         }
         // A parent step means a turn is running — arm the periodic poll for very long turns (idempotent).

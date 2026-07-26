@@ -2,6 +2,7 @@ import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@eare
 import type { MarkdownTheme } from '@earendil-works/pi-tui';
 import type { ChatTurn, ToolItem } from '../../brain/transcript.js';
 import { groupToolItems, failureSignature } from '../../brain/transcript.js';
+import { proposedPlanMatcher, proposedPlanOpenMatcher } from '../../brain/continuity/planCapture.js';
 import { formatDuration, formatK, padAnsi, terminalInlineText, terminalPlainText } from '../ui/text.js';
 import { framedDiffBlock, toolOutputBlock, UserBlock, workflowCounts, workflowTitle } from './components.js';
 import { ensureLang, langForPath } from './codeHighlight.js';
@@ -321,7 +322,7 @@ export class TurnRenderer {
   private renderTextWithPlans(text: string, width: number): string[] {
     text = terminalPlainText(text);
     const rows: string[] = [];
-    const plan = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/gi;
+    const plan = proposedPlanMatcher();
     let last = 0;
     let match: RegExpExecArray | null;
     while ((match = plan.exec(text))) {
@@ -331,7 +332,7 @@ export class TurnRenderer {
       last = match.index + match[0].length;
     }
     const after = text.slice(last);
-    const open = /<proposed_plan>\s*/i.exec(after);
+    const open = proposedPlanOpenMatcher().exec(after);
     if (open) {
       const before = after.slice(0, open.index);
       if (before.trim()) rows.push(...new Markdown(before, 2, 0, this.mdTheme).render(width));
