@@ -499,25 +499,47 @@ export class BrainService {
       // observer. A detaching client MUST NOT abort a turn another client is still watching (Invariant 2):
       // only the last watcher leaving may abort + dispose. Legacy callers without a stable id retain the
       // conservative behavior — only an already-detached stream can make the count zero.
+      // A claimed-but-not-yet-streaming start counts as an observer. It is a client mid-boot — a `--resume`
+      // that has been handed the session and is still opening its SSE — and counting only live streams
+      // disposes the conversation out from under it, leaving its stream dark until some later send
+      // respawns. availableForDefaultStart already treats a claim as occupancy for the same reason.
       const attachedBefore = this.attachments.attachedCount(sessionId);
-      if (attachedBefore !== 0) {
-        log.info(`stop ${sessionId}: ${attachedBefore} attachment(s) remain — leaving the turn running (streaming=${live.session.isStreaming})`);
+      const bootingBefore = this.attachments.hasPendingStartClaim(sessionId);
+      if (attachedBefore !== 0 || bootingBefore) {
+        log.info(`stop ${sessionId}: ${attachedBefore} attachment(s)${bootingBefore ? ' + a booting client' : ''} remain — leaving the turn running (streaming=${live.session.isStreaming})`);
         return { stopped: true, disposed: false };
       }
       const abortStartedAt = Date.now();
       log.info(`stop ${sessionId}: last observer gone — aborting (streaming=${live.session.isStreaming})`);
-      try { await this.abort(userId, sessionId); log.info(`stop ${sessionId}: abort settled in ${Date.now() - abortStartedAt}ms`); }
-      catch (e) { log.info(`stop ${sessionId}: abort threw after ${Date.now() - abortStartedAt}ms: ${(e as Error).message}`); }
-      // Re-check after the abort settles: a client can attach during that await, and it must not be disposed
-      // out from under. If one arrived, leave the (now idle) session live for the new observer.
-      if (this.attachments.attachedCount(sessionId) !== 0) {
-        log.info(`stop ${sessionId}: a client attached during abort — keeping it live`);
-        return { stopped: true, disposed: false };
+      // From here the record stays registered while we await, but it is doomed. Mark it so a concurrent
+      // ensureLive() queues on the session lock and respawns behind the dispose, instead of fast-pathing
+      // onto a handle this teardown is about to throw away.
+      this.sessions.markDisposing(sessionId);
+      // Everything from the mark to the dispose runs under this guard: dispose() clears the marker itself,
+      // and the abandoned-teardown path clears it explicitly, but a throw in between (a goal, elicitation
+      // or card teardown) would strand it — pinning a perfectly healthy session on the slow path forever.
+      try {
+        try { await this.abort(userId, sessionId); log.info(`stop ${sessionId}: abort settled in ${Date.now() - abortStartedAt}ms`); }
+        catch (e) { log.info(`stop ${sessionId}: abort threw after ${Date.now() - abortStartedAt}ms: ${(e as Error).message}`); }
+        // Re-check after the abort settles: a client can attach during that await, and it must not be
+        // disposed out from under. If one arrived, leave the (now idle) session live for the new observer.
+        // Deliberately NOT counting a pending claim here, unlike the gate above: a start that arrives once
+        // the teardown is already committed is expected to queue on the session lock and respawn behind the
+        // dispose — that ordering is the whole point of the disposing marker, and honouring the claim here
+        // would hand it the very record the teardown is about to drop.
+        if (this.attachments.attachedCount(sessionId) !== 0) {
+          log.info(`stop ${sessionId}: a client attached during abort — keeping it live`);
+          this.sessions.clearDisposing(sessionId); // teardown abandoned — the record is healthy again
+          return { stopped: true, disposed: false };
+        }
+        this.goals.cancelGoalContinuation(sessionId);
+        this.elicitation.cancelForSession(sessionId, 'client closed');
+        this.cards.clearSession(sessionId);
+        this.sessions.dispose(sessionId);
+      } catch (e) {
+        this.sessions.clearDisposing(sessionId);
+        throw e;
       }
-      this.goals.cancelGoalContinuation(sessionId);
-      this.elicitation.cancelForSession(sessionId, 'client closed');
-      this.cards.clearSession(sessionId);
-      this.sessions.dispose(sessionId);
       log.info(`stop ${sessionId}: disposed`);
       // A conversation nobody ever typed into leaves with the session it was the identity of, rather than
       // lingering as an untitled shell until some later `/new` sweeps it up.

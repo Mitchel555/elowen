@@ -19,6 +19,17 @@ export class LiveSessionRegistry<T extends { sessionId: string; session: { dispo
   /** A child can be tracked before its channel spawn finishes. `/stop` records that narrow race here;
    *  ChannelSessionService consumes the marker before prompting (or immediately after an awaited spawn). */
   private pendingAborts = new Set<string>();
+  /** Sessions whose teardown is COMMITTED and in flight: still registered in `live`, but already doomed.
+   *  ensureLive's pre-lock fast path reads this to tell a healthy live session (attach immediately) from
+   *  one being disposed (queue on the lock and respawn instead).
+   *
+   *  Marking is for a teardown that has DECIDED to dispose and then awaits — stopSession's
+   *  abort-then-dispose. It is deliberately not for every path that merely awaits while registered:
+   *  `restart()` awaits `settled()` holding a record that is still perfectly serviceable, and it does not
+   *  hold the session lock, so marking it would push a concurrent ensureLive through the lock and spawn a
+   *  DUPLICATE session in the window before its dispose. Those paths leave the record unmarked on purpose;
+   *  a caller that fast-paths onto one gets a working session, exactly as it did before this fast path. */
+  private disposing = new Set<string>();
   /** Parent aborts fence new delegated sends before the abort snapshots its child set. A counter keeps a
    * concurrent/nested abort from reopening the parent between another abort's snapshot and cleanup. */
   private abortingParents = new Map<string, number>();
@@ -45,17 +56,23 @@ export class LiveSessionRegistry<T extends { sessionId: string; session: { dispo
   // ── user sessions ─────────────────────────────────────────────────────────
   get(id: string): T | undefined { return this.live.get(id); }
   has(id: string): boolean { return this.live.has(id); }
-  set(id: string, b: T): void { this.live.set(id, b); }
+  set(id: string, b: T): void { this.disposing.delete(id); this.live.set(id, b); }
   /** Dispose the PI session and forget the record (no-op when absent). A reasoning marker still riding
    *  out its debounce dies with the session — the un-announced level change does not survive a dispose
    *  (respawns reset it), so the marker must not land after the record is gone. */
   dispose(id: string): void {
+    this.disposing.delete(id);
     const b = this.live.get(id);
     if (!b) return;
     if (b.pendingReasoningMarker) { clearTimeout(b.pendingReasoningMarker.timer); b.pendingReasoningMarker = undefined; }
     b.session.dispose();
     this.live.delete(id);
   }
+  /** Mark/unmark an in-flight teardown — see the `disposing` field. `dispose()` and `set()` clear it
+   *  themselves, so a caller only has to clear when it ABANDONS a teardown it had marked. */
+  markDisposing(id: string): void { this.disposing.add(id); }
+  clearDisposing(id: string): void { this.disposing.delete(id); }
+  isDisposing(id: string): boolean { return this.disposing.has(id); }
   liveEntries(): [string, T][] { return [...this.live]; }
 
   // ── active-conversation pointers ──────────────────────────────────────────

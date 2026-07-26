@@ -221,6 +221,17 @@ export class ConversationLifecycle {
    *  (respawn keeping its previous workDir) that must NOT be stamped — a cwd-less web session stays
    *  cwd-less. Serialized per conversation: two concurrent spawns would leak one PI session. */
   async ensureLive(userId: number, sessionId: string, o: { provider?: string; model?: string; clientCwd?: string; spawnCwd?: string; explicitResume?: boolean; fast?: boolean; thinkingLevel?: string | null } = {}): Promise<void> {
+    // A HEALTHY live conversation needs no spawn, so it must not queue on the session lock to find that
+    // out: a running turn holds that lock for its full duration (turnRunner), which would leave a
+    // relaunched CLI unable to resume into its own in-flight work until the turn ended or was aborted.
+    // A teardown in flight is the one case where the record is registered but doomed — it still has to
+    // take the lock and respawn behind the dispose. Synchronous (no await), so no teardown can start
+    // between the two reads.
+    const healthy = this.d.sessions.get(sessionId);
+    if (healthy && !this.d.sessions.isDisposing(sessionId)) {
+      if (o.explicitResume) healthy.interactedAt = Date.now();
+      return;
+    }
     await this.serial(sessionId, async () => {
       // An EXPLICIT resume (the session picker / `/resume <id>`) is a deliberate choice to continue
       // that conversation — stamp it so the idle-rollover check in send() respects it. A default

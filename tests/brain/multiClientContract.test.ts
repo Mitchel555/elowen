@@ -259,3 +259,129 @@ describe('BrainService — multi-client abort/detach contract (Fáze 0, Invarian
     offOther();
   });
 });
+
+// The reconnect a crashed terminal makes: `elowen chat --resume <id>` → POST /brain/start. It has to reach
+// a conversation whose turn is STILL RUNNING — resuming into work in flight is the entire point, and
+// chatApplication awaits client.start() before it builds the TUI, so a blocked start is a CLI that cannot
+// boot until the agent finishes or the user aborts it.
+//
+// ensureLive() therefore fast-paths a HEALTHY live conversation before taking serial(sessionId) — the lock
+// a running turn holds for its full duration (turnRunner's serial(target, …)). It buys nothing there: a
+// conversation with a turn in flight is already live, so there is nothing to spawn. The one case that must
+// still queue is an in-flight teardown (registered but doomed), which stopSession marks via
+// `markDisposing` — see the sibling test in brainService.test.ts ("serializes an old stop before a newer
+// same-session start"). Streaming was never affected either way: tapSession takes no lock at all.
+describe('BrainService — resuming a conversation whose turn is still running', () => {
+  it('start() attaches to the live session instead of queueing behind the in-flight turn', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+
+    // Hold the turn open: prompt() settles only when this test releases it.
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    d.session.prompt.mockImplementationOnce(async (_text: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+      await turnGate;
+    });
+    const turn = svc.send({ userId: 1, text: 'long-running work' });
+    // prompt() having been entered means send() is inside serial(sessionId) — the lock is held.
+    await vi.waitFor(() => expect(d.session.prompt).toHaveBeenCalled());
+    expect(svc.status(1).running).toBe(true);
+
+    // The crashed terminal relaunches against that same conversation while the agent still works.
+    const raced = await Promise.race([
+      svc.start(1, { session: sessionId }).then((r) => r.sessionId),
+      new Promise<'blocked'>((r) => { setTimeout(() => r('blocked'), 50); }),
+    ]);
+
+    // It resumes into the SAME live conversation, mid-turn, without a respawn.
+    expect(raced).toBe(sessionId);
+    expect(d.createSession).toHaveBeenCalledTimes(1);
+    expect(svc.status(1).running).toBe(true);
+
+    releaseTurn();
+    await turn;
+  });
+
+  it('a start racing an in-flight teardown still queues, then respawns behind the dispose', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
+
+    // The last watcher leaves: stopSession aborts (gated here) and only then disposes. Throughout that
+    // await the record is still registered — the case the `disposing` marker exists to distinguish.
+    let abortStarted!: () => void;
+    const aborting = new Promise<void>((resolve) => { abortStarted = resolve; });
+    let releaseAbort!: () => void;
+    const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
+    d.session.abort.mockImplementationOnce(async () => { abortStarted(); await abortGate; });
+
+    const stopping = svc.stopSession(1, sessionId, 'cli-a', 1);
+    await aborting;
+    let restartReturned = false;
+    const restarting = svc.start(1, { session: sessionId, clientId: 'cli-a', clientGeneration: 2 })
+      .then((r) => { restartReturned = true; return r; });
+    await Promise.resolve();
+    expect(restartReturned).toBe(false); // must NOT fast-path onto the handle the stop is about to drop
+
+    releaseAbort();
+    const [, resumed] = await Promise.all([stopping, restarting]);
+    expect(resumed.sessionId).toBe(sessionId);
+    expect(d.createSession).toHaveBeenCalledTimes(2); // respawned behind the dispose
+  });
+
+  it('a teardown abandoned mid-abort leaves the session fast-pathable again', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
+
+    let abortStarted!: () => void;
+    const aborting = new Promise<void>((resolve) => { abortStarted = resolve; });
+    let releaseAbort!: () => void;
+    const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
+    d.session.abort.mockImplementationOnce(async () => { abortStarted(); await abortGate; });
+
+    const stopping = svc.stopSession(1, sessionId, 'cli-a', 1);
+    await aborting;
+    // A new client attaches DURING the abort — stopSession's re-check keeps the session live and must
+    // clear the marker with it, or every later start would needlessly queue on a healthy conversation.
+    const off = svc.tapSession(1, sessionId, () => {}, 'cli-b');
+    releaseAbort();
+    expect(await stopping).toEqual({ stopped: true, disposed: false });
+
+    const raced = await Promise.race([
+      svc.start(1, { session: sessionId }).then((r) => r.sessionId),
+      new Promise<'blocked'>((r) => { setTimeout(() => r('blocked'), 50); }),
+    ]);
+    expect(raced).toBe(sessionId);
+    expect(d.createSession).toHaveBeenCalledTimes(1); // still the original live session
+    off();
+  });
+
+  it('following that same conversation is NOT blocked — only start() is', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    d.session.prompt.mockImplementationOnce(async (_text: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+      await turnGate;
+    });
+    const turn = svc.send({ userId: 1, text: 'long-running work' });
+    await vi.waitFor(() => expect(d.session.prompt).toHaveBeenCalled());
+
+    // A tap attaches mid-turn and immediately observes the live stream: no lock is involved on this path,
+    // which is why the fix is confined to start()'s spawn guard rather than the streaming surface.
+    const events: BrainEvent[] = [];
+    svc.tapSession(1, sessionId, (e) => events.push(e), 'cli-relaunched');
+    expect(attached(svc, sessionId)).toBe(1);
+    d.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'progress the crashed terminal missed' } });
+    expect(events).toContainEqual({ type: 'text', delta: 'progress the crashed terminal missed' });
+
+    releaseTurn();
+    await turn;
+  });
+});

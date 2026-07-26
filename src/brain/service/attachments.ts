@@ -122,16 +122,22 @@ export class ClientAttachments {
     return false;
   }
 
+  /** A client whose /brain/start has claimed this conversation but whose SSE stream has not opened yet.
+   *  It is an observer in every sense that matters — it is mid-boot, on its way to watch — so a teardown
+   *  that counts only live streams would dispose the session out from under it. */
+  hasPendingStartClaim(sessionId: string): boolean {
+    this.pruneDetached();
+    for (const binding of this.stableClients.values()) {
+      if (binding.sessionId === sessionId && binding.pendingStart) return true;
+    }
+    return false;
+  }
+
   /** Default CLI start candidates are held as soon as /brain/start claims them, before their SSE exists.
    *  This closes the two-simultaneous-launch gap without treating an ordinary disconnected grace binding
    *  as attached for five minutes. */
   availableForDefaultStart(sessionId: string): boolean {
-    this.pruneDetached();
-    if (this.attachedCount(sessionId) > 0) return false;
-    for (const binding of this.stableClients.values()) {
-      if (binding.sessionId === sessionId && binding.pendingStart) return false;
-    }
-    return true;
+    return this.attachedCount(sessionId) === 0 && !this.hasPendingStartClaim(sessionId);
   }
 
   private stableKey(userId: number, clientId: string): string {

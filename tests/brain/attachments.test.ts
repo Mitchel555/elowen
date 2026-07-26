@@ -89,6 +89,23 @@ describe('ClientAttachments stable client grace cache', () => {
     attachments.detachTransport(listener);
     expect(attachments.availableForDefaultStart('brain-A')).toBe(true); // grace identity alone does not
   });
+
+  // A teardown that counts only LIVE streams disposes the conversation out from under a client that has
+  // been handed it and is still opening its SSE. A `--resume` into a running turn is exactly that shape,
+  // and it ends with the resumed terminal watching a dead session until some later send respawns it.
+  it('reports a claimed-but-not-yet-streaming start as occupancy in its own right', () => {
+    const attachments = new ClientAttachments();
+    expect(attachments.hasPendingStartClaim('brain-A')).toBe(false);
+
+    attachments.claim(1, 'cli-a', 'brain-A', 2);
+    expect(attachments.hasPendingStartClaim('brain-A')).toBe(true);
+    expect(attachments.attachedCount('brain-A')).toBe(0); // the gap itself: claimed, nothing streaming yet
+    expect(attachments.hasPendingStartClaim('brain-B')).toBe(false); // scoped to the claimed conversation
+
+    const listener = () => {};
+    attachments.attach(1, 'brain-A', listener, () => attachments.detachTransport(listener), 'cli-a', 2);
+    expect(attachments.hasPendingStartClaim('brain-A')).toBe(false); // the live stream took over the claim
+  });
 });
 
 // The idle rollover consults this to leave a conversation a terminal still has OPEN alone. The CLI is the
