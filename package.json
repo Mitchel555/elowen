@@ -52,6 +52,7 @@
     "test:cli-tmux": "npm run build --silent && npm run test:cli-tmux:built",
     "test:cli-tmux:built": "node scripts/tests/cli-tmux-built.mjs",
     "test:cli-tmux:goal": "npm run build --silent && node scripts/tests/cli-tmux-goal.mjs",
+    "test:cli-tmux:stop": "npm run build --silent && node scripts/tests/cli-tmux-stop-escalation.mjs",
     "test:cli-tmux:analyze": "node scripts/tests/cli-tmux-analyze.mjs",
     "test:e2e:brain": "npm run build --silent && node scripts/tests/brain-e2e/chat-turn.mjs",
     "test:e2e:stop-kill": "npm run build --silent && node scripts/tests/brain-e2e/stop-kill.mjs",

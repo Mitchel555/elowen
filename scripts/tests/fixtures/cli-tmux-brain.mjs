@@ -171,6 +171,21 @@ function runFirstTurn(text) {
   }, firstTimers);
 }
 
+// The stop-escalation scenario: a long Bash turn that a graceful /brain/abort deliberately does NOT end
+// (the production wedge — PI only re-checks its abort signal between tool calls), so the CLI's next Esc
+// must escalate to POST /brain/commands/kill. The `process` event carries the running foreground command
+// the CLI's escalation notice and footer hint key on.
+function runEscalationTurn(text) {
+  runFirstTurn(text);
+  later(140, () => emit({
+    type: 'process',
+    processes: [{
+      id: 'fg-e2e', command: 'sleep e2e-long-run', cwd: '/tmp', startedAt: new Date().toISOString(),
+      sessionId: SESSION_ID, running: true, exitCode: null, completionMode: 'foreground',
+    }],
+  }), firstTimers);
+}
+
 function runSecondTurn(text) {
   later(40, () => emit({ type: 'user', text }));
   later(80, () => emit({ type: 'step', step: 1, maxSteps: 8 }));
@@ -469,6 +484,10 @@ const server = createServer(async (req, res) => {
       else if (sendCount === 3) runReopenTurn(text);
       return;
     }
+    if (SCENARIO === 'stop-escalation') {
+      runEscalationTurn(text);
+      return;
+    }
     if (sendCount === 1) runFirstTurn(text);
     else if (sendCount === 2) {
       // Deterministic production-shaped lifecycle: admission creates only queue state and compaction keeps
@@ -525,10 +544,29 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && url.pathname === '/brain/abort') {
+    // The escalation scenario reproduces the wedge: the graceful abort is acknowledged but the turn
+    // keeps running (a long command pins it), so the CLI's next Esc must escalate to the kill route.
+    if (SCENARIO === 'stop-escalation') {
+      json(res, 200, { ok: true });
+      return;
+    }
     stopFirstTurn();
     emit({ type: 'queue', items: [] });
     emit({ type: 'idle', model: 'mock/e2e-model' });
     json(res, 200, { ok: true });
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/brain/commands/kill') {
+    // The hard kill ends what the abort could not: the command dies, the tool settles as [killed], and
+    // the (already aborted) turn finally unwinds to idle.
+    stopFirstTurn();
+    emit({ type: 'process', processes: [] });
+    later(30, () => emit({
+      type: 'tool_output', id: 'long-tool',
+      output: { title: 'console output', kind: 'console', text: '[killed]', tone: 'warning' },
+    }));
+    later(60, () => emit({ type: 'idle', model: 'mock/e2e-model' }));
+    json(res, 200, { killed: 1 });
     return;
   }
   if (req.method === 'POST' && url.pathname === '/brain/session/stop') {
