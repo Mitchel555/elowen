@@ -568,6 +568,35 @@ describe('BrainService', () => {
     expect(svc.queueList(1).at(-1)?.text).toBe('Steer right now');
   });
 
+  // The wake a finished background command sends. Two adjacent guards in the runner used to contradict
+  // each other — drop-when-busy, then a steer branch that also named systemNudge and could never be
+  // reached — so pin the behaviour that actually runs, in both session states.
+  it('a systemNudge arriving mid-turn is dropped, never steered into the running turn', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.session.isStreaming = true;
+    const prompts = d.session.prompt.mock.calls.length;
+
+    await svc.send({ userId: 1, text: 'Background command finished.', mode: 'build', internal: { kind: 'systemNudge' }, session: sessionId });
+
+    expect(d.session.steer).not.toHaveBeenCalled();
+    expect(d.session.prompt.mock.calls.length).toBe(prompts); // no turn ran
+    expect(svc.queueList(1)).toEqual([]);                     // and nothing was left queued
+  });
+
+  it('a systemNudge on an idle session runs its own turn, so the wake actually lands', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.session.isStreaming = false;
+    const prompts = d.session.prompt.mock.calls.length;
+
+    await svc.send({ userId: 1, text: 'Background command finished.', mode: 'build', internal: { kind: 'systemNudge' }, session: sessionId });
+
+    expect(d.session.prompt.mock.calls.length).toBe(prompts + 1);
+  });
+
   it('tells the model an auto-deliver result arrives in a new turn, so it must end this one instead of polling', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

@@ -318,9 +318,10 @@ export class BrainTurnRunner {
     // delivers it between steps (after the current tool calls, before the next model call), so the agent
     // folds it in during the SAME turn instead of waiting for it to end. Admission creates only PI queue
     // state; the spawner persists/emits the authoritative user row at PI's later message_start, after the
-    // matching queue chip disappeared. Internal goal kickoff/continuation is never steered — it drives
-    // the loop itself and must run its own turn.
-    if (turnBusy && (!internal || internal.kind === 'systemNudge')) {
+    // matching queue chip disappeared. Only a real user turn reaches this: internal goal kickoff/
+    // continuation drives the loop itself and must run its own turn, and a busy systemNudge already
+    // returned above.
+    if (turnBusy && !internal) {
       const queuedText = this.contextBuilder.withRunningSubagents(text, active.sessionId);
       const admission = new TurnAdmission(
         { store: this.d.store, titler: this.d.titler },
