@@ -443,6 +443,22 @@ export function register(ctx) {
       }
       return { detached };
     },
+    // The stop escalation (a further Esc / repeat Ctrl+C after the graceful interrupt): SIGKILL the
+    // process group of every run still blocking this conversation's turn. kill() rides the same abort
+    // signal PI wired to killProcessTree, so the settled run reads as [killed] (exitCode stays null) and
+    // the awaited Bash tool resolves — which is what lets the already-aborted turn finally unwind.
+    // Detached and background runs are exempt (they no longer block a turn), and an entry whose kill is
+    // already in flight is skipped so a double-fire never double-counts.
+    killForeground: ({ sessionId, principal }) => {
+      let killed = 0;
+      for (const entry of foregroundRuns.values()) {
+        if (entry.run.detached || entry.run.controller.signal.aborted) continue;
+        if (entry.sessionId !== sessionId || entry.principal !== principal) continue;
+        entry.run.kill();
+        killed += 1;
+      }
+      return { killed };
+    },
   });
 
   ctx.logger.info('registered Bash (+background), list/read/kill process tools');

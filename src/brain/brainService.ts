@@ -1202,6 +1202,25 @@ export class BrainService {
     return control.detachForeground({ sessionId: target, principal: `elowen:${userId}` });
   }
 
+  /** Hard-kill every running foreground `Bash` command in this conversation — the stop ESCALATION (a
+   * further Esc / repeat Ctrl+C after the graceful interrupt). PI's agent loop only re-checks its abort
+   * signal between tool calls, so a long command otherwise pins the aborted turn until it exits on its
+   * own; the terminal plugin SIGKILLs the process group and the settled Bash tool resolves as `[killed]`,
+   * unwinding the turn. Structural mirror of detachForegroundCommands; never invoked by the daemon on its
+   * own — the escalation decision stays with the client, so one client's innocent stop can never SIGKILL
+   * a command another client's turn is running. */
+  async killForegroundCommands(
+    userId: number,
+    session?: string,
+    client?: BoundClientRequest,
+  ): Promise<{ killed: number }> {
+    const target = this.preflightSend(userId, session, client);
+    const registry = await this.d.plugins?.get();
+    const control = registry?.control('terminal');
+    if (!control) return { killed: 0 };
+    return control.killForeground({ sessionId: target, principal: `elowen:${userId}` });
+  }
+
   /** Convert every foreground `WorkflowStart` currently blocking this parent into a detached background
    * workflow. Same shape as detachForegroundSubagents/Commands — the engine keeps running the DAG and
    * delivers its summary back into this conversation. Detach rides the workflow control (which already

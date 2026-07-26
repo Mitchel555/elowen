@@ -441,6 +441,83 @@ describe('terminal plugin — foreground detach (Ctrl+B backgrounds a running co
   }, 25_000);
 });
 
+// The stop escalation (a further Esc / repeat Ctrl+C after the graceful interrupt): the daemon's
+// killForeground control SIGKILLs a still-foreground run so the aborted turn parked on the Bash tool can
+// unwind — PI's agent loop only re-checks its abort signal between tool calls, so a long command would
+// otherwise pin the turn until it exits on its own. The settled run must read as [killed].
+describe('terminal plugin — foreground kill (stop escalation)', () => {
+  let reg: PluginRegistry;
+  let dir: string;
+  const uidOwner: TurnIdentity = { platform: 'elowen', userId: '1', admin: true, owner: true, elowenUserId: 1 };
+  beforeAll(async () => {
+    reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log });
+    dir = mkdtempSync(join(tmpdir(), 'elowen-term-kill-'));
+  });
+  afterEach(() => { processRegistry.setExitListener(() => {}); });
+
+  const control = () => {
+    const c = reg.controls.get('terminal');
+    if (!c) throw new Error('terminal control not registered');
+    return c as unknown as {
+      detachForeground: (i: { sessionId: string; principal: string }) => { detached: number };
+      killForeground: (i: { sessionId: string; principal: string }) => { killed: number };
+    };
+  };
+  const inSession = (sessionId: string, name: string, params: Record<string, unknown>) =>
+    runWithPolicy(userPolicy([dir]), () => runTool(reg, name, params), { identity: uidOwner, sessionId });
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('kills a running foreground command: the tool settles as [killed] and the handle is collected', async () => {
+    const session = 'brain-fgkill-basic';
+    let nudged = 0;
+    processRegistry.setExitListener(() => { nudged += 1; });
+    const p = inSession(session, 'Bash', { command: 'sleep 30' });
+    await settle(300); // spawned and registered as foreground
+    expect(control().killForeground({ sessionId: session, principal: 'elowen:1' })).toEqual({ killed: 1 });
+    const res = await p;
+    expect(res.content[0].text).toContain('[killed]');
+    expect(res.details.exitCode).toBeUndefined(); // no structural exit code — the run was killed, not finished
+    expect(processRegistry.listForSession(session)).toHaveLength(0); // same settle path as a normal finish
+    expect(nudged).toBe(0); // a killed foreground command never wakes the conversation
+    // The entry is gone with the settle, so a repeat escalation press kills nothing (idempotent).
+    expect(control().killForeground({ sessionId: session, principal: 'elowen:1' })).toEqual({ killed: 0 });
+  }, 15_000);
+
+  it('a double-fire before the run settles counts the kill once (already-aborted entries are skipped)', async () => {
+    const session = 'brain-fgkill-twice';
+    const p = inSession(session, 'Bash', { command: 'sleep 30' });
+    await settle(300);
+    expect(control().killForeground({ sessionId: session, principal: 'elowen:1' })).toEqual({ killed: 1 });
+    // The abort is synchronous but the settle is not — the entry may still be in the map, already dying.
+    expect(control().killForeground({ sessionId: session, principal: 'elowen:1' })).toEqual({ killed: 0 });
+    expect((await p).content[0].text).toContain('[killed]');
+  }, 15_000);
+
+  it('a session or principal mismatch kills nothing and the command completes normally', async () => {
+    const session = 'brain-fgkill-mismatch';
+    const p = inSession(session, 'Bash', { command: `node -e "setTimeout(() => process.stdout.write('ok'), 500)"` });
+    await settle(200);
+    expect(control().killForeground({ sessionId: 'brain-other', principal: 'elowen:1' })).toEqual({ killed: 0 });
+    expect(control().killForeground({ sessionId: session, principal: 'elowen:999' })).toEqual({ killed: 0 });
+    const res = await p;
+    expect(res.content[0].text).toContain('ok');
+    expect(res.content[0].text).toContain('[exit 0]');
+  }, 15_000);
+
+  it('spares detached and background runs — only a run still blocking the turn is killable', async () => {
+    const session = 'brain-fgkill-spares';
+    const bg = await inSession(session, 'Bash', { command: 'sleep 8', background: true });
+    const bgId = /Started background process (\S+):/.exec(bg.content[0].text)?.[1];
+    expect(bgId).toBeTruthy();
+    const p = inSession(session, 'Bash', { command: 'sleep 8' });
+    await settle(300);
+    expect(control().detachForeground({ sessionId: session, principal: 'elowen:1' })).toEqual({ detached: 1 });
+    await p; // the detach resolved the tool; the process itself keeps running as a job
+    expect(control().killForeground({ sessionId: session, principal: 'elowen:1' })).toEqual({ killed: 0 });
+    expect(processRegistry.listForSession(session).filter((x) => x.running)).toHaveLength(2); // both alive
+  }, 15_000);
+});
+
 // Blocking reads exist so the agent stops burning turns polling a build it started. The wait is bounded
 // and never destructive: a timed-out wait leaves the process running for a later read.
 describe('terminal plugin — ProcessOutput(block)', () => {

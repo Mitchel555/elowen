@@ -265,6 +265,14 @@ export interface DetachControl {
   detachForeground(input: { sessionId: string; principal: string }): { detached: number };
 }
 
+/** The terminal plugin's stop-escalation seam: SIGKILL the process group of every still-foreground Bash
+ *  run bound to this session+principal. Complements DetachControl — Ctrl+B moves the wait aside and keeps
+ *  the command alive, this ends it so an already-aborted turn parked on the Bash tool can unwind (PI's
+ *  agent loop only re-checks its abort signal between tool calls). The settled run reads as `[killed]`. */
+export interface KillForegroundControl {
+  killForeground(input: { sessionId: string; principal: string }): { killed: number };
+}
+
 /** The cronjob plugin's retention seam: the ids of a user's conversations that still have a PENDING
  *  one-shot wake-up scheduled INTO them (jobs recorded with that origin which have not fired yet —
  *  firing consumes the job, so presence in the plugin's store IS pendingness). The retention janitor
@@ -291,7 +299,7 @@ export interface WorkflowCancelControl {
  *  the single place the registry narrows an opaque `PluginControl` to a usable contract. */
 export interface KnownControls {
   subagent: DetachControl;
-  terminal: DetachControl;
+  terminal: DetachControl & KillForegroundControl;
   cron: PendingWakeupControl;
   workflow: WorkflowCancelControl & DetachControl;
 }

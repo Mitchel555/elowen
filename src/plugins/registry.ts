@@ -47,7 +47,7 @@ export interface PluginEmbedder {
  *  a value typed as the WHOLE contract while a method may be missing, which then throws at the call site. */
 const KNOWN_CONTROL_METHODS: { [K in keyof KnownControls]: readonly (keyof KnownControls[K] & string)[] } = {
   subagent: ['detachForeground'],
-  terminal: ['detachForeground'],
+  terminal: ['detachForeground', 'killForeground'],
   cron: ['pendingWakeupOriginSessionIds'],
   workflow: ['cancelForSession', 'detachForeground'],
 };
