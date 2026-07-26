@@ -8,6 +8,7 @@ import type { SessionListItem, SessionPage, SessionPageOpts } from './service/st
 import {
   delegatedToolPolicy,
   normalizeDelegatedExecutionScope,
+  packDelegatedPromptAppend,
   withDelegatedDeniedTools,
   type DelegatedExecutionScope,
 } from './delegatedScope.js';
@@ -101,7 +102,9 @@ export class PlatformOrchestrator {
             : undefined;
           const rolePrompt = agentDef ? renderAgentPrompt(agentDef.body) : src.access.prompt;
           const promptAppend = [
-            ...(rolePrompt ? [rolePrompt] : []),
+            // Trimmed like every other section: a blank role is no role, and an append that survives only
+            // as whitespace is what the scope normalizer rejects the whole delegation over.
+            ...(rolePrompt?.trim() ? [rolePrompt] : []),
             // Parent-supplied background for a delegated child — stable prefix blocks (cache-friendly),
             // each bounded by the delegated-scope normalizer like every other prompt append. One entry per
             // block, so a workflow node's dependency results are not squeezed into a single chunk's budget.
@@ -150,6 +153,16 @@ export class PlatformOrchestrator {
             const boundary = readOnlyMode
               ? buildReadOnlyBoundary(src.access.permissionBoundary ?? null)
               : src.access.permissionBoundary;
+            // The role prompt is user-authored (a `.md` agent) and the context is caller-supplied, so
+            // nothing upstream bounds their combined size. Fit them to the scope ceilings HERE: over any
+            // of the three the normalizer below rejects the whole scope and the child never runs at all —
+            // the least diagnosable failure this path can produce. Log whatever had to be cut, since the
+            // child only learns it from a marker inside its own prompt.
+            const packed = packDelegatedPromptAppend(promptAppend);
+            if (packed.truncated || packed.dropped) {
+              log?.info(`delegated prompt did not fit the scope budget: ${packed.truncated} section(s) shortened, `
+                + `${packed.dropped} dropped (channel ${keyOf(src)})`);
+            }
             const rawScope = normalizeDelegatedExecutionScope({
               admin: src.access.admin === true,
               projectIds: src.access.projectIds,
@@ -159,7 +172,7 @@ export class PlatformOrchestrator {
               // the durable row owner's current (and potentially wider) permission settings.
               permissionBoundary: boundary,
               ...(effectiveToolPolicy !== undefined ? { toolPolicy: effectiveToolPolicy } : {}),
-              ...(promptAppend.length ? { promptAppend } : {}),
+              ...(packed.promptAppend.length ? { promptAppend: packed.promptAppend } : {}),
             });
             if (!rawScope) throw new Error('invalid delegated access');
             // The account running the child can only make the captured scope narrower. Persist this union

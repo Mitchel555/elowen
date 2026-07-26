@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { scopeExceedsCurrentAccess, type DelegatedExecutionScope } from '../../src/brain/delegatedScope.js';
+import { buildReadOnlyBoundary } from '../../src/brain/agents/readOnlyBoundary.js';
+import type { NoninteractivePermissionBoundary, PermissionRule } from '../../src/brain/toolPermissions.js';
 
 type Access = Parameters<typeof scopeExceedsCurrentAccess>[1];
 
@@ -9,6 +11,12 @@ const scope = (over: Partial<DelegatedExecutionScope> = {}): DelegatedExecutionS
 const access = (over: Partial<Access> = {}): Access => ({
   admin: false, projectIds: [1], owner: false, permissionBoundary: null, ...over,
 });
+const boundary = (
+  rules: PermissionRule[], unattendedAsks: 'allow' | 'deny' = 'allow',
+): NoninteractivePermissionBoundary => ({ rules, unattendedAsks });
+const WRITE_ALLOW: PermissionRule = { scope: 'tools', pattern: 'Write', action: 'allow' };
+const WRITE_DENY: PermissionRule = { scope: 'tools', pattern: 'Write', action: 'deny' };
+const READ_ALLOW: PermissionRule = { scope: 'tools', pattern: 'Read', action: 'allow' };
 
 /** Continuing an existing sub-agent replays a scope minted in the PAST. It must therefore be checked
  *  against the delegating turn's CURRENT authority, not only against what it was originally granted —
@@ -74,5 +82,77 @@ describe('scopeExceedsCurrentAccess', () => {
   // never a reason to refuse.
   it('does not refuse merely because the caller gained a deny-list', () => {
     expect(scopeExceedsCurrentAccess(scope(), access({ toolPolicy: { deny: ['Bash'] } }))).toBeUndefined();
+  });
+
+  /** The granular permission boundary is the half that actually decides whether a tool CALL runs, so a
+   *  continuation that replays an old boundary under a since-narrowed conversation is the widest hole
+   *  available: an old child would stay a durable handle onto permissions the operator has revoked. */
+  describe('permission boundary', () => {
+    // The exact escalation: the child captured `Write: allow`, the operator has since set `Write: deny`.
+    it('refuses a child whose captured rules the caller has since revoked', () => {
+      expect(scopeExceedsCurrentAccess(
+        scope({ permissionBoundary: boundary([WRITE_ALLOW]) }),
+        access({ permissionBoundary: boundary([WRITE_DENY]) }),
+      )).toMatch(/permission/i);
+    });
+
+    // Strict mode (`unattendedAsks: 'deny'`) is the operator's hard opt-in; a child minted before it must
+    // not carry the old 'allow' back into an unattended turn.
+    it('refuses a child minted before the caller turned on strict unattended asks', () => {
+      expect(scopeExceedsCurrentAccess(
+        scope({ permissionBoundary: boundary([READ_ALLOW], 'allow') }),
+        access({ permissionBoundary: boundary([READ_ALLOW], 'deny') }),
+      )).toMatch(/permission/i);
+    });
+
+    // `null` means no permission gate was wired at all — i.e. ungated. A gated caller must not resume it.
+    it('refuses an ungated child under a caller that now runs on a permission gate', () => {
+      expect(scopeExceedsCurrentAccess(
+        scope({ permissionBoundary: null }),
+        access({ permissionBoundary: boundary([WRITE_DENY]) }),
+      )).toMatch(/permission/i);
+    });
+
+    // Rule resolution is last-match-wins, so the same rules in a different order are a DIFFERENT boundary.
+    it('refuses rules that match only as a set, not in order', () => {
+      expect(scopeExceedsCurrentAccess(
+        scope({ permissionBoundary: boundary([WRITE_DENY, WRITE_ALLOW]) }),
+        access({ permissionBoundary: boundary([WRITE_ALLOW, WRITE_DENY]) }),
+      )).toMatch(/permission/i);
+    });
+
+    it('accepts an identical boundary', () => {
+      expect(scopeExceedsCurrentAccess(
+        scope({ permissionBoundary: boundary([READ_ALLOW, WRITE_DENY]) }),
+        access({ permissionBoundary: boundary([READ_ALLOW, WRITE_DENY]) }),
+      )).toBeUndefined();
+    });
+
+    // An ungated caller has no permission authority to exceed in the first place.
+    it('accepts any child boundary when the caller has no permission gate wired', () => {
+      expect(scopeExceedsCurrentAccess(
+        scope({ permissionBoundary: boundary([WRITE_ALLOW]) }),
+        access({ permissionBoundary: null }),
+      )).toBeUndefined();
+    });
+
+    describe('read-only children', () => {
+      // explore/plan children are minted with a clamp, so they never equal their parent's boundary. The
+      // continuation is allowed exactly when spawning that child TODAY would mint the same one.
+      it('accepts a clamped child that still matches the caller\'s current authority', () => {
+        const parent = boundary([READ_ALLOW, WRITE_DENY]);
+        expect(scopeExceedsCurrentAccess(
+          scope({ permissionBoundary: buildReadOnlyBoundary(parent) }),
+          access({ permissionBoundary: parent }),
+        )).toBeUndefined();
+      });
+
+      it('refuses a clamp minted from authority the caller has since lost', () => {
+        expect(scopeExceedsCurrentAccess(
+          scope({ permissionBoundary: buildReadOnlyBoundary(boundary([WRITE_ALLOW])) }),
+          access({ permissionBoundary: boundary([WRITE_DENY]) }),
+        )).toMatch(/permission/i);
+      });
+    });
   });
 });

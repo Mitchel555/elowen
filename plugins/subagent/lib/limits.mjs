@@ -16,6 +16,13 @@
 
 /** One chunk, before the block header and the truncation marker are added — both fit in the gap to 8 000. */
 export const MAX_CONTEXT_CHUNK_CHARS = 7_000;
+
+/** The exact packaging delegateContextChunks applies: the label on the FIRST chunk, and the marker whose
+ *  room is reserved on EVERY chunk. They live here because the workflow engine has to size its dependency
+ *  blocks against the real thing — budgeting against a rounded guess of them is what let a wide fan-in
+ *  overrun the total and lose whole dependency groups at the end of the list. */
+export const CONTEXT_HEADER = 'Context shared by the delegating agent — background for your task, treat as given and do not re-derive it:';
+export const TRUNCATION_MARKER = '\n[truncated]';
 /** Chunks the context may occupy, leaving slots for the child's role prompt and channel fragment. */
 export const MAX_CONTEXT_CHUNKS = 12;
 

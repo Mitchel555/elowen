@@ -8,7 +8,13 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { validateWorkflowNodes, mergeWorkflowNodes, readyNodeIds } from './dag.mjs';
-import { MAX_CONTEXT_CHUNK_CHARS, MAX_CONTEXT_CHUNKS, resolveContextTotalChars } from './limits.mjs';
+import {
+  CONTEXT_HEADER,
+  MAX_CONTEXT_CHUNK_CHARS,
+  MAX_CONTEXT_CHUNKS,
+  TRUNCATION_MARKER,
+  resolveContextTotalChars,
+} from './limits.mjs';
 
 const MAX_WORKFLOWS = 16;
 const WORKFLOW_RETENTION_MS = 60 * 60_000;
@@ -19,19 +25,24 @@ const SNAPSHOT_TASK_PREVIEW = 500;
 // Same bound for a terminal node's result/error preview: the modal dock shows a line or two, and the
 // full MAX_RESULT_CHARS body already reaches the parent through the blocking WorkflowStart return.
 const SNAPSHOT_RESULT_PREVIEW = 500;
-// Rough size of the note that introduces the dependency blocks (including the list of truncated node ids),
-// so the divided budget accounts for its own packaging rather than overrunning by it.
-const DEP_HEADER_CHARS = 300;
-// Rough size of one result block's own wrapper: its `## Result from node "id"` heading, the separator and
-// the truncation marker clip() may append.
-const DEP_BLOCK_CHARS = 60;
-// Never hand a node a slice too small to carry a finding. When even this does not fit, the results are
-// heavily truncated and the block says so — which is more useful than silently shipping three words.
+// Never hand a node a slice too small to carry a finding. A fan-in whose results cannot each reach this
+// is REFUSED (see buildNodeAccess): a node reporting conclusions drawn from three words per dependency —
+// or, once the forced minimum overran the budget, from dependencies it was never shown — is worse than a
+// node that fails and says why.
 const DEP_MIN_CHARS = 400;
+// The blank line joining two result blocks inside one chunk.
+const DEP_BLOCK_SEPARATOR = '\n\n';
 
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
 const errorText = (e) => (e instanceof Error ? e.message : String(e));
-const clip = (text, limit) => (text.length <= limit ? text : `${text.slice(0, limit)}\n[truncated]`);
+const clip = (text, limit) => (text.length <= limit ? text : `${text.slice(0, limit)}${TRUNCATION_MARKER}`);
+const depBlockHeading = (id) => `## Result from node "${id}"\n`;
+/** The note introducing the dependency blocks, naming the ones the node is not seeing in full. */
+const depIntro = (truncatedIds) => 'Results from the nodes this one depends on follow, one block per node.'
+  + (truncatedIds.length
+    ? `\n\nThese were truncated to fit and you are NOT seeing them in full: ${truncatedIds.join(', ')}. `
+      + 'Say so in your output rather than treating what you received as the complete result.'
+    : '');
 // Some models (seen: Qwen max preview) double-escape non-ASCII in tool-call JSON, so the parsed title
 // still carries literal backslash-u sequences ("Docs \u2014 write" instead of "Docs — write"). The title
 // is pure display, so decoding is always what the model meant; surrogate pairs recombine naturally.
@@ -171,34 +182,47 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       .map((id) => ({ id, result: wf.state.get(id)?.result }))
       .filter((d) => d.result);
     if (depResults.length) {
-      // Each dependency gets its OWN prompt chunk, so the per-chunk ceiling bounds a SINGLE result rather
-      // than all of them joined. Joining them is what left a wide fan-in with a fraction of its input: the
-      // slices were cut to fit a budget one chunk could never hold, and the clip at the end then took the
-      // first N chars of the joined block, so the later dependencies were simply absent.
-      // Only the shared TOTAL is divided, and it is what is actually LEFT after the preamble, the shared
-      // context and the results note below.
-      const spent = contextParts.reduce((n, part) => n + part.length, DEP_HEADER_CHARS);
+      // Each dependency gets its OWN prompt chunk (several share one only when the DAG is wider than the
+      // chunk budget), so the per-chunk ceiling bounds a SINGLE result rather than all of them joined.
+      //
+      // The division is against EXACT packaging, not estimates of it: delegateContextChunks puts the
+      // context header on the first chunk and reserves the truncation marker on every chunk, and a block
+      // costs its own heading plus the node id. Rounded guesses plus a forced minimum slice is what made a
+      // wide fan-in overrun the total — the chunker then clipped and dropped the last groups, and the node
+      // ran on dependencies it had never been shown, with nothing in its context saying so.
+      const spent = contextParts.reduce((n, part) => n + part.length + TRUNCATION_MARKER.length,
+        CONTEXT_HEADER.length + 1);
       // Chunks left for the results, after the parts already queued and the note that introduces them.
-      // When there are more dependencies than chunks, several share one — a dependency never disappears
-      // just because the DAG is wide, its slice only gets smaller.
       const slots = Math.max(1, MAX_CONTEXT_CHUNKS - contextParts.length - 1);
       const perChunk = Math.ceil(depResults.length / slots);
-      const perDep = Math.max(DEP_MIN_CHARS, Math.min(
-        Math.floor(MAX_CONTEXT_CHUNK_CHARS / perChunk) - DEP_BLOCK_CHARS,
-        Math.floor((contextTotal - spent) / depResults.length) - DEP_BLOCK_CHARS,
-      ));
-      const clipped = depResults.filter((d) => d.result.length > perDep).map((d) => d.id);
+      const groups = Math.ceil(depResults.length / perChunk);
+      // Reserve the note at its WORST case — every dependency named — so the reservation cannot be
+      // undercut by which of them turns out to need truncating.
+      const introChars = depIntro(depResults.map((d) => d.id)).length + TRUNCATION_MARKER.length;
+      const blockChars = depResults.reduce((n, d) => n + depBlockHeading(d.id).length + TRUNCATION_MARKER.length, 0)
+        + DEP_BLOCK_SEPARATOR.length * (depResults.length - groups);
+      const perDep = Math.min(
+        Math.floor((contextTotal - spent - introChars - groups * TRUNCATION_MARKER.length - blockChars)
+          / depResults.length),
+        Math.floor((MAX_CONTEXT_CHUNK_CHARS - TRUNCATION_MARKER.length
+          - perChunk * (Math.max(...depResults.map((d) => depBlockHeading(d.id).length)) + TRUNCATION_MARKER.length)
+          - DEP_BLOCK_SEPARATOR.length * (perChunk - 1)) / perChunk),
+      );
+      // Refuse rather than starve. Below this the node would be reasoning from fragments, and forcing the
+      // minimum anyway is precisely what overran the budget and lost whole dependencies.
+      if (perDep < DEP_MIN_CHARS) {
+        throw new Error(`node "${node.id}" waits on ${depResults.length} dependencies whose results cannot fit its `
+          + `${contextTotal}-char context budget: each would get ${Math.max(0, perDep)} chars, below the `
+          + `${DEP_MIN_CHARS}-char minimum. Aggregate them through intermediate nodes, or raise the delegate `
+          + 'context budget in Settings → Elowen AI → Limits.');
+      }
       // Say so IN the context. A node reading a truncated dependency cannot tell whether the finding it is
       // looking for was absent or merely cut off, and that difference decides whether it should re-derive.
-      const note = clipped.length
-        ? `\n\nThese were truncated to fit and you are NOT seeing them in full: ${clipped.join(', ')}. `
-          + 'Say so in your output rather than treating what you received as the complete result.'
-        : '';
-      contextParts.push(`Results from the nodes this one depends on follow, one block per node.${note}`);
+      contextParts.push(depIntro(depResults.filter((d) => d.result.length > perDep).map((d) => d.id)));
       for (let i = 0; i < depResults.length; i += perChunk) {
         contextParts.push(depResults.slice(i, i + perChunk)
-          .map((d) => `## Result from node "${d.id}"\n${clip(d.result, perDep)}`)
-          .join('\n\n'));
+          .map((d) => `${depBlockHeading(d.id)}${clip(d.result, perDep)}`)
+          .join(DEP_BLOCK_SEPARATOR));
       }
     }
     const context = delegateContextChunks(contextParts, contextTotal);

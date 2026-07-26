@@ -6,7 +6,13 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
-import { MAX_CONTEXT_CHUNK_CHARS, MAX_CONTEXT_CHUNKS, resolveContextTotalChars } from './lib/limits.mjs';
+import {
+  CONTEXT_HEADER,
+  MAX_CONTEXT_CHUNK_CHARS,
+  MAX_CONTEXT_CHUNKS,
+  TRUNCATION_MARKER,
+  resolveContextTotalChars,
+} from './lib/limits.mjs';
 
 const MAX_BACKGROUND_JOBS = 64;
 const JOB_RETENTION_MS = 60 * 60_000;
@@ -48,9 +54,7 @@ export function resolveDelegateTools(inheritedAllow, requested, available) {
   }
   return { allow: names };
 }
-const TRUNCATION_MARKER = '\n[truncated]';
 const clip = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit)}${TRUNCATION_MARKER}`;
-const CONTEXT_HEADER = 'Context shared by the delegating agent — background for your task, treat as given and do not re-derive it:';
 /** Format the parent-supplied context into the system-prompt chunks the child receives. The child cannot
  *  see the parent conversation, so this is how the delegating agent hands over what it already knows —
  *  saving the child from re-deriving it (and giving it a stable, cacheable prefix block).

@@ -171,6 +171,56 @@ describe('workflow engine', () => {
     for (const id of branches) expect(synthesis).toMatch(new RegExp(`truncated to fit[^\\n]*${id}`));
   });
 
+  // The fan-in the seven-branch test never reached: with dozens of dependencies the divided budget fell
+  // below the 400-char floor, which the engine then applied anyway. The blocks that resulted overran the
+  // context budget, delegateContextChunks cut the last GROUPS off, and the node ran — and reported — on
+  // dependencies it had never been shown. An input it cannot represent must fail the node, not shrink it.
+  it('refuses a fan-in it cannot represent instead of running the node on missing dependencies', async () => {
+    const { tools, launched, contextOf } = harness({ contextChars: 26_000 });
+    const branches = Array.from({ length: 63 }, (_, i) => `n${i}`);
+    const res = await tools.get('WorkflowStart')!.execute('t-wide', {
+      nodes: [
+        ...branches.map((id) => ({ id, task: `${id} BULK:600` })),
+        { id: 'synthesis', task: 'synthesise', deps: branches },
+      ],
+    });
+    const text = res.content[0]!.text;
+    expect(text).toMatch(/status: error/);
+    expect(text).toMatch(/\[synthesis\] ERROR/);
+    // Actionable: it names the fan-in and the budget that could not carry it.
+    expect(text).toMatch(/63 dependenc/);
+    expect(text).toMatch(/26000|26 000/);
+    // And it never started on a partial context.
+    expect(launched).not.toContain('synthesise');
+    expect(contextOf('synthesise')).toBe('');
+  });
+
+  // A width the budget CAN represent, with every dependency reporting far more than its slice: the packed
+  // context must then sit right under the budget, so each dependency arrives as its own attributed block
+  // and none is cut off the end by the chunker. This is where an ESTIMATED block cost overruns.
+  it('carries a wide fan-in in full when the budget can hold it, without breaching the scope bounds', async () => {
+    const { tools, contexts } = harness({ contextChars: 26_000 });
+    const branches = Array.from({ length: 24 }, (_, i) => `n${i}`);
+    await tools.get('WorkflowStart')!.execute('t-wide-ok', {
+      nodes: [
+        ...branches.map((id) => ({ id, task: `${id} BULK:8000` })),
+        { id: 'synthesis', task: 'synthesise', deps: branches },
+      ],
+    });
+    const chunks = contexts.get('synthesise') ?? [];
+    const joined = chunks.join('\n\n');
+    for (const id of branches) expect(joined).toContain(`## Result from node "${id}"`);
+    expect(joined).not.toContain('further context block'); // nothing silently cut by the chunker
+    expect(chunks.length).toBeLessThanOrEqual(16);
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(8_000);
+    expect(chunks.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThanOrEqual(26_000);
+    // Every dependency got the SAME slice. An overrun does not announce itself: the chunker simply shaves
+    // the tail of the chunk it no longer has room for, which shows up here as one short final block.
+    const sizes = [...receivedPerNode(joined, branches).values()];
+    expect(new Set(sizes).size).toBe(1);
+    expect(sizes[0]).toBeGreaterThanOrEqual(400);
+  });
+
   /** How many chars of each dependency's own report actually reached the dependent node. */
   const receivedPerNode = (context: string, ids: string[]): Map<string, number> => {
     const sizes = new Map<string, number>();

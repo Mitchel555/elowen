@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  normalizeDelegatedExecutionScope,
+  packDelegatedPromptAppend,
+  PROMPT_TRUNCATION_MARKER,
+} from '../../src/brain/delegatedScope.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const { delegateContextChunks } = await import(resolve(repoRoot, 'plugins/subagent/index.mjs')) as {
@@ -79,9 +84,16 @@ describe('delegateContextChunks', () => {
   });
 
   // A malformed or absent operator value must not disable the bound — it falls back to the default.
+  // The budget must land on the DEFAULT, so the outcome has to be indistinguishable from passing nothing:
+  // a malformed value that instead yielded no context (or the minimum budget) would silently starve the
+  // child while still respecting the upper bound.
   it('falls back to the default budget for a malformed operator value', () => {
     const parts = ['a', 'b', 'c', 'd', 'e'].map((id) => `${id}:${id.repeat(4_998)}`);
     const fallback = delegateContextChunks(parts, Number.NaN);
+    expect(fallback).toEqual(delegateContextChunks(parts, undefined));
+    // Four of the five 5 000-char parts fit the 20 000-char default; the fifth is reported as dropped.
+    expect(fallback).toHaveLength(4);
+    expect(fallback.at(-1)).toMatch(/further context block/);
     const total = fallback.reduce((n, chunk) => n + chunk.length, 0);
     expect(total).toBeLessThanOrEqual(DEFAULT_CONTEXT_TOTAL_CHARS + 500);
   });
@@ -97,5 +109,32 @@ describe('delegateContextChunks', () => {
     expect(chunks.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThan(SCOPE_MAX_PROMPT_TOTAL_CHARS);
     // And it says so rather than letting parts vanish.
     expect(chunks.at(-1)).toMatch(/further context block/);
+  });
+
+  // The context is only ONE of the sections sharing that scope budget: the child's role prompt leads the
+  // appends and the shared-channel fragment closes them. Bounding the context alone is what let a plain
+  // `.md` agent role push the assembled scope over the ceiling — and an invalid scope is not a shortened
+  // child prompt, it is a child that never spawns. So assert the whole composition the host mints.
+  it('composes with the role prompt and channel fragment into a scope the normalizer accepts', () => {
+    const context = delegateContextChunks(
+      Array.from({ length: 12 }, (_, i) => `dependency-${i}:${'y'.repeat(9_000)}`),
+      MAX_CONTEXT_TOTAL_CHARS,
+    );
+    const role = `ROLE:${'r'.repeat(19_995)}`; // a user-authored agent file, bounded by nothing upstream
+    const fragment = `You are talking on Discord in #general.${'f'.repeat(1_000)}`;
+    const packed = packDelegatedPromptAppend([role, ...context, fragment]);
+    const scope = normalizeDelegatedExecutionScope({
+      admin: true, projectIds: [], owner: true, permissionBoundary: null, promptAppend: packed.promptAppend,
+    });
+    expect(scope).toBeDefined(); // the delegation happens at all
+    expect(packed.promptAppend.length).toBeLessThanOrEqual(SCOPE_MAX_PROMPT_CHUNKS);
+    for (const chunk of packed.promptAppend) expect(chunk.length).toBeLessThanOrEqual(SCOPE_MAX_PROMPT_CHARS);
+    expect(packed.promptAppend.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThanOrEqual(SCOPE_MAX_PROMPT_TOTAL_CHARS);
+    // Every section is still represented, and the ones that had to give way say so.
+    expect(packed.promptAppend[0]).toContain('ROLE:');
+    for (const [i] of context.entries()) expect(packed.promptAppend.join('\n')).toContain(`dependency-${i}:`);
+    expect(packed.promptAppend.join('\n')).toContain('#general');
+    expect(packed.truncated).toBeGreaterThan(0);
+    expect(packed.promptAppend.join('\n')).toContain(PROMPT_TRUNCATION_MARKER.trim());
   });
 });

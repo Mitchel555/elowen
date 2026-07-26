@@ -4646,6 +4646,31 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
       expect(send).not.toHaveBeenCalled();
     });
 
+    // The child's captured permission boundary is what actually decides its tool calls, so a boundary the
+    // operator has since narrowed must not come back through an old child.
+    it('refuses when the caller\'s permissions no longer cover the child\'s captured boundary', async () => {
+      const { d, svc, sessionId, send } = await seed();
+      const gated = 'brain-ch-subagent-sub-gated';
+      d.store.createSession({
+        id: gated, userId: 1, model: 'm', parentSessionId: sessionId,
+        delegatedAccess: {
+          ...SCOPE,
+          permissionBoundary: { rules: [{ scope: 'tools', pattern: 'Write', action: 'allow' }], unattendedAsks: 'allow' },
+        },
+      });
+      await expect(svc.continueSubagent(sessionId, gated, 'hi', {
+        ...ADMIN_ACCESS,
+        permissionBoundary: { rules: [{ scope: 'tools', pattern: 'Write', action: 'deny' }], unattendedAsks: 'allow' },
+      })).rejects.toThrow(/permission/i);
+      expect(send).not.toHaveBeenCalled();
+
+      // …while the unchanged boundary still continues normally.
+      await expect(svc.continueSubagent(sessionId, gated, 'hi', {
+        ...ADMIN_ACCESS,
+        permissionBoundary: { rules: [{ scope: 'tools', pattern: 'Write', action: 'allow' }], unattendedAsks: 'allow' },
+      })).resolves.toBeTruthy();
+    });
+
     it('layers the caller\'s CURRENT tool denies onto the resumed policy', async () => {
       const { svc, sessionId, child, send } = await seed();
       await svc.continueSubagent(sessionId, child, 'hi', { ...ADMIN_ACCESS, toolPolicy: { deny: ['Bash'] } });

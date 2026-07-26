@@ -4,6 +4,7 @@ import { IdentityResolver } from '../../src/brain/identity.js';
 import type { Policy } from '../../src/plugins/policy.js';
 import type { ChannelSendOpts } from '../../src/brain/channels.js';
 import { READ_ONLY_AGENT_TOOLS, type AgentDef } from '../../src/brain/agents/agentRegistry.js';
+import { normalizeDelegatedExecutionScope, PROMPT_TRUNCATION_MARKER } from '../../src/brain/delegatedScope.js';
 
 // A linked sender resolves to Elowen account #2 (non-admin); everyone else is unlinked.
 const users = { get: (id: number) => ({ username: `u${id}` }) };
@@ -146,6 +147,67 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     } as never, 'inspect');
 
     expect(sent?.promptAppend).toEqual(['role', 'one block']);
+  });
+
+  /** Drive one delegated spawn and capture what the host handed the child. `fragment` stands in for the
+   *  shared-channel system-prompt block, which is appended to the very same prompt budget. */
+  const runDelegateWith = async (access: Record<string, unknown>, fragment = ''): Promise<ChannelSendOpts> => {
+    let sent: ChannelSendOpts | undefined;
+    let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
+    const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const orch = new PlatformOrchestrator({
+      plugins: async () => ({ platforms: [adapter] }) as never,
+      platformOwner: () => 1,
+      policyForProjects: () => rolePolicy,
+      identity: linkedResolver(false),
+      channels: {
+        sessionOwnerUserId: () => 1,
+        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+        fragmentFor: () => fragment,
+      } as never,
+    });
+    await orch.startAll();
+    await handler!({
+      platform: 'subagent', userId: 'subagent', channelId: 'sub-budget', roleIds: [],
+      ...(fragment ? { channelName: 'general' } : {}),
+      access: { admin: true, owner: true, projectIds: [], parentSessionId: 'brain-1', permissionBoundary: null, ...access },
+    } as never, 'inspect');
+    return sent!;
+  };
+
+  // A user-authored `.md` agent role is not bounded by anything upstream. At 20 000 chars it breaches the
+  // 8 000-char per-chunk scope ceiling on its own, which used to make normalizeDelegatedExecutionScope
+  // reject the WHOLE scope: the delegation threw and the child never ran, with nothing saying why.
+  it('splits an oversized role prompt across chunks instead of failing the whole delegation', async () => {
+    const role = `ROLE-START${'r'.repeat(19_980)}ROLE-END`;
+    const sent = await runDelegateWith({ prompt: role });
+    const appends = sent.delegatedAccess?.promptAppend ?? [];
+    expect(normalizeDelegatedExecutionScope(sent.delegatedAccess)).toBeDefined();
+    expect(appends.length).toBeGreaterThan(1); // split, not dropped and not squeezed into one oversized chunk
+    // The role arrives whole: 20 000 chars fit the 32 000-char total, they just need several chunks.
+    const rejoined = appends.map((chunk) => chunk.replace(/^\[part \d+ of \d+\]\n/, '')).join('');
+    expect(rejoined).toBe(role);
+  });
+
+  // Role + a context at the plugin's own maximum + the channel fragment is the combination that overruns
+  // the 32 000-char total. The scope must still normalize (the child runs), and everything shortened has
+  // to say so — a child silently missing half its role has no way to know.
+  it('keeps role, context and channel fragment inside the scope budget, marking what it had to cut', async () => {
+    const context = Array.from({ length: 12 }, (_, i) => `block-${i}:${'c'.repeat(2_150)}`);
+    const sent = await runDelegateWith(
+      { prompt: `ROLE:${'r'.repeat(19_995)}`, context },
+      `You are talking on Discord in #general.${'f'.repeat(400)}`,
+    );
+    const appends = sent.delegatedAccess?.promptAppend ?? [];
+    expect(normalizeDelegatedExecutionScope(sent.delegatedAccess)).toBeDefined();
+    expect(appends.length).toBeLessThanOrEqual(16);
+    for (const chunk of appends) expect(chunk.length).toBeLessThanOrEqual(8_000);
+    expect(appends.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThanOrEqual(32_000);
+    // The role still leads the appends, and the parent's context blocks all survive.
+    expect(appends[0]).toContain('ROLE:');
+    for (const block of context) expect(appends.join('\n')).toContain(block.slice(0, 20));
+    // Nothing was shortened in silence.
+    expect(appends.join('\n')).toContain(PROMPT_TRUNCATION_MARKER.trim());
   });
 
   it('preserves delegated origin-owner truth and exact allow+deny policy for an owner-anchored parent', async () => {

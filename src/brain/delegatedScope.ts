@@ -3,6 +3,7 @@ import {
   normalizeNoninteractivePermissionBoundary,
   type NoninteractivePermissionBoundary,
 } from './toolPermissions.js';
+import { buildReadOnlyBoundary } from './agents/readOnlyBoundary.js';
 
 /**
  * The immutable execution boundary minted for a delegated child.  A child is a durable conversation:
@@ -117,6 +118,38 @@ export function normalizeDelegatedExecutionScope(raw: unknown): DelegatedExecuti
   };
 }
 
+/** Ordered, field-by-field boundary equality. Rule ORDER is load-bearing (resolution is last-match-wins),
+ *  and JSON.stringify would additionally depend on object key order, which callers do not guarantee. */
+function sameBoundary(a: NoninteractivePermissionBoundary, b: NoninteractivePermissionBoundary): boolean {
+  if (a.unattendedAsks !== b.unattendedAsks || a.rules.length !== b.rules.length) return false;
+  return a.rules.every((rule, index) => {
+    const other = b.rules[index];
+    return !!other && other.scope === rule.scope && other.pattern === rule.pattern && other.action === rule.action;
+  });
+}
+
+/** Whether a child's captured granular permissions grant more than the caller's current ones.
+ *
+ *  Deliberately EQUALITY, not a subset test: rules are ordered wildcard patterns resolved last-match-wins
+ *  across two pattern spaces, so "is this ruleset contained in that one" is a real language-inclusion
+ *  problem. An approximate implementation would silently ALLOW the escalation it was written to stop, so
+ *  until a proven subset check exists this refuses every boundary it cannot prove identical.
+ *
+ *  The one accepted non-identity is the read-only clamp, recomputed from the caller's CURRENT boundary:
+ *  an explore/plan child never equals its parent by construction, and admitting exactly the boundary that
+ *  spawning it again right now would mint grants nothing the caller does not already hold this instant. */
+function permissionBoundaryExceeds(
+  child: NoninteractivePermissionBoundary | null,
+  caller: NoninteractivePermissionBoundary | null,
+): string | undefined {
+  // An ungated caller has no granular authority for the child to exceed.
+  if (caller === null) return undefined;
+  // `null` is "no permission gate wired at all" — strictly wider than any gate the caller now runs on.
+  if (child === null) return 'it captured no permission gate and this conversation now runs under one';
+  if (sameBoundary(child, caller) || sameBoundary(child, buildReadOnlyBoundary(caller))) return undefined;
+  return 'its captured tool permissions differ from the ones this conversation holds now';
+}
+
 /** Whether a PERSISTED child scope grants more than the delegating turn holds right now — returns the
  *  human-readable reason it exceeds, or undefined when the child fits inside the caller's current
  *  authority.
@@ -159,7 +192,7 @@ export function scopeExceedsCurrentAccess(
     const extra = childAllow.filter((name) => !held.has(name));
     if (extra.length) return `it holds ${extra.join(', ')}, which this conversation does not`;
   }
-  return undefined;
+  return permissionBoundaryExceeds(scope.permissionBoundary, access.permissionBoundary);
 }
 
 /** Semantically compare canonical durable scopes without trusting caller object identity or array order. */
@@ -195,6 +228,92 @@ export function withDelegatedDeniedTools(scope: DelegatedExecutionScope, denied:
   // Keep the explicit assertion here so a future change to the normalizer does not accidentally widen it.
   if (!normalized) throw new Error('invalid delegated access');
   return normalized;
+}
+
+/** Left on a section that did not fit its share of the prompt budget. A child reading a shortened role or
+ *  context block cannot otherwise tell whether something was absent or merely cut off. */
+export const PROMPT_TRUNCATION_MARKER = '\n[truncated to fit the delegated prompt budget]';
+/** Room reserved on every chunk of a SPLIT section for its `[part i of n]` label. The label also keeps
+ *  those chunks distinct, which is load-bearing: the normalizer above drops exact duplicate appends. */
+const PART_LABEL_CHARS = 24;
+/** Room reserved on the last chunk for the note counting sections that had no slot left at all. */
+const DROP_NOTE_CHARS = 120;
+const CHUNK_BODY_CHARS = MAX_PROMPT_CHARS - PART_LABEL_CHARS;
+
+export interface PackedDelegatedPrompt {
+  /** Chunks satisfying all three ceilings, in the order the sections were given. */
+  promptAppend: string[];
+  /** How many sections had to be shortened (each carries PROMPT_TRUNCATION_MARKER). */
+  truncated: number;
+  /** How many sections had no chunk slot left at all (counted on the last chunk). */
+  dropped: number;
+}
+
+/** Max-min fair share of `total` across `demands`: nobody gets more than it asks for, and the slack the
+ *  modest ones leave is redistributed to the greedy ones — so nothing shrinks while everything still fits. */
+function fairShare(demands: readonly number[], total: number, capOf: (index: number) => number): number[] {
+  const share = demands.map(() => 0);
+  const smallestFirst = demands.map((_, index) => index).sort((a, b) => (demands[a] ?? 0) - (demands[b] ?? 0));
+  let left = total;
+  let open = smallestFirst.length;
+  for (const index of smallestFirst) {
+    const got = Math.max(0, Math.min(demands[index] ?? 0, capOf(index), Math.floor(left / open)));
+    share[index] = got;
+    left -= got;
+    open -= 1;
+  }
+  return share;
+}
+
+/** A single-chunk section may use the whole per-chunk ceiling; a split one pays the part label per chunk. */
+const sectionCapacity = (slots: number): number => (slots <= 1 ? MAX_PROMPT_CHARS : slots * CHUNK_BODY_CHARS);
+
+/** Cut a section that outgrew one chunk into labelled parts. Its char budget is capped at the capacity of
+ *  the slots it was granted, so the part count can never exceed them. */
+function splitSection(body: string): string[] {
+  if (body.length <= MAX_PROMPT_CHARS) return [body];
+  const parts = Math.ceil(body.length / CHUNK_BODY_CHARS);
+  return Array.from({ length: parts }, (_, index) =>
+    `[part ${index + 1} of ${parts}]\n${body.slice(index * CHUNK_BODY_CHARS, (index + 1) * CHUNK_BODY_CHARS)}`);
+}
+
+/** Fit a delegated child's system-prompt sections — its role prompt, the parent-supplied context blocks
+ *  and the shared-channel fragment — inside the three ceilings normalizeDelegatedExecutionScope enforces.
+ *
+ *  None of those sections is bounded upstream: a user-authored `.md` agent role of 20 000 chars breaches
+ *  the per-chunk ceiling on its own, which invalidated the WHOLE scope and left the child unable to spawn
+ *  at all. So a long section is SPLIT across chunks rather than rejected, every section keeps at least an
+ *  even share of the budget, and whatever had to be cut says so instead of vanishing. */
+export function packDelegatedPromptAppend(sections: readonly string[]): PackedDelegatedPrompt {
+  const parts = sections.map((section) => section.trim()).filter((section) => section.length > 0);
+  const kept = parts.slice(0, MAX_PROMPT_CHUNKS);
+  const dropped = parts.length - kept.length;
+  const slots = fairShare(
+    kept.map((part) => Math.ceil(part.length / CHUNK_BODY_CHARS)),
+    MAX_PROMPT_CHUNKS,
+    () => MAX_PROMPT_CHUNKS,
+  );
+  const chars = fairShare(
+    kept.map((part) => part.length),
+    MAX_PROMPT_TOTAL_CHARS - MAX_PROMPT_CHUNKS * PART_LABEL_CHARS - DROP_NOTE_CHARS,
+    (index) => sectionCapacity(slots[index] ?? 1),
+  );
+  const chunks: string[] = [];
+  let truncated = 0;
+  for (const [index, part] of kept.entries()) {
+    const allowed = chars[index] ?? 0;
+    if (part.length <= allowed) { chunks.push(...splitSection(part)); continue; }
+    truncated += 1;
+    chunks.push(...splitSection(
+      `${part.slice(0, Math.max(1, allowed - PROMPT_TRUNCATION_MARKER.length))}${PROMPT_TRUNCATION_MARKER}`,
+    ));
+  }
+  const tail = chunks.at(-1);
+  if (dropped > 0 && tail !== undefined) {
+    const note = `\n[${dropped} further prompt section(s) dropped — the delegated prompt budget is full]`;
+    chunks[chunks.length - 1] = `${tail.slice(0, MAX_PROMPT_CHARS - note.length)}${note}`;
+  }
+  return { promptAppend: chunks, truncated, dropped };
 }
 
 /** Rehydrate the execution-time plugin-tool policy. An empty allow-list is preserved as a real empty Set. */
