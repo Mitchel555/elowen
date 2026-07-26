@@ -156,7 +156,14 @@ export class PluginHookBus {
 
   /** Run a single hook under its event's timeout budget, capturing its outcome + return value without
    *  ever rejecting. A throw or timeout is warned about and reported as 'threw'/'timeout' with no
-   *  result (fail-open). */
+   *  result (fail-open).
+   *
+   *  The budget bounds how long we WAIT, not how long the hook runs: the abandoned promise keeps going,
+   *  and a hook that blocks the event loop synchronously (`while (true) {}`) is not bounded at all,
+   *  because the timer that would stop it can never fire. Plugins run in-process, so that is a property
+   *  of the trust model — an installed plugin can already halt the daemon by other means — and not
+   *  something this timeout claims to solve. It defends against the realistic case: a hook awaiting
+   *  something that never resolves. */
   private runTraced(name: PluginHookName, hook: PluginHook, payload: unknown): Promise<TracedRun> {
     const budgetMs = this.eventBudgets[name] ?? this.timeoutMs;
     const started = Date.now();
