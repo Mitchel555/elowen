@@ -31,6 +31,8 @@ describe('install/launchdUnits', () => {
     // KeepAlive.SuccessfulExit=false ≙ systemd's Restart=on-failure — a clean stop stays stopped.
     expect(plist).toMatch(/<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key><false\/>/);
     expect(plist).toContain('<key>PATH</key><string>/opt/homebrew/bin:');
+    // A UTF-8 locale so accented output isn't mangled when the LaunchAgent inherits an empty locale env.
+    expect(plist).toContain('<key>LANG</key><string>en_US.UTF-8</string>');
     expect(plist).toContain('launchd-daemon.log');
   });
 
@@ -41,6 +43,7 @@ describe('install/launchdUnits', () => {
     expect(plist).toContain('<key>PORT</key><string>4500</string>');
     expect(plist).toContain('<key>HOSTNAME</key><string>127.0.0.1</string>');
     expect(plist).toContain('<key>ELOWEN_DAEMON_URL</key><string>http://127.0.0.1:4400</string>');
+    expect(plist).toContain('<key>LANG</key><string>en_US.UTF-8</string>');
   });
 
   it('update agent is an hourly timer running `elowen update --auto`, not a keep-alive service', () => {

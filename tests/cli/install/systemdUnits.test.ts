@@ -25,6 +25,9 @@ describe('install/systemdUnits.daemonUnit', () => {
     expect(u).toMatch(/^Restart=on-failure$/m);
     expect(u).toMatch(/^WantedBy=multi-user\.target$/m);
   });
+  it('pins a UTF-8 locale so accented output never depends on the box default environment', () => {
+    expect(u).toMatch(/^Environment=LANG=C\.UTF-8$/m);
+  });
   it('binds 127.0.0.1 by default (private behind a proxy / on localhost)', () => expect(u).toMatch(/^Environment=ELOWEN_HOST=127\.0\.0\.1$/m));
   it('can bind 0.0.0.0 for proxy-less IP mode so the browser reaches the terminal WS', () => {
     expect(daemonUnit({ ...p, daemonHost: '0.0.0.0' })).toMatch(/^Environment=ELOWEN_HOST=0\.0\.0\.0$/m);
@@ -42,6 +45,7 @@ describe('install/systemdUnits.webUnit', () => {
     expect(u).toContain('ExecStart=/usr/bin/node /g/lib/node_modules/elowen/web-dist/server.js');
     expect(u).toMatch(/^User=elowen$/m);
   });
+  it('pins the same UTF-8 locale as the daemon unit', () => expect(u).toMatch(/^Environment=LANG=C\.UTF-8$/m));
   it('binds the configured web host (127.0.0.1 behind a proxy)', () => expect(u).toMatch(/^Environment=HOSTNAME=127\.0\.0\.1$/m));
   it('can bind 0.0.0.0 for the proxy-less direct-port mode', () => {
     expect(webUnit({ ...p, webHost: '0.0.0.0' })).toMatch(/^Environment=HOSTNAME=0\.0\.0\.0$/m);

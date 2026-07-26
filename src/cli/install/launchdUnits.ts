@@ -31,6 +31,11 @@ export interface LaunchdParams {
 /** Homebrew (both arches) + system paths — what a login shell would have, minus user dotfiles. */
 const BASE_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
 
+// A UTF-8 locale pinned on the daemon/web agents so accented output never depends on the (usually empty)
+// locale env a LaunchAgent inherits at login. macOS libc has no C.UTF-8, so en_US.UTF-8 — always present
+// on macOS — is the portable UTF-8 charmap here (its region is irrelevant; only the encoding matters).
+const UTF8_LOCALE = 'en_US.UTF-8';
+
 export function agentPlistPath(home: string, label: string): string {
   return `${home}/Library/LaunchAgents/${label}.plist`;
 }
@@ -79,6 +84,7 @@ export function daemonAgent(p: LaunchdParams): string {
     ELOWEN_LOG_DIR: `${p.home}/.config/elowen/logs`,
     ELOWEN_PORT: String(p.daemonPort),
     ELOWEN_HOST: '127.0.0.1',
+    LANG: UTF8_LOCALE,
   }, 'launchd-daemon'));
 }
 
@@ -88,6 +94,7 @@ export function webAgent(p: LaunchdParams): string {
     HOSTNAME: '127.0.0.1',
     ELOWEN_DAEMON_URL: `http://127.0.0.1:${p.daemonPort}`,
     ELOWEN_LOG_DIR: `${p.home}/.config/elowen/logs`,
+    LANG: UTF8_LOCALE,
   }, 'launchd-web'));
 }
 

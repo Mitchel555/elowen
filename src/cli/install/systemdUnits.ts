@@ -31,6 +31,12 @@ export interface UnitParams {
 
 const BASE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
+// A UTF-8 locale the daemon/web units pin explicitly, so accented output (Czech clients, names) never
+// depends on whatever locale systemd's default environment happens to carry — a box whose default lacks
+// one runs the process under the ASCII charmap and mangles every non-ASCII byte. C.UTF-8 is the
+// locale-independent UTF-8 that glibc ships without a generated locale, so it is always resolvable.
+const UTF8_LOCALE = 'C.UTF-8';
+
 export function daemonUnit(p: UnitParams): string {
   return `[Unit]
 Description=ELOWEN daemon (REST API)
@@ -45,6 +51,7 @@ Environment=ELOWEN_LOG_DIR=${p.home}/.config/elowen/logs
 Environment=ELOWEN_PORT=${p.daemonPort}
 Environment=ELOWEN_HOST=${p.daemonHost}
 Environment=PATH=${p.npmGlobalBin}:${BASE_PATH}
+Environment=LANG=${UTF8_LOCALE}
 ExecStart=${p.nodePath} ${p.daemonEntry}
 Restart=on-failure
 RestartSec=3
@@ -120,6 +127,7 @@ Environment=HOSTNAME=${p.webHost}
 Environment=ELOWEN_DAEMON_URL=http://127.0.0.1:${p.daemonPort}${p.wsDirectPort ? `\nEnvironment=ELOWEN_WS_DIRECT_PORT=${p.wsDirectPort}` : ''}
 Environment=ELOWEN_LOG_DIR=${p.home}/.config/elowen/logs
 Environment=PATH=${p.npmGlobalBin}:${BASE_PATH}
+Environment=LANG=${UTF8_LOCALE}
 ExecStart=${p.nodePath} ${p.webServer}
 Restart=on-failure
 RestartSec=3
