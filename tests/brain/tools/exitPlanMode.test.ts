@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildExitPlanModeTool } from '../../../src/brain/tools/exitPlanMode.js';
 import { EXIT_PLAN_MODE_TOOL } from '../../../src/shared/planTool.js';
-import { writePlan } from '../../../src/brain/continuity/planStore.js';
+import { seedPlan } from '../../helpers/plan.js';
 import { runWithPolicy } from '../../../src/plugins/policyContext.js';
 import { planSlug } from '../../../src/shared/planSlug.js';
 import type { Policy } from '../../../src/plugins/policy.js';
@@ -45,7 +45,7 @@ describe('ExitPlanMode', () => {
   });
 
   it('submits the plan written to the session plan file', async () => {
-    writePlan(SESSION, '# Ship it\n\nStep one.');
+    seedPlan(SESSION, '# Ship it\n\nStep one.');
     const text = textOf(await call({ mode: 'plan' }));
     expect(text).toContain('submitted');
     // The plan goes to the CLIENT via details, not to the model via content: the approval UI needs the
@@ -60,7 +60,7 @@ describe('ExitPlanMode', () => {
 
   // Reading a stale plan file outside plan mode would let a build turn resurrect an old plan as fresh.
   it('refuses outside plan mode even when a plan file exists', async () => {
-    writePlan(SESSION, '# Ship it');
+    seedPlan(SESSION, '# Ship it');
     for (const mode of ['build', undefined] as const) {
       expect(textOf(await call({ mode }))).toContain('You are not in plan mode');
     }
@@ -78,7 +78,7 @@ describe('ExitPlanMode', () => {
   });
 
   it('treats a whitespace-only plan as no plan', async () => {
-    writePlan(SESSION, '# Ship it');
+    seedPlan(SESSION, '# Ship it');
     // writePlan ignores an all-whitespace body, so overwrite the file the way a model emptying its own
     // plan file would.
     writeFileSync(join(home, '.config/elowen/plans', `${planSlug(SESSION)}.md`), '   \n\n');

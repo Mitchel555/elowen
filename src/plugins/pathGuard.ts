@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import { resolve, sep, dirname, basename, join } from 'node:path';
 import { currentIdentity, currentPolicy, currentSessionId, currentToolPolicy, currentTurnMode, currentTurnPermissions, currentWorkDir } from './policyContext.js';
 import { noninteractivePermissionBoundary, type NoninteractivePermissionBoundary } from '../brain/toolPermissions.js';
-import { toolResultSpillDir } from '../shared/paths.js';
+import { planFilePath, toolResultSpillDir } from '../shared/paths.js';
 
 /** The repo roots the current session may operate in. Empty for an admin (all-access) or outside a
  *  prompt turn. A tool uses this to default a working directory. */
@@ -52,7 +52,7 @@ export function currentAccess(): { projectIds: number[]; admin: boolean; owner: 
 /** Resolve to the REAL absolute path (symlinks followed), so a link inside an allowed repo pointing
  *  outside it can't smuggle access past the prefix check. A not-yet-existing target (a new file)
  *  resolves through its closest existing ancestor instead. */
-export function realAbs(path: string): string {
+function realAbs(path: string): string {
   const abs = resolve(path);
   try { return realpathSync(abs); }
   catch {
@@ -74,9 +74,48 @@ export function realPathWithin(path: string, roots: string[]): string | null {
   return roots.some(within) ? abs : null;
 }
 
+/** Is `candidate` exactly this session's plan file?
+ *
+ *  This is a SECURITY boundary, not a convenience. Plan mode is read-only because it withholds every
+ *  writing tool; admitting one back so the model can author its plan is only safe while this predicate
+ *  is exact. A false positive here does not misplace a file — it hands plan mode arbitrary write access.
+ *
+ *  Two properties do the work, and both are needed:
+ *
+ *  1. The candidate is resolved through symlinks and `..` BEFORE anything is compared, so neither a
+ *     traversal nor a link in a parent directory can point somewhere else while spelling the right path.
+ *  2. The resolved path must land INSIDE the plans directory. Comparing it against the resolved expected
+ *     path alone would look right and be wrong: if the plan file were itself a symlink pointing out of
+ *     the directory, both sides would resolve to the same foreign target and agree. Containment is what
+ *     refuses that, so it is checked first and the file name is matched inside the RESOLVED directory.
+ *
+ *  Deny-by-default throughout: anything unresolvable, relative to nowhere, or merely near the plan file
+ *  is refused. What this cannot cover is a swap between this check and the write that follows it; the
+ *  plans directory lives under the daemon's own config dir and a plan turn has no tool able to create a
+ *  link there, so the window is closed by what plan mode withholds rather than by this function.
+ *
+ *  It lives HERE rather than beside the plan store because both users need it and one of them is
+ *  `assertPathAllowed` below: the plan store already depends on this module, so keeping the predicate
+ *  there would have forced a cycle to reach it. */
+export function isSessionPlanPath(sessionId: string, candidate: string): boolean {
+  if (!candidate) return false;
+  const expected = planFilePath(process.env, sessionId);
+  const plansDir = dirname(expected);
+  const resolved = realPathWithin(candidate, [plansDir]);
+  if (!resolved) return false;
+  return resolved === join(realAbs(plansDir), basename(expected));
+}
+
 /** Resolve `path` to its real absolute path and assert it is inside one of the current session's
  *  allowed repo roots (or that the session is admin all-access). Throws a clear Error otherwise.
  *  This is the single enforcement point the file/terminal tools call before touching disk.
+ *
+ *  A second non-repo allowance: the session's OWN plan file. Plan mode tells the model to write its
+ *  plan to a path under the daemon's config dir, which is no repository — so without this every
+ *  project-scoped user would be handed a path they are forbidden to write, and plan mode would be
+ *  unusable for everyone except admin all-access sessions (which return early above and are the only
+ *  reason this went unnoticed). Scoped per-session by the same exact predicate the plan-mode write
+ *  clamp uses, so this widens the boundary by exactly one file and never another session's.
  *
  *  One non-repo allowance: the session's OWN tool-result spill dir. Clearing swaps large historical
  *  tool outputs for a placeholder that names the spill path and tells the model to Read it back —
@@ -90,6 +129,7 @@ export function assertPathAllowed(path: string): string {
   if (abs) return abs;
   const sessionId = currentSessionId();
   if (sessionId) {
+    if (isSessionPlanPath(sessionId, path)) return realAbs(path);
     const spill = realPathWithin(path, [toolResultSpillDir(process.env, sessionId)]);
     if (spill) return spill;
   }

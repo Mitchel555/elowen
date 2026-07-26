@@ -24,6 +24,7 @@ import { turnWorkDir } from './workDir.js';
 import { drainPostCompactionContext } from '../continuity/postCompactionContext.js';
 import { EXIT_PLAN_MODE_TOOL } from '../../shared/planTool.js';
 import { planFilePath } from '../../shared/paths.js';
+import { ensurePlanDir } from '../continuity/planStore.js';
 
 interface TurnContextBuilderDeps {
   store: BrainStore;
@@ -121,6 +122,10 @@ export class TurnContextBuilder {
           // The plan-mode directive NAMES the plan file, because the plan is authored as a document and
           // the model cannot write one to a path it was never told. Passed to both modes' templates: the
           // var is simply unused by the ones that do not mention it.
+          // Creating the directory is part of naming the path: Write does not create parents and the
+          // plan-mode shell clamp denies `mkdir -p`, so telling the model to write somewhere that does
+          // not exist would hand it an ENOENT it has no tool to resolve.
+          if (mode === 'plan') ensurePlanDir(live.sessionId);
           const modeReminder = modeTemplate
             ? this.d.prompts.render(
               this.modeTemplateFor(modeTemplate, mode, previousMode, live, compacted),

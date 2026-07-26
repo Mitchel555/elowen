@@ -1,6 +1,6 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { currentSessionId, currentToolPolicy, currentTurnMode, currentTurnPermissions, toolPermitted, type ToolPolicy } from '../../plugins/policyContext.js';
-import { isSessionPlanPath } from '../continuity/planStore.js';
+import { isSessionPlanPath } from '../../plugins/pathGuard.js';
 import { buildExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { BASH_PERMISSION_TOOLS, bashAlwaysPattern, resolveToolPermission, type ApprovalDecision } from '../toolPermissions.js';
 import type { ToolActivationTarget } from '../toolSearch/toolSearchTool.js';
@@ -123,9 +123,10 @@ function gateToolAccess(
 /** A model-readable refusal result (the tool "ran" but reports why it did not act). */
 const refused = (text: string) => ({ content: [{ type: 'text' as const, text }], details: {} });
 
-/** Writing tools that plan mode must clamp to the session's plan file. `Write` is admitted to plan mode
- *  (PLAN_MODE_CLAMPED_TOOLS) so the model can author its plan; `Edit` is withheld there and is listed
- *  anyway, so that admitting it later cannot silently reopen the hole this clamp exists to close. */
+/** Writing tools that plan mode must clamp to the session's plan file. BOTH are admitted to plan mode
+ *  (PLAN_MODE_CLAMPED_TOOLS) — `Write` to author the plan, `Edit` to revise it incrementally — so this
+ *  clamp is the only thing standing between a planning turn and arbitrary write access. Nothing here is
+ *  redundant belt-and-braces: every name in this set is a tool the model can actually call. */
 const PLAN_MODE_WRITE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit']);
 
 /** Why a writing tool may not run on this path during a planning turn, or undefined when it may.

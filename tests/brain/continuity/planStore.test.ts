@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, existsSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PLAN_MAX_CHARS, isSessionPlanPath, readPlan, writePlan } from '../../../src/brain/continuity/planStore.js';
+import { PLAN_MAX_CHARS, ensurePlanDir, readPlan } from '../../../src/brain/continuity/planStore.js';
+import { isSessionPlanPath } from '../../../src/plugins/pathGuard.js';
+import { seedPlan } from '../../helpers/plan.js';
 import { planSlug } from '../../../src/shared/planSlug.js';
 
 describe('continuity/planStore', () => {
@@ -19,13 +21,33 @@ describe('continuity/planStore', () => {
   });
 
   it('writes a plan and reads it back verbatim', () => {
-    writePlan('s1', '# Ship it\n\nStep one.');
+    seedPlan('s1', '# Ship it\n\nStep one.');
     expect(readPlan('s1')).toBe('# Ship it\n\nStep one.');
+  });
+
+  // The model is told to write its plan here, but Write does not create parent directories and plan
+  // mode denies `mkdir -p`. Doing this lazily rather than at startup is what makes it survive an
+  // instance that UPDATED into the feature without restarting, or someone deleting the directory.
+  it('creates the plans directory on demand, and again after it is removed', () => {
+    const plans = join(home, '.config/elowen/plans');
+    expect(existsSync(plans)).toBe(false);
+    expect(ensurePlanDir('s1')).toBe(true);
+    expect(existsSync(plans)).toBe(true);
+    rmSync(plans, { recursive: true, force: true });
+    expect(ensurePlanDir('s1')).toBe(true);
+    expect(existsSync(plans)).toBe(true);
+  });
+
+  // The cap has to live on the read: the file is written by the model through the clamped Write tool
+  // and may be edited by hand, so neither ingress passes through this module.
+  it('caps an oversized plan written by something other than this module', () => {
+    seedPlan('s1', 'x'.repeat(PLAN_MAX_CHARS + 5_000));
+    expect(readPlan('s1')?.length).toBe(PLAN_MAX_CHARS);
   });
 
   it('creates the plans directory on first write', () => {
     expect(existsSync(join(home, '.config/elowen/plans'))).toBe(false);
-    writePlan('s1', 'anything');
+    seedPlan('s1', 'anything');
     expect(existsSync(planFile('s1'))).toBe(true);
   });
 
@@ -36,14 +58,14 @@ describe('continuity/planStore', () => {
   });
 
   it('replaces the previous plan rather than appending to it', () => {
-    writePlan('s1', 'first');
-    writePlan('s1', 'second');
+    seedPlan('s1', 'first');
+    seedPlan('s1', 'second');
     expect(readPlan('s1')).toBe('second');
   });
 
   it('scopes plans per conversation', () => {
-    writePlan('s1', 'mine');
-    writePlan('s2', 'theirs');
+    seedPlan('s1', 'mine');
+    seedPlan('s2', 'theirs');
     expect(readPlan('s1')).toBe('mine');
     expect(readPlan('s2')).toBe('theirs');
   });
@@ -51,14 +73,8 @@ describe('continuity/planStore', () => {
   // The plan is re-injected verbatim after a compaction, so an unbounded document would spend the
   // context the compaction just reclaimed.
   it('truncates an oversized plan', () => {
-    writePlan('s1', 'x'.repeat(PLAN_MAX_CHARS + 500));
+    seedPlan('s1', 'x'.repeat(PLAN_MAX_CHARS + 500));
     expect(readPlan('s1')).toHaveLength(PLAN_MAX_CHARS);
-  });
-
-  it('ignores an empty or whitespace-only plan instead of storing a blank file', () => {
-    writePlan('s1', '   \n\t ');
-    expect(existsSync(planFile('s1'))).toBe(false);
-    expect(readPlan('s1')).toBeUndefined();
   });
 
   it('treats a file that holds only whitespace as no plan', () => {
@@ -70,7 +86,7 @@ describe('continuity/planStore', () => {
   // The filename is now a derived slug rather than the id itself, which is what makes an escape
   // impossible; asserted end-to-end here so the guarantee is pinned at the level the caller sees.
   it('keeps an id carrying path separators inside the plans directory', () => {
-    writePlan('brain-ch-a/../../escape', 'contained');
+    seedPlan('brain-ch-a/../../escape', 'contained');
     expect(existsSync(join(home, '.config/elowen/plans'))).toBe(true);
     expect(existsSync(join(home, '.config/elowen/escape.md'))).toBe(false);
     expect(readPlan('brain-ch-a/../../escape')).toBe('contained');
@@ -84,19 +100,19 @@ describe('continuity/planStore', () => {
     const planName = `${planSlug('s1')}.md`;
 
     it('accepts exactly this session\'s plan file', () => {
-      writePlan('s1', 'x');
+      seedPlan('s1', 'x');
       expect(isSessionPlanPath('s1', planFile('s1'))).toBe(true);
     });
 
     it('refuses another session\'s plan, and the directory itself', () => {
-      writePlan('s1', 'x');
-      writePlan('s2', 'y');
+      seedPlan('s1', 'x');
+      seedPlan('s2', 'y');
       expect(isSessionPlanPath('s1', planFile('s2'))).toBe(false);
       expect(isSessionPlanPath('s1', plansDir())).toBe(false);
     });
 
     it('refuses a traversal that spells the right name from outside', () => {
-      writePlan('s1', 'x');
+      seedPlan('s1', 'x');
       expect(isSessionPlanPath('s1', join(plansDir(), '..', 'plans', planName))).toBe(true); // still the same file
       expect(isSessionPlanPath('s1', join(plansDir(), '..', 'elowen.db'))).toBe(false);
       expect(isSessionPlanPath('s1', join(plansDir(), '..', '..', '..', 'etc', 'passwd'))).toBe(false);
@@ -121,14 +137,14 @@ describe('continuity/planStore', () => {
 
     // Reached THROUGH a link but landing on the real file is fine — the resolved path is what counts.
     it('accepts the real file reached through a symlinked directory', () => {
-      writePlan('s1', 'x');
+      seedPlan('s1', 'x');
       const link = join(home, 'link-to-plans');
       symlinkSync(plansDir(), link);
       expect(isSessionPlanPath('s1', join(link, planName))).toBe(true);
     });
 
     it('refuses empty, relative and near-miss paths', () => {
-      writePlan('s1', 'x');
+      seedPlan('s1', 'x');
       expect(isSessionPlanPath('s1', '')).toBe(false);
       expect(isSessionPlanPath('s1', planName)).toBe(false);
       expect(isSessionPlanPath('s1', `${planFile('s1')}.bak`)).toBe(false);

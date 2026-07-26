@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildPostCompactionContext, drainPostCompactionContext, type PostCompactionStore } from '../../../src/brain/continuity/postCompactionContext.js';
-import { writePlan } from '../../../src/brain/continuity/planStore.js';
+import { seedPlan } from '../../helpers/plan.js';
 
 describe('continuity/postCompactionContext', () => {
   let home: string;
@@ -28,7 +28,7 @@ describe('continuity/postCompactionContext', () => {
   });
 
   it('carries the plan alone', () => {
-    writePlan('s1', '# Ship it');
+    seedPlan('s1', '# Ship it');
     const out = buildPostCompactionContext(empty, 's1', []);
     expect(out).toContain('<active-plan>\n# Ship it\n</active-plan>');
     expect(out).not.toContain('<working-set>');
@@ -43,7 +43,7 @@ describe('continuity/postCompactionContext', () => {
   });
 
   it('carries both in one reminder', () => {
-    writePlan('s1', '# Ship it');
+    seedPlan('s1', '# Ship it');
     const store = storeWith(divider([{ path: '/a.ts', wrote: true }]));
     const out = buildPostCompactionContext(store, 's1', []);
     expect(out).toContain('<active-plan>');
@@ -55,13 +55,13 @@ describe('continuity/postCompactionContext', () => {
   // A compaction that kept the turn holding the plan cost the model nothing — repeating the document
   // would spend the very context the compaction reclaimed.
   it('omits a plan the model can still see in the live context', () => {
-    writePlan('s1', '# Ship it');
+    seedPlan('s1', '# Ship it');
     const live = [{ role: 'assistant', content: 'here it is <proposed_plan>\n# Ship it\n</proposed_plan>' }];
     expect(buildPostCompactionContext(empty, 's1', live)).toBe('');
   });
 
   it('still carries the working set when the plan is suppressed', () => {
-    writePlan('s1', '# Ship it');
+    seedPlan('s1', '# Ship it');
     const store = storeWith(divider([{ path: '/a.ts', wrote: false }]));
     const live = [{ role: 'assistant', content: '<proposed_plan>\n# Ship it\n</proposed_plan>' }];
     const out = buildPostCompactionContext(store, 's1', live);
@@ -85,7 +85,7 @@ describe('continuity/postCompactionContext', () => {
   });
 
   it('tells the model not to trust the summary about file contents', () => {
-    writePlan('s1', 'x');
+    seedPlan('s1', 'x');
     expect(buildPostCompactionContext(empty, 's1', [])).toContain('do not assume file contents from the summary');
   });
 
@@ -98,14 +98,14 @@ describe('continuity/postCompactionContext', () => {
     const msg = (content: string) => ({ role: 'user', content });
 
     it('re-injects the plan when only the mode directive mentions the tag', () => {
-      writePlan('s1', '# Ship it\n\n1. Wire the store');
+      seedPlan('s1', '# Ship it\n\n1. Wire the store');
       const out = buildPostCompactionContext(empty, 's1', [msg(directive)]);
       expect(out).toContain('<active-plan>');
       expect(out).toContain('Wire the store');
     });
 
     it('stays quiet when the plan text itself is still on screen', () => {
-      writePlan('s1', '# Ship it\n\n1. Wire the store');
+      seedPlan('s1', '# Ship it\n\n1. Wire the store');
       expect(buildPostCompactionContext(empty, 's1', [msg('# Ship it\n\n1. Wire the store')])).toBe('');
     });
   });
@@ -121,13 +121,13 @@ describe('continuity/postCompactionContext', () => {
     });
 
     it('stays silent when the conversation never compacted', () => {
-      writePlan('s1', '# Ship it');
+      seedPlan('s1', '# Ship it');
       expect(drainPostCompactionContext(empty, live())).toEqual({ block: '', compacted: false });
     });
 
     // One-shot per compaction: the model is oriented once, not reminded every turn for the rest of it.
     it('yields the block once and then goes quiet', () => {
-      writePlan('s1', '# Ship it');
+      seedPlan('s1', '# Ship it');
       const store = withDivider('div-1');
       const l = live();
       expect(drainPostCompactionContext(store, l).block).toContain('<active-plan>');
@@ -141,7 +141,7 @@ describe('continuity/postCompactionContext', () => {
       const l = live();
       expect(drainPostCompactionContext(withDivider('div-1'), l).block).toBe('');
       expect(l.orientedForCompaction).toBe('div-1');
-      writePlan('s1', '# Ship it');
+      seedPlan('s1', '# Ship it');
       expect(drainPostCompactionContext(withDivider('div-2'), l).block).toContain('<active-plan>');
       expect(l.orientedForCompaction).toBe('div-2');
     });
