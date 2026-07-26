@@ -587,6 +587,7 @@ export class BrainService {
     // Only the PI-level interrupt, never the full abort(): abort() throws on an already-stopped session
     // and stopSession must stay idempotent. The serialized teardown below still does the real cascade.
     const runningLive = this.sessions.get(target);
+    logger('brain-stop').info(`stop ${target}: pre-lock interrupt gate live=${!!runningLive} mayAbort=${this.mayAbortOnStop(target, clientId)} bashRunning=${runningLive ? (runningLive.session as { isBashRunning?: boolean }).isBashRunning : 'n/a'}`);
     if (runningLive && this.mayAbortOnStop(target, clientId)) {
       // Signal only — deliberately NOT awaited, so cleanUp reserves the lock in THIS tick. Awaiting would
       // let a start arriving during the interrupt take the lock first, breaking "a start racing a teardown
@@ -600,7 +601,10 @@ export class BrainService {
       // times out (5 min by default). Release the parked turn first — synchronous, so the lock is still
       // reserved in this tick. abortLive does the same in the same order for the same reason.
       this.elicitation.cancelForSession(target, 'client closed');
-      void abortSessionWork(runningLive.session).catch((err: unknown) => {
+      const interruptStarted = Date.now();
+      void abortSessionWork(runningLive.session).then(() => {
+        logger('brain-stop').info(`stop ${target}: pre-lock interrupt settled in ${Date.now() - interruptStarted}ms`);
+      }).catch((err: unknown) => {
         // The serialized abort below normally reports the outcome — but if this interrupt is what failed,
         // the turn may never release the lock and the teardown silently waits it out again. Leave a trace.
         logger('brain').warn(`stop ${target}: interrupt failed — ${err instanceof Error ? err.message : String(err)}`);
