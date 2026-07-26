@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PLAN_MAX_CHARS, readPlan, writePlan } from '../../../src/brain/continuity/planStore.js';
+import { PLAN_MAX_CHARS, isSessionPlanPath, readPlan, writePlan } from '../../../src/brain/continuity/planStore.js';
 
 describe('continuity/planStore', () => {
   let home: string;
@@ -72,5 +72,70 @@ describe('continuity/planStore', () => {
     expect(existsSync(join(home, '.config/elowen/plans'))).toBe(true);
     expect(existsSync(join(home, '.config/elowen/escape.md'))).toBe(false);
     expect(readPlan('brain-ch-a/../../escape')).toBe('contained');
+  });
+
+  // This predicate is what makes it safe to hand plan mode a writing tool at all. A false positive does
+  // not misplace a file — it turns plan mode into arbitrary write access, so each way of spelling
+  // "somewhere else" gets its own case.
+  describe('isSessionPlanPath', () => {
+    const plansDir = () => join(home, '.config/elowen/plans');
+
+    it('accepts exactly this session\'s plan file', () => {
+      writePlan('s1', 'x');
+      expect(isSessionPlanPath('s1', planFile('s1'))).toBe(true);
+    });
+
+    it('refuses another session\'s plan, and the directory itself', () => {
+      writePlan('s1', 'x');
+      writePlan('s2', 'y');
+      expect(isSessionPlanPath('s1', planFile('s2'))).toBe(false);
+      expect(isSessionPlanPath('s1', plansDir())).toBe(false);
+    });
+
+    it('refuses a traversal that spells the right name from outside', () => {
+      writePlan('s1', 'x');
+      expect(isSessionPlanPath('s1', join(plansDir(), '..', 'plans', 's1.md'))).toBe(true); // still the same file
+      expect(isSessionPlanPath('s1', join(plansDir(), '..', 'elowen.db'))).toBe(false);
+      expect(isSessionPlanPath('s1', join(plansDir(), '..', '..', '..', 'etc', 'passwd'))).toBe(false);
+    });
+
+    // The case that makes containment load-bearing: comparing the candidate against the RESOLVED expected
+    // path would let a symlinked plan file agree with itself and wave a write through to the target.
+    it('refuses when the plan file itself is a symlink out of the directory', () => {
+      mkdirSync(plansDir(), { recursive: true });
+      const outside = join(home, 'outside.md');
+      writeFileSync(outside, 'victim');
+      symlinkSync(outside, join(plansDir(), 's1.md'));
+      expect(isSessionPlanPath('s1', planFile('s1'))).toBe(false);
+    });
+
+    it('refuses a symlink in the plans directory pointing at a neighbour', () => {
+      mkdirSync(plansDir(), { recursive: true });
+      writeFileSync(join(plansDir(), 'other.md'), 'other');
+      symlinkSync(join(plansDir(), 'other.md'), join(plansDir(), 's1.md'));
+      expect(isSessionPlanPath('s1', planFile('s1'))).toBe(false);
+    });
+
+    // Reached THROUGH a link but landing on the real file is fine — the resolved path is what counts.
+    it('accepts the real file reached through a symlinked directory', () => {
+      writePlan('s1', 'x');
+      const link = join(home, 'link-to-plans');
+      symlinkSync(plansDir(), link);
+      expect(isSessionPlanPath('s1', join(link, 's1.md'))).toBe(true);
+    });
+
+    it('refuses empty, relative and near-miss paths', () => {
+      writePlan('s1', 'x');
+      expect(isSessionPlanPath('s1', '')).toBe(false);
+      expect(isSessionPlanPath('s1', 's1.md')).toBe(false);
+      expect(isSessionPlanPath('s1', `${planFile('s1')}.bak`)).toBe(false);
+      expect(isSessionPlanPath('s1', join(plansDir(), 'sub', 's1.md'))).toBe(false);
+    });
+
+    // The file need not exist yet: the model writes it for the first time from inside plan mode.
+    it('accepts the path before the plan file exists', () => {
+      mkdirSync(plansDir(), { recursive: true });
+      expect(isSessionPlanPath('s1', planFile('s1'))).toBe(true);
+    });
   });
 });

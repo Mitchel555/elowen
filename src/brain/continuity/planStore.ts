@@ -1,7 +1,36 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { planFilePath } from '../../shared/paths.js';
+import { realAbs, realPathWithin } from '../../plugins/pathGuard.js';
 import { logger } from '../../shared/logger.js';
+
+/** Is `candidate` exactly this session's plan file?
+ *
+ *  This is a SECURITY boundary, not a convenience. Plan mode is read-only because it withholds every
+ *  writing tool; admitting one back so the model can author its plan is only safe while this predicate
+ *  is exact. A false positive here does not misplace a file — it hands plan mode arbitrary write access.
+ *
+ *  Two properties do the work, and both are needed:
+ *
+ *  1. The candidate is resolved through symlinks and `..` BEFORE anything is compared, so neither a
+ *     traversal nor a link in a parent directory can point somewhere else while spelling the right path.
+ *  2. The resolved path must land INSIDE the plans directory. Comparing it against the resolved expected
+ *     path alone would look right and be wrong: if the plan file were itself a symlink pointing out of
+ *     the directory, both sides would resolve to the same foreign target and agree. Containment is what
+ *     refuses that, so it is checked first and the file name is matched inside the RESOLVED directory.
+ *
+ *  Deny-by-default throughout: anything unresolvable, relative to nowhere, or merely near the plan file
+ *  is refused. What this cannot cover is a swap between this check and the write that follows it; the
+ *  plans directory lives under the daemon's own config dir and a plan turn has no tool able to create a
+ *  link there, so the window is closed by what plan mode withholds rather than by this function. */
+export function isSessionPlanPath(sessionId: string, candidate: string): boolean {
+  if (!candidate) return false;
+  const expected = planFilePath(process.env, sessionId);
+  const plansDir = dirname(expected);
+  const resolved = realPathWithin(candidate, [plansDir]);
+  if (!resolved) return false;
+  return resolved === join(realAbs(plansDir), basename(expected));
+}
 
 /** Upper bound on a stored plan. The plan is re-injected VERBATIM into the prompt after a compaction,
  *  so an unbounded document would trade one context problem for another — a 200 KB "plan" would blow

@@ -52,7 +52,7 @@ export function currentAccess(): { projectIds: number[]; admin: boolean; owner: 
 /** Resolve to the REAL absolute path (symlinks followed), so a link inside an allowed repo pointing
  *  outside it can't smuggle access past the prefix check. A not-yet-existing target (a new file)
  *  resolves through its closest existing ancestor instead. */
-function realAbs(path: string): string {
+export function realAbs(path: string): string {
   const abs = resolve(path);
   try { return realpathSync(abs); }
   catch {
