@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { validateWorkflowNodes, mergeWorkflowNodes, readyNodeIds } from './dag.mjs';
+import { MAX_CONTEXT_CHARS } from './limits.mjs';
 
 const MAX_WORKFLOWS = 16;
 const WORKFLOW_RETENTION_MS = 60 * 60_000;
@@ -18,10 +19,12 @@ const SNAPSHOT_TASK_PREVIEW = 500;
 // Same bound for a terminal node's result/error preview: the modal dock shows a line or two, and the
 // full MAX_RESULT_CHARS body already reaches the parent through the blocking WorkflowStart return.
 const SNAPSHOT_RESULT_PREVIEW = 500;
-// Total budget for the dependency results handed to one node, shared equally between its dependencies.
-// A wide fan-in (a synthesis node over many branches) must not bury the node's own task, and each slice
-// keeps clip()'s `[truncated]` marker so the child can see it is reading a partial result.
-const DEP_CONTEXT_BUDGET_CHARS = 40_000;
+// Rough size of the wrapper around the dependency results (block heading plus the truncation note), so
+// the divided budget accounts for its own packaging rather than overrunning by it.
+const DEP_HEADER_CHARS = 300;
+// Never hand a node a slice too small to carry a finding. When even this does not fit, the results are
+// heavily truncated and the block says so — which is more useful than silently shipping three words.
+const DEP_MIN_CHARS = 400;
 
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
 const errorText = (e) => (e instanceof Error ? e.message : String(e));
@@ -162,8 +165,21 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       .map((id) => ({ id, result: wf.state.get(id)?.result }))
       .filter((d) => d.result);
     if (depResults.length) {
-      const perDep = Math.floor(DEP_CONTEXT_BUDGET_CHARS / depResults.length);
-      contextParts.push(`Results from the nodes this one depends on:\n\n${depResults
+      // Divide what is actually LEFT, not a budget of our own choosing. The whole context ships as one
+      // prompt-append chunk, so the ceiling is the chunk bound — and the preamble and shared context are
+      // already spending it. Sizing this independently is how a wide fan-in used to lose everything but
+      // its first dependency: the slices were cut to fit a budget the chunk could never hold, and the
+      // single clip at the end then took the first N chars of the joined block.
+      const spent = contextParts.reduce((n, part) => n + part.length + 2, DEP_HEADER_CHARS);
+      const perDep = Math.max(DEP_MIN_CHARS, Math.floor((MAX_CONTEXT_CHARS - spent) / depResults.length));
+      const clipped = depResults.filter((d) => d.result.length > perDep).map((d) => d.id);
+      // Say so IN the block. A node reading a truncated dependency cannot tell whether the finding it is
+      // looking for was absent or merely cut off, and that difference decides whether it should re-derive.
+      const note = clipped.length
+        ? `\n\nThese were truncated to fit and you are NOT seeing them in full: ${clipped.join(', ')}. `
+          + 'Say so in your output rather than treating what you received as the complete result.'
+        : '';
+      contextParts.push(`Results from the nodes this one depends on:${note}\n\n${depResults
         .map((d) => `## Result from node "${d.id}"\n${clip(d.result, perDep)}`)
         .join('\n\n')}`);
     }

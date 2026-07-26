@@ -72,12 +72,17 @@ function skillLoadDisplay(args: Record<string, unknown>): { name: string; detail
 /** The plan markdown a settled ExitPlanMode call submitted, for the client's plan panel and decision.
  *  Read from the result's `details` (client-bound metadata) rather than from its text, which is addressed
  *  to the model. Keyed on the tool name so no other tool can put a plan panel on screen by shipping a
- *  `plan` detail of its own. */
+ *  `plan` detail of its own.
+ *
+ *  Stripped like any other tool output, for the reason given on `stripControl`: the plan is rendered
+ *  into a framed panel whose width is measured with ANSI removed but whose lines are written verbatim.
+ *  This content is not the model's own prose — it comes off disk, so it carries whatever the model
+ *  copied out of the repository it was reading, or whatever the user typed while editing the file. */
 export function submittedPlan(toolName: string, result: unknown): string | undefined {
   if (toolName !== EXIT_PLAN_MODE_TOOL) return undefined;
   const details = (result as { details?: unknown } | null | undefined)?.details;
   const plan = (details as { plan?: unknown } | null | undefined)?.plan;
-  return typeof plan === 'string' && plan.trim() ? plan : undefined;
+  return typeof plan === 'string' && plan.trim() ? stripControl(plan) : undefined;
 }
 
 export function toolDisplay(toolName: string, args: unknown): { name: string; detail?: string } {

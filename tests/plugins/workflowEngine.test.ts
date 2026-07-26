@@ -3,9 +3,17 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const { MAX_CONTEXT_CHARS } = await import(resolve(repoRoot, 'plugins/subagent/lib/limits.mjs')) as { MAX_CONTEXT_CHARS: number };
 const { registerWorkflow } = await import(resolve(repoRoot, 'plugins/subagent/lib/workflow.mjs')) as {
   registerWorkflow(ctx: unknown, getRun: unknown, helpers: unknown): void;
 };
+
+// Clips exactly like the real delegateContextChunk. A pass-through double is what let a wide fan-in
+// ship broken: the engine divided a budget six times larger than this bound, and the only thing that
+// would have caught it was the very function the double replaced.
+const realContextChunk = (raw: string): string | undefined => (raw
+  ? `ctx:${raw.length <= MAX_CONTEXT_CHARS ? raw : `${raw.slice(0, MAX_CONTEXT_CHARS)}\n[truncated]`}`
+  : undefined);
 
 interface Tool { name: string; execute(id: string, p: unknown): Promise<{ content: { text: string }[]; details?: Record<string, unknown> }> }
 
@@ -51,7 +59,7 @@ function harness(opts: { toolPolicyAllow?: string[] } = {}) {
     resolveDelegateTools: (_inheritedAllow: string[] | undefined, requested: string[] | undefined) =>
       (requested ? { allow: requested } : { allow: undefined }),
     principalOf: (identity: unknown) => (identity ? 'elowen:1' : null),
-    delegateContextChunk: (raw: string) => (raw ? `ctx:${raw}` : undefined),
+    delegateContextChunk: realContextChunk,
   };
   registerWorkflow(ctx, () => run, helpers);
   return { tools, controls, snapshots, launched, contexts };
@@ -133,6 +141,30 @@ describe('workflow engine', () => {
     expect(contexts.get('gather') ?? '').not.toContain('Results from the nodes');
   });
 
+  // A wide fan-in used to lose everything but its first dependency. The slices were cut to fit a budget
+  // six times larger than the one context chunk could hold, so the join was clipped from the front and a
+  // seven-branch synthesis node received one truncated report and six that were simply absent. It said
+  // so in its output, which is the only reason anyone noticed — so the fix has to divide what is really
+  // left AND tell the node which results it is not seeing in full.
+  it('gives a wide fan-in every dependency, and names the ones it had to truncate', async () => {
+    const { tools, contexts } = harness();
+    const branches = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    // Each branch reports far more than its slice can hold, the way a real review section does.
+    const longTask = (id: string) => `${id}:${'x'.repeat(3_000)}`;
+    await tools.get('WorkflowStart')!.execute('t-fanin', {
+      nodes: [
+        ...branches.map((id) => ({ id, task: longTask(id) })),
+        { id: 'synthesis', task: 'synthesise', deps: branches },
+      ],
+    });
+    const synthesis = contexts.get('synthesise') ?? '';
+    // Every branch is present and attributed — not just however many fit before the clip.
+    for (const id of branches) expect(synthesis).toContain(`## Result from node "${id}"`);
+    // And the node is told, by name, what it is reading only part of.
+    expect(synthesis).toContain('truncated to fit');
+    for (const id of branches) expect(synthesis).toMatch(new RegExp(`truncated to fit[^\\n]*${id}`));
+  });
+
   // The modal reports which model is burning a node's tokens. `node.model` is only set when the caller
   // named a DIFFERENT one, so reporting that alone left every inheriting node blank — the common case,
   // and the one where "what is actually running?" matters most (it is how a whole review workflow can
@@ -211,7 +243,7 @@ describe('workflow engine', () => {
     registerWorkflow(ctx, () => run, {
       resolveDelegateTools: () => ({ allow: undefined }),
       principalOf: () => 'elowen:1',
-      delegateContextChunk: (raw: string) => (raw ? `ctx:${raw}` : undefined),
+      delegateContextChunk: realContextChunk,
     });
     const startP = tools.get('WorkflowStart')!.execute('t6', { title: 'dyn', nodes: [{ id: 'root', task: 'root' }] });
     await new Promise((r) => setTimeout(r, 5)); // let root launch and park on the gate
@@ -267,7 +299,7 @@ describe('workflow engine', () => {
     registerWorkflow(ctx, () => run, {
       resolveDelegateTools: () => ({ allow: undefined }),
       principalOf,
-      delegateContextChunk: (raw: string) => (raw ? `ctx:${raw}` : undefined),
+      delegateContextChunk: realContextChunk,
     });
     const startP = tools.get('WorkflowStart')!.execute('t7', { nodes: [{ id: 'root', task: 'root' }] });
     await new Promise((r) => setTimeout(r, 5));
@@ -370,7 +402,7 @@ describe('workflow background + detach', () => {
     registerWorkflow(ctx, () => run, {
       resolveDelegateTools: () => ({ allow: undefined }),
       principalOf: (id: { elowenUserId?: number } | null) => (id?.elowenUserId ? `elowen:${id.elowenUserId}` : null),
-      delegateContextChunk: (raw: string) => (raw ? `ctx:${raw}` : undefined),
+      delegateContextChunk: realContextChunk,
     });
     return { tools, controls, completions, launched, finished, release, snapshots };
   }

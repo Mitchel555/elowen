@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
+import { MAX_CONTEXT_CHARS } from './lib/limits.mjs';
 
 const MAX_BACKGROUND_JOBS = 64;
 const JOB_RETENTION_MS = 60 * 60_000;
@@ -48,9 +49,6 @@ export function resolveDelegateTools(inheritedAllow, requested, available) {
   return { allow: names };
 }
 const clip = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit)}\n[truncated]`;
-// Well under the delegated-scope per-chunk bound (8k chars) so a shared-context chunk never overflows
-// and rejects the whole delegation. Oversized context is clipped, never dropped.
-const MAX_CONTEXT_CHARS = 6_000;
 /** Format the optional parent-supplied context into ONE system-prompt chunk for the child, clipped to
  *  stay within the delegated-scope bound. Returns undefined when there is no usable context. The child
  *  cannot see the parent conversation, so this is how the delegating agent hands over what it already
