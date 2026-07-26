@@ -109,6 +109,11 @@ async function main() {
     sendKey('Enter');
     await waitFor('the long tool running', () => capture().includes('E2E LONG PHASE'), 12_000);
     captureState({ tmux, session, artifactDir, label: '01-long-turn-running', perfLog, expectCursor: true });
+    // The escalation notice is set ONCE, at abort time, and only when the CLI already knows a foreground
+    // command is running — that arrives as a separate `process` event. Pressing Esc before it lands aborts
+    // without ever advertising the escalation. Only a test hits this (it presses within milliseconds of the
+    // turn starting; a human never does), so gate on the footer hint the very same state drives.
+    await waitFor('the foreground command visible to the CLI', () => capture().includes('background command'), 12_000);
 
     // 2) Esc presses arm and then fire the graceful abort. Press-by-press with the log as the oracle:
     //    each press either arms the 1.8 s window or (inside it) aborts, so a slow frame can never wedge
@@ -123,17 +128,17 @@ async function main() {
     assert.equal(requested('/brain/commands/kill').length, 0, 'the graceful abort must not kill anything yet');
 
     // 3) The turn is still pinned (the fixture never idles on abort) — the escalation notice appears.
-    await waitFor('the escalation notice', () => capture().includes('esc again to kill the running command'), 6_000);
+    await waitFor('the escalation notice', () => capture().includes('esc again to kill the running command'), 12_000);
     captureState({ tmux, session, artifactDir, label: '02-escalation-advertised', perfLog, expectCursor: true });
 
     // 4) The next Esc escalates to the hard kill and the turn finally unwinds.
     sendKey('Escape');
-    await waitFor('the kill request', () => requested('/brain/commands/kill').length > 0, 6_000);
+    await waitFor('the kill request', () => requested('/brain/commands/kill').length > 0, 12_000);
     const kill = requested('/brain/commands/kill').at(-1);
     assert.equal(kill.body?.session, 'e2e-session', 'the kill must carry the bound session');
     assert.ok(kill.body?.client && kill.body?.generation, 'the Esc-path kill rides the client-generation fence');
-    await waitFor('the kill outcome notice', () => capture().includes('killed 1 foreground command'), 6_000);
-    await waitFor('the turn settling to idle', () => capture().includes('⏎ send'), 6_000);
+    await waitFor('the kill outcome notice', () => capture().includes('killed 1 foreground command'), 12_000);
+    await waitFor('the turn settling to idle', () => capture().includes('⏎ send'), 12_000);
     captureState({ tmux, session, artifactDir, label: '03-killed-and-idle', perfLog, expectCursor: true });
 
     const performance = analyzeFrameDiagnostics(readFrames(perfLog));
