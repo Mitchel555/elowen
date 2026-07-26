@@ -1,8 +1,8 @@
 ---
 title: Skills
 slug: skills
-order: 19
-eyebrow: Extend Elowen
+order: 23
+eyebrow: Extending
 group: Extending
 ---
 
@@ -98,4 +98,4 @@ Save this as a skill named `deploy-checklist` with the description "Use before d
 
 Skills are one layer of Elowen's extension system. For the broader plugin architecture that skills live within, see [Plugins](plugins).
 
-[Next: Plugin Development](plugin-dev)
+[Next: MCP Integration](mcp)

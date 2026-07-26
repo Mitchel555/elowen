@@ -1,33 +1,51 @@
 ---
-title: Deployment
-slug: deployment
-order: 24
-eyebrow: Operations
-group: Reference
+title: Production & Updates
+slug: production-updates
+order: 4
+eyebrow: Start here
+group: Start here
 ---
 
-# Deployment
+# Production & Updates
 
-The [Install](install) page gets Elowen running on your machine. This page
-covers production operations: process supervision, reverse-proxy setup,
-monitoring, updates, and database care.
+Running Elowen on your own server — an always-on box you reach over the network
+— adds a few operational concerns on top of a local install: service
+supervision, a reverse proxy with HTTPS, monitoring, backups, and updates. Most
+of it is set up for you by the installer; the rest of this page is reference for
+running the pieces by hand.
 
-## Prerequisites
+## What `elowen install` provisions
 
-Node.js >=22, tmux >=3.x, npm — see [Install](install).
-
-## Production build
+For a shared or always-on box, `elowen install` provisions the whole service.
+It's a separate, heavier wizard than `elowen setup` — run it **as root**:
 
 ```bash
-npm ci --omit=dev
-npm run build
+sudo elowen install
 ```
 
-Compiles TypeScript and copies `schema.sql` + `prompts/` into `dist/`. Daemon
-entry point: `dist/daemon/index.js`.
+It will:
+
+1. Install prerequisites (tmux) and, optionally, the coding-agent CLIs it
+   detects — Claude Code, OpenCode, Codex
+2. Create (or reuse) a dedicated **service user** to run the agents
+3. Ask how you'll reach the UI — a **domain** (nginx or Apache reverse proxy +
+   free Let's Encrypt HTTPS), the server's **IP on a port**, or **localhost
+   only**. The generated vhost also routes `/hooks/` to the daemon so plugin
+   inbound webhooks work out of the box
+4. Write and enable the systemd units — `elowen-daemon` (`:4400`) and
+   `elowen-web` (`:4500`) — plus the `elowen-update.timer` and a **sudoers
+   drop-in** for self-updates (see [Auto-update](#auto-update))
+5. Run the same onboarding as `elowen setup` to create the admin, connect a
+   project, and wire the AI provider
+
+Add `--unattended` with flags (`--domain`, `--ip`, `--localhost`,
+`--admin-user`, `--admin-pass`, `--agents`, …) for a hands-off provision; run
+`elowen install --help` for the full list. Manage the box afterwards with
+`elowen menu`, which drives the systemd units directly.
 
 ## systemd services
 
+If you run the units by hand instead of using the installer,
 `/etc/systemd/system/elowen-daemon.service`:
 
 ```ini
@@ -50,7 +68,7 @@ Environment=ELOWEN_PROJECT_PATH=/opt/elowen
 WantedBy=multi-user.target
 ```
 
-`/etc/systemd/system/elowen-web.service`:
+`/etc/systemd/system/elowen-web.service` alongside it:
 
 ```ini
 [Unit]
@@ -130,7 +148,7 @@ Why each location matters:
 | Location | Reason |
 |----------|--------|
 | `/api/` | `proxy_buffering off` + long timeout keep SSE streams flowing without nginx swallowing events. |
-| `/ws/` | WebSocket upgrade for real-PTY terminal; without it, terminals fall back to snapshot mirror. |
+| `/ws/` | WebSocket upgrade for the real-PTY terminal; without it, terminals fall back to snapshot mirror. |
 | `/hooks/` | Plugin inbound webhooks (e.g. Teams Bot Framework). Auth handled by the plugin, not the daemon token. |
 | `/sw.js` | Prevents a cached service worker from serving stale UI after deploys. |
 
@@ -144,19 +162,44 @@ Why each location matters:
 | `ELOWEN_PORT` | `4400` | Daemon listen port |
 | `ELOWEN_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to expose) |
 | `ELOWEN_DB` | `~/.config/elowen/elowen.db` | SQLite database path |
+| `ELOWEN_PROJECT` | `elowen` | Initial project slug |
 | `ELOWEN_PROJECT_PATH` | `$PWD` | Default project root |
 | `ELOWEN_ALLOW_OPEN` | *(empty)* | Set `1` for no-auth mode |
 | `ELOWEN_BOOTSTRAP_USER` / `PASS` | *(empty)* | Initial admin credentials |
-| `ELOWEN_LOG_LEVEL` | *(empty)* | `debug`, `info`, `warn`, `error` |
+| `ELOWEN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `ELOWEN_LOG_DIR` | `~/.config/elowen/logs` | File-based log directory |
 | `ELOWEN_WEB_PORT` | `4500` | Web UI port |
 | `ELOWEN_DAEMON_URL` | `http://localhost:4400` | Web UI to daemon URL |
 | `ELOWEN_RELAY_URL` / `KEY` / `MODEL` | *(empty)* | Autopilot relay config |
+| `ELOWEN_URL` | `http://localhost:4400` | Daemon URL used by CLI clients |
+| `ELOWEN_TOKEN` | *(empty)* | Auth token for non-interactive CLI/API calls |
+| `ELOWEN_AUTOSTART` | `1` | Set `0` to stop CLI commands from auto-starting a daemon |
+| `ELOWEN_CLI` | `elowen` | CLI command used for spawned workers |
 
-CLI-specific vars (`ELOWEN_URL`, `ELOWEN_TOKEN`, `ELOWEN_AUTOSTART`) are
-covered in [Install](install).
+## Updating
 
-## Monitoring
+```bash
+elowen update
+```
+
+Pulls the latest release and restarts in place. Self-locating: it computes the
+npm prefix from its own binary path and handles root-owned installs via sudo.
+
+### Auto-update
+
+`elowen install` adds the `elowen-update.timer`, which fires an `elowen update
+--auto` check hourly (and once ~15 minutes after boot). It's **off by default** —
+the timer runs but the update no-ops until you turn auto-update on in **Settings →
+System**. Once enabled, updates are mission-aware: the agent won't restart itself
+while a mission is running, so work in flight is never interrupted.
+
+So the timer can go live unattended, the installer also writes a **sudoers
+drop-in** (`/etc/sudoers.d/elowen`, validated with `visudo`) granting the service
+user a narrow set of passwordless commands: restart and query its own units, and
+run the pinned self-reinstall. Without it the services still run — only in-place
+self-updates lose the ability to restart the units on their own.
+
+## Monitoring & logs
 
 ```bash
 curl http://localhost:4400/health   # {"ok":true}
@@ -166,36 +209,18 @@ tail -f ~/.config/elowen/logs/daemon-$(date +%F).log  # daily file logs
 ```
 
 Log files are daily (`daemon-2026-07-26.log`); there is no rolling file.
-Settings > Data > Logs in the web UI reads the same directory.
-
-## Updating
-
-```bash
-elowen update
-```
-
-Self-locating: computes the npm prefix from its own binary path, handles
-root-owned installs via sudo. An auto-update timer (provisioned by
-`elowen install`) checks hourly and respects running missions. Toggle in
-Settings > System.
+Settings → Data → Logs in the web UI reads the same directory.
 
 ## Database
 
-SQLite with WAL mode. Default: `~/.config/elowen/elowen.db`. Back up with
-`sqlite3 /path/to/elowen.db ".backup /backup/elowen-$(date +%Y%m%d).db"`.
+SQLite with WAL mode, one file at `~/.config/elowen/elowen.db` by default. Back
+up with:
+
+```bash
+sqlite3 /path/to/elowen.db ".backup /backup/elowen-$(date +%Y%m%d).db"
+```
+
 Schema changes are additive (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`)
 applied at boot. No migration framework — back up before updating.
 
-## Troubleshooting (quick reference)
-
-| Symptom | First check |
-|---------|-------------|
-| Daemon won't start | Node >=22? tmux? Port 4400 free? DB path writable? |
-| Sessions stuck | `elowen sessions`, then `DELETE /sessions/:name` |
-| CLI can't reach daemon | `curl http://localhost:4400/health` |
-| Web shows "unreachable" | Daemon running? `ELOWEN_DAEMON_URL` correct? |
-| Login returns 429 | Wait 5 min or restart. Check nginx `x-real-ip`. |
-
-Full guide: [Troubleshooting](troubleshooting).
-
-[Next: API Reference](api)
+[Next: Web UI](web-ui)

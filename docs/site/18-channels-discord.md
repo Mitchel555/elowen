@@ -1,9 +1,9 @@
 ---
 title: Discord
 slug: channels-discord
-order: 14
+order: 18
 eyebrow: Channels
-group: Extending
+group: Channels
 ---
 
 # Discord

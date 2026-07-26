@@ -1,9 +1,9 @@
 ---
 title: Troubleshooting
 slug: troubleshooting
-order: 18
-eyebrow: Reference
-group: Reference
+order: 27
+eyebrow: Help
+group: Help
 ---
 
 # Troubleshooting
@@ -83,7 +83,7 @@ The same readiness data powers the setup wizard's finish screen and `GET /system
    - No role policy mapped for the sender — unmapped senders are ignored by design.
 5. **Microsoft Teams specifics:**
    - The webhook endpoint `https://<domain>/hooks/msteams/messages` isn't reachable from the internet.
-   - `/hooks/` isn't proxied in a hand-written vhost — see [Deployment guide](../DEPLOYMENT.md).
+   - `/hooks/` isn't proxied in a hand-written vhost — see [Production & Updates](production-updates).
    - Missing or invalid TLS certificate.
    - The bot isn't installed from the app package — Teams only talks to installed bots.
    - Typo in the credentials — the plugin validates them immediately, so the error shows in the plugin log.
@@ -116,7 +116,7 @@ The same readiness data powers the setup wizard's finish screen and `GET /system
 
 1. Open the **Sessions** page and attach to the terminal — you can interrupt with Ctrl+C.
 2. Check if a permission denial is causing the retry (the agent retries a blocked command). Adjust the tool permissions or approve the action.
-3. The **stuck detector** (see [Agents & Autonomy](agents-autonomy)) should catch this automatically and escalate. If it doesn't fire, check that liveness checks are enabled.
+3. The **stuck detector** (see [Autonomy & Safety](autonomy-safety)) should catch this automatically and escalate. If it doesn't fire, check that liveness checks are enabled.
 4. Cancel the task/mission and rephrase the goal more concretely.
 
 ## Logs
@@ -157,4 +157,28 @@ Everything lives in a single SQLite database file in the data directory (default
 **The bot answered in the wrong language.**
 Set the `language` field in the channel plugin config (`en`, `cs` or `sk`) for service messages. For the agent's reply language, add an instruction to the role/sender policy's prompt.
 
-[Next: Scheduling](scheduling)
+**A model I configured doesn't appear in the picker.**
+Confirm the provider's API key is valid and the model is enabled in **Settings → Brain → Providers**. If you're not an admin, your account may be restricted to a model allow-list — ask an admin to check your access in **Settings → Users**. OpenRouter `:free` variants are filtered out by design and never appear.
+
+**My plugin config change didn't stick.**
+Saving a plugin config reloads the plugin, but a failed schema validation silently keeps the old values — check the field for an inline error. Secrets are write-only: re-entering a secret replaces it, but you can never read the stored value back, so an empty field does not mean the secret is gone. Existing live conversations keep the configuration they started with; changes apply from the next turn.
+
+**The bot ignores me in a group chat.**
+Group behavior is intentionally strict: on Discord and WhatsApp the bot only responds when mentioned (or replied to) unless `respondWithoutMention` is enabled, and on Telegram Group Privacy must be disabled in BotFather for the bot to see group messages at all. Check the platform specifics in the "Platform bot is silent" section above.
+
+**Memory exists but the agent doesn't recall it.**
+Memory is retrieved per user — facts stored under a different account never surface in your conversations. Without a configured embedding model, retrieval is keyword-only, so loosely worded prompts may miss relevant facts. Also check that the memory wasn't stored in a category scoped to a different project.
+
+**My cron job isn't firing.**
+Three common causes: the job was created with `enabled: false`; it has an `hours` window (e.g. `"5-21"`) and the current time falls outside it — the job stays quiet by design; or its `check` guard command printed nothing, which skips the tick entirely without running the model. List jobs with their last run and last result to see which one applies. Scheduling is also admin-only — a non-admin conversation can't create jobs.
+
+**The update fails with a permissions error.**
+A global npm update (`npm update -g elowen`) fails with `EACCES` when npm's global prefix is owned by root — either fix the npm prefix ownership or run the update with the same privileges used for the original install. On a server provisioned with `elowen install`, the auto-update timer runs as the dedicated `elowen` system user; don't mix in manual root updates, which can leave files the service user can't overwrite. See [Production & Updates](production-updates).
+
+**Web push notifications aren't arriving.**
+Push is per device and opt-in: enable it in **Account → Notifications** on each browser/device you want notified. Push requires the web UI to be served over HTTPS (or localhost) — a plain-HTTP origin can't register the service worker. Also check the browser's own notification permission for the site; a blocked permission in the browser overrides Elowen's setting.
+
+**A keybind doesn't do what I expect.**
+A chord can only belong to one action — if two actions share a chord, the earlier one in the `/keybinds` list wins and the editor shows a warning. Open `/keybinds`, press `r` on the affected action to reset its default, or `x` to unbind the conflicting one. To reset everything at once, delete the `keybinds` key in `cli-prefs.json`. See [CLI Keybinds](cli-keybinds).
+
+[Next: Glossary](glossary)

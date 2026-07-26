@@ -1,9 +1,9 @@
 ---
 title: Brain & Chat
 slug: brain-chat
-order: 7
-eyebrow: The agent
-group: Surfaces
+order: 8
+eyebrow: Everyday use
+group: Everyday use
 ---
 
 # Brain & Chat
@@ -63,6 +63,6 @@ Configure embeddings and categorization in **Settings → Memory**. An API-key o
 
 Tools come from the core and enabled plugins. Per-user policy narrows the visible and executable tool set, and execution-time checks remain authoritative. A tool's successful output is hidden unless its built-in or plugin declaration explicitly opts into transcript display; failures and important annotations remain visible.
 
-Approval questions are part of the conversation lifecycle. Depending on your account and the operation, the agent can wait for a decision, an overseer can handle a routine mission decision, or the work is escalated to a human. See [Agents & Autonomy](agents-autonomy) for the autonomy model.
+Approval questions are part of the conversation lifecycle. Depending on your account and the operation, the agent can wait for a decision, an overseer can handle a routine mission decision, or the work is escalated to a human. See [Autonomy & Safety](autonomy-safety) for the autonomy model.
 
-[Next: Plugins](plugins)
+[Next: Memory & Embeddings](memory)

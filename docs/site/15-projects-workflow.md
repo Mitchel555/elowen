@@ -1,9 +1,9 @@
 ---
 title: Projects & Workflow
 slug: projects-workflow
-order: 9
-eyebrow: Guide
-group: Extending
+order: 15
+eyebrow: Automation
+group: Automation
 ---
 
 # Projects & Workflow
@@ -65,4 +65,4 @@ Workers also receive a scoped `elowen help` and `elowen ask` interface so they c
 
 For task state and mission execution, see [Tasks & Missions](tasks-missions). For the editor and project UI, see [Web UI](web-ui).
 
-[Next: Configuration](configuration)
+[Next: Scheduling](scheduling)

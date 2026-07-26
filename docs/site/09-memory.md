@@ -1,9 +1,9 @@
 ---
 title: Memory & Embeddings
 slug: memory
-order: 23
-eyebrow: Automation
-group: Reference
+order: 9
+eyebrow: Everyday use
+group: Everyday use
 ---
 
 # Memory & Embeddings
@@ -120,4 +120,4 @@ Memory is personal: each user's memories are isolated and only recalled in that 
 - Recalled memories reflect what was true when written. If one names a file, function, or config key, verify it still exists before relying on it.
 - Keep each memory self-contained: a reader with no other context should understand it in one pass.
 
-[Next: Deployment](deployment)
+[Next: Usage & Costs](usage-costs)

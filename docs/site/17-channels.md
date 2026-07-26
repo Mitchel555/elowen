@@ -1,9 +1,9 @@
 ---
 title: Channels
 slug: channels
-order: 13
-eyebrow: Connect
-group: Extending
+order: 17
+eyebrow: Channels
+group: Channels
 ---
 
 # Channels

@@ -1,9 +1,9 @@
 ---
 title: Microsoft Teams
 slug: channels-teams
-order: 16
+order: 20
 eyebrow: Channels
-group: Extending
+group: Channels
 ---
 
 # Microsoft Teams

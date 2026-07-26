@@ -2,8 +2,8 @@
 title: Web UI
 slug: web-ui
 order: 5
-eyebrow: Control surfaces
-group: Surfaces
+eyebrow: Everyday use
+group: Everyday use
 ---
 
 # Web UI
@@ -91,6 +91,6 @@ Users have roles, project assignments, allowed models, and per-user tool control
 
 ![User management and permissions](images/users-rbac.png)
 
-For the security model and account-level choices, see [Account & Security](account-security).
+For the security model and account-level choices, see [Users & Access](users-access).
 
 [Next: CLI](cli)
