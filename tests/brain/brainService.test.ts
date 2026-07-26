@@ -1946,6 +1946,33 @@ describe('BrainService', () => {
     expect(stored.join('\n')).not.toContain('PLAN MODE PROMPT');
   });
 
+  // A mode's full directive costs one to two thousand tokens and says the same thing every turn, so it
+  // is restated in full only on entry and every fifth turn; the one-liner rides in between.
+  it('restates a mode directive in full on entry and every fifth turn, sparsely otherwise', async () => {
+    const d = fakeDeps();
+    d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
+      name.startsWith('cli/') ? name : `PERSONA:${name}:${vars.userName}`,
+    );
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    // Which mode template the turn actually rendered — the choice itself is what this asserts.
+    const variant = async (text: string, mode: 'build' | 'plan'): Promise<string | undefined> => {
+      d.prompts.render.mockClear();
+      await svc.send({ userId: 1, text, mode, session: 'brain-1' });
+      return (d.prompts.render.mock.calls.map((c) => c[0] as string)).find((n) => n.startsWith('cli/'));
+    };
+
+    expect(await variant('one', 'plan')).toBe('cli/plan-mode');            // entering → full
+    for (const n of ['two', 'three', 'four', 'five']) {
+      expect(await variant(n, 'plan')).toBe('cli/plan-mode-sparse');       // …then one-liners
+    }
+    expect(await variant('six', 'plan')).toBe('cli/plan-mode');            // fifth turn on → full again
+
+    expect(await variant('build something', 'build')).toBeUndefined();     // build carries no directive
+    // Re-entering restarts the cycle: the model has had other instructions since.
+    expect(await variant('back to planning', 'plan')).toBe('cli/plan-mode');
+  });
+
   it('plan mode hides mutating tools from the model for that turn', async () => {
     const d = fakeDeps();
     d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>

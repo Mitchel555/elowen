@@ -46,6 +46,11 @@ export const EDITABLE_PROMPTS: PromptCatalogEntry[] = [
   { name: 'scheduled', group: 'advisor', vars: ['userName', 'personality', 'agentName'], jsonContract: false, appendOnly: true },
   { name: 'cli/plan-mode', group: 'cli', vars: [], jsonContract: false },
   { name: 'cli/workflow-mode', group: 'cli', vars: [], jsonContract: false },
+  // The one-line restatements sent BETWEEN full directives (see turnContextBuilder): a mode's full text
+  // costs ~1-2k tokens and the model has already read it, so only entry and every fifth turn resend it.
+  // Editable beside their full counterparts so a customised mode keeps both halves in one place.
+  { name: 'cli/plan-mode-sparse', group: 'cli', vars: [], jsonContract: false },
+  { name: 'cli/workflow-mode-sparse', group: 'cli', vars: [], jsonContract: false },
 ];
 
 const EDITABLE_NAMES = new Set(EDITABLE_PROMPTS.map((p) => p.name));

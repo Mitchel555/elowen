@@ -157,6 +157,13 @@ export interface LiveBrain {
   /** The work mode of the last send on this session, so a change (build↔plan↔workflow) can be detected
    *  and recorded — mode is client-stamped per send, with no discrete daemon event of its own. */
   lastMode?: 'build' | 'plan' | 'workflow';
+  /** Turns spent in the current work mode since its directive was last restated IN FULL. 0 means the
+   *  turn that entered the mode; the full text returns every MODE_REMINDER_FULL_EVERY turns and the
+   *  one-line restatement rides in between (see turnContextBuilder.modeTemplateFor). Carried across
+   *  in-memory respawns beside lastTurnMode — a model switch is not a reason to resend the directive
+   *  the model just read. A daemon restart resets it, which is correct: a fresh process has shown the
+   *  model nothing. */
+  modeReminderTurns?: number;
 }
 
 /** What it takes to spawn one live conversation — composed by BrainService.spawnLive and reused by

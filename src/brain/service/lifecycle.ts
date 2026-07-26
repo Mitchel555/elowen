@@ -327,6 +327,7 @@ export class ConversationLifecycle {
       // An undelivered post-compaction re-orientation survives the respawn too: a model switch right
       // after a compaction would otherwise swallow the one turn the model had to learn where it was.
       live.pendingPostCompaction = previous?.pendingPostCompaction;
+      live.modeReminderTurns = previous?.modeReminderTurns; // a respawn is not a reason to restate the mode
       this.d.sessions.set(sessionId, live);
       // Carry the previous live's direct listeners onto the fresh one (mirrors maybeRollover/maybeVisionHop):
       // open SSE taps are already re-attached by the spawner (sessionTaps), so this covers the non-tap
@@ -393,6 +394,7 @@ export class ConversationLifecycle {
     // clamped (buildScope reads it).
     fresh.lastTurnMode = b.lastTurnMode;
     fresh.pendingPostCompaction = b.pendingPostCompaction;
+    fresh.modeReminderTurns = b.modeReminderTurns;
     fresh.replay.publish({ type: 'session', sessionId: fresh.sessionId });
     return fresh;
   }
@@ -444,6 +446,7 @@ export class ConversationLifecycle {
     for (const listener of listeners) fresh.listeners.add(listener);
     fresh.lastTurnMode = b.lastTurnMode; // the hop is not a mode change (buildScope reads it)
     fresh.pendingPostCompaction = b.pendingPostCompaction;
+    fresh.modeReminderTurns = b.modeReminderTurns;
     // Mark the fallback active only if the respawn actually reached the requested vision model (not the
     // configured default because the vision model was unavailable/disallowed) — so the NEXT text turn
     // hops back. Provider matters too: two configured entries can expose the same model id.

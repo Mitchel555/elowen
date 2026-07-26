@@ -54,6 +54,11 @@ interface TurnContextBuilderDeps {
  *  `WorkflowAddNodes`, and admitting one without the other only buys a workflow that cannot grow. */
 const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate']);
 
+/** How often a mode's FULL directive is resent while the mode stays on — entry, then every Nth turn.
+ *  Low enough that the rules never scroll out of steering range, high enough that a long planning
+ *  session is not paying for the same two thousand tokens on every single turn. */
+const MODE_REMINDER_FULL_EVERY = 5;
+
 export interface PreparedTurnContext {
   autoSaveMemory: boolean;
   /** Execute inside the exact PI identity/policy/permission scope and resolve volatile turnContext there. */
@@ -68,6 +73,9 @@ export class TurnContextBuilder {
 
   async build(request: TurnRequest, live: LiveBrain): Promise<PreparedTurnContext> {
     const mode: TurnMode = request.mode ?? 'build';
+    // Captured before the overwrite below: entering a mode must restate it in full, and that is the
+    // only way to tell entry from continuation (mode is client-stamped per send, with no daemon event).
+    const previousMode = live.lastTurnMode;
     // Remember it for the host-initiated turns that carry no request of their own (buildScope).
     live.lastTurnMode = mode;
     const memSettings = this.d.userSettings?.(request.userId);
@@ -78,7 +86,7 @@ export class TurnContextBuilder {
     // Each non-build mode carries its own tuned <system-reminder> directive (a self-contained block in
     // the template). Plan also restricts tools (see applyOwnerToolPolicy); Workflow is prompt-only.
     const modeTemplate = mode === 'plan' ? 'cli/plan-mode' : mode === 'workflow' ? 'cli/workflow-mode' : null;
-    const modeReminder = modeTemplate ? this.d.prompts.render(modeTemplate, {}, request.userId) : '';
+    const modeReminder = modeTemplate ? this.d.prompts.render(this.modeTemplateFor(modeTemplate, mode, previousMode, live), {}, request.userId) : '';
     const runningSubagents = this.runningSubagentsBlock(live.sessionId);
 
     return {
@@ -110,6 +118,22 @@ export class TurnContextBuilder {
         return operation(prompt);
       }, scope),
     };
+  }
+
+  /** Which variant of a mode directive this turn gets: the FULL text on entering the mode and every
+   *  MODE_REMINDER_FULL_EVERY turns after, the one-line restatement in between.
+   *
+   *  A mode's full directive costs one to two thousand tokens and says the same thing every turn. The
+   *  model has already read it, so resending it verbatim buys nothing and spends context on a long
+   *  planning session — precisely the session most likely to hit a compaction. Periodic full repeats
+   *  still exist because a directive that scrolled far enough back stops steering behaviour.
+   *
+   *  Mutates the counter on `live`, so it must be called exactly once per turn. */
+  private modeTemplateFor(template: string, mode: TurnMode, previousMode: TurnMode | undefined, live: LiveBrain): string {
+    const entering = previousMode !== mode;
+    const seen = entering ? 0 : (live.modeReminderTurns ?? 0) + 1;
+    live.modeReminderTurns = seen;
+    return seen % MODE_REMINDER_FULL_EVERY === 0 ? template : `${template}-sparse`;
   }
 
   /** The exact PI identity/policy/permission/emitter scope for an owner-chat turn on `live` — everything
