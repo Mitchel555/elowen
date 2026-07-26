@@ -21,7 +21,7 @@ async function readJson(req) {
 const frame = (payload) => `data: ${JSON.stringify(payload)}\n\n`;
 
 /** The file the scripted Read targets — filled in by the runner once its temp file exists. */
-export const PATHS = { read: '' };
+export const PATHS = { read: '', plan: '' };
 
 /** Enough prose that the conversation outgrows PI's keepRecentTokens window — the cut point that
  *  decides whether there is anything to summarise at all. Compaction is the whole subject of this
@@ -30,11 +30,19 @@ export const PATHS = { read: '' };
 const FILLER = Array.from({ length: 400 },
   (_, i) => `Step ${i + 1}: the widget pipeline reads its input, validates the shape, applies the configured transform, and forwards the result downstream to the next stage for accounting.`).join(' ');
 
+/** The plan the scripted planning turn authors, so the runner can assert on the exact document. */
+export const PLAN_BODY = '# Ship the widget\n\n1. Wire the store\n2. Cover it with tests';
+
 const MODES = {
-  // A turn ending in a plan block, exactly as a real planning turn produces.
-  plan: ({ say }) => say(
-    'Here is how I would do it.\n\n<proposed_plan>\n# Ship the widget\n\n1. Wire the store\n2. Cover it with tests\n</proposed_plan>',
-  ),
+  // A real planning turn writes its plan to the plan FILE and then submits it with ExitPlanMode — two
+  // tool round-trips, no plan text in the prose. Driving it this way is the point: it exercises the
+  // clamped Write landing on the plan path and the tool reading back what actually reached disk, which
+  // is the whole ingress. A fixture that shortcut either half would let that ingress break unnoticed.
+  plan: ({ say, callTool, toolResults }) => {
+    if (toolResults === 0) return callTool('Write', { path: PATHS.plan, content: PLAN_BODY });
+    if (toolResults === 1) return callTool('ExitPlanMode', {});
+    return say('Plan submitted; waiting for your decision.');
+  },
   read: ({ say, callTool, hasToolResult }) => (hasToolResult ? say(`Read it. ${FILLER}`) : callTool('Read', { path: PATHS.read })),
   // Bulk, so the conversation is actually worth compacting — PI refuses a session that is too small.
   filler: ({ say }) => say(FILLER),
@@ -67,6 +75,9 @@ export async function startScriptedModel() {
     // Deliberately not "does one exist anywhere": that stays true for the rest of the session once any
     // turn has used a tool, so a later tool turn would skip its own call and answer immediately.
     const hasToolResult = messages.at(-1)?.role === 'tool';
+    // How far into a multi-step turn we are. A plan turn needs TWO tool round-trips (write the file,
+    // then submit it), which a boolean cannot express.
+    const toolResults = messages.filter((m) => m?.role === 'tool').length;
 
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -97,7 +108,7 @@ export async function startScriptedModel() {
     };
 
     const respond = MODES[mode];
-    if (typeof respond === 'function') respond({ say, callTool, hasToolResult });
+    if (typeof respond === 'function') respond({ say, callTool, hasToolResult, toolResults });
     else say(`Nothing scripted for mode "${mode}".`);
 
     res.write('data: [DONE]\n\n');

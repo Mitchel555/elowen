@@ -14,7 +14,8 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnRealDaemon } from '../brain-e2e/spawn-daemon.mjs';
-import { startScriptedModel, PATHS } from './model.mjs';
+import { startScriptedModel, PATHS, PLAN_BODY } from './model.mjs';
+import { planSlug } from '../../../src/shared/planSlug.ts';
 
 let failures = 0;
 const check = (label, ok, detail = '') => {
@@ -100,6 +101,11 @@ async function main() {
 
     const start = await api('/brain/start', { fresh: true });
     const session = start?.sessionId;
+    // Derived exactly the way the daemon derives it. Hardcoding the name would pin the naming scheme
+    // rather than the behaviour, and the last time it changed this suite asserted on a file that could
+    // never exist.
+    const planFile = join(dataDir, '.config/elowen/plans', `${planSlug(session)}.md`);
+    PATHS.plan = planFile;
     if (!session) throw new Error('no session id from /brain/start');
     await api('/brain/yolo', { on: true, session });
     const stream = await openStream(baseUrl, token, session);
@@ -133,15 +139,16 @@ async function main() {
     };
 
     console.log('\n— a plan is captured and survives the compaction —');
-    await turn('How would you ship the widget?', 'plan');
+    // In plan mode, because that is the only mode where the model may write the file at all: the clamp
+    // admits Write solely for this path, and ExitPlanMode refuses outside it. Running the planning turn
+    // in build mode would test neither.
+    await turn('How would you ship the widget?', 'plan', { workMode: 'plan' });
 
     const plansDir = join(dataDir, '.config/elowen/plans');
-    const planFile = join(plansDir, `${session}.md`);
     check('the plan was written to the data dir', existsSync(planFile),
       `expected ${planFile}; dir holds: ${existsSync(plansDir) ? readdirSync(plansDir).join(', ') || '(empty)' : '(missing)'}`);
     const planBody = existsSync(planFile) ? readFileSync(planFile, 'utf8') : '';
-    check('the plan file holds the block body, without its tags',
-      planBody.includes('# Ship the widget') && !planBody.includes('<proposed_plan>'), planBody.slice(0, 160));
+    check('the plan file holds exactly what the model wrote', planBody.trim() === PLAN_BODY, planBody.slice(0, 160));
 
     await turn('Read the first file.', 'read');
     // Only a READ is driven here. Write-class tools need an approval this API-driven daemon has no one
