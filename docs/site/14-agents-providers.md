@@ -1,7 +1,7 @@
 ---
 title: Agents & Providers
 slug: agents-providers
-order: 13
+order: 14
 eyebrow: Automation
 group: Automation
 ---

@@ -1,7 +1,7 @@
 ---
 title: Memory & Embeddings
 slug: memory
-order: 9
+order: 10
 eyebrow: Everyday use
 group: Everyday use
 ---

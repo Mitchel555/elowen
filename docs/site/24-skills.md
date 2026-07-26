@@ -1,7 +1,7 @@
 ---
 title: Skills
 slug: skills
-order: 23
+order: 24
 eyebrow: Extending
 group: Extending
 ---

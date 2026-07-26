@@ -1,7 +1,7 @@
 ---
 title: CLI Keybinds
 slug: cli-keybinds
-order: 7
+order: 8
 eyebrow: Everyday use
 group: Everyday use
 ---

@@ -1,7 +1,7 @@
 ---
 title: WhatsApp
 slug: channels-whatsapp
-order: 21
+order: 22
 eyebrow: Channels
 group: Channels
 ---
@@ -15,9 +15,9 @@ For what every channel shares — reactions, reasoning, service language, and th
 ## Setup
 
 1. In Elowen: **Settings → Plugins → WhatsApp** → enable the plugin.
-2. Pair the bot to a WhatsApp account:
-   - **QR code** — the plugin prints a QR to its logs; scan it from WhatsApp → Linked devices.
-   - **Pairing code** — set `phoneNumber` (international format without +, e.g. `420777123456`) and the plugin prints an 8-character code instead. Enter it in WhatsApp → Linked devices → Link with phone number.
+2. Pair the bot to a WhatsApp account — either from the daemon log or from the **Web UI pairing modal** (Settings → Plugins → WhatsApp → Pair), which shows both the QR code and the pairing code:
+   - **QR code** — scan it from WhatsApp → Linked devices.
+   - **Pairing code** — set `phoneNumber` (international format without +, e.g. `420777123456`) to get an 8-character code. Enter it in WhatsApp → Linked devices → Link with phone number.
 3. Map at least one sender policy (see below).
 
 ## Sender policies
@@ -38,8 +38,19 @@ A group JID grants access to everyone in that group.
 |---------|-------------|
 | `/model` | Show a numbered model menu; reply with a number to switch |
 | `/context` | Show a numbered menu of your conversations; reply with a number to bind one here |
+| `/reasoning` | Toggle extended-thinking output |
+| `/fast` | Toggle OpenAI OAuth priority processing |
+| `/stop` | Abort the current turn, including any child work it spawned |
+| `/status` | Show the live session's model, context usage %, and usage |
+| `/compact` | Summarize the conversation to free context |
 | `/new` | Start a fresh conversation |
 | `/help` | Show available commands |
+
+**AskUserQuestion** works in plain text: reply with a number to pick an option, or any non-numeric text to answer a single question free-form.
+
+## No voice
+
+> WhatsApp has no voice features — no transcription, no spoken replies. A voice message arrives as an untranscribed audio attachment. Voice is [Discord](channels-discord) and [Telegram](channels-telegram) only.
 
 ## Groups
 
@@ -48,7 +59,11 @@ A group JID grants access to everyone in that group.
 
 ## Streaming
 
-With `streaming` enabled (default), the bot edits its reply in place as it streams — tool calls and text appear progressively. Off = one message at the end.
+WhatsApp uses a simpler streaming model than Discord or Telegram: a single `streaming` boolean instead of the `/display` axes. With `streaming` enabled (default), the bot edits its reply in place as it streams — tool calls and text appear progressively. Off = one message at the end.
+
+## Conversation behavior
+
+Steering mid-turn, idle rollover, quoted replies, and message splitting work the same on every platform — see [How conversations work in channels](channels). Long answers split at WhatsApp's message limit without breaking code fences.
 
 ## Proactive pushes
 

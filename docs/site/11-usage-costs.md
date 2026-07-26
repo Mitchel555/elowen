@@ -1,7 +1,7 @@
 ---
 title: Usage & Costs
 slug: usage-costs
-order: 10
+order: 11
 eyebrow: Everyday use
 group: Everyday use
 ---

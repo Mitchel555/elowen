@@ -1,7 +1,7 @@
 ---
 title: Glossary
 slug: glossary
-order: 28
+order: 29
 eyebrow: Help
 group: Help
 ---

@@ -1,7 +1,7 @@
 ---
 title: Brain & Chat
 slug: brain-chat
-order: 8
+order: 9
 eyebrow: Everyday use
 group: Everyday use
 ---
@@ -33,11 +33,54 @@ Long conversations are managed in three complementary ways:
 - **Idle rollover** can start a fresh session after a configured idle period, when continuing an old prompt cache would be wasteful. The previous conversation stays available to browse.
 - **Limits** bound agent steps, tool-output previews, memory recall, goal turns, elicitation waits, and channel-session capacity. Instance owners configure these in **Settings → Elowen AI**.
 
+## Compaction
+
+When a conversation grows long, Elowen summarizes the older history so the model's context window never overflows. You simply keep talking — the summary replaces the bulky early messages, and nothing that matters is lost. Long-term memory is a separate store and is unaffected by compaction.
+
+### Automatic compaction
+
+Compaction triggers automatically when the conversation reaches a threshold of the model's context window — 80% by default. You can tune the threshold anywhere between 30% and 95%, or turn automatic compaction off entirely, in **Account → Elowen AI** (the auto-compact toggle and slider). A between-turn check makes sure the next request never overflows the window mid-work. Channel conversations and unattended workers compact automatically too, so long-running automation needs no babysitting.
+
+### Per-model thresholds
+
+Different models have very different context windows, and a single threshold may not fit all of them. The per-model drawer in **Account → Elowen AI** lets you set a different threshold for each model — a small-context model compacts earlier, a large one later. Each row shows the model's context size so the choice is informed, and any override can be reset back to the default per model.
+
+### Compaction model
+
+Summarizing does not have to use the same model you chat with. You can pick a separate compaction model — for example, chat on Claude but have a cheaper model do the summarizing. By default the conversation's own model compacts itself.
+
+### Manual compaction
+
+Type `/compact` in the CLI to compact now, without waiting for the threshold. Type `/compact <text>` to steer the summary toward what you want it to keep. If there is nothing worth compacting yet, the command is a harmless no-op.
+
+### What survives a compaction
+
+Compaction is not a blind trim. What carries over:
+
+- The recent tail of the conversation, kept verbatim.
+- Your active plan, which is persisted to disk and re-injected after compaction.
+- A working set of up to 12 files the agent has touched, marked as edited or read.
+- Long-term memory, which lives outside the conversation entirely.
+
+> After a compaction, the agent is instructed to re-read files rather than trust the summary — so always trust freshly re-read state over a recalled detail.
+
+### What you see
+
+The CLI shows a `compacting conversation…` note while it runs, then a `· · · context compacted · · ·` divider in the transcript. Web chat shows the same labelled divider. The compaction marker and summary are persisted, so the saved tokens are not lost on a later reload.
+
+## Personality
+
+The personality setting shapes the tone and verbosity of your agent's replies. Four presets are available: **professional**, **friendly**, **concise**, and **detailed**. In Czech conversations it also controls tykání versus vykání.
+
+Set it in **Account → Elowen AI** — the presets appear as pills. Your choice applies to your conversations on every surface: CLI, web chat, and channels.
+
+If none of the presets fits, you can write your own custom personality text, which overrides the preset entirely. See [Your Account & Preferences](account-preferences) for details.
+
 ## Models and reasoning
 
 Elowen supports configured OpenAI-compatible and Anthropic providers, plus OAuth-backed **Claude**, **ChatGPT**, **GitHub Copilot**, and **Kimi** accounts. A provider's model catalog is used by the chat pickers and can also feed tasks and plugins that request a model field. OpenRouter's zero-cost `:free` catalog variants are filtered out at the source, so every listed model has metered, reported pricing.
 
-Select a model for the current conversation where your surface provides a picker. Reasoning options are shown only when the chosen model exposes them. ChatGPT OAuth models can additionally use priority processing through `/fast` in the CLI when the selected model supports it. The daemon preserves provider credentials and returns only safe configuration metadata to the Web UI.
+Select a model for the current conversation where your surface provides a picker. Reasoning options are shown only when the chosen model exposes them. ChatGPT OAuth models can additionally use priority processing through `/fast` when the selected model supports it. The daemon preserves provider credentials and returns only safe configuration metadata to the Web UI.
 
 Connected **ChatGPT**, **Claude**, and **Kimi** accounts expose their subscription usage limits, which Elowen polls and maps into shared 5-hour and weekly windows. In **Settings → Elowen AI**, each connected OAuth account row carries a slim per-account subscription usage bar. It is reported independently of the active model and colored by pressure: accent normally, warning at about 70%, then danger at about 90%.
 
