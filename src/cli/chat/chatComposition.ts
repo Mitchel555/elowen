@@ -4,6 +4,7 @@ import { color } from './theme.js';
 import { StatusBar, CardPanel, SubagentPanel, spinnerFrame } from './components.js';
 import type { SubagentPanelEntry } from './components.js';
 import type { BrainStatus } from './brainClient.js';
+import type { BrainCard } from '../../brain/events.js';
 import type { WorkflowState } from '../../brain/transcript.js';
 import { openWorkflowModal as showWorkflowModal } from './workflowModal.js';
 import { activeMention, CLIPBOARD_MENTION, imageMimeFor, rankMentionFiles, bumpMentionFrecency, mentionInsertText } from './mentions.js';
@@ -523,6 +524,10 @@ export function createChatComposition(
    *  reported nothing yet", and falling back would paint the PARENT's context and cost under a child's
    *  transcript, which is the exact bug this fixes. Null renders as `—`, which the panel already handles. */
   const focusedUsage = (): BrainStatus['usage'] => rt.childView ? rt.childView.usage : rt.usage;
+  /** The pinned panels of whichever agent the user is looking at. Same ternary reasoning as `focusedUsage`:
+   *  a child with no cards yet has an EMPTY panel, and falling back would paint the parent's checklist —
+   *  cards collide by id (`todos`), so a merge is indistinguishable from the child's own work. */
+  const focusedCards = (): BrainCard[] => rt.childView ? rt.childView.cards : rt.cards;
   let currentRunSeconds = 0;
   let currentAgents: readonly SubagentPanelEntry[] = [];
   let currentWorkflows: readonly WorkflowState[] = [];
@@ -811,7 +816,7 @@ export function createChatComposition(
     // Drop the terminal plugin's pinned `bg-processes` card only while the dedicated right rail is
     // actually visible. Narrow terminals cannot fit that rail; retaining the compact card there avoids
     // making background work disappear entirely while still preventing duplicates on wide layouts.
-    cardPanel.set(rt.cards.filter((c) => c.id !== 'bg-processes' || !panelVisible()));
+    cardPanel.set(focusedCards().filter((c) => c.id !== 'bg-processes' || !panelVisible()));
     subPanel.set(panelAvailable() ? [] : agents);
     subPanel.setSelected(rt.childView?.sessionId ?? null);
     // Pending mid-turn queue strip above the composer (with the remove-last keybind hint when bound).

@@ -259,7 +259,7 @@ export class StreamCoordinator implements StreamCoordinatorPort {
       const ac = new AbortController();
       rt.childAc = ac;
       const transcript = new TranscriptModel();
-      rt.childView = { sessionId, transcript, processes: [], loading: true, usage: null };
+      rt.childView = { sessionId, transcript, processes: [], loading: true, usage: null, cards: [] };
       render('child:opening');
       let processRevision = 0;
 
@@ -303,6 +303,10 @@ export class StreamCoordinator implements StreamCoordinatorPort {
         }
         const repairAtTerminal = truncatedSnapshotPending && (event.type === 'idle' || event.type === 'error');
         if (event.type === 'process') { processRevision += 1; rt.childView.processes = event.processes; }
+        // A card is panel state, not transcript state, and every agent emits its checklist under the same
+        // `todos` id — merging it into the parent's list is what painted the parent's checklist under a
+        // child's transcript.
+        else if (event.type === 'card') { rt.childView.cards = upsertCard(rt.childView.cards, event.card); }
         else {
           // The child's lane already carries its own context/cost on every step and idle — the parent lane
           // harvests the identical field. Taking it here is what lets the panel follow the focused agent;

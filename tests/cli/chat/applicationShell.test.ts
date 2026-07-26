@@ -1017,6 +1017,28 @@ describe('chat application shell ownership', () => {
     expect(h.tui.children).toHaveLength(1);
   });
 
+  it('paints the focused sub-agent\'s checklist instead of the parent\'s', async () => {
+    const h = compositionHarness({ columns: 100, rows: 24, turns: 4 });
+    h.rt.cards = [{ id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'parent checklist item' }] }];
+    h.rt.childView = {
+      sessionId: 'child-1',
+      transcript: new TranscriptModel([{ role: 'assistant', text: 'child output' }]),
+      processes: [],
+      loading: false,
+      usage: null,
+      cards: [{ id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'child checklist item' }] }],
+    };
+    const composition = makeComposition(h);
+    composition.resume();
+    composition.renderForced('test:child-cards');
+    await vi.runOnlyPendingTimersAsync();
+
+    const frame = renderMountedRoot(h).map(terminalPlainText).join('\n');
+    expect(frame).toContain('child checklist item');
+    expect(frame).not.toContain('parent checklist item');
+    composition.dispose();
+  });
+
   it('shows compaction as active work in the composer row until the daemon closes it', async () => {
     const h = compositionHarness({ columns: 100, rows: 24, turns: 6 });
     h.rt.transcript.apply({ type: 'idle' });
@@ -1319,6 +1341,7 @@ describe('chat application shell ownership', () => {
       processes: [],
       loading: false,
       usage: null,
+      cards: [],
     };
     vi.spyOn(h.stream, 'subagentStates').mockReturnValue([{
       sessionId: 'child-42',

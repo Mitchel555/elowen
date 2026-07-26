@@ -378,7 +378,7 @@ describe('StreamCoordinator — idle rollover', () => {
   });
 });
 
-describe('StreamCoordinator — focused sub-agent usage', () => {
+describe('StreamCoordinator — focused sub-agent panels', () => {
   const usage = { tokens: 5_000, contextWindow: 200_000, percent: 2.5, totalTokens: 9_000, cost: 0.42 };
 
   type Lane = (frame: BrainEvent | Record<string, unknown>) => void;
@@ -444,6 +444,42 @@ describe('StreamCoordinator — focused sub-agent usage', () => {
     await Promise.resolve();
     expect(rt.childView?.sessionId).toBe('brain-ch-b');
     expect(rt.childView?.usage).toBeNull();
+  });
+
+  it('keeps a card emitted by the child on its own view and leaves the parent\'s panel untouched', async () => {
+    const lanes = new Map<string, Lane>();
+    const rt = state();
+    const parentCard = { id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'parent step' }] };
+    rt.cards = [parentCard];
+    const stream = coordinator(rt, lanes);
+
+    void stream.openSubagent('brain-ch-a');
+    await Promise.resolve();
+    const childCard = { id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'child step' }] };
+    lanes.get('brain-ch-a')!(snapshot([{ type: 'card', card: childCard }]));
+
+    expect(rt.childView?.cards).toEqual([childCard]);
+    // The ids collide by design (every agent's checklist is `todos`) — merging the lanes is what painted
+    // the parent's checklist under a child's transcript.
+    expect(rt.cards).toEqual([parentCard]);
+  });
+
+  it('starts a newly focused child with an empty panel rather than the previous one\'s cards', async () => {
+    const lanes = new Map<string, Lane>();
+    const rt = state();
+    const stream = coordinator(rt, lanes);
+
+    void stream.openSubagent('brain-ch-a');
+    await Promise.resolve();
+    lanes.get('brain-ch-a')!(snapshot([{
+      type: 'card', card: { id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'first child step' }] },
+    }]));
+    expect(rt.childView?.cards).toHaveLength(1);
+
+    void stream.openSubagent('brain-ch-b');
+    await Promise.resolve();
+    expect(rt.childView?.sessionId).toBe('brain-ch-b');
+    expect(rt.childView?.cards).toEqual([]);
   });
 });
 

@@ -34,10 +34,11 @@ export interface ChatStateSeed {
  * always a live projection from TranscriptModel rather than a separately assigned snapshot. */
 export class ChatState {
   readonly transcript: TranscriptModel;
-  /** `usage` is the focused child's OWN context/cost, harvested from its own event lane — the parent's
-   *  numbers describe a different conversation and must never be painted under a child's transcript.
-   *  Null until that child reports its first step (or forever, for one restored without a live lane). */
-  childView: { sessionId: string; transcript: TranscriptModel; processes: ProcessInfo[]; loading: boolean; usage: BrainStatus['usage'] } | null = null;
+  /** `usage` and `cards` are the focused child's OWN context/cost and panels, harvested from its own
+   *  event lane — the parent's describe a different conversation and must never be painted under a
+   *  child's transcript. `usage` is null until that child reports its first step (or forever, for one
+   *  restored without a live lane); `cards` stays empty for a child that emitted none on this lane. */
+  childView: { sessionId: string; transcript: TranscriptModel; processes: ProcessInfo[]; loading: boolean; usage: BrainStatus['usage']; cards: BrainCard[] } | null = null;
   childAc: AbortController | null = null;
   /** The ExitPlanMode call whose decision has already been put to the user, so a replayed terminal `idle`
    *  cannot ask again. Lives on the state rather than the stream because it must outlive a stream
