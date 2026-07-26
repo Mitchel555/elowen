@@ -81,4 +81,22 @@ describe('cli/setup wizard Preferences step', () => {
     expect(calls).toHaveLength(0);
     expect(ctx.answers.preferences?.summary).toBe('server timezone');
   });
+
+  // A typo here is silent in production: the daemon falls back to the server's zone, so every scheduled
+  // job just fires at the wrong hour with nothing to trace it back to. Reject it at the prompt instead.
+  it('rejects a non-IANA timezone at the prompt and accepts a real one (blank = server zone)', async () => {
+    (p.text as Mock).mockResolvedValueOnce('UTC');
+    (p.confirm as Mock).mockResolvedValueOnce(true);
+    (p.confirm as Mock).mockResolvedValueOnce(false);
+    const { fetchFn } = routedFetch({ 'PUT /config': { ok: true } });
+
+    await runPreferencesStep({ base: 'http://x', fetchFn, token: 't', answers: {} });
+
+    const { validate } = (p.text as Mock).mock.calls[0][0] as { validate?: (v: string | undefined) => string | undefined };
+    expect(validate).toBeTypeOf('function');
+    expect(validate?.('Europe/Prague')).toBeUndefined();
+    expect(validate?.('')).toBeUndefined();
+    expect(validate?.('Prague')).toMatch(/IANA/);
+    expect(validate?.('CET+2')).toMatch(/IANA/);
+  });
 });

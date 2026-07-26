@@ -11,6 +11,15 @@ function detectTimezone(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; }
 }
 
+/** Reject anything the runtime can't resolve as an IANA zone. A typo saved here would be silent: the
+ *  daemon falls back to the server's zone, so every scheduled job would fire at the wrong hour with no
+ *  error to trace it back to. Blank is valid and means "use the server's zone". */
+function validTimezone(v: string | undefined): string | undefined {
+  const tz = (v ?? '').trim();
+  if (!tz) return undefined;
+  try { new Intl.DateTimeFormat(undefined, { timeZone: tz }); return undefined; } catch { return 'Enter a valid IANA timezone, e.g. Europe/Prague'; }
+}
+
 /** Assistant preferences — a few settings a fresh user would otherwise have to discover on their own,
  *  each offered as "accept a sane value" rather than an open question. Persists only what the user changes
  *  from the default, across three endpoints: the timezone (operator config, PUT /config), reasoning
@@ -28,6 +37,7 @@ export async function runPreferencesStep(ctx: WizardCtx): Promise<StepResult> {
     message: 'Your timezone (IANA name). It sets the time Elowen reports and the clock scheduled jobs run on — so "daily 07:30" fires at 07:30 where you are, not in the server\'s zone.',
     initialValue: detected,
     placeholder: 'e.g. Europe/Prague',
+    validate: validTimezone,
   })) as string).trim();
   if (tz) {
     // runtime-context's only config key is `timezone`, so replacing its plugin config wholesale (how the
