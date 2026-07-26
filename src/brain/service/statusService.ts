@@ -20,6 +20,7 @@ import type { PermissionApprovalService } from './permissionApproval.js';
 import type { BrainStreamSnapshot } from '../session/liveEventReplay.js';
 import { abortSessionWork } from '../session/abortSessionWork.js';
 import { gitBranch } from './gitBranch.js';
+import { clientDir } from './workDir.js';
 
 /** One row in the caller's conversation list (the pickers' "attached" marker rides `attached`). */
 export interface SessionListItem { id: string; title: string; model: string; updated_at: string; running: boolean; active: boolean; attached: number }
@@ -109,6 +110,9 @@ interface StatusServiceDeps {
   permissions: PermissionApprovalService;
   config: BrainDeps['config'];
   runtime: BrainDeps['runtime'];
+  /** The caller's repo access, re-resolved per request so the project section reflects CURRENT project
+   *  assignments. Absent (tests) → all-access. */
+  policy?: BrainDeps['policy'];
   /** Injected for tests; defaults to PI's createAgentSession (smoke test only). */
   createSession?: typeof createAgentSession;
   /** Working dir for the throwaway smoke-test session. Default: process.cwd(). */
@@ -233,7 +237,12 @@ export class BrainStatusService {
     const title = row?.title || '';
     // The live directory wins over the stored stamp: `/cd` moves the live conversation first. `gitBranch`
     // reads `.git/HEAD` behind a short-lived cache, so this hot poll never forks a process.
-    const cwd = b?.workDir ?? (row?.work_dir || null);
+    //
+    // Both the directory and the branch are re-authorized against the policy resolved NOW, never trusted
+    // from the stored stamp: a directory stamped while the user still had the project must stop being
+    // reported the moment that access is revoked.
+    const policy = this.d.policy?.(userId) ?? { allowedProjectIds: 'all' as const, allowedPaths: () => [] };
+    const cwd = clientDir(policy, b?.workDir ?? row?.work_dir ?? undefined) ?? null;
     return {
       running: !!b, sessionId: b?.sessionId ?? null, title, model: b?.model ?? '', provider: b?.provider ?? '',
       usage: b ? sessionUsageSnapshot(b.session, this.d.store, b.sessionId) : null,
@@ -256,7 +265,7 @@ export class BrainStatusService {
       // Effective YOLO for the active conversation (session override, else the persisted default) —
       // drives the CLI's warning-toned indicator.
       yolo: this.d.permissions.effectiveYolo(userId, b),
-      project: { cwd, branch: cwd ? gitBranch(cwd) : null },
+      project: { cwd, branch: cwd ? gitBranch(cwd, policy) : null },
     };
   }
 

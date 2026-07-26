@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../../src/store/db.js';
@@ -12,19 +12,21 @@ import { ElicitationRegistry } from '../../src/brain/elicitation.js';
 import { CardRegistry } from '../../src/brain/cards.js';
 import { PermissionApprovalService } from '../../src/brain/service/permissionApproval.js';
 import type { LiveBrain } from '../../src/brain/session/liveBrain.js';
+import type { Policy } from '../../src/plugins/policy.js';
 
 const dirs: string[] = [];
-/** A throwaway worktree whose HEAD names `branch` — the project section reads the branch off disk. */
+/** A throwaway worktree whose HEAD names `branch` — the project section reads the branch off disk. The
+ *  real path is returned because the reported cwd is realpath-resolved before it is authorized. */
 function repo(branch: string): string {
   const root = mkdtempSync(join(tmpdir(), 'status-project-'));
   dirs.push(root);
   mkdirSync(join(root, '.git'));
   writeFileSync(join(root, '.git', 'HEAD'), `ref: refs/heads/${branch}\n`);
-  return root;
+  return realpathSync(root);
 }
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-function harness() {
+function harness(policy?: (userId: number) => Policy) {
   const store = new BrainStore(openDb(':memory:'));
   const sessions = new LiveSessionRegistry<LiveBrain>();
   const elicitation = new ElicitationRegistry();
@@ -48,6 +50,7 @@ function harness() {
     permissions: new PermissionApprovalService({ elicitation }),
     config: undefined,
     runtime: undefined as unknown as ConstructorParameters<typeof BrainStatusService>[0]['runtime'],
+    policy,
   });
   return { store, sessions, status };
 }
@@ -95,5 +98,19 @@ describe('status() project section', () => {
     expect(() => status.status(1, 'brain-2')).toThrow('unknown session');
     // …and user 1's own default view describes user 1, never the neighbour's directory.
     expect(status.status(1).project).toEqual({ cwd: null, branch: null });
+  });
+
+  // Project access is re-read on every poll and never inherited from the stamp: once the project is
+  // unassigned the directory and the branch must both disappear, otherwise a user who lost access keeps
+  // polling the live branch — and the path — of a repository they may no longer reach.
+  it('stops reporting the directory and branch once project access is revoked', () => {
+    const root = repo('secret-work');
+    let roots = [root];
+    const { store, status } = harness(() => ({ allowedProjectIds: new Set([1]), allowedPaths: () => roots }));
+    store.createSession({ id: 'brain-1', userId: 1, model: 'm' });
+    store.setWorkDir('brain-1', root);
+    expect(status.status(1, 'brain-1').project).toEqual({ cwd: root, branch: 'secret-work' });
+    roots = [];
+    expect(status.status(1, 'brain-1').project).toEqual({ cwd: null, branch: null });
   });
 });

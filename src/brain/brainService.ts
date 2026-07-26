@@ -206,6 +206,7 @@ export class BrainService {
       get runtime() { return d.runtime; },
       get createSession() { return d.createSession; },
       get cwd() { return d.cwd; },
+      get policy() { return d.policy; },
     });
     this.channelService = new ChannelSessionService({
       registry: this.sessions, store: d.store, users: d.users,

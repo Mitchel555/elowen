@@ -806,7 +806,17 @@ describe('GET /brain/status telemetry', () => {
       project: { cwd: string | null; branch: string | null }; lspEnabled: boolean;
     };
     expect(body.project).toEqual({ cwd: '/work/user-2', branch: 'branch-2' });
-    expect(typeof body.lspEnabled).toBe('boolean');
+    // The LSP flag must MIRROR the live manager, not a constant: drive it to both states and read it back.
+    const { lspManager } = await import('../../src/brain/tools/lspTools.js');
+    const lsp = lspManager();
+    const reportedLsp = async (): Promise<boolean> =>
+      ((await (await app.request('/brain/status', auth(amyTok))).json()) as { lspEnabled: boolean }).lspEnabled;
+    try {
+      lsp.setEnabled(false);
+      expect(await reportedLsp()).toBe(false);
+      lsp.setEnabled(true);
+      expect(await reportedLsp()).toBe(true);
+    } finally { lsp.setEnabled(true); } // daemon-wide singleton — never leak a flip into another test
     // Each caller is described by THEIR conversation, never the other account's directory.
     const other = await (await app.request('/brain/status', auth(adminTok))).json() as { project: { cwd: string | null } };
     expect(other.project.cwd).toBe('/work/user-1');
