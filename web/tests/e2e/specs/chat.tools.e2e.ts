@@ -3,12 +3,11 @@
 // `tool_output` result block streams LIVE into its pill (superseding the live `tool_progress` tail). The
 // whole sequence folds into ONE assistant turn.
 //
-// The BrainChatProvider wires the live SSE listeners `tool`, `tool_progress`, `diff` AND `tool_output`
-// (the last added in the #118 rendering-parity fix — the reducer already folded `tool_output`, only the
-// EventSource subscription was missing, so a finished tool's stand-alone output block now renders live
-// rather than only after a history reload). A bare `tool_end` (a tool that finishes with no displayable
-// block) has no reducer case in either the web or daemon transcript mirror, so it is intentionally not
-// wired — folding it would be a no-op.
+// The BrainChatProvider wires the live SSE listeners `tool`, `tool_progress`, `diff`, `tool_output` AND
+// `tool_end` (the last two added in rendering-parity fixes — the reducer already folded them, only the
+// EventSource subscription was missing, so a finished tool's stand-alone output block and an
+// `ExitPlanMode` plan now render live rather than only after a history reload). A `tool_end` WITHOUT a
+// plan carries nothing displayable and folds to a no-op.
 import { test, expect, ChatPage } from '../fixtures/index.ts';
 
 test('@smoke P0-4 tool calls render a pill and an edit streams a diff block', async ({ app, seed, sse }) => {

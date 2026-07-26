@@ -1,7 +1,7 @@
 'use client';
 import { useRef, useState } from 'react';
 import { useFillHeight } from '../../lib/useFillHeight';
-import { useMobile } from '../../lib/useMobile';
+import { useMobileViewport } from '../../lib/useMobile';
 import { BrainChatSurface } from '../advisor/BrainChatSurface';
 import { ChatHistoryRail } from '../advisor/ChatHistoryRail';
 import { TelemetryPanel } from '../advisor/TelemetryPanel';
@@ -18,11 +18,13 @@ import { ChatDeckHero } from './ChatDeckHero';
  *
  *  The telemetry rail is a real column beside the transcript on desktop and a right drawer on mobile:
  *  the choice is made here in JS (not by a CSS breakpoint) so a phone never mounts a second column at
- *  all, which is what would squeeze the conversation off a narrow screen. */
+ *  all, which is what would squeeze the conversation off a narrow screen. Until the viewport is measured
+ *  (the first commit knows nothing) NEITHER variant mounts — guessing desktop would put the column on a
+ *  phone for one commit, queries and all. */
 export function ChatView() {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const fillHeight = useFillHeight(surfaceRef);
-  const mobile = useMobile();
+  const mobile = useMobileViewport();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [telemetryOpen, setTelemetryOpen] = useState(false);
 
@@ -41,9 +43,9 @@ export function ChatView() {
             onOpenTelemetry={mobile ? () => setTelemetryOpen(true) : undefined}
           />
         </div>
-        {mobile ? null : <TelemetryPanel variant="column" />}
+        {mobile === false ? <TelemetryPanel variant="column" /> : null}
         <ChatHistoryRail variant="drawer" open={historyOpen} onClose={() => setHistoryOpen(false)} />
-        {mobile ? (
+        {mobile === true ? (
           <TelemetryPanel variant="drawer" open={telemetryOpen} onClose={() => setTelemetryOpen(false)} />
         ) : null}
       </div>

@@ -153,6 +153,28 @@ describe('BrainChat session-bound controller', () => {
     }
   });
 
+  it('ends the live turn on an error frame — the spinner never outlives a failed reconnect', async () => {
+    vi.useFakeTimers();
+    try {
+      renderHarness();
+      await vi.waitFor(() => expect(FakeES.instances.length).toBe(1));
+      const es = FakeES.instances[0]!;
+
+      // A tool is executing: the turn streams and its last row carries the running spinner.
+      act(() => es.emit({ type: 'tool', name: 'Bash', id: 't1', detail: 'npm test' }));
+      await vi.waitFor(() => expect(screen.getByRole('status', { name: 'Running' })).toBeInTheDocument());
+
+      // The brain died mid-turn and the reconnect fails too — nothing will ever settle this turn.
+      server.use(http.post('*/api/brain/start', () => HttpResponse.error()));
+      act(() => es.emitErrorFrame('brain not started'));
+      await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+
+      expect(screen.queryByRole('status', { name: 'Running' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('discards a superseded (older-generation) switch so the latest conversation wins', async () => {
     renderHarness();
     await waitFor(() => expect(FakeES.instances.length).toBe(1)); // initial default connect

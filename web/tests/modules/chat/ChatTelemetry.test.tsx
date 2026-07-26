@@ -51,6 +51,32 @@ function setViewport(mobile: boolean) {
   } as MediaQueryList));
 }
 
+/** Watch whether a node matching `selector` was EVER in the document — a query run after render cannot
+ *  see a variant that the first commit mounted and the next one dropped. Both sides of every mutation are
+ *  inspected: a node mounted inside a bigger inserted subtree has no record of its own, but its later
+ *  removal does name it (and a detached node keeps its own subtree, so the match still holds). */
+function watchMounts(selector: string): () => boolean {
+  let mounted = false;
+  const hit = (nodes: NodeList): boolean => {
+    for (const node of nodes) {
+      if (node instanceof HTMLElement && (node.matches(selector) || node.querySelector(selector))) return true;
+    }
+    return false;
+  };
+  // Accumulate in the callback: the observer DRAINS its queue when it delivers, so a later takeRecords()
+  // would come back empty for everything that already fired.
+  const scan = (records: MutationRecord[]): void => {
+    for (const r of records) if (hit(r.addedNodes) || hit(r.removedNodes)) mounted = true;
+  };
+  const observer = new MutationObserver(scan);
+  observer.observe(document.body, { childList: true, subtree: true });
+  return () => {
+    scan(observer.takeRecords());
+    observer.disconnect();
+    return mounted;
+  };
+}
+
 beforeAll(() => {
   server.listen({ onUnhandledRequest });
   (Element.prototype as unknown as { scrollTo: () => void }).scrollTo = () => {};
@@ -122,5 +148,15 @@ describe('chat telemetry panel', () => {
     expect(drawer).toBeInTheDocument();
     expect(screen.getByTestId('telemetry-project').textContent).toContain('/var/www/elowen');
     expect(screen.queryByTestId('telemetry-column')).toBeNull();
+  });
+
+  it('never mounts the desktop column on mobile — not even for the pre-effect first commit', async () => {
+    setViewport(true);
+    const columnWasMounted = watchMounts('[data-testid="telemetry-column"]');
+    renderChat(<ChatView />);
+    await screen.findByPlaceholderText(/Write a message|Napište zprávu/i);
+    // The viewport is unknown on the first commit, so neither variant may be mounted yet: a phone must
+    // never build the second column, run its queries and tear it down again a tick later.
+    expect(columnWasMounted()).toBe(false);
   });
 });

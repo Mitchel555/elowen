@@ -106,6 +106,45 @@ describe('BrainChatSurface tool rows', () => {
   });
 });
 
+describe('BrainChatSurface submitted plan', () => {
+  it('renders the plan panel from the LIVE tool_end frame (not only after a history reload)', async () => {
+    const es = await renderSurface();
+    act(() => {
+      es.emit({ type: 'tool', name: 'ExitPlanMode', id: 'p1' });
+      // ExitPlanMode's result text is addressed to the model, so the daemon withholds it and the plan
+      // rides the settle event instead — the whole live path for a submitted plan.
+      es.emit({ type: 'tool_end', id: 'p1', plan: '# Ship it\n\n1. Wire the store' });
+    });
+    const panel = await screen.findByTestId('chat-plan');
+    expect(panel).toHaveTextContent('Ship it');
+    expect(panel).toHaveTextContent('Wire the store');
+    // The panel REPLACES the tool row — a bare "ExitPlanMode" pill says nothing the panel doesn't.
+    expect(screen.queryByTestId('chat-tool-pill')).toBeNull();
+  });
+
+  it('renders the plan when a hook-annotated result routes it through tool_output instead', async () => {
+    const es = await renderSurface();
+    act(() => {
+      es.emit({ type: 'tool', name: 'ExitPlanMode', id: 'p2' });
+      es.emit({
+        type: 'tool_output', id: 'p2', plan: '# Migrate the store',
+        output: { title: 'ExitPlanMode', kind: 'result', text: 'formatted', tone: 'success' },
+      });
+    });
+    expect(await screen.findByTestId('chat-plan')).toHaveTextContent('Migrate the store');
+  });
+
+  it('leaves a plain tool_end as a bare tool row', async () => {
+    const es = await renderSurface();
+    act(() => {
+      es.emit({ type: 'tool', name: 'Read', id: 'r1', detail: 'a.ts' });
+      es.emit({ type: 'tool_end', id: 'r1' });
+    });
+    await waitFor(() => expect(screen.getAllByTestId('chat-tool-pill')).toHaveLength(1));
+    expect(screen.queryByTestId('chat-plan')).toBeNull();
+  });
+});
+
 describe('BrainChatSurface reasoning block', () => {
   it('shows the elapsed thinking time while the model reasons', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

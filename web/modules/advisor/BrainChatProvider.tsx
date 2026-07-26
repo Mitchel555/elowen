@@ -308,6 +308,10 @@ function useBrainChatController(): BrainChatValue {
       esRef.current?.close();
       setBusy(false);
       setNotice(message);
+      // Fold the error into the transcript as well: it ENDS the streaming turn, so the tool row's running
+      // spinner stops. `busy` alone leaves the turn marked streaming, and a reconnect that never succeeds
+      // would then spin forever. A successful reconnect refetches history and replaces this line.
+      setTurns((cur) => fold(cur, { type: 'error', message }));
       setTimeout(() => {
         if (generation !== genRef.current) return; // a newer connect/switch already took over
         void connect().then(() => setNotice('')).catch(() => setReady(true));
@@ -401,8 +405,18 @@ function useBrainChatController(): BrainChatValue {
     // tool pill by id so a finished tool's stand-alone output renders LIVE, not only after a history reload
     // (parity with `diff`; the reducer's `tool_output` case supersedes any live `tool_progress` tail).
     es.addEventListener('tool_output', (e) => {
-      const { output, id } = JSON.parse((e as MessageEvent).data) as { output: ToolOutputView; id?: string };
-      setTurns((cur) => fold(cur, { type: 'tool_output', output, id }));
+      // A submitted plan rides this event too when the result carries a displayable block (a hook-annotated
+      // ExitPlanMode), so it is threaded through exactly as on `tool_end`.
+      const { output, id, plan } = JSON.parse((e as MessageEvent).data) as { output: ToolOutputView; id?: string; plan?: string };
+      setTurns((cur) => fold(cur, { type: 'tool_output', output, id, plan }));
+    });
+    // A tool that settled with nothing to display. Folded ONLY for its `plan`: an `ExitPlanMode` result is
+    // addressed to the model and withheld from the transcript, so this is the submitted plan's only live
+    // event — without it the plan panel appears solely after a history reload. A plain `tool_end` is a
+    // no-op in the reducer.
+    es.addEventListener('tool_end', (e) => {
+      const { id, plan } = JSON.parse((e as MessageEvent).data) as { id?: string; plan?: string };
+      setTurns((cur) => fold(cur, { type: 'tool_end', id, plan }));
     });
     // AskUserQuestion parked the turn — render the inline choice card until the user answers.
     es.addEventListener('ask', (e) => {
