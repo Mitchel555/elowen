@@ -38,7 +38,7 @@ The terminal chat streams assistant text, tool calls, diffs, approvals, todos, a
 - Use **`/cd [path]`** to show or change the CLI working directory. It affects later prompts, `!` commands, attachments, exports, and local history; it never widens the daemon's project permissions.
 - Use **`/tools`** to inspect the currently available plugin tools, their owner, description, and input schema. It is an inspector, not a plugin-management screen.
 - Use **`/fast`** with a ChatGPT/OpenAI OAuth model to toggle priority processing for this conversation when that model supports it.
-- Use **`/model`**, **`/theme`**, and **`/keybinds`** for the corresponding pickers and preferences.
+- Use **`/model`**, **`/theme`**, and **[`/keybinds`](cli-keybinds)** for the corresponding pickers and preferences.
 - Use **`/statusline`** for a checkbox overlay (like `/keybinds`) that picks which segments the status bar shows — context usage, total tokens, and cost. It edits the shared statusline config, so the choice also applies to the web chat dock.
 - Use **`/stats`** for an overlay with generation speed, cache hit rate, and the input/output token split. Press **⇄** to switch sections. The web chat opens the same data as a modal.
 

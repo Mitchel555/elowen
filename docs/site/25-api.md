@@ -188,4 +188,4 @@ on the HTTP status code.
 > The Zod schemas in `src/api/schemas/` are the executable contract. If this
 > page and the schemas disagree, the schemas win.
 
-[Back to start](getting-started)
+[Next: CLI Keybinds](cli-keybinds)
