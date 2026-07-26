@@ -1592,4 +1592,43 @@ describe('StreamCoordinator — plan decision', () => {
       { type: 'idle' },
     ])).toBe(1);
   });
+
+  // `idle` is not a once-per-plan event. The live journal holds the terminal `idle` until the next run
+  // starts, so every snapshot replay — a reconnect, `/model` restarting the stream, a client attaching
+  // after the turn finished — delivers it again over a history that still carries the plan. Asking twice
+  // about a question the user already answered is bad enough; the overlays also stack.
+  it('asks once about one plan, however many times the settled idle is replayed', () => {
+    expect(planDecisionsFor([
+      { type: 'tool', name: 'ExitPlanMode', id: 'plan-1' },
+      { type: 'tool_end', id: 'plan-1', plan: '# Migration\n- Step one.' },
+      { type: 'idle' },
+      { type: 'idle' },
+      { type: 'idle' },
+    ])).toBe(1);
+  });
+
+  // A second, genuinely different plan is a new question and must be asked — the guard keys on the call,
+  // not on "we have asked once in this conversation".
+  it('asks again when a later turn submits a different plan', () => {
+    expect(planDecisionsFor([
+      { type: 'tool', name: 'ExitPlanMode', id: 'plan-1' },
+      { type: 'tool_end', id: 'plan-1', plan: '# First' },
+      { type: 'idle' },
+      { type: 'user', text: 'redo it' },
+      { type: 'tool', name: 'ExitPlanMode', id: 'plan-2' },
+      { type: 'tool_end', id: 'plan-2', plan: '# Second' },
+      { type: 'idle' },
+    ])).toBe(2);
+  });
+
+  // The user switching model or mode between the tool result and `idle` writes a session marker turn.
+  // Treating that as "the conversation moved on" lost the decision entirely.
+  it('still asks when a session marker lands between the plan and the settled idle', () => {
+    expect(planDecisionsFor([
+      { type: 'tool', name: 'ExitPlanMode', id: 'plan-1' },
+      { type: 'tool_end', id: 'plan-1', plan: '# Migration' },
+      { type: 'session-event', kind: 'model', detail: 'claude-opus-5' },
+      { type: 'idle' },
+    ] as unknown as BrainEvent[])).toBe(1);
+  });
 });

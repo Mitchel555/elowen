@@ -177,7 +177,7 @@ describe('TranscriptModel', () => {
       model.apply({ type: 'tool', id: 'plan-1', name: 'ExitPlanMode' });
       model.apply({ type: 'tool_end', id: 'plan-1', plan: '# Migration' });
 
-      expect(model.lastSubmittedPlan()).toBe('# Migration');
+      expect(model.lastSubmittedPlan()?.plan).toBe('# Migration');
     });
 
     it('ignores a plan shipped by any other tool', () => {
@@ -192,7 +192,7 @@ describe('TranscriptModel', () => {
       const model = new TranscriptModel([
         { role: 'assistant', text: '', segments: [{ kind: 'tool', id: 'plan-1', name: 'ExitPlanMode', plan: '# Old' }] },
       ]);
-      expect(model.lastSubmittedPlan()).toBe('# Old');
+      expect(model.lastSubmittedPlan()?.plan).toBe('# Old');
 
       model.apply({ type: 'user', text: 'refine it' });
       model.apply({ type: 'text', delta: 'here is the refinement' });

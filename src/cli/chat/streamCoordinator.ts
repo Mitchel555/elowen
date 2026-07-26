@@ -150,7 +150,12 @@ export class StreamCoordinator implements StreamCoordinatorPort {
           }
           // The decision follows an explicit ExitPlanMode call in the settled turn — prose that merely
           // quotes or discusses a plan can never raise it.
-          if (rt.workMode === 'plan' && !rt.childView && rt.transcript.lastSubmittedPlan()) flows.openPlanDecision();
+          // Deduplicated by call id inside, because `idle` is not a once-per-plan event: the live journal
+          // keeps the terminal `idle` until the next run starts, so every snapshot replay — a reconnect,
+          // `/model` restarting the stream, a client attaching after the turn finished — delivers it again
+          // over a history that still carries the plan. Without that the picker reopens on a question
+          // already answered, and stacks, since overlays opened this way are not deduplicated by name.
+          maybeRaisePlanDecision();
         }
         // A parent step means a turn is running — arm the periodic poll for very long turns (idempotent).
         if (event.type === 'step') onTurnActive();
@@ -395,9 +400,23 @@ export class StreamCoordinator implements StreamCoordinatorPort {
       await hydrated;
     };
 
+  /** Put the submitted plan's implement/cancel decision to the user, at most once per ExitPlanMode
+   *  call. Called both when a turn settles and when a sub-agent panel closes: a plan that settled
+   *  while the panel was open would otherwise never be asked about, because the `idle` that carried
+   *  it is long gone by the time the user comes back. */
+  const maybeRaisePlanDecision = (): void => {
+    if (rt.workMode !== 'plan' || rt.childView) return;
+    const submitted = rt.transcript.lastSubmittedPlan();
+    const key = submitted && (submitted.id ?? submitted.plan);
+    if (!key || key === rt.planDecisionRaisedFor) return;
+    rt.planDecisionRaisedFor = key;
+    flows.openPlanDecision();
+  };
+
     const closeSubagent = (): void => {
       teardownChild();
       if (!stopped) render('child:closed');
+      maybeRaisePlanDecision();
     };
 
     const cycleSubagent = (): void => {

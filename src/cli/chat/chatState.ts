@@ -39,6 +39,10 @@ export class ChatState {
    *  Null until that child reports its first step (or forever, for one restored without a live lane). */
   childView: { sessionId: string; transcript: TranscriptModel; processes: ProcessInfo[]; loading: boolean; usage: BrainStatus['usage'] } | null = null;
   childAc: AbortController | null = null;
+  /** The ExitPlanMode call whose decision has already been put to the user, so a replayed terminal `idle`
+   *  cannot ask again. Lives on the state rather than the stream because it must outlive a stream
+   *  restart — a reconnect is exactly the case it exists to survive. */
+  planDecisionRaisedFor?: string;
   streamAc = new AbortController();
   notice: string;
   /** Set to true right after assigning `notice` to exempt THAT text from the frame loop's auto-expiry —

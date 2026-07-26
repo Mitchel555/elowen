@@ -121,16 +121,28 @@ export class TranscriptModel implements TranscriptRead {
   subagents(): readonly SubagentState[] { return this.subagentProjection; }
   workflows(): readonly WorkflowState[] { return this.workflowProjection; }
   lastAssistantText(): string { return this.lastAssistant; }
-  /** The plan an `ExitPlanMode` call submitted in the TAIL turn, or undefined. Tail-only on purpose, like
-   *  `lastAssistantText`: it answers "did the turn that just settled propose a plan?", so a later turn
-   *  without one must not resurrect the previous turn's plan decision. */
-  lastSubmittedPlan(): string | undefined {
-    const tail = this.turns.at(-1);
+  /** The plan an `ExitPlanMode` call submitted in the most recent ASSISTANT turn, with the id of the call
+   *  that submitted it, or undefined.
+   *
+   *  The id is what lets the caller raise the decision exactly once. The signal itself is durable — it is
+   *  rebuilt from history on every hydration — so "a plan was submitted" stays true long after the turn
+   *  settled, and anything that replays the terminal `idle` (a reconnect, a stream restart, a fresh client
+   *  attaching) would otherwise ask again about a plan the user already answered.
+   *
+   *  Trailing non-assistant turns are skipped rather than disqualifying: a session-change marker landing
+   *  between the tool result and `idle` — the user switching model or mode in that window — is not the
+   *  conversation moving on from the plan, and treating it as such lost the decision entirely. A later
+   *  assistant turn genuinely without a plan still returns undefined, so nothing resurrects. */
+  lastSubmittedPlan(): { id?: string; plan: string } | undefined {
+    const tail = this.turns.findLast((turn) => turn.role !== 'event');
     if (tail?.role !== 'elowen') return undefined;
-    let found: string | undefined;
+    let found: { id?: string; plan: string } | undefined;
     for (const segment of tail.segments) {
       if (segment.kind !== 'tools') continue;
-      for (const item of segment.items) found = submittedPlanOf(item) ?? found;
+      for (const item of segment.items) {
+        const plan = submittedPlanOf(item);
+        if (plan) found = { ...(item.id ? { id: item.id } : {}), plan };
+      }
     }
     return found;
   }
