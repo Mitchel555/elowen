@@ -1973,6 +1973,36 @@ describe('BrainService', () => {
     expect(await variant('back to planning', 'plan')).toBe('cli/plan-mode');
   });
 
+  // A compaction deletes the full directive along with everything else, so the sparse line's "the full
+  // instructions are earlier in this conversation" becomes a lie. The cadence therefore restarts on a
+  // compaction even though the mode never changed — the case `previousMode !== mode` cannot catch.
+  it('restates a mode directive in full after a compaction, with the mode unchanged', async () => {
+    const d = fakeDeps();
+    d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
+      name.startsWith('cli/') ? name : `PERSONA:${name}:${vars.userName}`,
+    );
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const variant = async (text: string): Promise<string | undefined> => {
+      d.prompts.render.mockClear();
+      await svc.send({ userId: 1, text, mode: 'plan', session: 'brain-1' });
+      return (d.prompts.render.mock.calls.map((c) => c[0] as string)).find((n) => n.startsWith('cli/'));
+    };
+
+    expect(await variant('one')).toBe('cli/plan-mode');
+    expect(await variant('two')).toBe('cli/plan-mode-sparse');
+
+    // A compaction lands. The divider carries a working set so the orientation block is non-empty —
+    // an empty block means nothing was lost worth mentioning, and must NOT restart the cadence.
+    d.store.appendMessage({
+      id: 'div-1', sessionId: 'brain-1', parentId: null, role: 'compaction',
+      content: { role: 'compactionSummary', workingSet: [{ path: '/a.ts', wrote: false }] },
+    });
+
+    expect(await variant('three')).toBe('cli/plan-mode');
+    expect(await variant('four')).toBe('cli/plan-mode-sparse');
+  });
+
   it('plan mode hides mutating tools from the model for that turn', async () => {
     const d = fakeDeps();
     d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
