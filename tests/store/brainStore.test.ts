@@ -1115,6 +1115,49 @@ describe('BrainStore', () => {
     });
   });
 
+  // The files the conversation was working in ride the divider for the same reason the usage rollup
+  // does: the rows that named them are about to be deleted, and nothing else records them.
+  describe('working set on the compaction divider', () => {
+    const fileRow = (id: string, tool: string, path: string) => ({
+      id, sessionId: 's1', parentId: null, role: 'toolResult',
+      content: { role: 'toolResult', toolName: tool, details: { ok: true, tool, path, contentHash: 'h' } },
+    });
+    const tail = () => store.appendMessage({ id: 'keep', sessionId: 's1', parentId: null, role: 'user', content: { role: 'user', content: 'carry on' } });
+    const compact = () => store.compactSessionMessages('s1', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary' } }, 1);
+    const divider = () => JSON.parse(store.getMessages('s1').find((m) => m.role === 'compaction')!.content) as Record<string, unknown>;
+
+    beforeEach(() => { store.createSession({ id: 's1', userId: 1, model: 'm' }); });
+
+    it('folds the files named by the dropped rows onto the divider, newest first', () => {
+      store.appendMessage(fileRow('r1', 'Read', '/a.ts'));
+      store.appendMessage(fileRow('r2', 'Write', '/b.ts'));
+      tail();
+      compact();
+      expect(divider().workingSet).toEqual([{ path: '/b.ts', wrote: true }, { path: '/a.ts', wrote: false }]);
+    });
+
+    it('leaves the divider clean when nothing dropped named a file', () => {
+      store.appendMessage({ id: 'r1', sessionId: 's1', parentId: null, role: 'assistant', content: { role: 'assistant', content: 'no tools' } });
+      tail();
+      compact();
+      expect(divider()).not.toHaveProperty('workingSet');
+    });
+
+    // The two rollups are independent: one must not suppress the other.
+    it('carries the working set alongside a usage rollup', () => {
+      store.appendMessage({
+        id: 'r1', sessionId: 's1', parentId: null, role: 'assistant',
+        content: { role: 'assistant', content: 'x', model: 'm', usage: { input: 5, output: 3, totalTokens: 8 } },
+      });
+      store.appendMessage(fileRow('r2', 'Edit', '/a.ts'));
+      tail();
+      compact();
+      const d = divider();
+      expect(d.workingSet).toEqual([{ path: '/a.ts', wrote: true }]);
+      expect(Array.isArray(d.usageRollup)).toBe(true);
+    });
+  });
+
   describe('workflow runs', () => {
     const wf = (over: Record<string, unknown> = {}) => ({
       id: 'wf-1', toolCallId: 'call-1', title: 'Ship it', status: 'running',

@@ -6,6 +6,7 @@ import { dbTsToIso } from '../shared/time.js';
 import { planFilePath, toolResultSpillDir } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
 import { CHANNEL_PREFIX, TASK_PREFIX } from '../brain/sessionId.js';
+import { rollupWorkingSet } from '../brain/continuity/workingSet.js';
 import {
   normalizeDelegatedExecutionScope,
   sameDelegatedExecutionScope,
@@ -642,8 +643,18 @@ export class BrainStore {
       // rows would otherwise silently ERASE that spend from the Stats page / daily tiles.
       const dropped = rows.slice(0, rows.length - keep.length);
       const rollup = rollupDroppedUsage(dropped);
-      const summaryContent = rollup && typeof summary.content === 'object' && summary.content !== null && !Array.isArray(summary.content)
-        ? { ...(summary.content as Record<string, unknown>), usageRollup: rollup }
+      // Fold the FILES those same rows named onto the divider too (under `$.workingSet`). Same reason
+      // and same last-chance timing as the usage rollup: after the DELETE below there is no record left
+      // that the conversation was ever working in them, and the model would resume from a summary with
+      // no idea which files it had open.
+      const workingSet = rollupWorkingSet(dropped);
+      const carriable = typeof summary.content === 'object' && summary.content !== null && !Array.isArray(summary.content);
+      const summaryContent = carriable && (rollup || workingSet)
+        ? {
+            ...(summary.content as Record<string, unknown>),
+            ...(rollup ? { usageRollup: rollup } : {}),
+            ...(workingSet ? { workingSet } : {}),
+          }
         : summary.content;
       this.db.prepare('DELETE FROM brain_messages WHERE session_id = ?').run(sessionId);
       const insert = this.db.prepare(
