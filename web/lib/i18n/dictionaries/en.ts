@@ -1292,6 +1292,8 @@ export const en = {
       goalMaxTurnsHint: "Absolute cap on autonomous goal turns — even in YOLO the loop pauses here so a runaway goal can't burn tokens forever. Range 8-500, default 64.",
       channelSessionCap: "Live channel sessions",
       channelSessionCapHint: "How many live channel conversations (e.g. Discord threads) stay in memory before the least-recently-used one is dropped (its history stays in the database). Range 4-256, default 32.",
+      delegateContextChars: "Sub-agent context",
+      delegateContextCharsHint: "Character budget for the background a delegating agent hands to a sub-agent or workflow node (each dependency result travels as its own block). Higher = a node sees more of what its dependencies produced, at a higher token cost; anything that still does not fit is reported to the node as truncated. Range 2000-26000, default 20000.",
     },
     contextWindow: "Context window",
     contextWindowEdit: "Edit context window",
@@ -1568,6 +1570,8 @@ export const en = {
     removeFromQueue: 'Remove from queue',
     showThoughts: 'Show reasoning',
     hideThoughts: 'Hide reasoning',
+    toolRunning: 'Running',
+    reasoningLabel: 'Reasoning',
   },
   chat: {
     historyTitle: 'Conversations',

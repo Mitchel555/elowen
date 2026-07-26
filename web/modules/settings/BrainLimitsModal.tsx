@@ -1,5 +1,5 @@
 'use client';
-import { SlidersHorizontal, AlignLeft, Type, Timer, Brain, ListChecks, Target, Repeat, MessagesSquare, type LucideIcon } from 'lucide-react';
+import { SlidersHorizontal, AlignLeft, Type, Timer, Brain, ListChecks, Target, Repeat, MessagesSquare, Share2, type LucideIcon } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -11,6 +11,7 @@ import type { BrainLimits } from '../../lib/types';
 export const BRAIN_LIMIT_DEFAULTS: BrainLimits = {
   toolOutputMaxLines: 80, toolOutputMaxChars: 12000, elicitationTimeoutMs: 300000,
   memoryRecallCount: 6, memoryRecallChars: 1500, goalTurnBudget: 8, goalMaxTurns: 64, channelSessionCap: 32,
+  delegateContextChars: 20000,
 };
 
 /** The Limits inputs, in display order, each with its UI bounds (the daemon re-clamps to the same range)
@@ -24,6 +25,7 @@ const BRAIN_LIMIT_FIELDS: { key: keyof BrainLimits; min: number; max: number; st
   { key: 'goalTurnBudget', min: 1, max: 50, step: 1, icon: Target },
   { key: 'goalMaxTurns', min: 8, max: 500, step: 1, icon: Repeat },
   { key: 'channelSessionCap', min: 4, max: 256, step: 1, icon: MessagesSquare },
+  { key: 'delegateContextChars', min: 2000, max: 26000, step: 1000, icon: Share2 },
 ];
 
 /** Modal editor for the operator-tunable brain limits. Edits flow straight back into the caller's

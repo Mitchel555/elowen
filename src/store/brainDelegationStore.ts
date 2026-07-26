@@ -1,5 +1,6 @@
 import type { Db } from './db.js';
 import type { WorkflowNode, WorkflowUpdate } from '../brain/events.js';
+import { isSubagentSession } from '../brain/sessionId.js';
 
 /** Validated latest UI state of one delegated child. The child id is a first-class indexed column in
  *  brain_subagent_runs; this JSON state contains only bounded display data. */
@@ -26,6 +27,26 @@ export interface BrainSubagentRun extends BrainSubagentRunState {
  *  purpose: a `workflow` event carries the WHOLE DAG, so the durable row IS the snapshot and the row,
  *  the event and the state attached to the tool item cannot drift apart. Bounded display data only. */
 export type BrainWorkflowRun = WorkflowUpdate;
+/** One delegated child of a conversation, as its PARENT sees it: enough to recognise which sub-agent
+ *  this was and decide whether to continue it. `task`/`status`/`model` come from the child's
+ *  brain_subagent_runs row and are absent for a child the engine never recorded one for (a workflow
+ *  node), which is why the listing is driven by the durable session relation instead. */
+export interface DelegatedChildSummary {
+  sessionId: string;
+  title: string;
+  task?: string;
+  status?: 'running' | 'done' | 'error';
+  /** Turns already in the child's transcript — what a continuation would resume on top of. */
+  messages: number;
+  model?: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
+/** Ceiling for one listing. A conversation that fanned out hundreds of children must not turn a single
+ *  tool call into an unbounded transcript dump. */
+const MAX_DELEGATED_CHILDREN = 50;
+
 export interface BrainSubagentResult {
   /** Which producer enqueued this row (see brain_subagent_results.kind). A 'workflow' result carries an
    *  empty `sessionId` and a `workflowId` instead of a child session. */
@@ -275,6 +296,59 @@ export class BrainDelegationStore {
         toolCallId: row.tool_call_id, sessionId: row.child_session_id, ...state,
         ...(row.delivery_state === 'pending' || row.delivery_state === 'acknowledged'
           ? { resultDelivery: row.delivery_state } : {}),
+      });
+    }
+    return out;
+  }
+
+  /** The delegated sub-agents ONE conversation spawned, newest first — the parent's own record of what
+   *  it already ran, and the only way it may address a child for a continuation.
+   *
+   *  Scoped by the durable relation alone: a row is returned only when it names THIS parent and still
+   *  shares its owner. That is the security boundary — the caller passes no user id and cannot widen the
+   *  query, so a conversation can never see (or reach) a sibling conversation's or another account's
+   *  children. Ownership is re-derived on every read rather than trusted from the row, so a child that
+   *  changed hands stops being listable immediately.
+   *
+   *  Unlike getSubagentRuns this starts from brain_sessions and only ENRICHES from brain_subagent_runs:
+   *  a workflow node is a real continuable child even though the engine records the DAG instead of a
+   *  per-child run row. Non-sub-agent nested sessions (a bound channel) are filtered out — they are not
+   *  delegated children and have no immutable scope to resume under. */
+  listDelegatedChildren(parentSessionId: string, limit = MAX_DELEGATED_CHILDREN): DelegatedChildSummary[] {
+    if (!parentSessionId) return [];
+    const rows = this.db.prepare(
+      `SELECT c.id, c.title, c.created_at, c.updated_at, r.state, r.updated_at AS run_updated_at,
+              (SELECT COUNT(*) FROM brain_messages m WHERE m.session_id = c.id) AS messages
+         FROM brain_sessions c
+         JOIN brain_sessions p ON p.id = c.parent_session_id
+         LEFT JOIN brain_subagent_runs r
+           ON r.parent_session_id = c.parent_session_id AND r.child_session_id = c.id
+        WHERE c.parent_session_id = ?
+          AND c.user_id = p.user_id
+        ORDER BY c.created_at DESC, c.rowid DESC`
+    ).all(parentSessionId) as {
+      id: string; title: string; created_at: string; updated_at: string;
+      state: string | null; run_updated_at: string | null; messages: number;
+    }[];
+    const capped = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, MAX_DELEGATED_CHILDREN) : MAX_DELEGATED_CHILDREN;
+    const out: DelegatedChildSummary[] = [];
+    for (const row of rows) {
+      if (out.length >= capped) break;
+      if (!isSubagentSession(row.id)) continue;
+      // Malformed run JSON degrades to "no run detail" rather than hiding the child: the transcript is
+      // still there and still continuable, which is what this listing exists to expose.
+      let state: BrainSubagentRunState | undefined;
+      if (row.state) {
+        try { state = normalizeSubagentState(JSON.parse(row.state)); } catch { state = undefined; }
+      }
+      out.push({
+        sessionId: row.id,
+        title: row.title,
+        ...(state ? { task: state.task, status: state.status } : {}),
+        ...(state?.model ? { model: state.model } : {}),
+        messages: Number(row.messages) || 0,
+        startedAt: row.created_at,
+        updatedAt: row.run_updated_at ?? row.updated_at,
       });
     }
     return out;

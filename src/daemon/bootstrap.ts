@@ -631,6 +631,18 @@ export async function buildApp(opts: BuildOpts) {
       // The typed sub-agent catalog, read synchronously by the subagent plugin at register time to compose
       // its Delegate tool description.
       subagentTypes: () => agentCatalog(getAgentRegistry()),
+      // The operator's ceiling on the context a delegating plugin may attach to a child (Settings →
+      // Elowen AI → Limits). Read live, so raising it applies to the next delegation without a restart.
+      delegateContextChars: () => config.get().brain.limits.delegateContextChars,
+      // Sub-agent transcripts already outlive their delegation in SQLite; this is what lets the agent
+      // that spawned them find them again and pick one back up. Both halves are keyed on the parent
+      // session the registry reads off the live turn, so a plugin can only ever reach its OWN children.
+      delegatedChildren: {
+        runs: (parentSessionId, limit) => brainStore.listDelegatedChildren(parentSessionId, limit),
+        continue: (parentSessionId, childSessionId, text, access) => brain
+          ? brain.continueSubagent(parentSessionId, childSessionId, text, access)
+          : Promise.reject(new Error('the brain is not available on this deployment')),
+      },
       // ONE answer to "what time is it for this operator", read from the single place they configure it
       // (Settings → Plugins → runtime-context → Timezone) and shared with every plugin that reasons about
       // wall-clock time. Without it, cron would silently schedule in whatever zone the SERVER happens to

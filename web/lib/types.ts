@@ -56,6 +56,7 @@ export interface BrainLimits {
   goalTurnBudget: number;
   goalMaxTurns: number;
   channelSessionCap: number;
+  delegateContextChars: number;
 }
 
 /** How a brain provider talks upstream: a custom endpoint (API key) or a connected OAuth account. */

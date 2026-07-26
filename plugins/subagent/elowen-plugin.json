@@ -10,6 +10,8 @@
       "DelegateStatus",
       "DelegateResult",
       "DelegateModels",
+      "DelegateList",
+      "DelegateContinue",
       "WorkflowStart",
       "WorkflowAddNodes",
       "WorkflowStatus"
@@ -23,6 +25,8 @@
     "DelegateStatus": "\u23f3",
     "DelegateResult": "\ud83d\udce5",
     "DelegateModels": "\ud83e\udd1d",
+    "DelegateList": "\ud83d\udccb",
+    "DelegateContinue": "\u2709\ufe0f",
     "WorkflowStart": "\ud83d\udd00",
     "WorkflowAddNodes": "\u2795",
     "WorkflowStatus": "\ud83d\udcca"
@@ -31,6 +35,7 @@
     "DelegateStatus",
     "DelegateResult",
     "DelegateModels",
+    "DelegateList",
     "WorkflowStatus"
   ]
 }

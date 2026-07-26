@@ -183,7 +183,8 @@ const clampMaxSteps = (next: number | undefined, fallback: number): number =>
  *  clamped to a sane range; an unset/invalid field falls back to the current value (so a partial patch
  *  never wipes a sibling). Consumed at: messageView (tool-output preview), ElicitationRegistry
  *  (AskUserQuestion wait), MemoryService.retrieve (recall size), the goal loop (turn budget + YOLO
- *  safety ceiling), and Channels (live-session LRU cap). */
+ *  safety ceiling), Channels (live-session LRU cap), and the subagent plugin (context handed to a
+ *  delegated child / workflow node). */
 export interface BrainLimits {
   toolOutputMaxLines: number;
   toolOutputMaxChars: number;
@@ -193,6 +194,7 @@ export interface BrainLimits {
   goalTurnBudget: number;
   goalMaxTurns: number;
   channelSessionCap: number;
+  delegateContextChars: number;
 }
 export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   toolOutputMaxLines: 80,
@@ -203,6 +205,7 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   goalTurnBudget: 8,
   goalMaxTurns: 64,
   channelSessionCap: 32,
+  delegateContextChars: 20_000,
 };
 const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> = {
   toolOutputMaxLines: [20, 400],
@@ -213,6 +216,10 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   goalTurnBudget: [1, 50],
   goalMaxTurns: [8, 500],
   channelSessionCap: [4, 256],
+  // The maximum stays under the delegated-scope prompt total (32 000 chars in brain/delegatedScope.ts),
+  // leaving room for the child's role prompt — a scope over that bound is rejected wholesale and the
+  // delegation fails closed.
+  delegateContextChars: [2_000, 26_000],
 };
 /** Merge a (possibly partial, possibly malformed) limits patch onto `fallback`, clamping each field to
  *  its bound and rounding to a whole number; a missing/invalid field keeps the fallback value. */

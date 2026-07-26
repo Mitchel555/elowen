@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { validateWorkflowNodes, mergeWorkflowNodes, readyNodeIds } from './dag.mjs';
-import { MAX_CONTEXT_CHARS } from './limits.mjs';
+import { MAX_CONTEXT_CHUNK_CHARS, MAX_CONTEXT_CHUNKS, resolveContextTotalChars } from './limits.mjs';
 
 const MAX_WORKFLOWS = 16;
 const WORKFLOW_RETENTION_MS = 60 * 60_000;
@@ -19,9 +19,12 @@ const SNAPSHOT_TASK_PREVIEW = 500;
 // Same bound for a terminal node's result/error preview: the modal dock shows a line or two, and the
 // full MAX_RESULT_CHARS body already reaches the parent through the blocking WorkflowStart return.
 const SNAPSHOT_RESULT_PREVIEW = 500;
-// Rough size of the wrapper around the dependency results (block heading plus the truncation note), so
-// the divided budget accounts for its own packaging rather than overrunning by it.
+// Rough size of the note that introduces the dependency blocks (including the list of truncated node ids),
+// so the divided budget accounts for its own packaging rather than overrunning by it.
 const DEP_HEADER_CHARS = 300;
+// Rough size of one result block's own wrapper: its `## Result from node "id"` heading, the separator and
+// the truncation marker clip() may append.
+const DEP_BLOCK_CHARS = 60;
 // Never hand a node a slice too small to carry a finding. When even this does not fit, the results are
 // heavily truncated and the block says so — which is more useful than silently shipping three words.
 const DEP_MIN_CHARS = 400;
@@ -49,7 +52,7 @@ const NODE_SHAPE = Type.Object({
 /** Register the workflow tools on the subagent plugin. `getRun` returns the host channel handler once
  *  connected; `helpers` are the delegate primitives reused verbatim so node spawning matches delegation
  *  exactly (same narrowing invariant, same principal check, same context chunking). */
-export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalOf, delegateContextChunk }) {
+export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalOf, delegateContextChunks }) {
   /** id -> workflow. In-memory only (mirrors delegate's `jobs`): a workflow does not survive a daemon
    *  restart, and its node child sessions persist on their own. */
   const workflows = new Map();
@@ -150,6 +153,9 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     // A node that keeps full access (no read_only, no explicit toolset) may extend the DAG; a narrowed
     // node cannot (it may not even hold WorkflowAddNodes), so it is never invited to.
     const canExpand = !node.readOnly && !node.tools;
+    // Read live (Settings → Elowen AI → Limits), so raising the budget applies to the next node without a
+    // daemon restart.
+    const contextTotal = resolveContextTotalChars(ctx.delegateContextChars?.());
     const contextParts = [];
     if (canExpand) {
       contextParts.push(`You are node "${node.id}" of a running workflow (id "${wf.id}"). Only if completing this `
@@ -165,25 +171,37 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       .map((id) => ({ id, result: wf.state.get(id)?.result }))
       .filter((d) => d.result);
     if (depResults.length) {
-      // Divide what is actually LEFT, not a budget of our own choosing. The whole context ships as one
-      // prompt-append chunk, so the ceiling is the chunk bound — and the preamble and shared context are
-      // already spending it. Sizing this independently is how a wide fan-in used to lose everything but
-      // its first dependency: the slices were cut to fit a budget the chunk could never hold, and the
-      // single clip at the end then took the first N chars of the joined block.
-      const spent = contextParts.reduce((n, part) => n + part.length + 2, DEP_HEADER_CHARS);
-      const perDep = Math.max(DEP_MIN_CHARS, Math.floor((MAX_CONTEXT_CHARS - spent) / depResults.length));
+      // Each dependency gets its OWN prompt chunk, so the per-chunk ceiling bounds a SINGLE result rather
+      // than all of them joined. Joining them is what left a wide fan-in with a fraction of its input: the
+      // slices were cut to fit a budget one chunk could never hold, and the clip at the end then took the
+      // first N chars of the joined block, so the later dependencies were simply absent.
+      // Only the shared TOTAL is divided, and it is what is actually LEFT after the preamble, the shared
+      // context and the results note below.
+      const spent = contextParts.reduce((n, part) => n + part.length, DEP_HEADER_CHARS);
+      // Chunks left for the results, after the parts already queued and the note that introduces them.
+      // When there are more dependencies than chunks, several share one — a dependency never disappears
+      // just because the DAG is wide, its slice only gets smaller.
+      const slots = Math.max(1, MAX_CONTEXT_CHUNKS - contextParts.length - 1);
+      const perChunk = Math.ceil(depResults.length / slots);
+      const perDep = Math.max(DEP_MIN_CHARS, Math.min(
+        Math.floor(MAX_CONTEXT_CHUNK_CHARS / perChunk) - DEP_BLOCK_CHARS,
+        Math.floor((contextTotal - spent) / depResults.length) - DEP_BLOCK_CHARS,
+      ));
       const clipped = depResults.filter((d) => d.result.length > perDep).map((d) => d.id);
-      // Say so IN the block. A node reading a truncated dependency cannot tell whether the finding it is
+      // Say so IN the context. A node reading a truncated dependency cannot tell whether the finding it is
       // looking for was absent or merely cut off, and that difference decides whether it should re-derive.
       const note = clipped.length
         ? `\n\nThese were truncated to fit and you are NOT seeing them in full: ${clipped.join(', ')}. `
           + 'Say so in your output rather than treating what you received as the complete result.'
         : '';
-      contextParts.push(`Results from the nodes this one depends on:${note}\n\n${depResults
-        .map((d) => `## Result from node "${d.id}"\n${clip(d.result, perDep)}`)
-        .join('\n\n')}`);
+      contextParts.push(`Results from the nodes this one depends on follow, one block per node.${note}`);
+      for (let i = 0; i < depResults.length; i += perChunk) {
+        contextParts.push(depResults.slice(i, i + perChunk)
+          .map((d) => `## Result from node "${d.id}"\n${clip(d.result, perDep)}`)
+          .join('\n\n'));
+      }
     }
-    const context = contextParts.length ? delegateContextChunk(contextParts.join('\n\n')) : undefined;
+    const context = delegateContextChunks(contextParts, contextTotal);
     return {
       ...wf.parentAccess,
       ...(toolPolicy ? { toolPolicy } : {}),
@@ -202,7 +220,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       ...(agentType
         ? { agentType }
         : { prompt: 'You are a focused sub-agent running one node of a workflow. Complete the task and report the result concisely — no preamble.' }),
-      ...(context ? { context } : {}),
+      ...(context.length ? { context } : {}),
     };
   };
 

@@ -1292,6 +1292,8 @@ export const cs = {
       goalMaxTurnsHint: "Absolutní strop autonomních tahů cíle — i v YOLO se smyčka zde pozastaví, aby zaběhlý cíl nespálil tokeny donekonečna. Rozsah 8–500, výchozí 64.",
       channelSessionCap: "Živé kanálové relace",
       channelSessionCapHint: "Kolik živých kanálových konverzací (např. Discord vláken) zůstává v paměti, než se nejdéle nepoužitá zahodí (její historie zůstává v databázi). Rozsah 4–256, výchozí 32.",
+      delegateContextChars: "Kontext pro subagenta",
+      delegateContextCharsHint: "Znakový rozpočet pro podklady, které předávající agent předá subagentovi nebo uzlu workflow (výsledek každé závislosti putuje jako samostatný blok). Vyšší hodnota znamená, že uzel uvidí víc z toho, co vytvořily jeho závislosti, za cenu vyšší spotřeby tokenů; co se ani tak nevejde, je uzlu ohlášeno jako zkrácené. Rozsah 2000–26000, výchozí 20000.",
     },
     contextWindow: "Kontextové okno",
     contextWindowEdit: "Upravit kontextové okno",
@@ -1568,6 +1570,8 @@ export const cs = {
     removeFromQueue: 'Odebrat z fronty',
     showThoughts: 'Zobrazit uvažování',
     hideThoughts: 'Skrýt uvažování',
+    toolRunning: 'Probíhá',
+    reasoningLabel: 'Uvažování',
   },
   chat: {
     historyTitle: 'Konverzace',

@@ -5,7 +5,7 @@ import { parseManifest } from './manifest.js';
 import type { PluginManifest } from './manifest.js';
 import { PluginRegistry } from './registry.js';
 import type { PluginEmbedder } from './registry.js';
-import type { PluginLogger, PluginModule, ProviderCredentials } from './api.js';
+import type { DelegatedChildBridge, PluginLogger, PluginModule, ProviderCredentials } from './api.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
 import type { AskAnswer } from '../brain/events.js';
 import type { PluginModelOption } from './api.js';
@@ -101,6 +101,12 @@ export interface LoadPluginsOptions {
   /** Host reloader exposed to plugins as ctx.requestReload() — a plugin that writes a skill/agent to disk
    *  asks the host to re-scan + apply it live (deferred to the end of the current turn). */
   requestReload?: () => void;
+  /** The operator's delegated-context budget (Settings → Elowen AI → Limits), exposed to plugins as
+   *  ctx.delegateContextChars(). Read live so a change applies without a reload. */
+  delegateContextChars?: () => number;
+  /** Durable sub-agent persistence, exposed to plugins as ctx.subagentRuns() / ctx.continueSubagent().
+   *  Absent (worker or unit-test wiring) → listing is empty and continuing is refused. */
+  delegatedChildren?: DelegatedChildBridge;
   logger: PluginLogger;
 }
 
@@ -144,7 +150,8 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<PluginRegis
         const ctx = staging.contextFor(name, opts.config?.[name] ?? {}, opts.logger, opts.dataRoot, opts.notify, opts.listModels, opts.resolveProvider, manifest.capabilities ?? {}, manifest.provides, opts.answerQuestion, opts.embeddings, opts.embeddingConfig, () => registry.tools.map((t) => t.name), opts.timezone, opts.subagentTypes, opts.requestReload,
           // Like `toolNames`, this closes over the MERGED registry (not the staging one): the adapter reads it
           // long after every plugin has merged, so it must see the whole live set of plugin prompt commands.
-          () => [...registry.commands.values()].map((c) => ({ name: c.name, description: c.description, prompt: c.prompt, surfaces: c.surfaces, plugin: registry.commandOwner.get(c.name) })));
+          () => [...registry.commands.values()].map((c) => ({ name: c.name, description: c.description, prompt: c.prompt, surfaces: c.surfaces, plugin: registry.commandOwner.get(c.name) })),
+          opts.delegateContextChars, opts.delegatedChildren);
         await mod.register(ctx);
         registry.merge(staging, (m) => opts.logger.warn(`[plugin:${name}] ${m}`));
         // Capture the plugin's declared capabilities (deny-by-default `{}` when absent) — the manifest

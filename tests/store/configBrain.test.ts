@@ -48,7 +48,21 @@ describe('ConfigStore brain limits', () => {
     expect(cs.get().brain.limits).toEqual({
       toolOutputMaxLines: 80, toolOutputMaxChars: 12000, elicitationTimeoutMs: 300000,
       memoryRecallCount: 6, memoryRecallChars: 1500, goalTurnBudget: 8, goalMaxTurns: 64, channelSessionCap: 32,
+      delegateContextChars: 20000,
     });
+  });
+
+  // The sub-agent context budget must stay under the delegated-scope prompt total (32 000 chars): a scope
+  // over that bound is rejected wholesale, so an operator typing a bigger number would not get a fatter
+  // context, they would get delegations that fail closed.
+  it('clamps the sub-agent context budget to what a delegated scope can carry', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ brain: { limits: { delegateContextChars: 500_000 } } });
+    expect(cs.get().brain.limits.delegateContextChars).toBe(26000);
+    cs.update({ brain: { limits: { delegateContextChars: 10 } } });
+    expect(cs.get().brain.limits.delegateContextChars).toBe(2000);
+    cs.update({ brain: { limits: { delegateContextChars: 12_345 } } });
+    expect(cs.get().brain.limits.delegateContextChars).toBe(12345);
   });
 
   it('merges a partial patch per-field without resetting siblings, and clamps out-of-range values', () => {

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { PluginRegistry } from '../../src/plugins/registry.js';
 import type { PluginSkill } from '../../src/plugins/api.js';
 import type { EmbeddingConfig } from '../../src/embeddings/embeddingService.js';
+import { DEFAULT_BRAIN_LIMITS } from '../../src/store/configStore.js';
 
 const noopLog = { info() {}, warn() {}, error() {} };
 const fakeSkill = (name: string) => ({ name, description: 'd', filePath: `/s/${name}.md` } as unknown as PluginSkill);
@@ -67,6 +68,24 @@ describe('PluginRegistry', () => {
       const cmds = ctx.chatCommands('whatsapp');
       expect(cmds.every((c) => typeof c.kind === 'string')).toBe(true);
       expect(cmds.some((c) => c.name === 'help')).toBe(true);
+    });
+  });
+
+  // The operator's sub-agent context budget travels through a long positional wiring chain
+  // (bootstrap → loadPlugins → contextFor), which is exactly where a mis-ordered argument hides: the
+  // delegating plugin would silently keep its built-in default whatever the operator configured.
+  describe('ctx.delegateContextChars', () => {
+    const U = undefined;
+    it('exposes the wired budget live, and falls back to the default without one', () => {
+      const reg = new PluginRegistry();
+      let configured = 12_345;
+      const ctx = reg.contextFor('subagent', {}, noopLog, U, U, U, U, U, U, U, U, U, U, U, U, U, U,
+        () => configured);
+      expect(ctx.delegateContextChars()).toBe(12_345);
+      configured = 8_000;
+      expect(ctx.delegateContextChars()).toBe(8_000); // read live, not captured at register time
+      expect(reg.contextFor('subagent', {}, noopLog).delegateContextChars())
+        .toBe(DEFAULT_BRAIN_LIMITS.delegateContextChars);
     });
   });
 

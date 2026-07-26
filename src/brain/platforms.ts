@@ -102,9 +102,11 @@ export class PlatformOrchestrator {
           const rolePrompt = agentDef ? renderAgentPrompt(agentDef.body) : src.access.prompt;
           const promptAppend = [
             ...(rolePrompt ? [rolePrompt] : []),
-            // Parent-supplied background for a delegated child — a stable prefix block (cache-friendly),
-            // bounded by the delegated-scope normalizer like every other prompt append.
-            ...(src.access.context ? [src.access.context] : []),
+            // Parent-supplied background for a delegated child — stable prefix blocks (cache-friendly),
+            // each bounded by the delegated-scope normalizer like every other prompt append. One entry per
+            // block, so a workflow node's dependency results are not squeezed into a single chunk's budget.
+            ...(typeof src.access.context === 'string' ? [src.access.context] : src.access.context ?? [])
+              .filter((chunk) => typeof chunk === 'string' && chunk.trim().length > 0),
             ...(src.channelName ? [this.d.channels.fragmentFor(src, owner)] : []),
           ];
           // ONE unified access decision. A LINKED sender runs fully through their Elowen account — their

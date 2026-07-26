@@ -4554,3 +4554,103 @@ describe('retention janitor — pending cron wake-up protection', () => {
     expect(d.store.getSession('brain-ch-subagent-abc')).toBeUndefined(); // child purged WITH it (previously leaked)
   });
 });
+
+describe('BrainService.continueSubagent (a delegating turn picking a sub-agent back up)', () => {
+  const SCOPE = { admin: true, projectIds: [], owner: true, permissionBoundary: null };
+  const ADMIN_ACCESS = { admin: true, projectIds: [], owner: true, permissionBoundary: null };
+
+  /** A live service with one owner conversation and one idle delegated child under it. `channelService`
+   *  is stubbed at the seam: how a delegated turn is actually run is ChannelSessionService's contract
+   *  (tested there); what belongs to continueSubagent is which turns it lets through and with what. */
+  async function seed(child = 'brain-ch-subagent-sub-1') {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId, delegatedAccess: SCOPE });
+    const send = vi.fn(async () => 'the sub-agent answered');
+    (svc as unknown as { channelService: { send: unknown } }).channelService.send = send;
+    const sessions = (svc as unknown as {
+      sessions: { setChildRunning(parent: string, child: string, running: boolean): void };
+    }).sessions;
+    return { d, svc, sessionId, child, send, sessions };
+  }
+
+  it('continues an idle child on its own transcript and returns its reply', async () => {
+    const { svc, sessionId, child, send } = await seed();
+    await expect(svc.continueSubagent(sessionId, child, 'also check the tests', ADMIN_ACCESS))
+      .resolves.toBe('the sub-agent answered');
+    const [opts, text] = send.mock.calls[0] as unknown as [Record<string, unknown>, string];
+    expect(text).toBe('also check the tests');
+    // The child's OWN channel, its durable parent edge, and the scope minted for it originally — this is
+    // what makes the child rehydrate its context instead of starting over.
+    expect(opts.channelId).toBe('subagent-sub-1');
+    expect(opts.parentSessionId).toBe(sessionId);
+    expect(opts.delegatedAccess).toMatchObject({ admin: true, owner: true });
+    // Never roll the transcript over: continuing IS the reason it is still around.
+    expect(opts.idleRolloverMs).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  describe('a conversation can only reach its own children', () => {
+    it('refuses a sub-agent belonging to a different conversation', async () => {
+      const { d, svc, sessionId, send } = await seed();
+      d.store.createSession({ id: 'brain-1-sibling', userId: 1, model: 'm' });
+      d.store.createSession({
+        id: 'brain-ch-subagent-sub-other', userId: 1, model: 'm',
+        parentSessionId: 'brain-1-sibling', delegatedAccess: SCOPE,
+      });
+      await expect(svc.continueSubagent(sessionId, 'brain-ch-subagent-sub-other', 'hi', ADMIN_ACCESS))
+        .rejects.toThrow(/unknown sub-agent/);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('refuses an unknown id and a session that is not a sub-agent at all', async () => {
+      const { d, svc, sessionId, send } = await seed();
+      d.store.createSession({ id: 'brain-ch-discord-c1', userId: 1, model: 'm', parentSessionId: sessionId });
+      await expect(svc.continueSubagent(sessionId, 'brain-ch-subagent-nope', 'hi', ADMIN_ACCESS))
+        .rejects.toThrow(/unknown sub-agent/);
+      await expect(svc.continueSubagent(sessionId, 'brain-ch-discord-c1', 'hi', ADMIN_ACCESS))
+        .rejects.toThrow(/unknown sub-agent/);
+      expect(send).not.toHaveBeenCalled();
+    });
+  });
+
+  // Two agents driving one transcript is a race with no owner. The human drill-in steers a running child
+  // on purpose; a delegating agent is told to wait instead, using the same live-child registration the
+  // abort tree and eviction guard already key on.
+  it('refuses a sub-agent that still has a turn in flight', async () => {
+    const { svc, sessionId, child, send, sessions } = await seed();
+    sessions.setChildRunning(sessionId, child, true);
+    await expect(svc.continueSubagent(sessionId, child, 'one more thing', ADMIN_ACCESS))
+      .rejects.toThrow(/still running/);
+    expect(send).not.toHaveBeenCalled();
+
+    sessions.setChildRunning(sessionId, child, false);
+    await expect(svc.continueSubagent(sessionId, child, 'one more thing', ADMIN_ACCESS)).resolves.toBeTruthy();
+  });
+
+  it('refuses a legacy child that has no immutable scope to resume under', async () => {
+    const { d, svc, sessionId, send } = await seed();
+    d.store.createSession({ id: 'brain-ch-subagent-legacy', userId: 1, model: 'm', parentSessionId: sessionId });
+    await expect(svc.continueSubagent(sessionId, 'brain-ch-subagent-legacy', 'hi', ADMIN_ACCESS))
+      .rejects.toThrow(/delegated access unavailable/);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  describe('a continuation can never widen access', () => {
+    it('refuses when the child\'s captured scope now exceeds the conversation\'s own', async () => {
+      const { svc, sessionId, child, send } = await seed();
+      // The child was minted all-project; the conversation is now scoped to one project.
+      await expect(svc.continueSubagent(sessionId, child, 'hi', {
+        admin: false, projectIds: [1], owner: false, permissionBoundary: null,
+      })).rejects.toThrow(/all-project/);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('layers the caller\'s CURRENT tool denies onto the resumed policy', async () => {
+      const { svc, sessionId, child, send } = await seed();
+      await svc.continueSubagent(sessionId, child, 'hi', { ...ADMIN_ACCESS, toolPolicy: { deny: ['Bash'] } });
+      const [opts] = send.mock.calls[0] as unknown as [{ toolPolicy?: { deny?: Set<string> } }];
+      expect([...(opts.toolPolicy?.deny ?? [])]).toContain('Bash');
+    });
+  });
+});

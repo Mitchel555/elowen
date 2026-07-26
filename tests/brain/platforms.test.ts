@@ -87,6 +87,67 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     expect(sent?.identity?.owner).toBe(false); // a second admin's child is not the instance operator
   });
 
+  // The parent-supplied context used to travel as ONE string, so the delegated-scope per-chunk bound
+  // (8 000 chars) applied to every workflow dependency result joined together and a wide fan-in reached
+  // its node with a fraction of the text. Each block must land as its OWN prompt append.
+  it('carries a delegated child\'s context blocks as separate prompt appends', async () => {
+    let sent: ChannelSendOpts | undefined;
+    let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
+    const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const orch = new PlatformOrchestrator({
+      plugins: async () => ({ platforms: [adapter] }) as never,
+      platformOwner: () => 1,
+      policyForProjects: () => rolePolicy,
+      identity: linkedResolver(false),
+      channels: {
+        sessionOwnerUserId: () => 1,
+        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+        fragmentFor: () => '',
+      } as never,
+    });
+    await orch.startAll();
+
+    await handler!({
+      platform: 'subagent', userId: 'subagent', channelId: 'sub-chunks', roleIds: [],
+      access: {
+        admin: true, owner: true, projectIds: [], parentSessionId: 'brain-1', permissionBoundary: null,
+        prompt: 'role', context: ['shared background', 'result from node "a"', '  ', 'result from node "b"'],
+      },
+    } as never, 'inspect');
+
+    // Blank blocks are dropped; the rest keep their order and stay separate, so each is bounded on its own.
+    expect(sent?.promptAppend).toEqual(['role', 'shared background', 'result from node "a"', 'result from node "b"']);
+    expect(sent?.delegatedAccess?.promptAppend).toEqual(['role', 'shared background', 'result from node "a"', 'result from node "b"']);
+  });
+
+  it('still accepts a delegated child\'s context as a single string', async () => {
+    let sent: ChannelSendOpts | undefined;
+    let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
+    const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const orch = new PlatformOrchestrator({
+      plugins: async () => ({ platforms: [adapter] }) as never,
+      platformOwner: () => 1,
+      policyForProjects: () => rolePolicy,
+      identity: linkedResolver(false),
+      channels: {
+        sessionOwnerUserId: () => 1,
+        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+        fragmentFor: () => '',
+      } as never,
+    });
+    await orch.startAll();
+
+    await handler!({
+      platform: 'subagent', userId: 'subagent', channelId: 'sub-string', roleIds: [],
+      access: {
+        admin: true, owner: true, projectIds: [], parentSessionId: 'brain-1', permissionBoundary: null,
+        prompt: 'role', context: 'one block',
+      },
+    } as never, 'inspect');
+
+    expect(sent?.promptAppend).toEqual(['role', 'one block']);
+  });
+
   it('preserves delegated origin-owner truth and exact allow+deny policy for an owner-anchored parent', async () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;

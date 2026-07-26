@@ -405,6 +405,12 @@ export class BrainStore {
     return this.delegation.getSubagentRuns(parentSessionId);
   }
 
+  /** The delegated sub-agents one conversation spawned, newest first — see
+   *  {@link BrainDelegationStore.listDelegatedChildren}. */
+  listDelegatedChildren(parentSessionId: string, limit?: number): ReturnType<BrainDelegationStore['listDelegatedChildren']> {
+    return this.delegation.listDelegatedChildren(parentSessionId, limit);
+  }
+
   /** Persist the newest whole-DAG workflow snapshot for one tool call — see
    *  {@link BrainDelegationStore.upsertWorkflowRun}. */
   upsertWorkflowRun(parentSessionId: string, raw: unknown): boolean {

@@ -4,6 +4,22 @@ import type { AskAnswer, AskQuestion, BrainCard } from '../brain/events.js';
 import type { ProcessRegistry } from '../brain/processRegistry.js';
 import type { NoninteractivePermissionBoundary } from '../brain/toolPermissions.js';
 import type { SlashCommandDef } from '../brain/slashCommands.js';
+import type { DelegatedChildSummary } from '../store/brainDelegationStore.js';
+
+export type { DelegatedChildSummary };
+
+/** The host's bridge to the DURABLE side of delegation: which sub-agents a conversation already ran,
+ *  and continuing one of them. Both are keyed on the parent session the HOST resolves from the live turn
+ *  — never on anything the plugin supplies — so a plugin cannot address another conversation's children. */
+export interface DelegatedChildBridge {
+  runs(parentSessionId: string, limit?: number): DelegatedChildSummary[];
+  continue(
+    parentSessionId: string,
+    childSessionId: string,
+    text: string,
+    access: { admin: boolean; projectIds: number[]; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean },
+  ): Promise<string>;
+}
 
 /** A skill contributed by a plugin. Reuses pi's file-backed `Skill` (name/description/filePath…), so it
  *  feeds PI's native path unchanged (the session factory's `skillsOverride` → progressive disclosure in
@@ -111,8 +127,11 @@ export interface SessionSource {
   history?: () => Promise<string>;
   access?: { projectIds: number[]; prompt?: string; admin?: boolean; model?: { provider?: string; model?: string }; thinkingLevel?: string; fast?: boolean; tools?: string[];
     /** Optional background the delegating agent hands to a sub-agent (it cannot see the parent
-     *  conversation). Added to the child's system-prompt prefix as a stable, cache-friendly block. */
-    context?: string;
+     *  conversation). Added to the child's system-prompt prefix as stable, cache-friendly blocks. A LIST
+     *  because each block is bounded on its own (MAX_PROMPT_CHARS in delegatedScope): passing a workflow
+     *  node's dependency results as one string meant the per-chunk bound applied to all of them joined,
+     *  and a wide fan-in lost most of its input to the clip. */
+    context?: string | string[];
     /** True only when the ORIGINAL delegating turn belongs to the instance operator. `admin` is project
      *  scope and is deliberately insufficient: a foreign platform role may be admin without being owner. */
     owner?: boolean;
@@ -400,6 +419,12 @@ export interface PluginContext {
    *  the server happens to be hosted. Falls back to the host's own zone when unset. Read live, so an
    *  operator changing it applies on the next call. */
   timezone(): string;
+  /** Total characters of parent-supplied context a plugin may attach to a delegated child (Settings →
+   *  Elowen AI → Limits). The delegating plugin owns HOW it spends the budget — how many chunks, and how
+   *  it divides them between a workflow node's dependencies — but the ceiling is the operator's, so
+   *  raising it does not mean editing a plugin. Read live, so a change applies on the next delegation
+   *  without a restart. Falls back to the configured default when nothing is wired. */
+  delegateContextChars(): number;
   /** The working directory an exec/file tool uses when the caller names none: the project path the
    *  current turn's session is bound to (a task worker's checkout), else the first allowed root, else
    *  the daemon's own cwd. Evaluated per tool call against the per-run turn scope, so a directory the
@@ -422,6 +447,21 @@ export interface PluginContext {
    *  prompt turn. Lets a plugin bind scheduled work back to the exact conversation it was created
    *  from (a cron wake-up records it as the job's origin and the reply lands there). */
   currentSessionId(): string | undefined;
+  /** The sub-agents THIS conversation already delegated, newest first — its own durable record of what
+   *  it ran, surviving daemon restarts and the delegating plugin's in-memory job table. Scoped by the
+   *  host to the current turn's session: the plugin names no parent and cannot widen it, so a sibling
+   *  conversation's or another account's children are not merely hidden but unaddressable. Empty outside
+   *  a prompt turn, or when nothing is wired. */
+  subagentRuns(limit?: number): DelegatedChildSummary[];
+  /** Send a follow-up to a sub-agent listed by {@link subagentRuns} and resolve with its reply. The child
+   *  resumes its own transcript with full context preserved — this is how a delegating agent refines a
+   *  finished sub-agent's work instead of respawning one that has to rediscover everything.
+   *
+   *  Rejects when the id is not a child of this conversation, when that child still has a turn in flight
+   *  (two agents on one transcript is a race), or when its captured scope would now grant more than this
+   *  conversation itself holds. A continuation replays the child's ORIGINAL immutable boundary, narrowed
+   *  by the caller's current denies — it can never widen access. */
+  continueSubagent(sessionId: string, text: string): Promise<string>;
   /** The current turn's resolved working directory (the project the CLI was launched in, a channel's
    *  policy root, the daemon's primary project as fallback) — plugins that persist per-PROJECT state
    *  (e.g. a todo checklist) key on this alongside the identity. Undefined outside a prompt turn. */

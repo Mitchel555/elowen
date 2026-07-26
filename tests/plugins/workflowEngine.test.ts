@@ -3,17 +3,15 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const { MAX_CONTEXT_CHARS } = await import(resolve(repoRoot, 'plugins/subagent/lib/limits.mjs')) as { MAX_CONTEXT_CHARS: number };
 const { registerWorkflow } = await import(resolve(repoRoot, 'plugins/subagent/lib/workflow.mjs')) as {
   registerWorkflow(ctx: unknown, getRun: unknown, helpers: unknown): void;
 };
-
-// Clips exactly like the real delegateContextChunk. A pass-through double is what let a wide fan-in
-// ship broken: the engine divided a budget six times larger than this bound, and the only thing that
-// would have caught it was the very function the double replaced.
-const realContextChunk = (raw: string): string | undefined => (raw
-  ? `ctx:${raw.length <= MAX_CONTEXT_CHARS ? raw : `${raw.slice(0, MAX_CONTEXT_CHARS)}\n[truncated]`}`
-  : undefined);
+// The REAL chunker, not a double. A pass-through double is what let a wide fan-in ship broken: the engine
+// sized its slices against a budget the packaging could never hold, and the only thing that would have
+// caught it was the very function the double replaced.
+const { delegateContextChunks } = await import(resolve(repoRoot, 'plugins/subagent/index.mjs')) as {
+  delegateContextChunks(raw: unknown, totalChars?: number): string[];
+};
 
 interface Tool { name: string; execute(id: string, p: unknown): Promise<{ content: { text: string }[]; details?: Record<string, unknown> }> }
 
@@ -26,22 +24,27 @@ interface WorkflowControl { cancelForSession(input: { sessionId: string }): { ca
  *  child ("Error: interrupted") once released — the cancel test's stand-in for the host's abort tree. */
 let gate: { task: string; promise: Promise<void> } | null = null;
 
-function harness(opts: { toolPolicyAllow?: string[] } = {}) {
+function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {}) {
   gate = null;
   const tools = new Map<string, Tool>();
   const controls = new Map<string, WorkflowControl>();
   const snapshots: { id: string; toolCallId: string; title?: string; status: string; nodes: { id: string; status: string; deps: string[]; startedAt?: number; result?: string; error?: string }[] }[] = [];
   const launched: string[] = [];
-  /** The context each node was actually handed, by task — what the child can see, not what we hoped. */
-  const contexts = new Map<string, string | undefined>();
-  const run = async (source: { access?: { context?: string } }, task: string, onEvent: (e: unknown) => void) => {
+  /** The context chunks each node was actually handed, by task — what the child can see, not what we hoped. */
+  const contexts = new Map<string, string[]>();
+  const run = async (source: { access?: { context?: string[] } }, task: string, onEvent: (e: unknown) => void) => {
     launched.push(task);
-    contexts.set(task, source.access?.context);
+    contexts.set(task, source.access?.context ?? []);
     onEvent({ type: 'session', sessionId: `s-${task}` });
     onEvent({ type: 'tool', name: 'Read' });
     onEvent({ type: 'idle', usage: { totalTokens: 100 } });
     if (gate && task === gate.task) { await gate.promise; return 'Error: interrupted'; }
-    return task.includes('FAIL') ? 'Error: boom' : `done:${task}`;
+    if (task.includes('FAIL')) return 'Error: boom';
+    // A node's own task is capped at 4 000 chars, so a report bigger than that cannot be echoed back from
+    // it — `BULK:<n>` asks for a result of n chars instead, the way a real node returns far more than it
+    // was asked.
+    const bulk = /BULK:(\d+)/.exec(task);
+    return bulk ? `done:${task}:${'x'.repeat(Number(bulk[1]))}` : `done:${task}`;
   };
   const ctx = {
     registerTool: (def: Tool) => { tools.set(def.name, def); },
@@ -54,15 +57,18 @@ function harness(opts: { toolPolicyAllow?: string[] } = {}) {
     workflowEmitter: () => (u: (typeof snapshots)[number]) => { snapshots.push(u); },
     listModels: async () => [],
     toolNames: () => ['Read', 'Write', 'Bash'],
+    delegateContextChars: () => opts.contextChars ?? undefined,
   };
   const helpers = {
     resolveDelegateTools: (_inheritedAllow: string[] | undefined, requested: string[] | undefined) =>
       (requested ? { allow: requested } : { allow: undefined }),
     principalOf: (identity: unknown) => (identity ? 'elowen:1' : null),
-    delegateContextChunk: realContextChunk,
+    delegateContextChunks,
   };
   registerWorkflow(ctx, () => run, helpers);
-  return { tools, controls, snapshots, launched, contexts };
+  /** Everything the node can read, as one string — the chunks are a transport detail, not the content. */
+  const contextOf = (task: string) => (contexts.get(task) ?? []).join('\n\n');
+  return { tools, controls, snapshots, launched, contexts, contextOf };
 }
 
 describe('workflow engine', () => {
@@ -124,7 +130,7 @@ describe('workflow engine', () => {
   // "gather → analyze → write" promise false, and a real synthesis node reported it could not do its job
   // because the reports it was told it would receive were nowhere in its context.
   it('hands a node the results of the dependencies it waited for', async () => {
-    const { tools, contexts } = harness();
+    const { tools, contextOf } = harness();
     await tools.get('WorkflowStart')!.execute('t-deps', {
       nodes: [
         { id: 'gather', task: 'gather' },
@@ -132,13 +138,13 @@ describe('workflow engine', () => {
         { id: 'write', task: 'write', deps: ['gather'] },
       ],
     });
-    const write = contexts.get('write') ?? '';
+    const write = contextOf('write');
     expect(write).toContain('done:gather');
     expect(write).toContain('gather'); // attributed to the node it came from
     // Only what it actually depends on — a sibling branch is not its business.
     expect(write).not.toContain('done:other');
     // A root node has nothing to inherit and must not be handed a phantom results block.
-    expect(contexts.get('gather') ?? '').not.toContain('Results from the nodes');
+    expect(contextOf('gather')).not.toContain('Results from the nodes');
   });
 
   // A wide fan-in used to lose everything but its first dependency. The slices were cut to fit a budget
@@ -147,7 +153,7 @@ describe('workflow engine', () => {
   // so in its output, which is the only reason anyone noticed — so the fix has to divide what is really
   // left AND tell the node which results it is not seeing in full.
   it('gives a wide fan-in every dependency, and names the ones it had to truncate', async () => {
-    const { tools, contexts } = harness();
+    const { tools, contextOf } = harness();
     const branches = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
     // Each branch reports far more than its slice can hold, the way a real review section does.
     const longTask = (id: string) => `${id}:${'x'.repeat(3_000)}`;
@@ -157,12 +163,80 @@ describe('workflow engine', () => {
         { id: 'synthesis', task: 'synthesise', deps: branches },
       ],
     });
-    const synthesis = contexts.get('synthesise') ?? '';
+    const synthesis = contextOf('synthesise');
     // Every branch is present and attributed — not just however many fit before the clip.
     for (const id of branches) expect(synthesis).toContain(`## Result from node "${id}"`);
     // And the node is told, by name, what it is reading only part of.
     expect(synthesis).toContain('truncated to fit');
     for (const id of branches) expect(synthesis).toMatch(new RegExp(`truncated to fit[^\\n]*${id}`));
+  });
+
+  /** How many chars of each dependency's own report actually reached the dependent node. */
+  const receivedPerNode = (context: string, ids: string[]): Map<string, number> => {
+    const sizes = new Map<string, number>();
+    for (const id of ids) {
+      const body = context.split(`## Result from node "${id}"\n`)[1] ?? '';
+      sizes.set(id, body.split('## Result from node "')[0]!.trim().length);
+    }
+    return sizes;
+  };
+
+  // Five dependencies of 3 000 chars are 15 000 chars in total — far more than one prompt chunk can hold,
+  // which is why they used to arrive at ~1 000 chars each (13% of the text). One chunk per dependency
+  // carries them whole.
+  it('hands a five-way fan-in every dependency in full when the budget allows', async () => {
+    const { tools, contextOf } = harness();
+    const branches = ['a', 'b', 'c', 'd', 'e'];
+    const report = (id: string) => `${id}:${'x'.repeat(3_000)}`;
+    await tools.get('WorkflowStart')!.execute('t-five', {
+      nodes: [
+        ...branches.map((id) => ({ id, task: report(id) })),
+        { id: 'synthesis', task: 'synthesise', deps: branches },
+      ],
+    });
+    const synthesis = contextOf('synthesise');
+    expect(synthesis).not.toContain('[truncated]');
+    expect(synthesis).not.toContain('truncated to fit');
+    // Every branch's whole report, verbatim — `done:` is what the harness `run` prefixes a result with.
+    for (const id of branches) expect(synthesis).toContain(`done:${report(id)}`);
+  });
+
+  // The measured regression: five dependencies at the 8 000-char result cap used to reach the dependent
+  // node as ~1 093 chars each. The prompt total still cannot carry 40 000 chars, so they ARE truncated —
+  // but each must keep a usable share of its report, and the node must be told which ones were cut.
+  it('keeps a usable share of each dependency when a five-way fan-in cannot fit whole', async () => {
+    const { tools, contextOf } = harness({ contextChars: 26_000 });
+    const branches = ['a', 'b', 'c', 'd', 'e'];
+    await tools.get('WorkflowStart')!.execute('t-five-big', {
+      nodes: [
+        ...branches.map((id) => ({ id, task: `${id} BULK:8000` })),
+        { id: 'synthesis', task: 'synthesise', deps: branches },
+      ],
+    });
+    const synthesis = contextOf('synthesise');
+    for (const [id, size] of receivedPerNode(synthesis, branches)) {
+      expect(size, `node ${id}`).toBeGreaterThan(3_000);
+    }
+    for (const id of branches) expect(synthesis).toMatch(new RegExp(`truncated to fit[^\\n]*${id}`));
+  });
+
+  // The budget is an operator setting (Settings → Elowen AI → Limits), read live off the plugin context.
+  // A workflow that ignored it would silently keep the built-in default whatever the operator chose.
+  it('sizes the dependency slices from the operator-configured budget', async () => {
+    const branches = ['a', 'b', 'c', 'd', 'e'];
+    const nodes = [
+      ...branches.map((id) => ({ id, task: `${id} BULK:8000` })),
+      { id: 'synthesis', task: 'synthesise', deps: branches },
+    ];
+    const generous = harness({ contextChars: 26_000 });
+    await generous.tools.get('WorkflowStart')!.execute('t-generous', { nodes });
+    const tight = harness({ contextChars: 6_000 });
+    await tight.tools.get('WorkflowStart')!.execute('t-tight', { nodes });
+    const big = receivedPerNode(generous.contextOf('synthesise'), branches).get('a')!;
+    const small = receivedPerNode(tight.contextOf('synthesise'), branches).get('a')!;
+    expect(big).toBeGreaterThan(small * 2);
+    // Even on the tight budget nothing disappears without the node hearing about it.
+    for (const id of branches) expect(tight.contextOf('synthesise')).toMatch(new RegExp(`truncated to fit[^\\n]*${id}`));
   });
 
   // The modal reports which model is burning a node's tokens. `node.model` is only set when the caller
@@ -243,7 +317,7 @@ describe('workflow engine', () => {
     registerWorkflow(ctx, () => run, {
       resolveDelegateTools: () => ({ allow: undefined }),
       principalOf: () => 'elowen:1',
-      delegateContextChunk: realContextChunk,
+      delegateContextChunks,
     });
     const startP = tools.get('WorkflowStart')!.execute('t6', { title: 'dyn', nodes: [{ id: 'root', task: 'root' }] });
     await new Promise((r) => setTimeout(r, 5)); // let root launch and park on the gate
@@ -299,7 +373,7 @@ describe('workflow engine', () => {
     registerWorkflow(ctx, () => run, {
       resolveDelegateTools: () => ({ allow: undefined }),
       principalOf,
-      delegateContextChunk: realContextChunk,
+      delegateContextChunks,
     });
     const startP = tools.get('WorkflowStart')!.execute('t7', { nodes: [{ id: 'root', task: 'root' }] });
     await new Promise((r) => setTimeout(r, 5));
@@ -402,7 +476,7 @@ describe('workflow background + detach', () => {
     registerWorkflow(ctx, () => run, {
       resolveDelegateTools: () => ({ allow: undefined }),
       principalOf: (id: { elowenUserId?: number } | null) => (id?.elowenUserId ? `elowen:${id.elowenUserId}` : null),
-      delegateContextChunk: realContextChunk,
+      delegateContextChunks,
     });
     return { tools, controls, completions, launched, finished, release, snapshots };
   }

@@ -39,7 +39,7 @@ import type { ExportFormat, SessionExport } from './session/exportSession.js';
 import type { BrainDeps } from './brainDeps.js';
 import { processRegistry, type ProcessHandle, type ProcessInfo } from './processRegistry.js';
 import type { BrainStreamSnapshot } from './session/liveEventReplay.js';
-import { delegatedToolPolicy, type DelegatedExecutionScope } from './delegatedScope.js';
+import { delegatedToolPolicy, scopeExceedsCurrentAccess, type DelegatedExecutionScope } from './delegatedScope.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 import type { Model, Api } from '@earendil-works/pi-ai';
 import { CANONICAL_THINKING_LEVELS, canonicalThinkingLevel } from './modelCapabilities.js';
@@ -193,8 +193,9 @@ export class BrainService {
       plugins: () => this.resolvePlugins(),
       get hookAudit() { return d.hookAudit; },
       get projectPath() { return d.projectPath; },
-      sendDelegatedCustom: (userId, sessionId, customType, content, resultId) =>
-        this.sendDelegated(userId, sessionId, content, { customType, resultId }),
+      sendDelegatedCustom: async (userId, sessionId, customType, content, resultId) => {
+        await this.sendDelegated(userId, sessionId, content, { internalSystem: { customType, resultId } });
+      },
       afterTurnSettled: () => this.drainDeferredPluginReload(),
     });
     this.statusView = new BrainStatusService({
@@ -1039,6 +1040,43 @@ export class BrainService {
     await this.sendDelegated(userId, sessionId, text);
   }
 
+  /** A delegating TURN continuing one of its own sub-agents: the child picks its transcript back up
+   *  (rehydrated from SQLite) and answers this follow-up, whose reply is returned to the caller — the
+   *  agent-facing counterpart of the owner's drill-in `sendToSubagent`, which streams to a human instead.
+   *
+   *  Three guards, in order, and each of them is the point:
+   *  - `parentSessionId` comes from the HOST's own turn scope, never from the calling plugin, and the
+   *    child must name exactly it. That is what keeps a conversation inside its own delegation tree —
+   *    a sibling conversation's (or another account's) child is simply not addressable.
+   *  - A child with a turn in flight is refused rather than steered. `sendToSubagent` deliberately steers
+   *    (a human correcting a running agent mid-flight), but two agents driving one transcript is a race
+   *    with no owner, so the delegating turn is told to wait instead.
+   *  - The persisted scope may not exceed what this conversation holds NOW (see
+   *    scopeExceedsCurrentAccess). It is then narrowed further by the caller's current denies. */
+  async continueSubagent(
+    parentSessionId: string,
+    childSessionId: string,
+    text: string,
+    access: Parameters<typeof scopeExceedsCurrentAccess>[1],
+    onEvent?: (e: BrainEvent) => void,
+  ): Promise<string> {
+    const row = this.d.store.getSession(childSessionId);
+    if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
+      throw new Error('unknown sub-agent for this conversation');
+    }
+    if (this.sessions.isActiveChild(childSessionId)) {
+      throw new Error('that sub-agent is still running — wait for it to finish before sending it more');
+    }
+    const scope = this.d.store.delegatedAccessFor(childSessionId);
+    if (!scope) throw new Error('delegated access unavailable');
+    const exceeds = scopeExceedsCurrentAccess(scope, access);
+    if (exceeds) throw new Error(`cannot continue that sub-agent: ${exceeds}`);
+    return this.sendDelegated(row.user_id, childSessionId, text, {
+      extraDeny: access.toolPolicy?.deny ?? [],
+      ...(onEvent ? { onEvent } : {}),
+    });
+  }
+
   /** The single delegated-turn dispatch, shared by the owner's drill-in continuations (`sendToSubagent`)
    *  and hidden host system turns (durable sub-agent result delivery, via `internalSystem`). Resolves the
    *  child's immutable execution scope, rebuilds its captured policy + current account deny-list, and drives
@@ -1047,15 +1085,21 @@ export class BrainService {
    *  from under the still-owned child) — the child's own delegation owns that transcript. */
   private async sendDelegated(
     userId: number, sessionId: string, content: string,
-    internalSystem?: { customType: string; resultId: string },
-  ): Promise<void> {
+    opts?: {
+      internalSystem?: { customType: string; resultId: string };
+      /** Additional tool denies from the CALLING turn, layered on the account's own. Only ever narrows;
+       *  the captured allow-list stays authoritative (see ChannelSessionService.delegatedExecution). */
+      extraDeny?: string[];
+      onEvent?: (e: BrainEvent) => void;
+    },
+  ): Promise<string> {
     const { row, parentSessionId, scope } = this.delegatedContinuation(userId, sessionId);
     const policy = scope.admin
       ? { allowedProjectIds: 'all' as const, allowedPaths: () => [] }
       : this.d.policyForProjects?.(scope.projectIds)
         ?? { allowedProjectIds: new Set(scope.projectIds), allowedPaths: () => [] };
-    const deniedTools = this.d.users.get(userId)?.disabled_tools ?? [];
-    await this.channelService.send({
+    const deniedTools = [...(this.d.users.get(userId)?.disabled_tools ?? []), ...(opts?.extraDeny ?? [])];
+    return this.channelService.send({
       channelId: channelIdOf(sessionId),
       ownerUserId: row.user_id,
       // A drill-in continuation is a new child run, not a standalone channel turn. Preserve the durable
@@ -1071,7 +1115,8 @@ export class BrainService {
       identity: this.identity.forDelegatedTurn(scope, row.user_id),
       ownerSteer: true,
       idleRolloverMs: Number.POSITIVE_INFINITY,
-      ...(internalSystem ? { internalSystem } : {}),
+      ...(opts?.internalSystem ? { internalSystem: opts.internalSystem } : {}),
+      ...(opts?.onEvent ? { onEvent: opts.onEvent } : {}),
     }, content);
   }
 

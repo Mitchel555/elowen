@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
-import { MAX_CONTEXT_CHARS } from './lib/limits.mjs';
+import { MAX_CONTEXT_CHUNK_CHARS, MAX_CONTEXT_CHUNKS, resolveContextTotalChars } from './lib/limits.mjs';
 
 const MAX_BACKGROUND_JOBS = 64;
 const JOB_RETENTION_MS = 60 * 60_000;
@@ -48,16 +48,63 @@ export function resolveDelegateTools(inheritedAllow, requested, available) {
   }
   return { allow: names };
 }
-const clip = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit)}\n[truncated]`;
-/** Format the optional parent-supplied context into ONE system-prompt chunk for the child, clipped to
- *  stay within the delegated-scope bound. Returns undefined when there is no usable context. The child
- *  cannot see the parent conversation, so this is how the delegating agent hands over what it already
- *  knows — saving the child from re-deriving it (and giving it a stable, cacheable prefix block). */
-export function delegateContextChunk(raw) {
-  const text = typeof raw === 'string' ? raw.trim() : '';
-  if (!text) return undefined;
-  return `Context shared by the delegating agent — background for your task, treat as given and do not re-derive it:\n${clip(text, MAX_CONTEXT_CHARS)}`;
+const TRUNCATION_MARKER = '\n[truncated]';
+const clip = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit)}${TRUNCATION_MARKER}`;
+const CONTEXT_HEADER = 'Context shared by the delegating agent — background for your task, treat as given and do not re-derive it:';
+/** Format the parent-supplied context into the system-prompt chunks the child receives. The child cannot
+ *  see the parent conversation, so this is how the delegating agent hands over what it already knows —
+ *  saving the child from re-deriving it (and giving it a stable, cacheable prefix block).
+ *
+ *  Each part becomes its OWN chunk, so the per-chunk ceiling bounds a single dependency result instead of
+ *  all of them joined: passing the whole context as one string is what left a five-way fan-in with ~13%
+ *  of its input. Only the first chunk carries the header — the rest read as a continuation of it.
+ *
+ *  Returns [] when there is nothing usable. Oversized input is clipped, never dropped in silence: a part
+ *  that did not fit whole ends in `[truncated]`, and parts that did not fit at all are counted on the
+ *  last chunk. The caller is expected to size its parts against `totalChars`; the budget enforced here is
+ *  the backstop that keeps the scope valid. */
+export function delegateContextChunks(raw, totalChars) {
+  const parts = (Array.isArray(raw) ? raw : [raw])
+    .map((part) => typeof part === 'string' ? part.trim() : '')
+    .filter(Boolean);
+  if (!parts.length) return [];
+  const chunks = [];
+  let remaining = resolveContextTotalChars(totalChars);
+  for (const [index, part] of parts.entries()) {
+    if (chunks.length >= MAX_CONTEXT_CHUNKS) break;
+    const head = index === 0 ? `${CONTEXT_HEADER}\n` : '';
+    const room = Math.min(MAX_CONTEXT_CHUNK_CHARS, remaining) - head.length - TRUNCATION_MARKER.length;
+    // Below this a chunk carries packaging and nothing else; report it as dropped instead.
+    if (room < 200) break;
+    const chunk = `${head}${clip(part, room)}`;
+    chunks.push(chunk);
+    remaining -= chunk.length;
+  }
+  const dropped = parts.length - chunks.length;
+  // A child reading a short context cannot tell whether the rest was absent or cut off, and that
+  // difference decides whether it should re-derive. Never let a part vanish unannounced.
+  if (dropped > 0 && chunks.length) chunks[chunks.length - 1] += `\n[${dropped} further context block(s) dropped — the context budget is full]`;
+  return chunks;
 }
+/** How many past sub-agents DelegateList reports by default. High enough to cover a normal session's
+ *  fan-out, low enough that the listing stays a summary rather than a transcript. */
+const DEFAULT_LISTED_SUBAGENTS = 20;
+const LISTED_TASK_PREVIEW_CHARS = 180;
+
+/** Render a stored `YYYY-MM-DD HH:MM:SS` UTC timestamp as an age. When a sub-agent ran matters mostly as
+ *  "just now" vs "yesterday" — an absolute UTC stamp would make the agent do that arithmetic itself, and
+ *  do it in the wrong timezone. Returns '' for anything unparseable rather than inventing a time. */
+export function relativeAge(stamp, now = Date.now()) {
+  const parsed = typeof stamp === 'string' ? Date.parse(`${stamp.replace(' ', 'T')}Z`) : NaN;
+  if (!Number.isFinite(parsed)) return '';
+  const minutes = Math.round((now - parsed) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
 const principalOf = (identity) => {
   if (!identity) return null;
   if (Number.isInteger(identity.elowenUserId)) return `elowen:${identity.elowenUserId}`;
@@ -234,7 +281,7 @@ export function register(ctx) {
       'By default the call BLOCKS and returns the sub-agent\'s final result. Set background=true for an independent side-quest: it returns a job id immediately and the result is delivered to you in a NEW turn — do other work meanwhile, then end your turn. You are woken when it lands, so never poll DelegateStatus in a loop.',
       'To launch several independent sub-agents, put multiple delegate calls in ONE response so they run concurrently; do not serialize them. Once you have delegated a search, do not also run it yourself.',
       'Use read_only=true when the sub-agent only needs to look (explore, search, report) — it then gets read-only tools plus a read-only shell (inspect commands only) and cannot write, mutate or delegate further. Use `tools` to hand it an exact toolset. Either way you can only ever narrow what you already hold.',
-      'The sub-agent inherits your model; pass `model` only when the user explicitly asked for a different one. Its final message comes back to you, not to the user — relay what matters. There is no way to continue a finished sub-agent: a follow-up is a NEW delegation, carrying whatever context it needs.'
+      'The sub-agent inherits your model; pass `model` only when the user explicitly asked for a different one. Its final message comes back to you, not to the user — relay what matters. A sub-agent that already ran is NOT gone: its transcript is kept, so before delegating something that builds on earlier work, check DelegateList and send that sub-agent a follow-up with DelegateContinue instead — it resumes with its full context, where a fresh one would have to rediscover everything.'
       + agentTypeLine,
     ].join(' '),
     parameters: Type.Object({
@@ -309,6 +356,7 @@ export function register(ctx) {
       // The child inherits the delegating turn's working directory, so its tools resolve relative paths
       // against — and it advertises — the SAME project the parent runs in, never the daemon's `/`.
       const parentCwd = ctx.currentWorkDir?.();
+      const contextChunks = delegateContextChunks(p.context, ctx.delegateContextChars?.());
       const access = {
         ...parentAccess,
         ...(toolPolicy ? { toolPolicy } : {}),
@@ -331,7 +379,7 @@ export function register(ctx) {
           ? { agentType }
           : { prompt: 'You are a focused sub-agent. Complete the task and report the result concisely — no preamble.' }),
         // Optional parent-supplied background, added to the child's system-prompt prefix (cache-friendly).
-        ...(delegateContextChunk(p.context) ? { context: delegateContextChunk(p.context) } : {}),
+        ...(contextChunks.length ? { context: contextChunks } : {}),
       };
       const emit = ctx.subagentEmitter();
       const emitCompletion = ctx.subagentCompletionEmitter();
@@ -532,10 +580,79 @@ export function register(ctx) {
     },
   }));
 
+  ctx.registerTool(defineTool({
+    name: 'DelegateList', label: 'List past sub-agents',
+    description: 'List the sub-agents this conversation has already run, newest first — their id, what '
+      + 'they were asked to do, how it went and how long their transcript is. Their transcripts are kept, '
+      + 'so a finished sub-agent is not gone: use this to find one, then DelegateContinue to send it a '
+      + 'follow-up and have it resume with its full context preserved. Reach for it when a sub-agent\'s '
+      + 'answer needs refining, when you want work built on top of what one already did, or when the user '
+      + 'asks what you delegated. It reports ONLY this conversation\'s own sub-agents — there is no way to '
+      + 'ask it about another conversation\'s, and no parameter that would widen it.',
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Number({ description: `How many to return, newest first (default ${DEFAULT_LISTED_SUBAGENTS}).` })),
+    }),
+    execute: async (_id, p) => {
+      const requested = typeof p.limit === 'number' && Number.isFinite(p.limit) ? Math.round(p.limit) : DEFAULT_LISTED_SUBAGENTS;
+      const runs = ctx.subagentRuns?.(Math.max(1, requested)) ?? [];
+      if (!runs.length) {
+        return ok('No sub-agents have run in this conversation yet. Delegate spawns one; they show up here afterwards.');
+      }
+      const lines = runs.map((run) => {
+        const label = (run.task || run.title || '(no task recorded)').replace(/\s+/g, ' ').trim();
+        const facts = [
+          run.status ?? 'unknown',
+          `${run.messages} message${run.messages === 1 ? '' : 's'}`,
+          relativeAge(run.updatedAt || run.startedAt),
+          run.model,
+        ].filter(Boolean).join(' · ');
+        return `- ${run.sessionId}\n  ${clip(label, LISTED_TASK_PREVIEW_CHARS)}\n  ${facts}`;
+      });
+      return ok(
+        `${runs.length} sub-agent${runs.length === 1 ? '' : 's'} in this conversation (newest first). `
+          + 'Continue one with DelegateContinue({"id":"…","message":"…"}) — it resumes with its own context.\n\n'
+          + lines.join('\n'),
+        { subagents: runs },
+      );
+    },
+  }));
+
+  ctx.registerTool(defineTool({
+    name: 'DelegateContinue', label: 'Continue a sub-agent',
+    description: 'Send a follow-up to a sub-agent that already ran (id from DelegateList) and get its '
+      + 'reply. The sub-agent resumes its OWN conversation with full context preserved, so write a '
+      + 'directive — what to change, add or check — not a fresh briefing: it still remembers the task, the '
+      + 'files it read and what it concluded. Prefer this over a new Delegate whenever the work builds on '
+      + 'what that sub-agent already did; a fresh sub-agent would have to rediscover all of it. '
+      + 'The call BLOCKS until it answers. A sub-agent with a turn still in flight is refused rather than '
+      + 'interrupted — wait for it and try again. It resumes under the exact access it was originally '
+      + 'given, narrowed by whatever you hold now, so continuing one can never widen anything.',
+    parameters: Type.Object({
+      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+      message: Type.String({
+        description: 'The follow-up. It is read by an agent that already has the task and its findings in '
+          + 'context, so say what to do next — do not restate the original briefing.',
+      }),
+    }),
+    execute: async (_id, p) => {
+      const message = typeof p.message === 'string' ? p.message.trim() : '';
+      if (!message) return ok('Error: `message` was empty. Say what the sub-agent should do next.');
+      if (!ctx.continueSubagent) return ok('Error: continuing a sub-agent is not wired up on this server.');
+      try {
+        const reply = await ctx.continueSubagent(String(p.id ?? '').trim(), message);
+        return ok(reply || '(the sub-agent returned nothing)');
+      } catch (e) {
+        // A refusal is self-correctable — the agent can wait for a busy child or pick another one — so it
+        // comes back as a readable result, exactly like every other error this plugin surfaces.
+        return ok(`Error: ${errorText(e)}`);
+      }
+    },
+  }));
+
   // Workflow tools reuse the SAME captured `run` handler and the delegate access primitives, so a
   // workflow node spawns exactly like a delegation (never Orca). `run` is captured lazily on connect;
   // the engine reads it through the getter at execute time.
-  registerWorkflow(ctx, () => run, { resolveDelegateTools, principalOf, delegateContextChunk });
+  registerWorkflow(ctx, () => run, { resolveDelegateTools, principalOf, delegateContextChunks });
 
   ctx.logger.info('delegate tools registered (+background status/result)');
 }

@@ -117,6 +117,51 @@ export function normalizeDelegatedExecutionScope(raw: unknown): DelegatedExecuti
   };
 }
 
+/** Whether a PERSISTED child scope grants more than the delegating turn holds right now — returns the
+ *  human-readable reason it exceeds, or undefined when the child fits inside the caller's current
+ *  authority.
+ *
+ *  Spawning a child mints its scope from the parent's access, so the two agree by construction.
+ *  CONTINUING one replays a scope minted earlier, and the conversation may have been narrowed since
+ *  (projects revoked, an allow-list applied, the turn switched to planning). Without this check an old
+ *  child would be a durable handle onto authority its parent has lost.
+ *
+ *  Only the comparison lives here. Tool DENIES are not a reason to refuse — the continuation path layers
+ *  the caller's current denies onto the resumed policy, which only ever narrows it. */
+export function scopeExceedsCurrentAccess(
+  scope: DelegatedExecutionScope,
+  access: {
+    admin: boolean; projectIds: number[]; owner: boolean;
+    toolPolicy?: { allow?: string[]; deny?: string[] };
+    permissionBoundary: NoninteractivePermissionBoundary | null;
+    readOnly?: boolean;
+  },
+): string | undefined {
+  // A planning turn is read-only, and nothing in a persisted scope distinguishes a child that was
+  // spawned read-only from an ordinary `tools: ['Read']` delegation whose Bash boundary was never
+  // clamped. Guessing here would be the one way a plan-mode turn could reach a writing agent, so every
+  // continuation fails closed instead.
+  if (access.readOnly) return 'this turn is read-only (planning), which cannot continue a sub-agent — a planning turn may only spawn fresh read-only ones';
+  if (scope.admin && !access.admin) return 'it holds all-project access and this conversation no longer does';
+  if (!access.admin) {
+    const held = new Set(access.projectIds);
+    const lost = scope.projectIds.filter((id) => !held.has(id));
+    if (lost.length) return `it is scoped to project(s) ${lost.join(', ')}, which this conversation no longer has`;
+  }
+  if (scope.owner && !access.owner) return 'it carries owner authority and this conversation does not';
+  const callerAllow = access.toolPolicy?.allow;
+  if (callerAllow) {
+    const childAllow = scope.toolPolicy?.allow;
+    // Absence means UNRESTRICTED, so an old child without an allow-list is strictly wider than a caller
+    // that now runs on one. Reading a missing list as "narrow" is exactly the inversion to avoid.
+    if (!childAllow) return 'it runs with an unrestricted toolset and this conversation is now limited to a specific one';
+    const held = new Set(callerAllow);
+    const extra = childAllow.filter((name) => !held.has(name));
+    if (extra.length) return `it holds ${extra.join(', ')}, which this conversation does not`;
+  }
+  return undefined;
+}
+
 /** Semantically compare canonical durable scopes without trusting caller object identity or array order. */
 export function sameDelegatedExecutionScope(a: DelegatedExecutionScope, b: DelegatedExecutionScope): boolean {
   const left = normalizeDelegatedExecutionScope(a);
