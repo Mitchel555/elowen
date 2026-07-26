@@ -7,7 +7,8 @@ import { useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
 import type { BrainCard } from '../../lib/types';
-import { collectSubagents, type ChatTurn, type SessionEventItem, type ToolItem } from '../../lib/transcript';
+import { collectSubagents, groupToolItems, type ChatTurn, type SessionEventItem, type ToolItem } from '../../lib/transcript';
+import { MorePill } from '../../components/ui/MorePill';
 import { AskQuestionCard } from './AskQuestionCard';
 import { ProcessPanel } from './ProcessPanel';
 import { AgentsTable } from './AgentsTable';
@@ -15,7 +16,7 @@ import { StatsModal } from './StatsModal';
 import { ChatHistoryRail } from './ChatHistoryRail';
 import { ModelPicker } from './ModelPicker';
 import { useBrainChat } from './BrainChatProvider';
-import { formatTokens, formatCost } from '../../lib/format';
+import { formatTokens, formatCost, formatDuration } from '../../lib/format';
 
 /** Sanitized-markdown block for one assistant text segment (marked + DOMPurify, no bubble). */
 function TextSegment({ text, className = '' }: { text: string; className?: string }) {
@@ -75,23 +76,40 @@ function ToolOutputBlock({ output }: { output: NonNullable<ToolItem['output']> }
   );
 }
 
-/** A display card (ctx.emitCard) — the web mirror of the CLI/Discord panel: an optional title with a
- *  done/total count, a checklist (done struck through + green, in-progress accented, pending muted), and
- *  optional freeform body. The todo checklist is the canonical card. */
+/** How many checklist items a card previews before folding the rest behind the "+N more" pill (mirror of
+ *  the CLI CardPanel's TODO_PREVIEW_ITEMS). */
+const CARD_PREVIEW_ITEMS = 4;
+
+/** A display card (ctx.emitCard) — the web mirror of the CLI/Discord panel: a clickable title row with a
+ *  done/total count that collapses the card, a checklist (done struck through + green, in-progress
+ *  accented, pending muted) previewed to its first items, and an optional freeform body. The todo
+ *  checklist is the canonical card. A checklist with everything ticked leaves the transcript entirely —
+ *  the CLI panel drops it the same way, because a finished list has nothing left to track. */
 function CardBlock({ card }: { card: BrainCard }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const items = card.items ?? [];
   const done = items.filter((i) => i.status === 'completed').length;
+  if (items.length > 0 && done === items.length) return null;
+  const previewable = items.length > CARD_PREVIEW_ITEMS;
+  const shown = collapsed ? [] : previewable && !expanded ? items.slice(0, CARD_PREVIEW_ITEMS) : items;
   return (
-    <div className="rounded-md border border-border bg-elevated p-2 text-tiny">
+    <div data-testid="chat-card" className="rounded-md border border-border bg-elevated p-2 text-tiny">
       {(card.title || items.length > 0) ? (
-        <div className="mb-1 flex items-center gap-1.5 font-medium text-text-muted">
-          ☑ {card.title ?? 'Card'}
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          aria-expanded={!collapsed}
+          className="mb-1 flex w-full items-center gap-1.5 text-left font-medium text-text-muted transition-colors hover:text-text"
+        >
+          <ChevronRight size={11} aria-hidden className={`shrink-0 opacity-60 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+          <span className="truncate">{card.title ?? 'Card'}</span>
           {items.length > 0 ? <span className="tabular-nums opacity-70">{done}/{items.length}</span> : null}
-        </div>
+        </button>
       ) : null}
-      {items.length > 0 ? (
+      {shown.length > 0 ? (
         <ul className="flex flex-col gap-0.5">
-          {items.map((titem, i) => (
+          {shown.map((titem, i) => (
             <li key={i} className="flex items-start gap-1.5">
               <span className={`shrink-0 ${titem.status === 'completed' ? 'text-success' : titem.status === 'in_progress' ? 'text-accent' : 'text-text-muted'}`}>
                 {titem.status === 'completed' ? '✔' : titem.status === 'in_progress' ? '◐' : '○'}
@@ -101,7 +119,12 @@ function CardBlock({ card }: { card: BrainCard }) {
           ))}
         </ul>
       ) : null}
-      {card.body ? <div className="whitespace-pre-wrap text-text-muted">{card.body}</div> : null}
+      {!collapsed && previewable ? (
+        <div className="mt-1">
+          <MorePill expanded={expanded} hidden={items.length - CARD_PREVIEW_ITEMS} onToggle={() => setExpanded((v) => !v)} />
+        </div>
+      ) : null}
+      {!collapsed && card.body ? <div className="whitespace-pre-wrap text-text-muted">{card.body}</div> : null}
     </div>
   );
 }
@@ -113,19 +136,30 @@ function CardBlock({ card }: { card: BrainCard }) {
  *  column. The argument summary (file path, query…) rides muted next to the name; rows are indented
  *  (pl-4) so they sit visually deeper than the assistant's prose. The diff/output/progress blocks
  *  inherit this wrapper's mono type, so the full page's slightly larger log size flows into them. */
-function ToolPills({ tools, full }: { tools: ToolItem[]; full?: boolean }) {
+function ToolPills({ tools, full, live }: { tools: ToolItem[]; full?: boolean; live?: boolean }) {
+  const { t } = useTranslation();
+  // Consecutive calls of the same tool fold into ONE row carrying a `×N` count (the CLI's grouped pills);
+  // recomputed every render so a streaming run's count and latest argument stay live.
+  const groups = groupToolItems(tools);
   return (
     <div className={`flex flex-col pl-4 font-mono leading-relaxed ${full ? 'text-[0.6875rem]' : 'text-tiny'}`}>
-      {tools.map((tool, i) => {
+      {groups.map((group, i) => {
+        const tool = group.item;
         // A submitted plan REPLACES its tool row: the row would say only "ExitPlanMode", which tells the
         // reader nothing the panel does not say better.
         if (tool.plan) return <PlanBlock key={i} plan={tool.plan} />;
         const rich = !!(tool.diff || tool.output || tool.progress);
+        // The tail call of a still-streaming turn that has settled neither a diff nor an output is the one
+        // currently executing — the web twin of the CLI's spinner row.
+        const running = !!live && i === groups.length - 1 && !tool.output && !tool.diff;
         const head = (
           <>
-            {tool.icon ? <span aria-hidden className="shrink-0 opacity-70">{tool.icon}</span> : <Wrench size={9} aria-hidden className="shrink-0 opacity-70" />}
+            {running
+              ? <Loader2 size={10} role="status" aria-label={t.brainChat.toolRunning} className="shrink-0 animate-spin text-warning" />
+              : tool.icon ? <span aria-hidden className="shrink-0 opacity-70">{tool.icon}</span> : <Wrench size={9} aria-hidden className="shrink-0 opacity-70" />}
             <span className="shrink-0 text-text-muted">{tool.name}</span>
             {tool.detail ? <span className="truncate opacity-60">{tool.detail}</span> : null}
+            {group.count > 1 ? <span className="shrink-0 tabular-nums opacity-50">×{group.count}</span> : null}
           </>
         );
         if (!rich) {
@@ -139,7 +173,11 @@ function ToolPills({ tools, full }: { tools: ToolItem[]; full?: boolean }) {
             </summary>
             <div className="pb-0.5">
               {tool.diff ? <DiffBlock diff={tool.diff} /> : null}
-              {tool.output ? <ToolOutputBlock output={tool.output} /> : null}
+              {/* A folded run of identical FAILURES keeps every member: the rows read alike, but each one
+                  names the path it refused, so the expanded block lists them all. */}
+              {group.members
+                ? group.members.map((member, j) => (member.output ? <ToolOutputBlock key={j} output={member.output} /> : null))
+                : tool.output ? <ToolOutputBlock output={tool.output} /> : null}
               {tool.progress ? <ProgressBlock text={tool.progress} /> : null}
             </div>
           </details>
@@ -164,6 +202,43 @@ function PlanBlock({ plan }: { plan: string }) {
         {t.brainChat.proposedPlan}
       </div>
       <div className="whitespace-pre-wrap break-words px-2.5 py-1.5 text-text">{plan}</div>
+    </div>
+  );
+}
+
+/** One reasoning segment, the web twin of the CLI's "Thought: 12s" row: a collapsible block whose header
+ *  carries how long the model has been thinking. It stays open while it streams and folds itself away once
+ *  the turn settles — unless the reader has toggled it, in which case their choice wins for good. The
+ *  elapsed time is measured here (the wire carries no timing), so it exists only for a segment this tab
+ *  actually watched stream; a rehydrated one simply shows the time it spent mounted. */
+function ReasoningBlock({ text, live, full }: { text: string; live: boolean; full?: boolean }) {
+  const { t } = useTranslation();
+  const [choice, setChoice] = useState<'auto' | 'open' | 'closed'>('auto');
+  const startRef = useRef(Date.now());
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const tick = (): void => setElapsed(Date.now() - startRef.current);
+    tick(); // settling freezes the timer on the exact elapsed time, not on the last whole second
+    if (!live) return;
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [live]);
+  const open = choice === 'auto' ? live : choice === 'open';
+  // A button + conditional body rather than <details>: the open state is driven by the stream (it folds
+  // itself when the turn settles), and a details element owns its own toggling, which fights that.
+  return (
+    <div data-testid="chat-thought" className={full ? 'my-1.5' : ''}>
+      <button
+        type="button"
+        onClick={() => setChoice(open ? 'closed' : 'open')}
+        aria-expanded={open}
+        className={`flex items-center gap-1.5 text-text-muted transition-colors hover:text-text ${full ? 'text-xs' : 'text-tiny'}`}
+      >
+        <ChevronRight size={11} aria-hidden className={`shrink-0 opacity-40 transition-transform ${open ? 'rotate-90' : ''}`} />
+        <span>{t.brainChat.reasoningLabel}</span>
+        <span className="tabular-nums opacity-60">{formatDuration(elapsed)}</span>
+      </button>
+      {open ? <p className={`whitespace-pre-wrap border-l-2 border-border pl-2 italic text-text-muted ${full ? 'text-xs' : 'text-tiny'}`}>{text}</p> : null}
     </div>
   );
 }
@@ -236,8 +311,8 @@ function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; f
     : <>{turn.segments.map((seg, i) => (seg.kind === 'text'
         ? <TextSegment key={i} text={seg.text} className={full ? 'my-1.5' : ''} />
         : seg.kind === 'reasoning'
-        ? (showThoughts ? <p key={i} className={`whitespace-pre-wrap border-l-2 border-border pl-2 italic text-text-muted ${full ? 'my-1.5 text-xs' : 'text-tiny'}`}>{seg.text}</p> : null)
-        : <ToolPills key={i} tools={seg.items} full={full} />))}</>;
+        ? (showThoughts ? <ReasoningBlock key={i} text={seg.text} full={full} live={turn.streaming && i === turn.segments.length - 1} /> : null)
+        : <ToolPills key={i} tools={seg.items} full={full} live={turn.streaming && i === turn.segments.length - 1} />))}</>;
 
   if (full) {
     return (
