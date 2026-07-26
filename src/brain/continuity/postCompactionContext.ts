@@ -51,16 +51,21 @@ function latestWorkingSet(store: PostCompactionStore, sessionId: string): Workin
 export function drainPostCompactionContext(
   store: PostCompactionStore,
   live: { sessionId: string; orientedForCompaction?: string; session: { messages: readonly unknown[] } },
-): { block: string; compacted: boolean } {
+): { block: string; compacted: boolean; commit: () => void } {
   const divider = [...store.getMessages(live.sessionId)].reverse().find((m) => m.role === 'compaction');
-  if (!divider || divider.id === live.orientedForCompaction) return { block: '', compacted: false };
-  live.orientedForCompaction = divider.id;
+  if (!divider || divider.id === live.orientedForCompaction) return { block: '', compacted: false, commit: () => {} };
+  // Marked as delivered only when the caller COMMITS, after the prompt it went into actually reached the
+  // provider. Marking it here — at composition time — looked equivalent and was not: a provider error or
+  // an abort in between, and the orientation is gone for good, having been consumed by a turn that never
+  // happened. That window is common precisely when it hurts, because a compaction follows a heavy turn.
+  // Failing this way costs at most one duplicate reminder, which is the right side to err on.
+  const commit = (): void => { live.orientedForCompaction = divider.id; };
   // `compacted` is reported SEPARATELY from the block, and the difference is load-bearing. The block is
   // empty when the compaction had nothing worth naming — no plan, no files — but the compaction still
   // happened, and it still deleted every standing instruction along with everything else. A caller that
   // inferred "a compaction happened" from "the block is non-empty" would, after a quiet compaction, go on
   // telling the model its full directive is earlier in the conversation when nothing of the sort remains.
-  return { block: buildPostCompactionContext(store, live.sessionId, live.session.messages), compacted: true };
+  return { block: buildPostCompactionContext(store, live.sessionId, live.session.messages), compacted: true, commit };
 }
 
 export function buildPostCompactionContext(

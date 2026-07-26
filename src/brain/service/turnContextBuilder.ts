@@ -117,8 +117,10 @@ export class TurnContextBuilder {
 
     return {
       autoSaveMemory: memSettings?.autoSave !== false,
-      run: <T>(operation: (prompt: string) => Promise<T>): Promise<T> => runWithPolicy(live.policy, () => {
+      run: <T>(operation: (prompt: string) => Promise<T>): Promise<T> => runWithPolicy(live.policy, async () => {
         let prompt = request.text;
+        // Assigned by the drain below and called only once the prompt has actually reached the provider.
+        let commitOrientation = (): void => {};
         if (!isPromptCommand(request.text, live.session)) {
           const turnContext = live.turnContext();
           // One-shot notice of any session-state change (model/mode/rename/reasoning) since the last reply —
@@ -128,7 +130,8 @@ export class TurnContextBuilder {
           const sessionChanges = drainSessionNotices(live);
           // A compaction just destroyed the messages holding the agreed plan and every trace of which
           // files were open. Re-orient the model exactly once, next to the other one-shot notices.
-          const { block: postCompaction, compacted } = drainPostCompactionContext(this.d.store, live);
+          const { block: postCompaction, compacted, commit } = drainPostCompactionContext(this.d.store, live);
+          commitOrientation = commit;
           // Rendered HERE, not in build(), for two reasons the counter cannot survive otherwise. It must
           // be chosen AFTER the drain, because a compaction just deleted the full directive from context
           // and the sparse line's "the full instructions are earlier in this conversation" would then be
@@ -164,7 +167,9 @@ export class TurnContextBuilder {
             + (modeReminder ? `\n\n${modeReminder}` : '')
             + (runningSubagents ? `\n\n${runningSubagents}` : '');
         }
-        return operation(prompt);
+        const result = await operation(prompt);
+        commitOrientation();
+        return result;
       }, scope),
     };
   }

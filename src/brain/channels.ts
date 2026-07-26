@@ -407,12 +407,15 @@ export class ChannelSessionService {
             // only fires when the message starts with the slash, so it is sent alone (self-contained macro,
             // no per-turn context). Everything else gets its ephemeral blocks placed around the user text.
             let prompted = turnText;
+            // Assigned by the drain below and called only after the prompt has reached the provider.
+            let commitOrientation = (): void => {};
             if (!isPromptCommand(turnText, ch.session)) {
               const turnContext = ch.turnContext();
               // Channel turns compose their prompt here rather than through TurnContextBuilder, so the
               // post-compaction re-orientation needs its own drain — wiring it only into the builder
               // would leave it working in the CLI and silently doing nothing on every channel.
-              const { block: postCompaction } = drainPostCompactionContext(this.d.store, ch);
+              const { block: postCompaction, commit } = drainPostCompactionContext(this.d.store, ch);
+              commitOrientation = commit;
               prompted = memoryBlock + turnContext.beforeUser + turnText
                 + (turnContext.afterUser ? `\n\n${turnContext.afterUser}` : '')
                 + (postCompaction ? `\n\n${postCompaction}` : '');
@@ -424,6 +427,9 @@ export class ChannelSessionService {
                 details: { source: 'elowen', resultId: opts.internalSystem.resultId },
               }, { triggerTurn: true, deliverAs: 'followUp' });
             } else await (options ? ch.session.prompt(prompted, options) : ch.session.prompt(prompted));
+            // The re-orientation counts as delivered only now, once the prompt carrying it actually
+            // reached the provider — an error or abort before this must leave it pending, not consumed.
+            commitOrientation();
             // A parent stop that landed during prompt() must make the child terminally unsuccessful;
             // otherwise an empty aborted assistant is mistaken for a successful "returned nothing" job.
             if (this.d.registry.consumePendingAbort(sessionId)) throw new Error('delegation aborted');

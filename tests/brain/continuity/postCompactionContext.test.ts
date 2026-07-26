@@ -122,7 +122,7 @@ describe('continuity/postCompactionContext', () => {
 
     it('stays silent when the conversation never compacted', () => {
       seedPlan('s1', '# Ship it');
-      expect(drainPostCompactionContext(empty, live())).toEqual({ block: '', compacted: false });
+      expect(drainPostCompactionContext(empty, live())).toMatchObject({ block: '', compacted: false });
     });
 
     // One-shot per compaction: the model is oriented once, not reminded every turn for the rest of it.
@@ -130,19 +130,25 @@ describe('continuity/postCompactionContext', () => {
       seedPlan('s1', '# Ship it');
       const store = withDivider('div-1');
       const l = live();
-      expect(drainPostCompactionContext(store, l).block).toContain('<active-plan file=');
+      const first = drainPostCompactionContext(store, l);
+      expect(first.block).toContain('<active-plan file=');
+      first.commit();
       expect(l.orientedForCompaction).toBe('div-1');
-      expect(drainPostCompactionContext(store, l)).toEqual({ block: '', compacted: false });
+      expect(drainPostCompactionContext(store, l)).toMatchObject({ block: '', compacted: false });
     });
 
     // The marker is recorded even when there was nothing worth saying, so the same compaction cannot
     // resurface later — and a SECOND compaction still gets its own orientation.
     it('records the divider even with nothing to report, and re-orients on a newer one', () => {
       const l = live();
-      expect(drainPostCompactionContext(withDivider('div-1'), l).block).toBe('');
+      const first = drainPostCompactionContext(withDivider('div-1'), l);
+      expect(first.block).toBe('');
+      first.commit();
       expect(l.orientedForCompaction).toBe('div-1');
       seedPlan('s1', '# Ship it');
-      expect(drainPostCompactionContext(withDivider('div-2'), l).block).toContain('<active-plan file=');
+      const second = drainPostCompactionContext(withDivider('div-2'), l);
+      expect(second.block).toContain('<active-plan file=');
+      second.commit();
       expect(l.orientedForCompaction).toBe('div-2');
     });
 
@@ -150,7 +156,21 @@ describe('continuity/postCompactionContext', () => {
     // report that it happened, because it deleted every standing instruction along with everything else.
     it('reports a compaction it has nothing to say about', () => {
       expect(drainPostCompactionContext(withDivider('div-1'), live()))
-        .toEqual({ block: '', compacted: true });
+        .toMatchObject({ block: '', compacted: true });
+    });
+
+    // Consuming the orientation at COMPOSITION time looked equivalent and was not: a provider error or an
+    // abort between building the prompt and sending it threw the re-orientation away for good, on a turn
+    // that never happened. That window is common exactly when it hurts, since compaction follows a heavy
+    // turn. Erring the other way costs at most one duplicate reminder.
+    it('keeps the orientation pending until the caller commits', () => {
+      seedPlan('s1', '# Ship it');
+      const store = withDivider('div-1');
+      const l = live();
+      expect(drainPostCompactionContext(store, l).block).toContain('<active-plan file=');
+      expect(l.orientedForCompaction).toBeUndefined();
+      // The turn failed, so the next one must still be oriented.
+      expect(drainPostCompactionContext(store, l).block).toContain('<active-plan file=');
     });
   });
 });
