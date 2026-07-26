@@ -119,7 +119,34 @@ async function main() {
     assert(setup.status === 200 && setup.json?.needsSetup === false, `/setup should be needsSetup=false: ${setup.text}`);
   });
 
-  // 10. The web standalone actually serves (elowen up does not wait for it, so poll).
+  // 10. The writes the first-run wizard's Preferences step performs land on a fresh box. These three
+  //     endpoints are the first thing a new user's onboarding touches after the admin exists, so a
+  //     regression in any of them breaks the unboxing path itself — and the wizard's own tests mock
+  //     fetch, so nothing else exercises them against a real daemon.
+  await step('onboarding preference writes persist (timezone, terminal, cli settings)', async () => {
+    const login = await req('POST', DAEMON, '/auth/login', { body: { username: 'admin', password: 'smoke-Passw0rd!' } });
+    assert(login.status === 200 && typeof login.json?.token === 'string', `login = ${login.status} ${login.text}`);
+    const token = login.json.token;
+
+    // Plugin config never comes back from GET /config (it may hold secrets), so read it back through the
+    // per-plugin detail route the settings UI uses.
+    const tz = await req('PATCH', DAEMON, '/plugins/runtime-context/config', { token, body: { values: { timezone: 'Europe/Prague' } } });
+    assert(tz.status === 200, `PATCH runtime-context config = ${tz.status} ${tz.text}`);
+    const tzRead = await req('GET', DAEMON, '/plugins/runtime-context', { token });
+    assert(tzRead.json?.config?.timezone === 'Europe/Prague', `timezone did not persist: ${tzRead.text}`);
+
+    const term = await req('PATCH', DAEMON, '/auth/me/terminal-settings', { token, body: { showThoughtsCli: false } });
+    assert(term.status === 200, `PATCH terminal-settings = ${term.status} ${term.text}`);
+    const termRead = await req('GET', DAEMON, '/auth/me/terminal-settings', { token });
+    assert(termRead.json?.showThoughtsCli === false, `showThoughtsCli did not persist: ${termRead.text}`);
+
+    const cli = await req('PATCH', DAEMON, '/auth/me/cli-settings', { token, body: { autoCompact: true, autoCompactAt: 80 } });
+    assert(cli.status === 200, `PATCH cli-settings = ${cli.status} ${cli.text}`);
+    const cliRead = await req('GET', DAEMON, '/auth/me/cli-settings', { token });
+    assert(cliRead.json?.autoCompact === true && cliRead.json?.autoCompactAt === 80, `auto-compaction did not persist: ${cliRead.text}`);
+  });
+
+  // 11. The web standalone actually serves (elowen up does not wait for it, so poll).
   await step('web UI serves 200', async () => {
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -129,7 +156,7 @@ async function main() {
     }
   });
 
-  // 11. Teardown verb stops everything.
+  // 12. Teardown verb stops everything.
   await step('elowen down stops the daemon', async () => {
     execFileSync('elowen', ['down'], { stdio: 'inherit' });
     let stillUp = false;

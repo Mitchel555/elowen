@@ -40,9 +40,10 @@ export async function runPreferencesStep(ctx: WizardCtx): Promise<StepResult> {
     validate: validTimezone,
   })) as string).trim();
   if (tz) {
-    // runtime-context's only config key is `timezone`, so replacing its plugin config wholesale (how the
-    // config store merges plugins.config) loses nothing.
-    const r = await apiJson(ctx, 'PUT', '/config', { plugins: { config: { 'runtime-context': { timezone: tz } } } });
+    // The per-plugin config route rather than a raw PUT /config: it read-merges the stored values,
+    // validates the key against the plugin's manifest schema, and hot-reloads so the zone applies to the
+    // running daemon. Writing plugins.config directly would replace runtime-context's config wholesale.
+    const r = await apiJson(ctx, 'PATCH', '/plugins/runtime-context/config', { values: { timezone: tz } });
     if (r.ok) summary.push(tz);
     else p.log.warn(`Couldn't save the timezone (${r.status}) — set it later in Settings.`);
   } else {

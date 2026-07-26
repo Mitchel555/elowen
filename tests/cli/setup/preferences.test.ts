@@ -35,7 +35,7 @@ describe('cli/setup wizard Preferences step', () => {
     (p.confirm as Mock).mockResolvedValueOnce(false); // show reasoning? → No (hide)
     (p.confirm as Mock).mockResolvedValueOnce(true); // auto-compact? → Yes
     const { fetchFn, calls } = routedFetch({
-      'PUT /config': { ok: true },
+      'PATCH /plugins/runtime-context/config': { ok: true },
       'PATCH /auth/me/terminal-settings': { ok: true },
       'PATCH /auth/me/cli-settings': { ok: true },
     });
@@ -45,7 +45,7 @@ describe('cli/setup wizard Preferences step', () => {
 
     expect(r).toEqual({ status: 'done' });
     // Timezone → runtime-context plugin config (operator config).
-    expect(calls).toContainEqual({ method: 'PUT', path: '/config', body: { plugins: { config: { 'runtime-context': { timezone: 'Europe/Prague' } } } } });
+    expect(calls).toContainEqual({ method: 'PATCH', path: '/plugins/runtime-context/config', body: { values: { timezone: 'Europe/Prague' } } });
     // Reasoning visibility → terminal settings.
     expect(calls).toContainEqual({ method: 'PATCH', path: '/auth/me/terminal-settings', body: { showThoughtsCli: false } });
     // Auto-compaction → CLI settings, at the store default threshold.
@@ -57,14 +57,14 @@ describe('cli/setup wizard Preferences step', () => {
     (p.text as Mock).mockResolvedValueOnce('UTC');
     (p.confirm as Mock).mockResolvedValueOnce(true); // keep reasoning shown (default) → no terminal write
     (p.confirm as Mock).mockResolvedValueOnce(false); // leave auto-compaction off (default) → no cli write
-    const { fetchFn, calls } = routedFetch({ 'PUT /config': { ok: true } });
+    const { fetchFn, calls } = routedFetch({ 'PATCH /plugins/runtime-context/config': { ok: true } });
     const ctx: WizardCtx = { base: 'http://x', fetchFn, token: 't', answers: {} };
 
     const r = await runPreferencesStep(ctx);
 
     expect(r).toEqual({ status: 'done' });
-    expect(calls).toHaveLength(1); // only the timezone PUT
-    expect(calls[0]).toEqual({ method: 'PUT', path: '/config', body: { plugins: { config: { 'runtime-context': { timezone: 'UTC' } } } } });
+    expect(calls).toHaveLength(1); // only the timezone write
+    expect(calls[0]).toEqual({ method: 'PATCH', path: '/plugins/runtime-context/config', body: { values: { timezone: 'UTC' } } });
     expect(ctx.answers.preferences?.summary).toBe('UTC');
   });
 
@@ -88,7 +88,7 @@ describe('cli/setup wizard Preferences step', () => {
     (p.text as Mock).mockResolvedValueOnce('UTC');
     (p.confirm as Mock).mockResolvedValueOnce(true);
     (p.confirm as Mock).mockResolvedValueOnce(false);
-    const { fetchFn } = routedFetch({ 'PUT /config': { ok: true } });
+    const { fetchFn } = routedFetch({ 'PATCH /plugins/runtime-context/config': { ok: true } });
 
     await runPreferencesStep({ base: 'http://x', fetchFn, token: 't', answers: {} });
 
