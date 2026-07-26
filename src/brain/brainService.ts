@@ -492,32 +492,19 @@ export class BrainService {
     // Consume the authenticated client's attachment FIRST. Its binding follows idle rollover inside the
     // daemon, so it is more authoritative than the (possibly pre-rollover) id the CLI last observed.
     // Releasing invokes only this client's stream disposer; every other attachment remains counted.
-    // TEMP diagnostics (ctrl+c wedge): record what the caller identified as and what its release resolved,
-    // so a later "another interactive client" veto can be attributed to a real second client or to this
-    // caller's own re-attached stream. Remove with the rest of the brain-stop tracing.
-    if (clientId) {
-      logger('brain-stop').info(`stop: client=${clientId} gen=${clientGeneration ?? '-'} session=${session ?? '-'} bindings-before=[${this.attachments.describeStableClients(session ?? '')}]`);
-    }
     const released = clientId
       ? this.attachments.release(userId, clientId, clientGeneration)
       : { accepted: true as const, sessionId: undefined };
-    if (clientId) {
-      logger('brain-stop').info(`stop: release accepted=${released.accepted} resolved=${released.sessionId ?? '-'} bindings-after=[${this.attachments.describeStableClients(released.sessionId ?? session ?? '')}]`);
-    }
     // A delayed stop from generation N must not abort a newer N+1 selection owned by the same CLI id.
-    if (!released.accepted) { logger('brain-stop').info(`stop: release rejected for client ${clientId ?? '—'} (stale generation)`); return { stopped: false, disposed: false }; }
+    if (!released.accepted) return { stopped: false, disposed: false };
     const bound = released.sessionId;
     // A bootstrap/start failure can issue a generation stop before the daemon ever created a binding.
     // `release()` has still tombstoned that generation (so a delayed start cannot resurrect it), but with
     // no stable target and no explicit session body it must not guess the user's unrelated active session.
-    if (clientId && !bound && !session) { logger('brain-stop').info(`stop: client ${clientId} had no bound session and none given — nothing to stop`); return { stopped: false, disposed: false }; }
+    if (clientId && !bound && !session) return { stopped: false, disposed: false };
     const cleanUp = async (sessionId: string): Promise<{ stopped: boolean; disposed: boolean }> => {
-      // TEMP diagnostics (ctrl+c wedge): trace which teardown branch a client-close takes so a repro tells
-      // us whether the SSE attachment lingers, PI's abort never settles, or dispose ran yet /resume still
-      // fails. Remove once the ctrl+c-during-a-turn hang is pinned.
-      const log = logger('brain-stop');
       const live = this.sessions.get(sessionId);
-      if (!live) { log.info(`stop ${sessionId}: no live session`); return { stopped: false, disposed: false }; }
+      if (!live) return { stopped: false, disposed: false };
       // The caller's own attachment was released above, so a zero count now unambiguously means no other
       // observer. A detaching client MUST NOT abort a turn another client is still watching (Invariant 2):
       // only the last watcher leaving may abort + dispose. Legacy callers without a stable id retain the
@@ -526,19 +513,9 @@ export class BrainService {
       // that has been handed the session and is still opening its SSE — and counting only live streams
       // disposes the conversation out from under it, leaving its stream dark until some later send
       // respawns. availableForDefaultStart already treats a claim as occupancy for the same reason.
-      const attachedBefore = this.attachments.attachedCount(sessionId);
-      const bootingBefore = this.attachments.hasPendingStartClaim(sessionId);
-      const otherInteractive = this.attachments.hasLiveStableClient(sessionId);
       // Same predicate the pre-lock abort used, re-evaluated because a client can attach while this waited
       // on the session lock. Deciding it twice with two copies of the rule is how they drift apart.
-      if (!this.mayAbortOnStop(sessionId, clientId)) {
-        const held = clientId ? `${otherInteractive ? 'another interactive client' : 'no interactive client'}` : `${attachedBefore} attachment(s)`;
-        log.info(`stop ${sessionId}: ${held}${bootingBefore ? ' + a booting client' : ''} remain — leaving the turn running (streaming=${live.session.isStreaming}, attached=${attachedBefore}, holders=[${this.attachments.describeStableClients(sessionId)}])`);
-        return { stopped: true, disposed: false };
-      }
-      if (attachedBefore !== 0) log.info(`stop ${sessionId}: ${attachedBefore} passive stream(s) still watching — aborting anyway on an explicit client stop`);
-      const abortStartedAt = Date.now();
-      log.info(`stop ${sessionId}: last observer gone — aborting (streaming=${live.session.isStreaming})`);
+      if (!this.mayAbortOnStop(sessionId, clientId)) return { stopped: true, disposed: false };
       // From here the record stays registered while we await, but it is doomed. Mark it so a concurrent
       // ensureLive() queues on the session lock and respawns behind the dispose, instead of fast-pathing
       // onto a handle this teardown is about to throw away.
@@ -547,8 +524,7 @@ export class BrainService {
       // and the abandoned-teardown path clears it explicitly, but a throw in between (a goal, elicitation
       // or card teardown) would strand it — pinning a perfectly healthy session on the slow path forever.
       try {
-        try { await this.abort(userId, sessionId); log.info(`stop ${sessionId}: abort settled in ${Date.now() - abortStartedAt}ms`); }
-        catch (e) { log.info(`stop ${sessionId}: abort threw after ${Date.now() - abortStartedAt}ms: ${(e as Error).message}`); }
+        try { await this.abort(userId, sessionId); } catch { /* already idle/settled */ }
         // Re-check after the abort settles: a client can attach during that await, and it must not be
         // disposed out from under. If one arrived, leave the (now idle) session live for the new observer.
         // Deliberately NOT counting a pending claim here, unlike the gate above: a start that arrives once
@@ -556,7 +532,6 @@ export class BrainService {
         // dispose — that ordering is the whole point of the disposing marker, and honouring the claim here
         // would hand it the very record the teardown is about to drop.
         if (this.attachments.attachedCount(sessionId) !== 0) {
-          log.info(`stop ${sessionId}: a client attached during abort — keeping it live`);
           this.sessions.clearDisposing(sessionId); // teardown abandoned — the record is healthy again
           return { stopped: true, disposed: false };
         }
@@ -568,7 +543,6 @@ export class BrainService {
         this.sessions.clearDisposing(sessionId);
         throw e;
       }
-      log.info(`stop ${sessionId}: disposed`);
       // A conversation nobody ever typed into leaves with the session it was the identity of, rather than
       // lingering as an untitled shell until some later `/new` sweeps it up.
       this.lifecycle.dropIfUnspoken(sessionId);
@@ -587,7 +561,6 @@ export class BrainService {
     // Only the PI-level interrupt, never the full abort(): abort() throws on an already-stopped session
     // and stopSession must stay idempotent. The serialized teardown below still does the real cascade.
     const runningLive = this.sessions.get(target);
-    logger('brain-stop').info(`stop ${target}: pre-lock interrupt gate live=${!!runningLive} mayAbort=${this.mayAbortOnStop(target, clientId)} bashRunning=${runningLive ? (runningLive.session as { isBashRunning?: boolean }).isBashRunning : 'n/a'}`);
     if (runningLive && this.mayAbortOnStop(target, clientId)) {
       // Signal only — deliberately NOT awaited, so cleanUp reserves the lock in THIS tick. Awaiting would
       // let a start arriving during the interrupt take the lock first, breaking "a start racing a teardown
@@ -601,10 +574,7 @@ export class BrainService {
       // times out (5 min by default). Release the parked turn first — synchronous, so the lock is still
       // reserved in this tick. abortLive does the same in the same order for the same reason.
       this.elicitation.cancelForSession(target, 'client closed');
-      const interruptStarted = Date.now();
-      void abortSessionWork(runningLive.session).then(() => {
-        logger('brain-stop').info(`stop ${target}: pre-lock interrupt settled in ${Date.now() - interruptStarted}ms`);
-      }).catch((err: unknown) => {
+      void abortSessionWork(runningLive.session).catch((err: unknown) => {
         // The serialized abort below normally reports the outcome — but if this interrupt is what failed,
         // the turn may never release the lock and the teardown silently waits it out again. Leave a trace.
         logger('brain').warn(`stop ${target}: interrupt failed — ${err instanceof Error ? err.message : String(err)}`);
