@@ -1566,6 +1566,8 @@ export const sk = {
     proposedPlan: 'Navrhnutý plán',
     queued: 'Vo fronte',
     removeFromQueue: 'Odobrať z frontu',
+    showThoughts: 'Zobraziť uvažovanie',
+    hideThoughts: 'Skryť uvažovanie',
   },
   chat: {
     historyTitle: 'Konverzácie',

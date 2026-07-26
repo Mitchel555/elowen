@@ -1566,6 +1566,8 @@ export const en = {
     proposedPlan: 'Proposed plan',
     queued: 'Queued',
     removeFromQueue: 'Remove from queue',
+    showThoughts: 'Show reasoning',
+    hideThoughts: 'Hide reasoning',
   },
   chat: {
     historyTitle: 'Conversations',

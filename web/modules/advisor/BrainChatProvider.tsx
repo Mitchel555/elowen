@@ -2,6 +2,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
+import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
@@ -21,6 +22,8 @@ import {
 /** A staged attachment: images travel as base64 to the model's vision input; text files get their
  *  content inlined into the message (fenced), which works with any model. */
 interface Attachment { name: string; kind: 'image' | 'text'; mimeType: string; data: string; preview?: string }
+
+const THOUGHTS_VALUES = ['show', 'hide'] as const;
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -108,6 +111,11 @@ export interface BrainChatValue {
   loadModels: () => void;
   modelsLoading: boolean;
   modelsError: boolean;
+  /** Whether the transcript renders the model's reasoning segments. A CLIENT-SIDE display switch only:
+   *  the daemon keeps streaming `reasoning` either way, so hidden thoughts stay in the transcript and
+   *  reappear the moment it is switched back on. Persisted per browser. */
+  showThoughts: boolean;
+  setShowThoughts: (v: boolean) => void;
   slash: {
     items: SlashItem[];
     open: boolean;
@@ -174,6 +182,9 @@ function useBrainChatController(): BrainChatValue {
   const [modelsError, setModelsError] = useState(false);
   const [currentModel, setCurrentModel] = useState('');
   const [focusNonce, setFocusNonce] = useState(0);
+  // Lives on the controller (mounted once) rather than the surface, so the choice survives the dock's
+  // Chat↔Terminál toggle and every route change, exactly like the transcript itself.
+  const [thoughts, setThoughts] = usePersistentState<'show' | 'hide'>('elowen.chat.thoughts', 'show', THOUGHTS_VALUES);
 
   // --- Session binding (mirror BrainClient): stable per-tab clientId, monotonic generation, bound id. ---
   const clientIdRef = useRef<string>('');
@@ -614,6 +625,8 @@ function useBrainChatController(): BrainChatValue {
     usage, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
+    showThoughts: thoughts === 'show',
+    setShowThoughts: (v) => setThoughts(v ? 'show' : 'hide'),
     slash: { items: slashItems, open: slashItems.length > 0, modelOptsOpen: modelSlashOpen, clearModelOpts: () => setModelSlashOpen(false) },
     sessions,
   };

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2 } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
@@ -224,7 +224,7 @@ function SessionEvents({ events, tk }: { events: SessionEventItem[]; tk?: string
  *  they sit in one turn or across a turn boundary; only a speaker change opens a real block break. The
  *  compact dock keeps the tight look: a small accent bubble for the user, bubble-free markdown for the
  *  assistant. */
-function Message({ turn, full, showRole, tk }: { turn: ChatTurn; full?: boolean; showRole?: boolean; tk?: string }) {
+function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; full?: boolean; showRole?: boolean; showThoughts: boolean; tk?: string }) {
   const { t } = useTranslation();
   if (turn.role === 'divider') return <ContextDivider full={full} />;
   if (turn.role === 'event') return <SessionEvents events={turn.events} tk={tk} />;
@@ -236,7 +236,7 @@ function Message({ turn, full, showRole, tk }: { turn: ChatTurn; full?: boolean;
     : <>{turn.segments.map((seg, i) => (seg.kind === 'text'
         ? <TextSegment key={i} text={seg.text} className={full ? 'my-1.5' : ''} />
         : seg.kind === 'reasoning'
-        ? <p key={i} className={`whitespace-pre-wrap border-l-2 border-border pl-2 italic text-text-muted ${full ? 'my-1.5 text-xs' : 'text-tiny'}`}>{seg.text}</p>
+        ? (showThoughts ? <p key={i} className={`whitespace-pre-wrap border-l-2 border-border pl-2 italic text-text-muted ${full ? 'my-1.5 text-xs' : 'text-tiny'}`}>{seg.text}</p> : null)
         : <ToolPills key={i} tools={seg.items} full={full} />))}</>;
 
   if (full) {
@@ -263,6 +263,29 @@ function Message({ turn, full, showRole, tk }: { turn: ChatTurn; full?: boolean;
   return <div data-tk={tk} data-testid="chat-turn" data-role={roleAttr} className="mr-4 flex flex-col gap-1.5 self-start">{body}</div>;
 }
 
+/** Header switch for showing the model's reasoning in the transcript. Rendered as a pressed-state icon
+ *  button like its sibling controls (new chat, fullscreen) rather than ui/IconButton or ui/Toggle: neither
+ *  carries a toggled state at this bar's size, and a switch pill reads as a settings control here. */
+function ThoughtsToggle({ full, on, onToggle }: { full?: boolean; on: boolean; onToggle: () => void }) {
+  const { t } = useTranslation();
+  const label = on ? t.brainChat.hideThoughts : t.brainChat.showThoughts;
+  return (
+    <button
+      type="button"
+      data-testid="chat-thoughts-toggle"
+      onClick={onToggle}
+      aria-pressed={on}
+      aria-label={label}
+      title={label}
+      className={`flex shrink-0 items-center justify-center rounded-md transition-colors hover:bg-elevated hover:text-text ${
+        full ? 'h-8 w-8' : 'h-7 w-7'
+      } ${on ? 'text-text' : 'text-text-muted'}`}
+    >
+      <Brain size={full ? 18 : 16} aria-hidden />
+    </button>
+  );
+}
+
 /** The presentational brain chat surface, driven entirely by the shared controller (BrainChatProvider)
  *  read from context. It owns NO network or session state: only pure view affordances (the picker-open
  *  toggle, the slash keyboard cursor, DOM refs + autoscroll) live here, so unmounting it (Chat↔Terminál
@@ -277,7 +300,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory }: { varia
     turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
     usage, lineCfg, currentModel, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
-    ensureAttached, abort, loadOlder, hasMoreHistory,
+    ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
   } = c;
 
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -452,6 +475,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory }: { varia
             <ChevronDown size={14} className="shrink-0 text-text-muted" aria-hidden />
           </button>
           <ModelPicker variant="compact" />
+          <ThoughtsToggle on={showThoughts} onToggle={() => setShowThoughts(!showThoughts)} />
           <button
             type="button"
             onClick={newChat}
@@ -480,6 +504,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory }: { varia
           ) : null}
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{active?.title || t.brainChat.newChat}</span>
           <ModelPicker variant="full" />
+          <ThoughtsToggle full on={showThoughts} onToggle={() => setShowThoughts(!showThoughts)} />
           <button
             type="button"
             onClick={newChat}
@@ -536,6 +561,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory }: { varia
               turn={turn}
               full={variant === 'full'}
               showRole={i === 0 || turns[i - 1].role !== turn.role}
+              showThoughts={showThoughts}
             />
           );
         })}

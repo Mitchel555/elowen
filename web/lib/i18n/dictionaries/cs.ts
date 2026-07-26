@@ -1566,6 +1566,8 @@ export const cs = {
     proposedPlan: 'Navržený plán',
     queued: 'Ve frontě',
     removeFromQueue: 'Odebrat z fronty',
+    showThoughts: 'Zobrazit uvažování',
+    hideThoughts: 'Skrýt uvažování',
   },
   chat: {
     historyTitle: 'Konverzace',
