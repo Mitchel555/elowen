@@ -6,6 +6,8 @@ eyebrow: Automation
 group: Reference
 ---
 
+# Memory & Embeddings
+
 Elowen's memory is a set of durable, reusable facts the agent stores and recalls across conversations. It is not a chat log — it holds stable preferences, architectural decisions, project details, and environment topology. When the agent starts work on a project or with a user it has history with, it recalls relevant memories to pick up where it left off.
 
 ## Storage

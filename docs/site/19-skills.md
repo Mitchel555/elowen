@@ -6,6 +6,8 @@ eyebrow: Extend Elowen
 group: Extending
 ---
 
+# Skills
+
 Skills are reusable markdown instruction files that give the agent specialized knowledge for specific tasks. Instead of repeating the same procedure or context in every conversation, you capture it once as a skill and the agent follows it automatically whenever a matching task comes up.
 
 ## How skills work

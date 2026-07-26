@@ -6,6 +6,8 @@ eyebrow: Extend Elowen
 group: Extending
 ---
 
+# MCP Integration
+
 MCP (Model Context Protocol) is an open standard for connecting AI agents to external tool servers. Elowen participates on both sides: it exposes its own tools as an MCP server, and it can consume tools from external MCP servers you connect.
 
 ## Elowen as an MCP server

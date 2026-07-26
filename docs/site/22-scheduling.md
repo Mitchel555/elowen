@@ -6,6 +6,8 @@ eyebrow: Automation
 group: Reference
 ---
 
+# Scheduling
+
 Elowen can run prompts on a schedule — recurring jobs that fire like clockwork and one-shot wake-ups that check back on something later. Both execute as the brain's own conversations with full owner powers, so a scheduled prompt can read files, call tools, and deliver results to any channel.
 
 ## Access
