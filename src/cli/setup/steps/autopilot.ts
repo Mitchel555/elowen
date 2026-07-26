@@ -9,13 +9,13 @@ export function shouldWireAutopilot(type: BrainProviderType | undefined, hasKey:
   return type === 'openai' && hasKey === true;
 }
 
-/** Final step — autopilot (planner/overseer for autonomous missions). A BONUS: everyday chat, tasks,
+/** Final step — autopilot (planner/overseer for autonomous missions). Optional: everyday chat, tasks,
  *  memory and code intelligence all work without it, so this only offers to wire the relay and skips in a
  *  single keypress. The relay reuses the AI provider connected earlier; if that provider can't back it
  *  (not an openai-type endpoint with a key) there is nothing to ask, so it says so plainly and moves on.
  *  Enabling PUTs the exact same `autopilot` patch the AI step used to write inline. */
 export async function runAutopilotStep(ctx: WizardCtx): Promise<StepResult> {
-  p.note('Autopilot lets Elowen plan and oversee long autonomous missions on its own. Optional — everyday chat, tasks, memory and diagnostics all work without it.', 'Autopilot (bonus)');
+  p.note('Autopilot lets Elowen plan and oversee long autonomous missions on its own. Optional — everyday chat, tasks, memory and diagnostics all work without it.', 'Autopilot');
 
   const ai = ctx.answers.ai;
   if (ai?.status !== 'done' || !ai.providerId || !shouldWireAutopilot(ai.providerType, ai.hasKey)) {

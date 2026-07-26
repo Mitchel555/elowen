@@ -15,7 +15,7 @@ import type { ReadinessCheck } from '../doctor.js';
 
 // The personal assistant is set up FIRST — sign in, connect the provider your own conversations run on,
 // tune its behaviour, then the optional memory/code-intelligence add-ons. Autopilot (the orchestrator) is
-// a bonus and comes LAST, so onboarding never front-loads it before the assistant itself works.
+// optional and comes LAST, so onboarding never front-loads it before the assistant itself works.
 const BASE_STEPS: WizardStep[] = [
   { id: 'account', title: 'Account', run: runAccountStep },
   { id: 'project', title: 'Project', run: runProjectStep },

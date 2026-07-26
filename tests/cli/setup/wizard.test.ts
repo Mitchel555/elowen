@@ -87,9 +87,9 @@ describe('cli/setup deployment-step gating (install/setup parity)', () => {
 });
 
 describe('cli/setup step order (personal agent first, autopilot last)', () => {
-  it('sets up the personal assistant before the optional bonuses, with autopilot the final step', () => {
+  it('sets up the personal assistant before the optional add-ons, with autopilot the final step', () => {
     const steps = buildSteps({ info: null, isRoot: false, embedded: false }).map((s) => s.id);
-    // Autopilot (the orchestrator) is a bonus: it must come AFTER code intelligence, never before the
+    // Autopilot (the orchestrator) is optional: it must come AFTER code intelligence, never before the
     // provider the user's own conversations run on.
     expect(steps[steps.length - 1]).toBe('autopilot');
     expect(steps.indexOf('ai')).toBeLessThan(steps.indexOf('autopilot'));
