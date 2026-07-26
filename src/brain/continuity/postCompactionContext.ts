@@ -1,5 +1,4 @@
 import { extractText } from '../messageView.js';
-import { proposedPlanOpenMatcher } from './planCapture.js';
 import { readPlan } from './planStore.js';
 import type { WorkingSetEntry } from './workingSet.js';
 
@@ -64,8 +63,14 @@ export function buildPostCompactionContext(
   liveMessages: readonly unknown[],
 ): string {
   const stored = readPlan(sessionId);
-  const alreadyVisible = stored !== undefined
-    && liveMessages.some((m) => proposedPlanOpenMatcher().test(extractText(m)));
+  // Look for the plan's own TEXT, not for its tags. Matching a `<proposed_plan>` marker seems like the
+  // obvious check and is quietly wrong: the plan-mode directive itself quotes that tag when it tells the
+  // model how to answer, and that directive rides in a live message. Every plan-mode session would
+  // therefore look like it could still see its plan — suppressing re-injection in exactly the mode this
+  // whole feature exists to protect. A prefix is enough to identify it and survives truncation.
+  const needle = stored?.slice(0, 200);
+  const alreadyVisible = needle !== undefined && needle !== ''
+    && liveMessages.some((m) => extractText(m).includes(needle));
   const plan = alreadyVisible ? undefined : stored;
   const files = latestWorkingSet(store, sessionId);
   if (plan === undefined && !files) return '';

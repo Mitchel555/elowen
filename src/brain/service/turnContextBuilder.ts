@@ -86,7 +86,6 @@ export class TurnContextBuilder {
     // Each non-build mode carries its own tuned <system-reminder> directive (a self-contained block in
     // the template). Plan also restricts tools (see applyOwnerToolPolicy); Workflow is prompt-only.
     const modeTemplate = mode === 'plan' ? 'cli/plan-mode' : mode === 'workflow' ? 'cli/workflow-mode' : null;
-    const modeReminder = modeTemplate ? this.d.prompts.render(this.modeTemplateFor(modeTemplate, mode, previousMode, live), {}, request.userId) : '';
     const runningSubagents = this.runningSubagentsBlock(live.sessionId);
 
     return {
@@ -103,6 +102,15 @@ export class TurnContextBuilder {
           // A compaction just destroyed the messages holding the agreed plan and every trace of which
           // files were open. Re-orient the model exactly once, next to the other one-shot notices.
           const postCompaction = drainPostCompactionContext(this.d.store, live);
+          // Rendered HERE, not in build(), for two reasons the counter cannot survive otherwise. It must
+          // be chosen AFTER the drain, because a compaction just deleted the full directive from context
+          // and the sparse line's "the full instructions are earlier in this conversation" would then be
+          // a lie. And it must sit on the real-prompt path: rendering it in build() advanced the counter
+          // even on prompt-command turns, which never show the reminder — so a `/command` landing on the
+          // periodic full repeat silently consumed it and the next turns stayed sparse.
+          const modeReminder = modeTemplate
+            ? this.d.prompts.render(this.modeTemplateFor(modeTemplate, mode, previousMode, live, postCompaction !== ''), {}, request.userId)
+            : '';
           // The mode directive is volatile per-turn content (it flips when the user switches mode), so it
           // rides UNDER the user message as a <system-reminder> — alongside runningSubagents — rather than
           // prefixing the user's words. Keeps the user message body stable/contiguous across mode switches
@@ -129,8 +137,10 @@ export class TurnContextBuilder {
    *  still exist because a directive that scrolled far enough back stops steering behaviour.
    *
    *  Mutates the counter on `live`, so it must be called exactly once per turn. */
-  private modeTemplateFor(template: string, mode: TurnMode, previousMode: TurnMode | undefined, live: LiveBrain): string {
-    const entering = previousMode !== mode;
+  private modeTemplateFor(template: string, mode: TurnMode, previousMode: TurnMode | undefined, live: LiveBrain, reoriented: boolean): string {
+    // A compaction counts as entering the mode again: it deleted the full directive along with everything
+    // else, so the cadence has to restart from a turn the model can actually still read.
+    const entering = previousMode !== mode || reoriented;
     const seen = entering ? 0 : (live.modeReminderTurns ?? 0) + 1;
     live.modeReminderTurns = seen;
     return seen % MODE_REMINDER_FULL_EVERY === 0 ? template : `${template}-sparse`;

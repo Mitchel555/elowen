@@ -63,7 +63,7 @@ describe('continuity/postCompactionContext', () => {
   it('still carries the working set when the plan is suppressed', () => {
     writePlan('s1', '# Ship it');
     const store = storeWith(divider([{ path: '/a.ts', wrote: false }]));
-    const live = [{ role: 'assistant', content: '<proposed_plan>x</proposed_plan>' }];
+    const live = [{ role: 'assistant', content: '<proposed_plan>\n# Ship it\n</proposed_plan>' }];
     const out = buildPostCompactionContext(store, 's1', live);
     expect(out).not.toContain('<active-plan>');
     expect(out).toContain('- /a.ts (read)');
@@ -87,6 +87,27 @@ describe('continuity/postCompactionContext', () => {
   it('tells the model not to trust the summary about file contents', () => {
     writePlan('s1', 'x');
     expect(buildPostCompactionContext(empty, 's1', [])).toContain('do not assume file contents from the summary');
+  });
+
+  // The plan-mode directive QUOTES the `<proposed_plan>` tag when it tells the model how to answer, and
+  // that directive rides in a live message. A tag-based visibility check therefore reads every plan-mode
+  // session as "the plan is still on screen" and suppresses re-injection in exactly the mode this whole
+  // feature exists to protect.
+  describe('deciding whether the plan is still visible', () => {
+    const directive = 'Plan mode is STILL ACTIVE — end the turn with exactly one `<proposed_plan>` block.';
+    const msg = (content: string) => ({ role: 'user', content });
+
+    it('re-injects the plan when only the mode directive mentions the tag', () => {
+      writePlan('s1', '# Ship it\n\n1. Wire the store');
+      const out = buildPostCompactionContext(empty, 's1', [msg(directive)]);
+      expect(out).toContain('<active-plan>');
+      expect(out).toContain('Wire the store');
+    });
+
+    it('stays quiet when the plan text itself is still on screen', () => {
+      writePlan('s1', '# Ship it\n\n1. Wire the store');
+      expect(buildPostCompactionContext(empty, 's1', [msg('# Ship it\n\n1. Wire the store')])).toBe('');
+    });
   });
 
   describe('drain', () => {
