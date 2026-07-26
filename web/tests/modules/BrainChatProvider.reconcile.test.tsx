@@ -21,7 +21,10 @@ vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
 const brainStart = vi.fn(async () => ({ sessionId: 'brain-1' }));
 // The live chat boots + refetches history through the PAGED endpoint (brainMessagesPage); brainMessages
 // (bare) is only the read-only path, unused here but kept so the mock matches the client surface.
-const brainMessagesPage = vi.fn(async () => ({ items: [], hasMore: false, nextBefore: null }));
+// Typed explicitly: inferred from the empty default page, `items` would be never[] and `nextBefore` null,
+// so any test seeding a real page fails to typecheck.
+type HistoryPage = { items: { id: string; role: string; text: string }[]; hasMore: boolean; nextBefore: number | null };
+const brainMessagesPage = vi.fn(async (): Promise<HistoryPage> => ({ items: [], hasMore: false, nextBefore: null }));
 const brainMessages = vi.fn(async () => []);
 const brainStatus = vi.fn(async () => ({ running: true, sessionId: 'brain-1', model: 'model-a', usage: null, statusline: null }));
 const brainSetModel = vi.fn(async () => ({ model: 'model-b' }));

@@ -1,3 +1,4 @@
+import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { Plus } from 'lucide-react';
 import { SpatialWorkspaceHero, SpatialWorkspaceLayout, WorkspaceDetailRail, WorkspaceMetric } from '../../../components/ui/WorkspacePrimitives';
