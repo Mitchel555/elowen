@@ -25,7 +25,12 @@ const NOUNS = [
   'tide', 'trail', 'valley', 'vault', 'willow', 'window', 'harbourage', 'yarrow',
 ] as const;
 
-/** A stable, readable slug for a session's plan file — `brave-otter-3f9a`.
+// Both pools are exactly 64 entries: that keeps `% length` free of modulo bias over a byte, and the
+// length is part of the file name on disk. A typecheck failure here is the intended warning.
+ADJECTIVES.length satisfies 64;
+NOUNS.length satisfies 64;
+
+/** A stable, readable slug for a session's plan file — `brave-otter-3f9a1c7d4e2b`.
  *
  *  DERIVED from the session id rather than generated at random, which is where this deliberately parts
  *  company with Claude Code. There the slug is random, cached in memory, and recovered from the message
@@ -36,13 +41,20 @@ const NOUNS = [
  *  restart. A regenerated slug anywhere would silently orphan the file; here there is no second copy to
  *  regenerate.
  *
- *  The hex tail is what keeps it honest: two sessions landing on the same word pair would otherwise share
- *  a plan. 64 × 64 words × 16 bits puts a collision far past the number of sessions any instance will
- *  hold, and a collision would merely mean a shared file, not an escape — the output is `[a-z0-9-]` by
- *  construction, so it can never become a path component that leaves the plans directory. */
+ *  The hex tail is what keeps it honest, and it is sized for the consequence rather than for looks. Two
+ *  sessions landing on the same name share a FILE, and `brain_sessions` is multi-user: that would mean one
+ *  conversation's plan re-injected into another's prompt, submitted to another user's client, and
+ *  overwritten or deleted by whichever session acted last. Not an escape — the output is `[a-z0-9-]` by
+ *  construction, so it can never leave the plans directory — but a boundary between users all the same.
+ *  With the word pair carrying only 2^12, the tail is what actually does the work: 48 bits puts the
+ *  birthday bound past any plausible number of sessions, where 16 bits reached even odds around 19k.
+ *
+ *  Ordering and length of the word lists are therefore part of the on-disk format, not decoration:
+ *  changing either renames every existing plan, and since the mapping is one-way nothing would ever find
+ *  the old files again. The `satisfies 64` pins are there so an edit fails the typecheck instead. */
 export function planSlug(sessionId: string): string {
   const digest = createHash('sha256').update(sessionId).digest();
   const adjective = ADJECTIVES[digest[0]! % ADJECTIVES.length]!;
   const noun = NOUNS[digest[1]! % NOUNS.length]!;
-  return `${adjective}-${noun}-${digest.subarray(2, 4).toString('hex')}`;
+  return `${adjective}-${noun}-${digest.subarray(2, 8).toString('hex')}`;
 }

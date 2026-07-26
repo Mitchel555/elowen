@@ -63,7 +63,7 @@ interface TurnContextBuilderDeps {
  *     the whole document, which is both wasteful and a good way to lose a section by accident.
  *  `WorkflowStart` stays withheld: it would inherit the same forcing, but its nodes expand through
  *  `WorkflowAddNodes`, and admitting one without the other only buys a workflow that cannot grow. */
-const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate', 'Write', 'Edit', EXIT_PLAN_MODE_TOOL]);
+export const PLAN_MODE_CLAMPED_TOOLS: ReadonlySet<string> = new Set(['Bash', 'Delegate', 'Write', 'Edit', EXIT_PLAN_MODE_TOOL]);
 
 /** What the plan-mode directive says about the plan file's current state.
  *
@@ -234,9 +234,18 @@ export class TurnContextBuilder {
     // read-only clamp. Appended LAST so last-match-wins puts it over the user's own rules — a planning
     // turn must not mutate even for someone who allowed `rm *` in Settings. `deny` also survives YOLO
     // (which only promotes `ask`), so plan mode keeps its promise with auto-approval switched on.
-    const permissions = base && mode === 'plan'
-      ? { ...base, ruleset: [...base.ruleset, ...READ_ONLY_BASH_RULES] }
-      : base;
+    // Synthesized when there is no base, rather than skipped. A turn with no TurnPermissions leaves the
+    // permission gate inert, so making the clamp conditional on one would mean plan mode's read-only
+    // promise holds only when permissions happen to be configured — the same conditional the write clamp
+    // was deliberately moved out of. The defaults here are the resolver's own: no YOLO, and `ask`
+    // allowed, which is what an unattended turn already does.
+    const permissions = mode !== 'plan'
+      ? base
+      : {
+        ...base,
+        ruleset: [...(base?.ruleset ?? []), ...READ_ONLY_BASH_RULES],
+        yolo: base?.yolo ?? false,
+      };
     return {
       identity,
       elicit,

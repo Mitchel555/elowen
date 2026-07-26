@@ -30,7 +30,7 @@ describe('continuity/postCompactionContext', () => {
   it('carries the plan alone', () => {
     seedPlan('s1', '# Ship it');
     const out = buildPostCompactionContext(empty, 's1', []);
-    expect(out).toContain('<active-plan>\n# Ship it\n</active-plan>');
+    expect(out).toContain('>\n# Ship it\n</active-plan>');
     expect(out).not.toContain('<working-set>');
   });
 
@@ -39,14 +39,14 @@ describe('continuity/postCompactionContext', () => {
     const out = buildPostCompactionContext(store, 's1', []);
     expect(out).toContain('- /a.ts (edited)');
     expect(out).toContain('- /b.ts (read)');
-    expect(out).not.toContain('<active-plan>');
+    expect(out).not.toContain('<active-plan file=');
   });
 
   it('carries both in one reminder', () => {
     seedPlan('s1', '# Ship it');
     const store = storeWith(divider([{ path: '/a.ts', wrote: true }]));
     const out = buildPostCompactionContext(store, 's1', []);
-    expect(out).toContain('<active-plan>');
+    expect(out).toContain('<active-plan file=');
     expect(out).toContain('<working-set>');
     expect(out.startsWith('<system-reminder>')).toBe(true);
     expect(out.endsWith('</system-reminder>')).toBe(true);
@@ -65,7 +65,7 @@ describe('continuity/postCompactionContext', () => {
     const store = storeWith(divider([{ path: '/a.ts', wrote: false }]));
     const live = [{ role: 'assistant', content: '<proposed_plan>\n# Ship it\n</proposed_plan>' }];
     const out = buildPostCompactionContext(store, 's1', live);
-    expect(out).not.toContain('<active-plan>');
+    expect(out).not.toContain('<active-plan file=');
     expect(out).toContain('- /a.ts (read)');
   });
 
@@ -100,7 +100,7 @@ describe('continuity/postCompactionContext', () => {
     it('re-injects the plan when only the mode directive mentions the tag', () => {
       seedPlan('s1', '# Ship it\n\n1. Wire the store');
       const out = buildPostCompactionContext(empty, 's1', [msg(directive)]);
-      expect(out).toContain('<active-plan>');
+      expect(out).toContain('<active-plan file=');
       expect(out).toContain('Wire the store');
     });
 
@@ -130,7 +130,7 @@ describe('continuity/postCompactionContext', () => {
       seedPlan('s1', '# Ship it');
       const store = withDivider('div-1');
       const l = live();
-      expect(drainPostCompactionContext(store, l).block).toContain('<active-plan>');
+      expect(drainPostCompactionContext(store, l).block).toContain('<active-plan file=');
       expect(l.orientedForCompaction).toBe('div-1');
       expect(drainPostCompactionContext(store, l)).toEqual({ block: '', compacted: false });
     });
@@ -142,7 +142,7 @@ describe('continuity/postCompactionContext', () => {
       expect(drainPostCompactionContext(withDivider('div-1'), l).block).toBe('');
       expect(l.orientedForCompaction).toBe('div-1');
       seedPlan('s1', '# Ship it');
-      expect(drainPostCompactionContext(withDivider('div-2'), l).block).toContain('<active-plan>');
+      expect(drainPostCompactionContext(withDivider('div-2'), l).block).toContain('<active-plan file=');
       expect(l.orientedForCompaction).toBe('div-2');
     });
 

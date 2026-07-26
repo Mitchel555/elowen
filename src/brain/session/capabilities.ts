@@ -127,7 +127,7 @@ const refused = (text: string) => ({ content: [{ type: 'text' as const, text }],
  *  (PLAN_MODE_CLAMPED_TOOLS) — `Write` to author the plan, `Edit` to revise it incrementally — so this
  *  clamp is the only thing standing between a planning turn and arbitrary write access. Nothing here is
  *  redundant belt-and-braces: every name in this set is a tool the model can actually call. */
-const PLAN_MODE_WRITE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit']);
+export const PLAN_MODE_WRITE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit']);
 
 /** Why a writing tool may not run on this path during a planning turn, or undefined when it may.
  *

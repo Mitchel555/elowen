@@ -1940,7 +1940,9 @@ describe('BrainService', () => {
     await svc.start(1);
     await svc.send({ userId: 1, text: 'outline the migration', mode: 'plan' });
     // The mode directive rides under the user message (a per-turn <system-reminder>), not as a prefix.
-    expect(d.session.prompt.mock.calls.at(-1)?.[0]).toBe('outline the migration\n\nPLAN MODE PROMPT');
+    // Asserted as a suffix, not as the whole prompt: a plan turn also carries the permissions block that
+    // states its read-only shell clamp, and that block is turn context, not the subject of this test.
+    expect(d.session.prompt.mock.calls.at(-1)?.[0]).toMatch(/outline the migration\n\nPLAN MODE PROMPT$/);
     const stored = d.store.getMessages('brain-1')
       .filter((m) => m.role === 'user')
       .map((m) => JSON.parse(m.content).content);

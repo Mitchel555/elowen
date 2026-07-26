@@ -14,7 +14,7 @@ describe('planSlug', () => {
   });
 
   it('reads as words, so a person can tell two plans apart in a listing', () => {
-    expect(planSlug('brain-ch-owner-1')).toMatch(/^[a-z]+-[a-z]+-[0-9a-f]{4}$/);
+    expect(planSlug('brain-ch-owner-1')).toMatch(/^[a-z]+-[a-z]+-[0-9a-f]{12}$/);
   });
 
   // It becomes a path component, so the charset is a safety property, not a cosmetic one — a session id

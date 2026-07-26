@@ -1,5 +1,6 @@
 import { extractText } from '../messageView.js';
 import { readPlan } from './planStore.js';
+import { planFilePath } from '../../shared/paths.js';
 import type { WorkingSetEntry } from './workingSet.js';
 
 /** The slice of BrainStore this needs: the conversation's rows, so the newest compaction divider can be
@@ -68,11 +69,11 @@ export function buildPostCompactionContext(
   liveMessages: readonly unknown[],
 ): string {
   const stored = readPlan(sessionId);
-  // Look for the plan's own TEXT, not for its tags. Matching a `<proposed_plan>` marker seems like the
-  // obvious check and is quietly wrong: the plan-mode directive itself quotes that tag when it tells the
-  // model how to answer, and that directive rides in a live message. Every plan-mode session would
-  // therefore look like it could still see its plan — suppressing re-injection in exactly the mode this
-  // whole feature exists to protect. A prefix is enough to identify it and survives truncation.
+  // Look for the plan's own TEXT. The way it gets into a live message is by the model READING its own
+  // plan file — which the plan-mode directive now tells it to do whenever the file already exists — so
+  // the body arrives as the text of a tool result. It does NOT arrive as a Write call's arguments:
+  // `extractText` only collects parts carrying a `text` key, and a tool call is not one, so authoring the
+  // plan never makes it look already-visible. A prefix identifies it and survives truncation.
   const needle = stored?.slice(0, 200);
   const alreadyVisible = needle !== undefined && needle !== ''
     && liveMessages.some((m) => extractText(m).includes(needle));
@@ -81,7 +82,12 @@ export function buildPostCompactionContext(
   if (plan === undefined && !files) return '';
 
   const sections: string[] = [];
-  if (plan !== undefined) sections.push(`<active-plan>\n${plan}\n</active-plan>`);
+  // Named with its file, because after approval this block is the ONLY thing that mentions the plan at
+  // all — the plan-mode directive is gone in build mode, so a model implementing the plan would otherwise
+  // have no way to re-read it or record progress against it, having been handed the text and not the path.
+  if (plan !== undefined) {
+    sections.push(`<active-plan file="${planFilePath(process.env, sessionId)}">\n${plan}\n</active-plan>`);
+  }
   if (files) {
     const rows = files.map((f) => `- ${f.path} (${f.wrote ? 'edited' : 'read'})`).join('\n');
     sections.push(`<working-set>\n${rows}\n</working-set>`);

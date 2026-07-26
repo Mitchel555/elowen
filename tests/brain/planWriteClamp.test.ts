@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
-import { composeSessionTools } from '../../src/brain/session/capabilities.js';
+import { composeSessionTools, PLAN_MODE_WRITE_TOOLS } from '../../src/brain/session/capabilities.js';
+import { PLAN_MODE_CLAMPED_TOOLS } from '../../src/brain/service/turnContextBuilder.js';
+import { EXIT_PLAN_MODE_TOOL } from '../../src/shared/planTool.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import { buildPermissionRuleset, sanitizePermissionSettings, type TurnPermissions } from '../../src/brain/toolPermissions.js';
 import type { Policy } from '../../src/plugins/policy.js';
@@ -94,8 +96,8 @@ describe('plan-mode write clamp', () => {
     expect(ran()).toBe(0);
   });
 
-  // Edit is withheld from plan mode entirely; it is clamped anyway so that admitting it later cannot
-  // silently reopen the hole.
+  // Both writing tools are ADMITTED to plan mode, so this clamp is the only thing between a planning
+  // turn and arbitrary write access.
   it('clamps Edit as well as Write', async () => {
     const { gated, ran } = composed('Edit');
     const res = await call(gated, { path: join(home, 'src/index.ts') }, { mode: 'plan', permissions: perms() });
@@ -122,5 +124,26 @@ describe('plan-mode write clamp', () => {
     const res = await call(gated, { path: escape }, { mode: 'plan', permissions: perms() });
     expect(ran()).toBe(0);
     expect(res.content[0]!.text).toContain('Plan mode is read-only');
+  });
+
+  // Two lists have to move together: the tools plan mode ADMITS, and the tools this clamp CHECKS. Adding
+  // a writing tool to the first and forgetting the second opens exactly the hole the clamp exists to
+  // close, and nothing else in the suite would fail. Anything admitted that this clamp does not cover
+  // must be here deliberately, with a reason.
+  it('clamps every writing tool that plan mode admits', () => {
+    const clampedElsewhere = new Set([
+      'Bash',              // narrowed by READ_ONLY_BASH_RULES instead
+      'Delegate',          // its child is forced read-only by currentAccess()
+      EXIT_PLAN_MODE_TOOL, // reads the plan file; writes nothing
+    ]);
+    for (const name of PLAN_MODE_CLAMPED_TOOLS) {
+      expect(PLAN_MODE_WRITE_TOOLS.has(name) || clampedElsewhere.has(name), `${name} is admitted to plan mode but nothing clamps it`).toBe(true);
+    }
+  });
+
+  // Plan mode withholds tools by allow-list. Drop ExitPlanMode from that list and the mode becomes a
+  // trap: the model can plan but has no way to submit and leave. Nothing else pins this.
+  it('keeps ExitPlanMode admitted, so plan mode can be left', () => {
+    expect(PLAN_MODE_CLAMPED_TOOLS.has(EXIT_PLAN_MODE_TOOL)).toBe(true);
   });
 });
