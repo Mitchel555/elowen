@@ -600,7 +600,11 @@ html[data-effects='full'] .hero-cosmos__orb::after { animation: spatial-ember-fl
 .cmd-orbit__close:hover { background: var(--color-elevated); color: var(--color-text); }
 .cmd-orbit__field { position: relative; flex: 1 1 auto; width: 100%; }
 .cmd-orbit__filaments { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-.cmd-orbit__core { position: absolute; pointer-events: none; }
+/* The square has to be declared, not inferred: the mascot glyph is `height: 100%` over absolutely
+   positioned layers, so it contributes no height of its own and this box collapses to zero. The field
+   MEASURES this element to place the filaments, so a zero-height core converged every line on the
+   mascot's top edge instead of its middle. */
+.cmd-orbit__core { position: absolute; pointer-events: none; aspect-ratio: 1; }
 .cmd-orbit__pods { position: absolute; inset: 0; }
 .cmd-orbit__pod { position: absolute; translate: -50% -50%; display: flex; align-items: center; border-radius: 1rem; border: 1px solid transparent; background: rgb(5 5 5 / 0.72); transition: transform var(--motion-base) var(--ease-out), border-color var(--motion-base) var(--ease-out); }
 .cmd-orbit__pod:hover, .cmd-orbit__pod:focus-visible { transform: translateY(-3px); border-color: var(--color-border-strong); }
@@ -615,11 +619,11 @@ html[data-effects='full'] .hero-cosmos__orb::after { animation: spatial-ember-fl
 .cmd-orbit__pod--active .cmd-orbit__orb { box-shadow: 0 0 0 4px #040404, var(--glow-active), 0 0 34px rgb(255 82 54 / 0.45), inset 0 0 14px rgb(255 82 54 / 0.14); }
 .cmd-orbit__pod--active .cmd-orbit__label { color: var(--color-ember); }
 
-/* ring: the owl centred, pods on an even orbit around it */
+/* ring: the mascot centred, pods on an even orbit around it */
 .cmd-orbit[data-layout='orbit'] .cmd-orbit__core { left: 50%; top: 50%; translate: -50% -50%; width: min(30vh, 15rem); }
 .cmd-orbit[data-layout='orbit'] .cmd-orbit__pod { gap: 0.7rem; width: 11.5rem; min-height: 3.25rem; padding: 0.55rem 0.75rem; }
 
-/* arc: the owl above, the pods within thumb reach of the bottom edge. Compact pods (icon over a short
+/* arc: the mascot above, the pods within thumb reach of the bottom edge. Compact pods (icon over a short
    label) — a phone-width row of hero-sized pods would collide long before the sweep closed. */
 .cmd-orbit[data-layout='arc'] .cmd-orbit__field { transform: scale(var(--k, 1)); transform-origin: bottom center; }
 .cmd-orbit[data-layout='arc'] .cmd-orbit__core { left: 50%; top: 0.5rem; translate: -50% 0; width: 9.5rem; }

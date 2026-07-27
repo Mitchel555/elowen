@@ -33,8 +33,8 @@ function TelemetryMascot({ busy }: { busy: boolean }) {
   const [fieldOpen, setFieldOpen] = useState(false);
   const mascotRef = useRef<HTMLButtonElement>(null);
   const wasOpen = useRef(false);
-  // Closing returns focus to the owl explicitly. The overlay restores whatever was focused when it
-  // opened, which is the owl only when it was opened by an actual click — a pointer tap leaves focus on
+  // Closing returns focus to the mascot explicitly. The overlay restores whatever was focused when it
+  // opened, which is the mascot only when it was opened by an actual click — a pointer tap leaves focus on
   // the body on some browsers, and the user would land back at the top of the document.
   useEffect(() => {
     if (wasOpen.current && !fieldOpen) mascotRef.current?.focus();
@@ -51,7 +51,10 @@ function TelemetryMascot({ busy }: { busy: boolean }) {
         aria-haspopup="dialog"
         aria-expanded={fieldOpen}
         onClick={() => setFieldOpen(true)}
-        className="h-28 w-28 rounded-full transition-transform hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text"
+        // Sized as a share of the rail rather than a fixed 7rem: the column is draggable from 15rem to
+        // 35rem, and a mascot frozen at one size looks lost in a wide rail and crowds a narrow one. The
+        // glyph itself has no intrinsic size (it fills its parent), so the square has to come from here.
+        className="aspect-square w-[42%] min-w-[6.5rem] max-w-[11rem] rounded-full transition-transform hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text"
       >
         <MascotGlyph state={busy ? 'saving' : 'idle'} />
       </button>
