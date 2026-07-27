@@ -508,6 +508,70 @@ describe('workflow engine', () => {
   });
 });
 
+// Regression: pruneWorkflows() only removed workflows finished more than an hour ago, while the start
+// limit compared against the WHOLE map. Sixteen quickly-finished workflows locked the tool out for an
+// hour with nothing actually in flight, and the error message falsely called them "running".
+describe('workflow start limit', () => {
+  const MAX_WORKFLOWS = 16;
+
+  /** One node per workflow: `hold` parks on the shared gate until release(); anything else finishes
+   *  immediately. `background: true` needs a completion sink to return without blocking on the parked
+   *  node, exactly like the production host wiring. */
+  function limitHarness() {
+    const tools = new Map<string, Tool>();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const run = async (_s: unknown, task: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: 'session', sessionId: `s-${task}` });
+      if (task === 'hold') { await gate; return 'done:hold'; }
+      return `done:${task}`;
+    };
+    const ctx = {
+      registerTool: (def: Tool) => { tools.set(def.name, def); },
+      registerControl: () => {},
+      logger: { info() {}, warn() {} },
+      currentSessionId: () => 'brain-parent',
+      currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
+      currentAccess: () => ({ toolPolicy: undefined }),
+      currentModel: () => ({ provider: 'p', model: 'm' }),
+      workflowEmitter: () => () => {},
+      workflowCompletionEmitter: () => () => {},
+      listModels: async () => [],
+      toolNames: () => ['Read'],
+    };
+    registerWorkflow(ctx, () => run, {
+      resolveDelegateTools: () => ({ allow: undefined }),
+      principalOf: () => 'elowen:1',
+      delegateContextChunks,
+    });
+    return { tools, release };
+  }
+
+  it('sixteen finished workflows do not block a seventeenth from starting', async () => {
+    const { tools } = limitHarness();
+    for (let i = 0; i < MAX_WORKFLOWS; i += 1) {
+      const res = await tools.get('WorkflowStart')!.execute(`f${i}`, { nodes: [{ id: 'a', task: `quick${i}` }] });
+      expect(res.content[0]!.text).toMatch(/status: done/);
+    }
+    const res17 = await tools.get('WorkflowStart')!.execute('f17', { nodes: [{ id: 'a', task: 'quick17' }] });
+    expect(res17.content[0]!.text).toMatch(/status: done/);
+    expect(res17.content[0]!.text).not.toMatch(/too many workflows/);
+  });
+
+  it('sixteen genuinely running workflows still block a seventeenth', async () => {
+    const { tools, release } = limitHarness();
+    const starts = [];
+    for (let i = 0; i < MAX_WORKFLOWS; i += 1) {
+      starts.push(tools.get('WorkflowStart')!.execute(`r${i}`, { background: true, nodes: [{ id: 'a', task: 'hold' }] }));
+    }
+    await Promise.all(starts); // background handle returns immediately; every node is parked, none finished
+    const blocked = await tools.get('WorkflowStart')!.execute('r17', { nodes: [{ id: 'a', task: 'nope' }] });
+    expect(blocked.content[0]!.text).toMatch(/too many workflows \(16\) are running; wait for one to finish\./);
+    release();
+    await new Promise((r) => setTimeout(r, 5)); // let the sixteen parked nodes settle before the test ends
+  });
+});
+
 describe('workflow background + detach', () => {
   interface Completion { id: string; toolCallId: string; title?: string; status: string; result: string }
   interface Ctrl {

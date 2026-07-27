@@ -162,26 +162,54 @@ async function connectServer(ctx, spec, live) {
   setServerState(spec.name, { status: 'connecting', transport: transportKind(spec), lastError: null, tools: [], toolCount: 0 });
   const { transport, child } = makeTransport(spec);
   const client = new Client({ name: 'elowen-mcp-bridge', version: '0.1.1' }, { capabilities: {} });
-  const entry = { name: spec.name, client, transport, child };
+  // `closing` suppresses the onclose transition below during OUR OWN deliberate teardown (reload/cleanup)
+  // so a normal shutdown is never reported as a crash.
+  const entry = { name: spec.name, client, transport, child, closing: false, lastTransportError: undefined };
   live.push(entry);
   const connectTimeoutMs = configNumber(ctx.config?.connectTimeoutMs, CONNECT_TIMEOUT_MS, 5000, 60000);
   try {
     await withTimeout(client.connect(transport), connectTimeoutMs, `mcp connect ${spec.name}`);
-    const { tools } = await withTimeout(client.listTools(), connectTimeoutMs, `mcp listTools ${spec.name}`);
-    for (const tool of tools ?? []) registerBridgedTool(ctx, client, spec.name, tool);
+    // Page through the whole tool list — same pattern as the resource listing below. A server that
+    // paginates would otherwise expose only its first page, and the status would report a wrong count.
+    const tools = [];
+    let cursor;
+    do {
+      const res = await withTimeout(client.listTools(cursor ? { cursor } : undefined), connectTimeoutMs, `mcp listTools ${spec.name}`);
+      for (const tool of res?.tools ?? []) tools.push(tool);
+      cursor = res?.nextCursor;
+    } while (cursor);
+    for (const tool of tools) registerBridgedTool(ctx, client, spec.name, tool);
     setServerState(spec.name, {
       status: 'connected',
       transport: transportKind(spec),
       lastError: null,
-      toolCount: tools?.length ?? 0,
-      tools: (tools ?? []).map((tool) => ({
+      toolCount: tools.length,
+      tools: tools.map((tool) => ({
         name: tool.name,
         title: tool.title ?? tool.name,
         description: tool.description ?? '',
         schema: tool.inputSchema ?? null,
       })),
     });
-    ctx.logger?.info?.(`mcp: connected "${spec.name}" (${tools?.length ?? 0} tools)`);
+    ctx.logger?.info?.(`mcp: connected "${spec.name}" (${tools.length} tools)`);
+    // Capture the last transport error (if any) so an unexpected close can report WHY, not just THAT.
+    client.onerror = (err) => { entry.lastTransportError = err instanceof Error ? err.message : String(err); };
+    // The dead-client bug: without this, a crashed stdio process or a dropped HTTP/SSE connection left
+    // the state lying "connected" forever, tools kept failing against a dead client, and a manual
+    // reconnect no-opped because the state still said "connected". `closing` is set by our own cleanup
+    // right before it calls transport/client close, so that expected teardown never triggers this path.
+    client.onclose = () => {
+      if (entry.closing) return;
+      const i = live.indexOf(entry);
+      if (i >= 0) live.splice(i, 1);
+      setServerState(spec.name, {
+        status: 'disconnected',
+        lastError: entry.lastTransportError ?? 'connection closed unexpectedly',
+        toolCount: 0,
+        tools: [],
+      });
+      ctx.logger?.warn?.(`mcp: "${spec.name}" disconnected unexpectedly`);
+    };
   } catch (e) {
     const i = live.indexOf(entry);
     if (i >= 0) live.splice(i, 1);
@@ -223,6 +251,8 @@ export async function register(ctx) {
   const cleanup = async () => {
     const closing = [];
     for (const c of live.splice(0)) {
+      // Deliberate teardown, not a crash: suppress the onclose transition before triggering it.
+      c.closing = true;
       try { const p = c.transport?.close?.(); if (p?.then) closing.push(p); } catch { /* ignore */ }
       killTree(c.child);
       try { const p = c.client?.close?.(); if (p?.then) closing.push(p); } catch { /* ignore */ }

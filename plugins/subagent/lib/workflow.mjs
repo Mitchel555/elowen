@@ -87,6 +87,18 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     for (const [id, wf] of workflows) {
       if (wf.finishedAt !== undefined && now - wf.finishedAt >= WORKFLOW_RETENTION_MS) workflows.delete(id);
     }
+    // Bounded memory without blocking new starts: once retained history grows past MAX_WORKFLOWS, evict
+    // the OLDEST finished entries first (a finished workflow no longer counts against the start limit
+    // below, so this only trims history, never a workflow anyone is still waiting on).
+    if (workflows.size > MAX_WORKFLOWS) {
+      const finished = [...workflows.values()]
+        .filter((wf) => wf.finishedAt !== undefined)
+        .sort((a, b) => a.finishedAt - b.finishedAt);
+      for (const wf of finished) {
+        if (workflows.size <= MAX_WORKFLOWS) break;
+        workflows.delete(wf.id);
+      }
+    }
   };
 
   /** Resolve a workflow the CURRENT turn is allowed to see/extend. Two authorized callers, fail closed:
@@ -423,7 +435,11 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       const { nodes, error } = validateWorkflowNodes(p.nodes);
       if (error) return ok(`Error: ${error}`);
       pruneWorkflows();
-      if (workflows.size >= MAX_WORKFLOWS) return ok(`Error: too many workflows (${MAX_WORKFLOWS}) are running; wait for one to finish.`);
+      // Only UNFINISHED workflows compete for the slot — a finished one sitting in memory for retention
+      // is not "running" and must never block a new start (that was the bug: 16 quickly-finished
+      // workflows locked the tool out for an hour even with nothing actually in flight).
+      const runningCount = [...workflows.values()].filter((wf) => wf.finishedAt === undefined).length;
+      if (runningCount >= MAX_WORKFLOWS) return ok(`Error: too many workflows (${MAX_WORKFLOWS}) are running; wait for one to finish.`);
       // Capture the durable completion sink on the ORIGIN turn, before any node is scheduled — node turns
       // run in their own scope where this accessor no longer resolves to this conversation.
       const emitCompletion = ctx.workflowCompletionEmitter?.() ?? undefined;

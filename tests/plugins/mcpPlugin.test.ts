@@ -5,10 +5,11 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 // The plugin is a plain ESM module (no build step) — import it directly.
 // @ts-expect-error - .mjs plugin has no type declarations
-import { register, killTree, sanitize, mapResult, DetachedStdioTransport, configNumber } from '../../plugins/mcp/index.mjs';
+import { register, killTree, sanitize, mapResult, DetachedStdioTransport, configNumber, listMcpServers, reconnectMcpServer } from '../../plugins/mcp/index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER = join(here, '../fixtures/mock-mcp-server.mjs');
+const PAGINATED_MOCK_SERVER = join(here, '../fixtures/mock-mcp-paginated-server.mjs');
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -144,4 +145,61 @@ describe('mcp plugin — end-to-end connection + process-group cleanup', () => {
     expect(elapsed).toBeLessThan(10_000); // well under the unconfigured 15s default -> the override was used
     expect(ctx.tools.find((t) => t.name.startsWith('mcp__hung__'))).toBeUndefined();
   }, 15000);
+
+  // Regression: listTools() was called once and nextCursor was ignored, so a paginated server exposed
+  // only its first page — silently, with the status reporting a wrong tool count.
+  it('pages through tools/list until nextCursor is exhausted, bridging every tool from every page', async () => {
+    const ctx = fakeCtx({
+      servers: [{
+        name: 'paged', enabled: true, transport: 'stdio',
+        command: process.execPath, args: [PAGINATED_MOCK_SERVER],
+      }],
+    });
+    await register(ctx as never);
+
+    const bridged = ctx.tools.filter((t) => t.name.startsWith('mcp__paged__')).map((t) => t.name).sort();
+    expect(bridged).toEqual(['mcp__paged__tool_a', 'mcp__paged__tool_b', 'mcp__paged__tool_c']);
+
+    const server = listMcpServers().find((s: { name: string }) => s.name === 'paged');
+    expect(server.status).toBe('connected');
+    expect(server.toolCount).toBe(3);
+    expect(server.tools.map((t: { name: string }) => t.name).sort()).toEqual(['tool_a', 'tool_b', 'tool_c']);
+
+    const hook = ctx.hooks.find((h) => h.name === 'plugin.reload.before');
+    await hook!.run({});
+  }, 20000);
+
+  // Regression: nothing set client.onclose, so a dead stdio process left the state lying "connected",
+  // tools kept failing against the dead client, and reconnectMcpServer no-opped because the state still
+  // said "connected".
+  it('detects an unexpected disconnect and lets a manual reconnect actually reconnect', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elowen-mcp-'));
+    const pidFile = join(dir, 'server.pid');
+    const ctx = fakeCtx({
+      servers: [{
+        name: 'crashy', enabled: true, transport: 'stdio',
+        command: process.execPath, args: [MOCK_SERVER], env: { SERVER_PID_FILE: pidFile },
+      }],
+    });
+    await register(ctx as never);
+    expect(listMcpServers().find((s: { name: string }) => s.name === 'crashy')?.status).toBe('connected');
+
+    await waitFor(() => existsSync(pidFile));
+    const serverPid = Number(readFileSync(pidFile, 'utf-8').trim());
+    expect(alive(serverPid)).toBe(true);
+    process.kill(serverPid, 'SIGKILL'); // simulate the server crashing, not a deliberate plugin cleanup
+
+    expect(await waitFor(() => listMcpServers().find((s: { name: string }) => s.name === 'crashy')?.status === 'disconnected', 5000)).toBe(true);
+    const disconnected = listMcpServers().find((s: { name: string }) => s.name === 'crashy');
+    expect(disconnected.lastError).toBeTruthy();
+    expect(disconnected.toolCount).toBe(0);
+
+    // The bug: reconnect used to see status "connected" and return immediately, doing nothing.
+    const reconnected = await reconnectMcpServer('crashy');
+    expect(reconnected.status).toBe('connected');
+    expect(ctx.tools.some((t) => t.name === 'mcp__crashy__echo')).toBe(true);
+
+    const hook = ctx.hooks.find((h) => h.name === 'plugin.reload.before');
+    await hook!.run({});
+  }, 20000);
 });
