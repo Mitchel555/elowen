@@ -40,9 +40,17 @@ describe('autoScaleFor — the window-width base', () => {
     expect(autoScaleFor(1440)).toBe(0.75);
   });
 
-  it('bottoms out rather than shrinking into unreadability on a narrow window', () => {
+  it('bottoms out rather than shrinking into unreadability on a narrow DESKTOP window', () => {
     expect(autoScaleFor(1280)).toBe(0.7);
-    expect(autoScaleFor(480)).toBe(0.7);
+    expect(autoScaleFor(800)).toBe(0.7);
+  });
+
+  // The ramp exists for a desktop window too narrow for a desktop layout. A phone is not that: it already
+  // gets the compact layout, so shrinking it too left body text at 9.8px and controls at 25px.
+  it('leaves a phone at reference density instead of shrinking the compact layout again', () => {
+    expect(autoScaleFor(390)).toBe(1);  // iPhone
+    expect(autoScaleFor(767)).toBe(1);  // last mobile width
+    expect(autoScaleFor(768)).toBe(0.7); // first desktop width — back on the ramp
   });
 
   it('quantises to 5% notches, so dragging a window edge steps rather than reflowing on every pixel', () => {

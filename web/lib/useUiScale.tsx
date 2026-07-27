@@ -1,5 +1,6 @@
 'use client';
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { MOBILE_MAX_WIDTH } from './useMobile';
 
 /** Whole-app UI scale (CSS `zoom` on the document root).
  *
@@ -39,6 +40,14 @@ const clamp = (n: number): number => Math.min(MAX_SCALE, Math.max(MIN_SCALE, n))
  *  every pixel of travel. Falls back to the neutral 1 when there is no measurable window (SSR). */
 export function autoScaleFor(width: number): number {
   if (!(width > 0)) return DEFAULT_SCALE;
+  // A phone is not a cramped desktop window, and the ramp only makes sense for one. Below the mobile
+  // breakpoint the app has ALREADY switched to its own compact layout — drawer navigation, full-screen
+  // chat, a telemetry drawer instead of a side column — so the desktop shrink compacts a design that is
+  // the compact one a second time. A 390px phone lands far past the ramp, at the 0.7 floor: 14px body
+  // text rendered at 9.8px and a 36px control at 25px. That, not the type scale, is what "everything is
+  // tiny and unclickable on the phone" was. The personal preference still multiplies on top, so anyone
+  // who does want it smaller keeps the slider.
+  if (width <= MOBILE_MAX_WIDTH) return DEFAULT_SCALE;
   const fit = Math.round((width / AUTO_REFERENCE_WIDTH) * 20) / 20;
   return Math.min(DEFAULT_SCALE, Math.max(AUTO_FLOOR_SCALE, fit));
 }
