@@ -19,11 +19,14 @@ const MIN: LogLevel = (() => {
   return v in ORDER ? (v as LogLevel) : 'info';
 })();
 
-// Mirrors `logDir()` in src/shared/paths.ts — the canonical rule for where persistent state lives. It is
-// duplicated rather than imported because the web is a separate TS package (see the note above); keep the
-// two in step. NOT a cwd-relative default: that wrote logs into the checkout on any run without the env
-// var, so the installed folder and a stale in-repo one both filled up.
-const DIR = process.env.ELOWEN_LOG_DIR || join(process.env.HOME || homedir(), '.config', 'elowen', 'logs');
+// Mirrors `logDir()`/`dataDir()` in src/shared/paths.ts — the canonical rule for where persistent state
+// lives. It is duplicated rather than imported because the web is a separate TS package (see the note
+// above); keep the two in step. NOT a cwd-relative default: that wrote logs into the checkout on any run
+// without the env var, so the installed folder and a stale in-repo one both filled up. The final `|| '/'`
+// matters too: homedir() consults $HOME itself, so an empty HOME under some service managers leaves it
+// empty and the fallback would be circular, joining a RELATIVE '.config/elowen/logs' against the process
+// cwd instead — see src/shared/paths.ts's dataDir() for the full story.
+const DIR = process.env.ELOWEN_LOG_DIR || join(process.env.HOME || homedir() || '/', '.config', 'elowen', 'logs');
 let dirReady = false;
 
 function stamp(d: Date): string {

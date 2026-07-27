@@ -120,4 +120,23 @@ describe('AccountView', () => {
     // from <Activity> hidden→visible is deferred, so wait for it rather than asserting synchronously.
     await waitFor(() => expect(screen.getByText('Friendly')).toBeVisible());
   });
+
+  it('shows a retryable error instead of an infinite skeleton when /auth/me fails', async () => {
+    let attempts = 0;
+    server.use(
+      http.get('*/api/auth/me', () => {
+        attempts += 1;
+        return attempts === 1 ? HttpResponse.json({ error: 'boom' }, { status: 500 }) : HttpResponse.json({ user: meUser() });
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: ['sonnet'], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByText('@bob')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByText('@bob')).toBeInTheDocument());
+  });
 });

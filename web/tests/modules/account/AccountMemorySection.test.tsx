@@ -1,0 +1,45 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { ToastProvider } from '../../../components/ui/Toast';
+import { createWrapper } from '../../test-utils';
+import type { CliSettings } from '../../../lib/types';
+
+const mutate = vi.fn();
+vi.mock('../../../lib/mutations', () => ({ useSaveMyCliSettings: () => ({ mutate, mutateAsync: mutate }) }));
+
+const SEED: CliSettings = {
+  model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '',
+  autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'professional', personalityBody: '', discordUserId: '', whatsappNumber: '',
+  autoRecall: true, autoSave: true,
+};
+const state = vi.hoisted(() => ({ error: false }));
+const mocks = vi.hoisted(() => ({ refetch: vi.fn() }));
+vi.mock('../../../lib/queries', () => ({
+  useMyCliSettings: () => (state.error ? { data: undefined, isLoading: false, isError: true, refetch: mocks.refetch } : { data: SEED, isLoading: false, isError: false }),
+}));
+
+import { AccountMemorySection } from '../../../modules/account/AccountMemorySection';
+
+const renderSection = () => render(<ToastProvider><AccountMemorySection /></ToastProvider>, { wrapper: createWrapper().wrapper });
+
+beforeEach(() => { mutate.mockClear(); state.error = false; mocks.refetch.mockClear(); });
+
+describe('AccountMemorySection — error state', () => {
+  it('shows a retryable error instead of a permanent skeleton', () => {
+    state.error = true;
+    renderSection();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(mocks.refetch).toHaveBeenCalledOnce();
+  });
+});
+
+describe('AccountMemorySection', () => {
+  it('seeds the toggles and autosaves a change', async () => {
+    renderSection();
+    const toggle = screen.getAllByRole('switch')[0]!;
+    fireEvent.click(toggle);
+    await waitFor(() => expect(mutate).toHaveBeenCalled(), { timeout: 1500 });
+  });
+});

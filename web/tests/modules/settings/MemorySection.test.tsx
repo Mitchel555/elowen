@@ -21,11 +21,17 @@ const MODELS: BrainModelOption[] = [
   { provider: 'openai', providerLabel: 'OpenAI', model: 'text-embedding-3-small', exec: 'elowen:openai/text-embedding-3-small', source: 'api-key', contextWindow: 8192, contextWindowSet: false },
 ];
 const CONFIG = { brain: { providers: [{ id: 'anthropic', label: 'Anthropic', type: 'anthropic' }, { id: 'openai', label: 'OpenAI', type: 'openai' }] } };
+const state = vi.hoisted(() => ({ embeddingError: false, categorizationError: false }));
+const mocks = vi.hoisted(() => ({ refetchEmbedding: vi.fn(), refetchCategorization: vi.fn() }));
 vi.mock('../../../lib/queries', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useConfig: () => ({ data: CONFIG }),
-  useEmbeddingSettings: () => ({ data: EMBEDDING }),
-  useCategorizationSettings: () => ({ data: CATEGORIZATION }),
+  useEmbeddingSettings: () => (state.embeddingError
+    ? { data: undefined, isError: true, refetch: mocks.refetchEmbedding }
+    : { data: EMBEDDING, isError: false, refetch: mocks.refetchEmbedding }),
+  useCategorizationSettings: () => (state.categorizationError
+    ? { data: undefined, isError: true, refetch: mocks.refetchCategorization }
+    : { data: CATEGORIZATION, isError: false, refetch: mocks.refetchCategorization }),
   useBrainModels: () => ({ data: MODELS }),
 }));
 
@@ -33,7 +39,30 @@ import { MemorySection } from '../../../modules/settings/MemorySection';
 
 const renderSection = () => render(<ToastProvider><MemorySection /></ToastProvider>, { wrapper: createWrapper().wrapper });
 
-beforeEach(() => { saveCategorization.mockClear(); saveEmbedding.mockClear(); });
+beforeEach(() => {
+  saveCategorization.mockClear(); saveEmbedding.mockClear();
+  state.embeddingError = false; state.categorizationError = false;
+  mocks.refetchEmbedding.mockClear(); mocks.refetchCategorization.mockClear();
+});
+
+describe('MemorySection — error state', () => {
+  it('shows a retryable error instead of a permanent skeleton when embedding settings fail to load', () => {
+    state.embeddingError = true;
+    renderSection();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryAllByRole('button', { name: en.managePicker.manage })).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(mocks.refetchEmbedding).toHaveBeenCalledOnce();
+  });
+
+  it('shows a retryable error when categorization settings fail to load', () => {
+    state.categorizationError = true;
+    renderSection();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(mocks.refetchCategorization).toHaveBeenCalledOnce();
+  });
+});
 
 describe('MemorySection — categorization model picker', () => {
   it('uses the shared settings group and row pattern for both memory model areas', () => {

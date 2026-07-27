@@ -54,12 +54,18 @@ export function useDeleteMission() {
     },
   });
 }
-/** Admin: destructively reset all usage stores. Invalidates the usage query on success. */
+/** Admin: destructively reset all usage stores. Invalidates every cache usage is read from — by-model
+ *  (Stats), by-day (the dashboard's daily chart) and the per-task usage badges — so nothing keeps
+ *  showing pre-reset numbers until an unrelated refetch happens to catch up. */
 export function useResetUsage() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => elowenClient.resetUsage(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: QUERY_KEYS.usageByModel }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.usageByModel });
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.usageByDay });
+      qc.invalidateQueries({ queryKey: ['task-usage'] });
+    },
   });
 }
 
@@ -419,8 +425,15 @@ export function useWriteProjectFile() {
   return useMutation({
     mutationFn: (v: { id: number; path: string; content: string }) => elowenClient.writeProjectFile(v.id, v.path, v.content),
     onSuccess: (_r, v) => {
+      // Update the file cache with what we just wrote before invalidating — the editor clears its local
+      // draft on save and falls back to this cache, so without the update it would briefly flash the
+      // stale pre-save content until the refetch below resolves.
+      qc.setQueryData<{ content: string; truncated: boolean }>(['project-file', v.id, v.path], { content: v.content, truncated: false });
       qc.invalidateQueries({ queryKey: ['project-file', v.id, v.path] });
       qc.invalidateQueries({ queryKey: ['project-git', v.id] });
+      // 'project-changed' is where the editor gets its highlighted (dirty) paths — without this the tree
+      // keeps claiming the just-saved path is unchanged until something else invalidates it.
+      qc.invalidateQueries({ queryKey: ['project-changed', v.id] });
     },
   });
 }

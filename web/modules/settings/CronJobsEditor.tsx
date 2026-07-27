@@ -10,7 +10,7 @@ import { Field } from '../../components/ui/Field';
 import { Toggle } from '../../components/ui/Toggle';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { AutoSaveStatus } from '../../components/ui/AutoSaveStatus';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { ManageSelectionModal, type ManageSelectionItem } from '../../components/ui/ManageSelectionModal';
 import { SelectionSummary } from '../../components/ui/SelectionSummary';
@@ -286,7 +286,7 @@ function CronJobRow({ job, persisted, channels, models, onRemoved }: {
  *  here lives locally only until the server has it; from then on the server's copy is the row. */
 export function CronJobsEditor() {
   const { t } = useTranslation();
-  const { data, isLoading } = useCronJobs();
+  const { data, isLoading, isError, refetch } = useCronJobs();
   const channels = useDiscordChannels();
   const models = useBrainModels();
   const [drafts, setDrafts] = useState<CronJob[]>([]);
@@ -299,6 +299,7 @@ export function CronJobsEditor() {
     setDrafts((cur) => (cur.some((j) => ids.has(j.id)) ? cur.filter((j) => !ids.has(j.id)) : cur));
   }, [data]);
 
+  if (isError) return <ErrorState message={t.common.daemonUnreachable} onRetry={() => refetch()} />;
   if (isLoading || !data) return <LoadingState />;
 
   const saved = new Set(data.map((j) => j.id));

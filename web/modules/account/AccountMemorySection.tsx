@@ -4,7 +4,7 @@ import { useAutoSaveStatus, type SaveStatus } from '../../lib/useAutoSaveStatus'
 import { Search, Save } from 'lucide-react';
 import { SpatialGroup, SpatialRow } from '../../components/ui/SpatialPrimitives';
 import { Toggle } from '../../components/ui/Toggle';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { useMyCliSettings } from '../../lib/queries';
@@ -15,7 +15,7 @@ import { useSaveMyCliSettings } from '../../lib/mutations';
  *  memories under their message before the reply; autoSave lets the post-turn curator persist new
  *  facts to their account. Both default on; read fresh each turn so a flip applies immediately. */
 export function AccountMemorySection({ onSaveState }: { onSaveState?: (section: string, status: SaveStatus, retry?: () => void) => void } = {}) {
-  const { data, isLoading } = useMyCliSettings();
+  const { data, isLoading, isError, refetch } = useMyCliSettings();
   const save = useSaveMyCliSettings();
   const { toast } = useToast();
   const { t } = useTranslation();
@@ -40,6 +40,7 @@ export function AccountMemorySection({ onSaveState }: { onSaveState?: (section: 
   }, { ready: seeded });
   useEffect(() => onSaveState?.('memory', autosave.status, autosave.retry), [onSaveState, autosave.status, autosave.retry]);
 
+  if (isError) return <ErrorState message={t.common.daemonUnreachable} onRetry={() => refetch()} />;
   if (isLoading || !data) return <LoadingState />;
 
   return (

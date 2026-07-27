@@ -33,6 +33,23 @@ const server = setupServer(
 );
 beforeAll(() => server.listen()); afterEach(() => { server.resetHandlers(); lastPatch = null; }); afterAll(() => server.close());
 
+describe('PersonalitySection — error state', () => {
+  it('shows a retryable error instead of an editor that can never save', async () => {
+    server.use(http.get('*/api/auth/me/cli-settings', () => HttpResponse.json({ error: 'boom' }, { status: 500 })));
+    const { wrapper } = createWrapper();
+    render(<ToastProvider><PersonalitySection /></ToastProvider>, { wrapper });
+
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    // No editor form (style picker / body field) must render while the load has failed.
+    expect(screen.queryByRole('button', { name: 'Manage' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Personality instructions' })).not.toBeInTheDocument();
+
+    server.use(http.get('*/api/auth/me/cli-settings', () => HttpResponse.json(settings)));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('Concise')).toBeInTheDocument();
+  });
+});
+
 describe('PersonalitySection', () => {
   it('shows the current style as a chip and opens the body editor in a drawer', async () => {
     const { wrapper } = createWrapper();

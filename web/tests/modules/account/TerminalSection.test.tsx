@@ -16,14 +16,27 @@ const mutate = vi.fn();
 vi.mock('../../../lib/mutations', () => ({ useSaveMyTerminalSettings: () => ({ mutate, mutateAsync: mutate }) }));
 
 const SEED: TerminalSettings = { fontSize: 16, fontFamily: 'menlo', cursorStyle: 'bar', cursorBlink: false, scrollback: 2000, theme: 'auto', palette: DARK_PALETTE };
-vi.mock('../../../lib/queries', () => ({ useMyTerminalSettings: () => ({ data: SEED, isLoading: false }) }));
+const state = vi.hoisted(() => ({ error: false }));
+const mocks = vi.hoisted(() => ({ refetch: vi.fn() }));
+vi.mock('../../../lib/queries', () => ({ useMyTerminalSettings: () => (state.error ? { data: undefined, isLoading: false, isError: true, refetch: mocks.refetch } : { data: SEED, isLoading: false, isError: false }) }));
 
 import { TerminalSection } from '../../../modules/account/TerminalSection';
 
 const renderSection = () => render(<ToastProvider><TerminalSection /></ToastProvider>, { wrapper: createWrapper().wrapper });
 const colorInputs = (c: HTMLElement) => c.querySelectorAll('input[type="color"]');
 
-beforeEach(() => mutate.mockClear());
+beforeEach(() => { mutate.mockClear(); state.error = false; mocks.refetch.mockClear(); });
+
+describe('TerminalSection — error state', () => {
+  it('shows a retryable error instead of a permanent skeleton', () => {
+    state.error = true;
+    renderSection();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Colors' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(mocks.refetch).toHaveBeenCalledOnce();
+  });
+});
 
 describe('TerminalSection', () => {
   it('seeds the form from the query and hides the palette while theme is auto', () => {

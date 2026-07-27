@@ -19,7 +19,7 @@ import { BrainModelField } from '../../components/ui/BrainModelField';
 import { Toggle } from '../../components/ui/Toggle';
 import { Slider } from '../../components/ui/Slider';
 import { ModuleHeader } from '../../components/ui/ModuleHeader';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
@@ -249,6 +249,9 @@ export function AccountView() {
     }
   };
 
+  if (me.isError) {
+    return <div className="flex w-full min-w-0 flex-col"><ModuleHeader title={t.account.title} icon={UserCog} /><ErrorState message={t.common.daemonUnreachable} onRetry={() => me.refetch()} /></div>;
+  }
   if (me.isLoading || !me.data?.user) {
     return <div className="flex w-full min-w-0 flex-col"><ModuleHeader title={t.account.title} icon={UserCog} /><LoadingState /></div>;
   }

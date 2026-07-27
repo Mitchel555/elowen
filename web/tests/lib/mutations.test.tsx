@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
-import { useSpawn, useAssignProject, useSavePluginConfig, useTogglePlugin, useSetTaskStatus } from '../../lib/mutations';
+import { useSpawn, useAssignProject, useSavePluginConfig, useTogglePlugin, useSetTaskStatus, useResetUsage, useWriteProjectFile } from '../../lib/mutations';
 import type { Task } from '../../lib/types';
 
 let lastAssignCall: { method: string; userId: string; projectId?: string } | null = null;
@@ -26,6 +26,8 @@ const server = setupServer(
     const patch = (await request.json()) as Partial<Task>;
     return HttpResponse.json({ id: String(params.id), title: 'Task', status: 'open', ...patch });
   }),
+  http.post('*/api/usage/reset', () => HttpResponse.json({ ok: true })),
+  http.put('*/api/projects/:id/file', () => HttpResponse.json({ ok: true })),
 );
 beforeAll(() => server.listen()); afterAll(() => server.close());
 
@@ -105,5 +107,49 @@ describe('useAssignProject', () => {
     result.current.mutate({ userId: 7, projectId: 3, currentlyAssigned: true });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(lastAssignCall).toEqual({ method: 'DELETE', userId: '7', projectId: '3' });
+  });
+});
+
+describe('useResetUsage', () => {
+  // Stats reads usage-by-model, the dashboard's daily chart reads usage-by-day, and open task badges
+  // read task-usage — a reset that invalidates only the first leaves the other two on stale numbers.
+  it('invalidates the by-model, by-day and task-usage caches', async () => {
+    const client = new QueryClient();
+    const spy = vi.spyOn(client, 'invalidateQueries');
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useResetUsage(), { wrapper });
+    result.current.mutate();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['usage-by-model'] });
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['usage-by-day'] });
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['task-usage'] });
+  });
+});
+
+describe('useWriteProjectFile', () => {
+  // The editor's changed-path highlighting reads 'project-changed'; without invalidating it a save
+  // leaves the tree claiming the just-edited file is unchanged.
+  it('invalidates the file, git summary and changed-path caches', async () => {
+    const client = new QueryClient();
+    const spy = vi.spyOn(client, 'invalidateQueries');
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useWriteProjectFile(), { wrapper });
+    result.current.mutate({ id: 5, path: 'a.ts', content: 'new content' });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['project-file', 5, 'a.ts'] });
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['project-git', 5] });
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['project-changed', 5] });
+  });
+
+  // The editor clears its local draft on save success and falls back to the file cache, so the cache
+  // must already hold the new content — otherwise it flashes the stale pre-save version until refetch.
+  it('updates the file cache with the written content synchronously', async () => {
+    const client = new QueryClient();
+    client.setQueryData(['project-file', 5, 'a.ts'], { content: 'old content', truncated: false });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useWriteProjectFile(), { wrapper });
+    result.current.mutate({ id: 5, path: 'a.ts', content: 'new content' });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(client.getQueryData(['project-file', 5, 'a.ts'])).toEqual({ content: 'new content', truncated: false });
   });
 });
