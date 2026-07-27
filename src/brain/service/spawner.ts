@@ -43,7 +43,9 @@ interface SpawnerDeps {
   plugins(): Promise<PluginRegistry | undefined>;
   /** Shared session assembly (store row + rehydrate + resource loader + PI session). */
   factory: BrainSessionFactory;
-  /** Long-lived session taps to re-attach on every (re)spawn — owned by ClientAttachments. */
+  /** Every listener ClientAttachments still has attached to this session id (subscribe() AND
+   *  tapSession()) — restored on every (re)spawn. Ownership lives entirely in ClientAttachments, so a
+   *  respawn site never has to carry a particular LiveBrain's transient `listeners` Set by hand. */
   sessionTaps(sessionId: string): Iterable<(e: BrainEvent) => void>;
 }
 
@@ -223,9 +225,10 @@ export class LiveSessionSpawner {
     for (const [k, v] of plugins?.toolIcons ?? []) iconMap.set(k, v);
     const iconOf = makeToolIconResolver(iconMap);
     const listeners = new Set<(e: BrainEvent) => void>();
-    // Re-attach long-lived session taps (open sub-agent drill-in streams): a respawn (model switch,
-    // LRU eviction + revival) builds a fresh listener set, and without this the tapped stream would
-    // silently go dark while the client believes it is still following the session.
+    // Re-attach every listener ClientAttachments still has on this session id — direct subscribe()
+    // subscribers and drill-in taps alike. A respawn (model switch, restart, vision hop, idle rollover,
+    // LRU eviction + revival) always builds a fresh listener set here; without this every one of them
+    // would silently go dark while the client believes it is still attached.
     for (const tap of this.d.sessionTaps(opts.sessionId)) listeners.add(tap);
     const replay = new LiveEventReplay(listeners);
     // Image-carrying mirror of PI's mid-turn queue — the SAME array instances returned on the LiveBrain, so

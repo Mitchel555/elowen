@@ -28,7 +28,11 @@ function live(spec: { provider?: string; model: string }): LiveBrain {
   };
 }
 
-function makeLifecycle(sessions: LiveSessionRegistry<LiveBrain>, spawn: (opts: SpawnOpts) => Promise<LiveBrain>) {
+function makeLifecycle(
+  sessions: LiveSessionRegistry<LiveBrain>,
+  spawn: (opts: SpawnOpts) => Promise<LiveBrain>,
+  attachments: ClientAttachments = new ClientAttachments(),
+) {
   const appendSessionEvent = vi.fn((sessionId: string, kind: string, detail: string) => ({
     id: 'evt-1', kind, detail, at: '2026-07-16T00:00:00.000Z',
   }));
@@ -42,30 +46,39 @@ function makeLifecycle(sessions: LiveSessionRegistry<LiveBrain>, spawn: (opts: S
   const lifecycle = new ConversationLifecycle({
     store,
     sessions,
-    attachments: new ClientAttachments(),
+    attachments,
     elicitation: { cancelForSession: vi.fn() },
-    goals: { cancelGoalContinuation: vi.fn() },
+    goals: { cancelGoalContinuation: vi.fn(), resumeAfterRespawn: vi.fn(), pauseForRespawnFailure: vi.fn() },
     spawn,
     policy: () => ({ allowedProjectIds: 'all', allowedPaths: () => [] }),
     userSettings: () => ({ autoCompact: false, autoCompactAt: 80 }),
     selectionAllowed: () => true,
   } as never);
-  return { lifecycle, store, appendSessionEvent };
+  return { lifecycle, store, appendSessionEvent, attachments };
 }
 
 describe('ConversationLifecycle model switch (invariant 3)', () => {
-  it('carries every attached listener onto the respawned session, drains before disposing, and publishes exactly one model reconcile', async () => {
+  it('carries every listener ClientAttachments has on this session onto the respawned session, drains before disposing, and publishes exactly one model reconcile', async () => {
     const sessions = new LiveSessionRegistry<LiveBrain>();
+    const attachments = new ClientAttachments();
     const original = live({ provider: 'p', model: 'model-a' });
+    sessions.set('brain-1', original);
     const l1 = vi.fn();
     const l2 = vi.fn();
-    original.listeners.add(l1);
-    original.listeners.add(l2);
-    sessions.set('brain-1', original);
+    // Listener ownership lives in ClientAttachments (attach()), not on the transient LiveBrain — this is
+    // what subscribe()/tapSession() do; direct `.listeners.add` is no longer how a respawn restores them.
+    attachments.attach(1, 'brain-1', l1, vi.fn());
+    attachments.attach(1, 'brain-1', l2, vi.fn());
 
-    const fresh = live({ provider: 'p', model: 'model-b' });
-    const spawn = vi.fn(async () => fresh);
-    const { lifecycle, appendSessionEvent, store } = makeLifecycle(sessions, spawn);
+    let fresh!: LiveBrain;
+    const spawn = vi.fn(async (opts: SpawnOpts) => {
+      fresh = live({ provider: 'p', model: 'model-b' });
+      // Mirrors LiveSessionSpawner: every respawn restores whatever ClientAttachments still has attached
+      // to this session id.
+      for (const l of attachments.sessionTaps.get(opts.sessionId) ?? []) fresh.listeners.add(l);
+      return fresh;
+    });
+    const { lifecycle, appendSessionEvent, store } = makeLifecycle(sessions, spawn, attachments);
 
     await lifecycle.switchModel(1, { provider: 'p', model: 'model-b' });
 
@@ -75,7 +88,7 @@ describe('ConversationLifecycle model switch (invariant 3)', () => {
       selection: { provider: 'p', model: 'model-b' }, sessionId: 'brain-1',
     });
 
-    // Both direct listeners carried onto the fresh live (the invariant-3 core; fails without the carry).
+    // Both listeners carried onto the fresh live via ClientAttachments (fails without the fix).
     expect(fresh.listeners.has(l1)).toBe(true);
     expect(fresh.listeners.has(l2)).toBe(true);
 
