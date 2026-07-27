@@ -8,7 +8,7 @@ group: Everyday use
 
 # Slash Commands
 
-Slash commands are the fastest way to steer Elowen mid-conversation. They work the same on every surface — the [CLI](cli), the [web chat](web-ui), Discord, Telegram, WhatsApp, and Teams — because the menu is served by the daemon, not by each client. Add a command once and it shows up everywhere, always in sync.
+Slash commands are the fastest way to steer Elowen mid-conversation. The menu is served by the daemon, not by each client, so a command added once shows up on every surface it applies to — the [CLI](cli), the [web chat](web-ui), Discord, Telegram, WhatsApp, and Teams — always in sync. Most commands work everywhere; a few are limited to the surfaces that can actually present them, and the Surfaces column below says which.
 
 Type `/` in any chat to browse the menu. It filters as you keep typing, so `/mod` narrows to `/model` before you finish the word.
 
@@ -48,12 +48,16 @@ These manage saved conversations. They exist only in the CLI, where session swit
 
 | Command | Arguments | What it does | Surfaces |
 | --- | --- | --- | --- |
-| `/plan` | — | Switches to plan mode: read-only, with mutating tools hidden. | All |
-| `/build` | — | Switches back to build mode. | All |
-| `/workflow` | — | Switches to workflow mode, where work runs as a DAG of sub-agents. | All |
-| `/goal` | `[text\|status\|pause\|resume\|clear\|draft]` | Manages a persistent multi-turn objective. `draft` previews the goal without activating it. | All |
-| `/subgoal` | `<text>\|remove N\|clear` | Adds, removes, or clears sub-goals under the active goal. | All |
-| `/tdd` | `[on\|off]` | Toggles the daemon-wide test-driven-development mission mode. | All (admin) |
+| `/plan` | — | Switches to plan mode: read-only, with mutating tools hidden. | CLI, web |
+| `/build` | — | Switches back to build mode. | CLI, web |
+| `/workflow` | — | Switches to workflow mode, where work runs as a DAG of sub-agents. | CLI, web |
+| `/goal` | `[text\|status\|pause\|resume\|clear\|draft]` | Manages a persistent multi-turn objective. `draft` previews the goal without activating it. | CLI |
+| `/subgoal` | `<text>\|remove N\|clear` | Adds, removes, or clears sub-goals under the active goal. | CLI |
+| `/tdd` | `[on\|off]` | Toggles the daemon-wide test-driven-development mission mode. | CLI (admin) |
+
+A mode lives in the client's own session state and is stamped on each message it
+sends, so it only exists where there is a place to show which mode you are in —
+the CLI and the web chat. The chat platforms have no such place, so they stay out.
 
 ## CLI environment
 

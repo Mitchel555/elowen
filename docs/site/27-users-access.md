@@ -102,8 +102,8 @@ the [Users](web-ui) page:
   access, no matter what they ask the agent to do.
 - **Per-user models (`allowed_execs`)** — restrict which executors that user may
   run, narrower than the global `allowedExecs` in [Settings](configuration). An
-  empty list means "unrestricted within the global list" — you widen access by
-  adding entries, not by leaving it blank.
+  empty list means "unrestricted within the global list" — adding entries
+  NARROWS the user to just those, it does not widen anything.
 
 The Users detail pane renders each user's live tool access as pills, so you see
 the real, computed result of role + disabled tools without reasoning it out.

@@ -70,12 +70,14 @@ Also in **Account → Elowen AI**: the **unattended asks** switch decides what
 happens when the agent needs input while you're away — during a cron run or a
 background mission, where nobody is there to answer.
 
-- **Deny** (default) — the ask is refused and the agent works around it or
-  stops and waits for you.
-- **Allow** — the agent proceeds with the default answer and keeps going.
+- **Allow** (default) — the agent proceeds with the default answer and keeps
+  going.
+- **Deny** — the ask is refused and the agent works around it or stops and
+  waits for you.
 
-Allow it for background work you'd rather see finished than stalled; keep it
-off if an unattended default could do something you'd want to veto.
+Allow is the historical default, so background work gets finished rather than
+stalled. Switch to Deny if an unattended default could do something you'd want
+to veto.
 
 ## Permission rules
 
