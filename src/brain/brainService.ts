@@ -18,6 +18,7 @@ import { ChannelSessionService } from './channels.js';
 import type { ChannelSendOpts } from './channels.js';
 import { PlatformOrchestrator } from './platforms.js';
 import type { BrainMessageView } from './messageView.js';
+import { extractText } from './messageView.js';
 import { runCompaction, withDescendantUsage } from './events.js';
 import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
 import { isNonUserSession, isOwnedUserSession, isChannelSession, isSubagentSession, channelIdOf, defaultUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
@@ -1129,7 +1130,13 @@ export class BrainService {
    *
    *  `scopeExceedsCurrentAccess` deliberately does not apply here: reading stored text executes no child
    *  tools and cannot revive its captured permissions. Applying a write-time execution check would only
-   *  make an already-authorized parent lose access to its own durable result after its tool scope narrows. */
+   *  make an already-authorized parent lose access to its own durable result after its tool scope narrows.
+   *
+   *  Deliberately NOT `lastAssistantText` (which is `lastAssistant` — literally the last row). A follow-up
+   *  attempt on this child that later errored (a bad model route, a dropped connection) appends its own
+   *  empty-text assistant row AFTER the real answer, and the shared helper would then report the child as
+   *  having "no final text" even though it plainly does — one row further back. Scanning backward for the
+   *  last NON-EMPTY assistant text is what "the sub-agent's answer" actually means here. */
   readSubagent(parentSessionId: string, childSessionId: string): string {
     const row = this.d.store.getSession(childSessionId);
     if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
@@ -1140,7 +1147,15 @@ export class BrainService {
     }
     const scope = this.d.store.delegatedAccessFor(childSessionId);
     if (!scope) throw new Error('delegated access unavailable');
-    const text = lastAssistantText(this.d.store, childSessionId);
+    const messages = this.d.store.getMessages(childSessionId);
+    let text = '';
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]!.role !== 'assistant') continue;
+      try {
+        const candidate = extractText(JSON.parse(messages[i]!.content));
+        if (candidate) { text = candidate; break; }
+      } catch { /* malformed row — keep scanning further back */ }
+    }
     if (!text) {
       throw new Error('that sub-agent has not produced final assistant text yet — wait for it to finish, then try DelegateRead again; if it finished empty, use DelegateContinue to ask for a conclusion');
     }

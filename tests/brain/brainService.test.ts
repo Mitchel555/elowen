@@ -4649,6 +4649,24 @@ describe('BrainService.readSubagent (a parent recovering a stored final result)'
     expect(svc.readSubagent(sessionId, child)).toBe('full durable report');
   });
 
+  it('finds the real answer behind a later failed follow-up that left an empty assistant row', async () => {
+    // Regression: a `DelegateContinue` attempt that errors (bad model route, dropped connection) still
+    // appends its own assistant row — with no extracted text — AFTER the child's actual final report.
+    // Scanning only the last row (as `lastAssistantText` does) would then see nothing and wrongly claim
+    // the child never produced an answer, exactly what happened recovering a truncated report on 2026-07-27.
+    const { d, svc, sessionId, child } = await seed();
+    d.store.appendMessage({
+      id: 'assistant-final', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: [{ type: 'text', text: 'the real final report' }] },
+    });
+    d.store.appendMessage({
+      id: 'assistant-failed-followup', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: [], stopReason: 'error', errorMessage: 'model not available' },
+    });
+
+    expect(svc.readSubagent(sessionId, child)).toBe('the real final report');
+  });
+
   it('refuses a running child even when an earlier assistant message is already stored', async () => {
     const { d, svc, sessionId, child, sessions } = await seed();
     d.store.appendMessage({
