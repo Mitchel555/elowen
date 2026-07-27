@@ -7,6 +7,8 @@ import { elowenClient } from '../../lib/elowenClient';
 import { formatTokens, formatCost } from '../../lib/format';
 import { OAuthUsageRail, usageFillClass } from '../settings/OAuthUsageRail';
 import { MascotGlyph } from '../../components/ui/SpatialMascot';
+import { ResizeHandle } from '../../components/ui/ResizeHandle';
+import { railTypeVars, useTelemetryRailWidth, RAIL_MIN_WIDTH, RAIL_MAX_WIDTH } from '../../lib/useTelemetryRailWidth';
 import { useBrainChat } from './BrainChatProvider';
 import { CommandOrbit } from './CommandOrbit';
 
@@ -17,7 +19,7 @@ import { CommandOrbit } from './CommandOrbit';
  *
  *  It is also the door to the command field: clicking it opens the orbital field of slash commands as an
  *  overlay. An overlay rather than the rail itself — an orbit needs roughly 26rem before its pods start
- *  colliding with the core, and the rail is 15rem (18rem as a phone drawer).
+ *  colliding with the core, which even the widest rail does not reach.
  *
  *  The flat glyph rather than the full WebGL mascot: that scene frames itself at a fixed pixel size, so a
  *  rail this narrow would crop it down to a pair of eyes. */
@@ -183,13 +185,18 @@ function TelemetryBody() {
  *
  *  `column` is the desktop layout (a real sidebar beside the transcript); `drawer` is the mobile one,
  *  because a second column on a phone would squeeze the conversation off the screen. The host picks
- *  between them via `useMobile()` — this component never renders both. */
+ *  between them via `useMobile()` — this component never renders both.
+ *
+ *  Only the column is resizable, and the variant is the viewport decision: the host already made it, so
+ *  the drag handle needs no media query of its own. A phone drawer has nothing to widen into anyway, and
+ *  an edge that swallowed horizontal drags would fight the gesture that closes it. */
 export function TelemetryPanel({ variant, open = false, onClose }: {
   variant: 'column' | 'drawer';
   open?: boolean;
   onClose?: () => void;
 }) {
   const { t } = useTranslation();
+  const { width, resizeBy, reset } = useTelemetryRailWidth();
 
   if (variant === 'drawer') {
     // Mounted only while open, like the history drawer: a closed drawer leaves nothing focusable behind.
@@ -226,8 +233,21 @@ export function TelemetryPanel({ variant, open = false, onClose }: {
     <aside
       aria-label={t.telemetry.title}
       data-testid="telemetry-column"
-      className="flex w-60 shrink-0 flex-col border-l border-border"
+      style={{ width, ...railTypeVars(width) }}
+      className="relative flex shrink-0 flex-col border-l border-border"
     >
+      {/* The handle sits ON the column's own border rather than between the two flex children, so
+          widening the rail never shifts the divider out from under the cursor mid-drag. */}
+      <ResizeHandle
+        orientation="vertical"
+        onDelta={(dx) => resizeBy(-dx)}
+        onReset={reset}
+        label={t.telemetry.resize}
+        value={width}
+        min={RAIL_MIN_WIDTH}
+        max={RAIL_MAX_WIDTH}
+        className="absolute inset-y-0 left-0 z-10"
+      />
       {/* The border runs the full column height while the content itself follows the reader, so the rail
           stays legible through a long transcript instead of scrolling away with the first turns. */}
       <div className="sticky top-0 max-h-[100dvh] overflow-y-auto">
