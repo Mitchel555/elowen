@@ -41,15 +41,19 @@ export function execModel(exec: string): string {
   return exec; // slash form or bare — the model id is the whole string
 }
 
-/** Compose an exec string from a chosen provider + bare model id (inverse of the parse above). */
+/** Prefix for the providers whose exec format is "just prepend the prefix" — derived from the parse table
+ *  above so a new PROVIDER_PREFIXES entry works through buildExec without a matching branch here. */
+const PREFIX_BY_PROVIDER: Record<string, string> = Object.fromEntries(
+  PROVIDER_PREFIXES.map(([prefix, provider]) => [provider, prefix]),
+);
+
+/** Compose an exec string from a chosen provider + bare model id (inverse of the parse above). opencode
+ *  and claude-code are the only two whose format genuinely differs (bare unless a slash would otherwise
+ *  mean the other program), so they stay explicit; every other provider just gets its table prefix. */
 export function buildExec(provider: ProviderId, model: string): string {
   const m = model.trim();
-  if (provider === 'elowen') return `elowen:${m}`;
-  if (provider === 'codex') return `codex:${m}`;
-  if (provider === 'kilo') return `kilo:${m}`;
-  if (provider === 'pi') return `pi:${m}`;
-  if (provider === 'omp') return `omp:${m}`;
   if (provider === 'opencode') return m.includes('/') ? m : `opencode:${m}`;
   // claude-code: bare resolves to claude; prefix only when a slash would otherwise mean opencode
-  return m.includes('/') ? `claude:${m}` : m;
+  if (provider === 'claude-code') return m.includes('/') ? `claude:${m}` : m;
+  return `${PREFIX_BY_PROVIDER[provider]}${m}`;
 }

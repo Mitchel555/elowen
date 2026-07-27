@@ -43,18 +43,22 @@ const BATTERY: Array<Record<string, unknown>>[] = [
    { name: 'WorkflowStart', wf: { id: 'w2', toolCallId: 'c2', status: 'running', nodes: [] } }],
   [{ name: 'Bash', command: 'ls' }, { name: 'Bash', command: 'pwd' }],
   [{ name: 'Bash', progress: 'a…' }, { name: 'Bash', progress: 'b…' }],
+  // ADJACENT items each carrying a submitted PLAN — the case both implementations special-case
+  // (`isCollapsibleTool`'s `!item.plan` guard) but neither battery had exercised: a plan is the one
+  // payload that raises a UI decision (the "implement it?" panel) if it merges into the wrong item.
+  [{ name: 'ExitPlanMode', plan: 'Step 1\nStep 2' }, { name: 'ExitPlanMode', plan: 'Alternative plan' }],
   [],
 ];
 
 describe('daemon↔web transcript fold parity (guards the un-shareable runtime copy)', () => {
-  it('groupToolItems produces identical group shapes on both sides for every battery case', () => {
+  it('groupToolItems produces identical groups on both sides for every battery case', () => {
     for (const items of BATTERY) {
       const d = daemonGroup(items as DaemonItem[]);
       const w = webGroup(items as WebItem[]);
-      // Compare the observable shape: run length + folded members + the surviving item name/detail.
-      const shape = (g: { item: { name: string; detail?: string }; count: number; members?: { name: string }[] }) =>
-        ({ name: g.item.name, detail: g.item.detail, count: g.count, members: g.members?.map((m) => m.name) });
-      expect(w.map(shape)).toEqual(d.map(shape));
+      // Compare the WHOLE serialisable group — item and members in full, not a hand-picked subset of
+      // fields — so a drift that keeps the wrong output/diff/plan/sub/wf payload fails here instead of
+      // staying invisible behind a name/detail/count-only comparison.
+      expect(w).toEqual(d);
     }
   });
 
