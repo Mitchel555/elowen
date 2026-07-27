@@ -6,6 +6,7 @@ import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, Chevron
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
+import type { LocaleDict } from '../../lib/i18n/types';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
 import type { BrainCard, BrainWorkMode } from '../../lib/types';
@@ -42,6 +43,7 @@ const DIFF_SIGN = /^([+-])\s*\d+ |^\s*\d+ ([-+ ]) |^([-+])/;
  *  context muted), no frame and no horizontal scroll — long lines wrap under the gutter so nothing is
  *  clipped or hidden behind a scrollbar. */
 function DiffBlock({ diff }: { diff: string }) {
+  const { t } = useTranslation();
   const lines = diff.replace(/\n+$/, '').split('\n');
   return (
     <div className="my-1 overflow-hidden rounded-md bg-elevated/40 py-1">
@@ -53,12 +55,17 @@ function DiffBlock({ diff }: { diff: string }) {
           : 'border-transparent text-text-muted';
         return <div key={i} className={`whitespace-pre-wrap break-words border-l-2 px-2 ${cls}`}>{l || ' '}</div>;
       })}
-      {lines.length > DIFF_MAX_ROWS ? <div className="border-l-2 border-transparent px-2 text-text-muted">… +{lines.length - DIFF_MAX_ROWS} more lines</div> : null}
+      {lines.length > DIFF_MAX_ROWS ? <div className="border-l-2 border-transparent px-2 text-text-muted">… +{lines.length - DIFF_MAX_ROWS} {t.brainChat.moreLines}</div> : null}
     </div>
   );
 }
 
 function ToolOutputBlock({ output }: { output: NonNullable<ToolItem['output']> }) {
+  const { t } = useTranslation();
+  // A truncated output offers the full text as a real toggle, not a broken promise of a terminal that
+  // was never wired up — flip between the preview and the full body in place.
+  const [expanded, setExpanded] = useState(false);
+  const hasFull = !!output.fullText && output.fullText !== output.text;
   const tone = output.tone === 'warning' || output.tone === 'danger'
     ? 'bg-warning/10 text-warning'
     : output.tone === 'success'
@@ -68,9 +75,9 @@ function ToolOutputBlock({ output }: { output: NonNullable<ToolItem['output']> }
     <div data-testid="chat-tool-output" className={`my-1 overflow-hidden whitespace-pre-wrap break-words rounded-md px-2.5 py-1.5 ${tone}`}>
       {output.command ? <div className="text-text">$ {output.command}</div> : null}
       {/* Working directory lifted out of the console framing — faint context under the command echo. */}
-      {output.cwd ? <div className="opacity-60">(cwd: {output.cwd})</div> : null}
+      {output.cwd ? <div className="opacity-60">({t.brainChat.eventCwd}: {output.cwd})</div> : null}
       {output.status ? <div className="opacity-80">{output.status}</div> : null}
-      <div>{output.text || ' '}</div>
+      <div>{(expanded && output.fullText ? output.fullText : output.text) || ' '}</div>
       {/* Hook-appended annotations (the `tools.call.after` contract, e.g. "formatted a.ts with prettier") —
           faint suffix lines under the output body, matching how the daemon renders ToolOutputView.notes. */}
       {output.notes?.length ? (
@@ -78,7 +85,16 @@ function ToolOutputBlock({ output }: { output: NonNullable<ToolItem['output']> }
           {output.notes.map((n, i) => <div key={i}>↳ {n}</div>)}
         </div>
       ) : null}
-      {output.fullText && output.fullText !== output.text ? <div className="mt-1 opacity-70">Click to expand in terminal</div> : null}
+      {hasFull ? (
+        <button
+          type="button"
+          data-testid="chat-tool-output-expand"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 opacity-70 underline-offset-2 hover:underline"
+        >
+          {expanded ? t.brainChat.toolOutputCollapse : t.brainChat.toolOutputExpand}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -93,6 +109,7 @@ const CARD_PREVIEW_ITEMS = 4;
  *  checklist is the canonical card. A checklist with everything ticked leaves the transcript entirely —
  *  the CLI panel drops it the same way, because a finished list has nothing left to track. */
 function CardBlock({ card }: { card: BrainCard }) {
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const items = card.items ?? [];
@@ -110,7 +127,7 @@ function CardBlock({ card }: { card: BrainCard }) {
           className="mb-1 flex w-full items-center gap-1.5 text-left font-medium text-text-muted transition-colors hover:text-text"
         >
           <ChevronRight size={11} aria-hidden className={`shrink-0 opacity-60 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
-          <span className="truncate">{card.title ?? 'Card'}</span>
+          <span className="truncate">{card.title ?? t.brainChat.cardFallback}</span>
           {items.length > 0 ? <span className="tabular-nums opacity-70">{done}/{items.length}</span> : null}
         </button>
       ) : null}
@@ -272,13 +289,13 @@ function ContextDivider({ full }: { full?: boolean }) {
 
 /** Phrase a session-change marker — mirror of the daemon `sessionEventLabel` (src/cli/chat/turnRenderer.ts).
  *  A `cwd` path is shortened to its last two segments (the web has no absolute-path context). */
-function eventLabel(kind: string, detail: string): string {
+function eventLabel(kind: string, detail: string, t: LocaleDict): string {
   switch (kind) {
-    case 'model': return `model → ${detail}`;
-    case 'mode': return `mode → ${detail}`;
-    case 'rename': return `renamed → "${detail}"`;
+    case 'model': return `${t.brainChat.eventModel} → ${detail}`;
+    case 'mode': return `${t.brainChat.eventMode} → ${detail}`;
+    case 'rename': return `${t.brainChat.eventRenamed} → "${detail}"`;
     case 'reasoning': return `reasoning → ${detail}`;
-    case 'cwd': return `cwd → …/${detail.split('/').filter(Boolean).slice(-2).join('/')}`;
+    case 'cwd': return `${t.brainChat.eventCwd} → …/${detail.split('/').filter(Boolean).slice(-2).join('/')}`;
     default: return detail;
   }
 }
@@ -286,12 +303,13 @@ function eventLabel(kind: string, detail: string): string {
 /** A run of session-change markers (model/mode/rename/cwd) — the machine annotating what it did, rendered
  *  as one faint line per marker, the web twin of the CLI's dim `⚙` event rows. */
 function SessionEvents({ events, tk }: { events: SessionEventItem[]; tk?: string }) {
+  const { t } = useTranslation();
   return (
     <div data-tk={tk} data-testid="chat-turn" data-role="event" className="flex flex-col gap-0.5 py-1 text-tiny text-text-muted">
       {events.map((e) => (
         <div key={e.id || `${e.kind}:${e.detail}`} data-testid="chat-event-marker" className="flex items-center gap-1.5">
           <span aria-hidden className="shrink-0 opacity-60">⚙</span>
-          <span className="truncate">{eventLabel(e.kind, e.detail)}</span>
+          <span className="truncate">{eventLabel(e.kind, e.detail, t)}</span>
         </div>
       ))}
     </div>

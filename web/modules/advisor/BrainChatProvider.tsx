@@ -121,7 +121,7 @@ export interface BrainChatValue {
   exitReadOnly: () => void;
   deleteSession: (id: string, wasActive: boolean) => Promise<void>;
   onQueueRemove: (id: string) => void;
-  onAnswer: (id: string, answers: AskAnswer[]) => void;
+  onAnswer: (id: string, answers: AskAnswer[]) => Promise<void>;
   /** Explicit Stop intent — aborts the streaming turn for ALL watchers of the bound conversation. Wired
    *  here in Fáze 1; the visible Stop button lands in a later phase (no UX change yet). */
   abort: () => void;
@@ -659,11 +659,15 @@ function useBrainChatController(): BrainChatValue {
 
   // View a non-continuable session (a shared Discord channel or a task worker) read-only: load its stored
   // history, show it, and swap the composer for an exit banner. No live stream is opened. Bumping the
-  // generation discards any in-flight connect so it can't clobber the read-only view.
+  // generation discards any in-flight connect so it can't clobber the read-only view, and the stale-gen
+  // check below on our OWN await stops the reverse: this call's history landing after something newer
+  // (another switch/openReadOnly) has already taken over.
   const openReadOnly = async (sessionId: string): Promise<void> => {
     esRef.current?.close();
     esRef.current = null; // no live stream here — and nothing for the silence watchdog to revive
-    nextGeneration();
+    // Capture the generation right after bumping it (mirror `connect()`): a slow `brainMessages` below
+    // must not be allowed to land once a newer connect/switch/openReadOnly has superseded this one.
+    const generation = nextGeneration();
     setAsk(null); setCards([]); setNotice('');
     // The composer is about to be replaced by the read-only banner, so drop the in-flight marker at once
     // rather than only when the stored history lands below.
@@ -675,6 +679,7 @@ function useBrainChatController(): BrainChatValue {
     setHasMoreHistory(false);
     historyEpochRef.current++;
     const msgs = await elowenClient.brainMessages(sessionId);
+    if (generation !== genRef.current) return; // a newer connect/switch/openReadOnly superseded this one
     setView(fromHistory(msgs));
     setReady(true);
   };
@@ -705,7 +710,19 @@ function useBrainChatController(): BrainChatValue {
     setQueued((cur) => cur.filter((x) => x.id !== id));
     void elowenClient.brainQueueRemove(id, boundSessionRef.current).catch(() => undefined);
   };
-  const onAnswer = (id: string, answers: AskAnswer[]): void => { void elowenClient.brainAnswer(id, answers).catch(() => undefined); setAsk(null); };
+  // Awaited by AskQuestionCard: the question is only removed from the UI once the server actually
+  // accepted the answer. On failure the agent is STILL waiting server-side, so the question must stay
+  // on screen (and the card's form re-enable) — losing it here would leave no way to answer without a
+  // reconnect or reload.
+  const onAnswer = async (id: string, answers: AskAnswer[]): Promise<void> => {
+    try {
+      await elowenClient.brainAnswer(id, answers);
+      setAsk(null);
+    } catch (e) {
+      toast(t.brainChat.askError, 'error');
+      throw e;
+    }
+  };
   const abort = (): void => { void elowenClient.brainAbort(boundSessionRef.current).catch(() => undefined); };
 
   // Both projections are pure folds of the transcript, so they survive a reconnect for free: history

@@ -32,13 +32,16 @@ function Radio({ checked }: { checked: boolean }) {
  *  When a single-select question's options carry a `preview` (monospace: an ASCII mockup, a code snippet),
  *  the question switches to a side-by-side layout — the option list on the left, the focused option's
  *  preview on the right — so the user can compare the choices visually instead of reading about them. */
-export function AskQuestionCard({ questions, kind, onSubmit }: { questions: AskQuestion[]; kind?: 'approval'; onSubmit: (answers: AskAnswer[]) => void }) {
+export function AskQuestionCard({ questions, kind, onSubmit }: { questions: AskQuestion[]; kind?: 'approval'; onSubmit: (answers: AskAnswer[]) => Promise<void> }) {
   const { t } = useTranslation();
   // Per-question selection (option labels) and free-text Other, keyed by question index.
   const [picked, setPicked] = useState<Record<number, string[]>>({});
   const [otherOpen, setOtherOpen] = useState<Record<number, boolean>>({});
   const [other, setOther] = useState<Record<number, string>>({});
-  const [sent, setSent] = useState(false);
+  // `pending` locks the form only while the request is in flight. On success the question is removed by
+  // the parent (the card unmounts with it) — nothing to reset here. On failure the request rejects and
+  // this flips back to false, so the user's picks stay intact and they can retry without re-answering.
+  const [pending, setPending] = useState(false);
   // Which option's preview is showing, per question. Follows the pointer/keyboard focus so the user can
   // compare options WITHOUT committing to one; a click still selects as normal.
   const [focused, setFocused] = useState<Record<number, number>>({});
@@ -55,14 +58,19 @@ export function AskQuestionCard({ questions, kind, onSubmit }: { questions: AskQ
   const answered = (qi: number): boolean => (picked[qi]?.length ?? 0) > 0 || (otherOpen[qi] && !!other[qi]?.trim());
   const ready = questions.every((_, qi) => answered(qi));
 
-  const submit = (): void => {
-    if (!ready || sent) return;
-    setSent(true);
-    onSubmit(questions.map((q, qi) => ({
-      header: q.header,
-      selected: picked[qi] ?? [],
-      other: otherOpen[qi] && other[qi]?.trim() ? other[qi].trim() : undefined,
-    })));
+  const submit = async (): Promise<void> => {
+    if (!ready || pending) return;
+    setPending(true);
+    try {
+      await onSubmit(questions.map((q, qi) => ({
+        header: q.header,
+        selected: picked[qi] ?? [],
+        other: otherOpen[qi] && other[qi]?.trim() ? other[qi].trim() : undefined,
+      })));
+      // Success: the parent clears the question and this card unmounts — no local state left to reset.
+    } catch {
+      setPending(false); // the request failed — re-enable the form so the user can retry
+    }
   };
 
   const approval = kind === 'approval';
@@ -86,7 +94,7 @@ export function AskQuestionCard({ questions, kind, onSubmit }: { questions: AskQ
                   type="button"
                   role={q.multiSelect ? 'checkbox' : 'radio'}
                   aria-checked={on}
-                  disabled={sent}
+                  disabled={pending}
                   onClick={() => toggle(qi, op.label, q.multiSelect)}
                   onMouseEnter={hasPreview ? () => setFocused((cur) => ({ ...cur, [qi]: oi })) : undefined}
                   onFocus={hasPreview ? () => setFocused((cur) => ({ ...cur, [qi]: oi })) : undefined}
@@ -103,7 +111,7 @@ export function AskQuestionCard({ questions, kind, onSubmit }: { questions: AskQ
             {q.custom !== false ? (
               <button
                 type="button"
-                disabled={sent}
+                disabled={pending}
                 onClick={() => setOtherOpen((cur) => ({ ...cur, [qi]: !cur[qi] }))}
                 className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent/10 disabled:opacity-60 ${otherOpen[qi] ? 'bg-accent/10' : ''}`}
               >
@@ -137,7 +145,7 @@ export function AskQuestionCard({ questions, kind, onSubmit }: { questions: AskQ
                 value={other[qi] ?? ''}
                 onChange={(e) => setOther((cur) => ({ ...cur, [qi]: e.target.value }))}
                 placeholder={t.brainChat.askOtherPlaceholder}
-                disabled={sent}
+                disabled={pending}
                 autoFocus
               />
             ) : null}
@@ -145,7 +153,7 @@ export function AskQuestionCard({ questions, kind, onSubmit }: { questions: AskQ
         );
       })}
       <div>
-        <Button type="button" variant="accent" onClick={submit} disabled={!ready || sent}>
+        <Button type="button" variant="accent" onClick={() => void submit()} disabled={!ready || pending}>
           {t.brainChat.askSubmit}
         </Button>
       </div>
