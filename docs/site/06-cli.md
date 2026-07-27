@@ -41,7 +41,7 @@ The exact command menu is served by the daemon, so built-in and plugin commands 
 - Use **`/statusline`** for a checkbox overlay (like `/keybinds`) that picks which segments the status bar shows — context usage, total tokens, and cost. It edits the shared statusline config, so the choice also applies to the web chat dock.
 - Use **`/stats`** for an overlay with generation speed, cache hit rate, and the input/output token split. Press **⇄** to switch sections. The web chat opens the same data as a modal.
 
-While Elowen is working, the CLI shows live activity and elapsed time. A tool call that takes longer to compose shows a localized action label describing what the tool is doing. **`Ctrl+B`** moves a running foreground sub-agent or `Bash` command into the background without cancelling it; its result returns to the conversation when it completes.
+While Elowen is working, the CLI shows live activity and elapsed time. A tool call that takes longer to compose shows a localized action label describing what the tool is doing. **`Ctrl+B`** moves a running foreground sub-agent, workflow, or `Bash` command into the background without cancelling it; its result returns to the conversation when it completes.
 
 ### Mouse support
 
@@ -80,7 +80,7 @@ Sending a message while the agent is working queues it for delivery after the cu
 
 ### Sub-agent interaction
 
-**`Ctrl+O`** cycles focus from the main conversation through each running child sub-agent and back. While you are viewing a child, plain text you send goes directly to that sub-agent, so you can steer it without leaving the parent. **`Esc`** returns focus to the parent.
+**`Ctrl+O`** cycles focus from the main conversation through each running child sub-agent and back. While you are viewing a child, plain text you send goes directly to that sub-agent, so you can steer it without leaving the parent. The telemetry rail and todo checklist follow the agent you are looking at — drill into a child and you see that sub-agent's own checklist and context, not the parent's. **`Esc`** returns focus to the parent.
 
 ## Conversations, context, and limits
 
@@ -96,7 +96,7 @@ The message queue is durable per session, and the same recall works in the web c
 
 ### Background commands
 
-`Bash(background: true)` starts a command as a tracked background process and returns its ID. The agent can inspect it with `ListProcesses`, collect output with `ProcessOutput`, or stop it with `KillProcess`. `ProcessOutput(block: true)` waits for a bounded period instead of polling. A foreground `Bash` command can also be detached with **`Ctrl+B`** from the terminal chat; it keeps running without the foreground timeout and reports its completion asynchronously.
+`Bash(background: true)` starts a command as a tracked background process and returns its ID. The agent can inspect it with `ListProcesses`, collect output with `ProcessOutput`, or stop it with `KillProcess`. `ProcessOutput(block: true)` waits for a bounded period instead of polling. A foreground `Bash` command can also be detached with **`Ctrl+B`** from the terminal chat — the same chord that backgrounds a running sub-agent or workflow; it keeps running without the foreground timeout and reports its completion asynchronously.
 
 ## Modes and permissions
 
