@@ -423,7 +423,7 @@ function awaitsPlanDecision(turns: ChatTurn[]): boolean {
  *  the wide /chat (full) look; `onOpenHistory` opens the mobile history drawer in the full variant, and
  *  `onOpenTelemetry` the telemetry drawer — the host passes the latter only where the rail cannot be a
  *  column (a phone), so on desktop no button appears beside the permanently visible rail. */
-export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTelemetry }: { variant?: 'compact' | 'full'; onOpenHistory?: () => void; onOpenTelemetry?: () => void }) {
+export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTelemetry, telemetryShown }: { variant?: 'compact' | 'full'; onOpenHistory?: () => void; onOpenTelemetry?: () => void; telemetryShown?: boolean }) {
   const { t } = useTranslation();
   const { toast } = useToast();
   const c = useBrainChat();
@@ -642,8 +642,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             <button
               type="button"
               onClick={onOpenTelemetry}
-              aria-label={t.telemetry.open}
-              title={t.telemetry.open}
+              // `telemetryShown` is absent where the rail is a drawer (a phone), so the control is a plain
+              // opener; where the rail is a docked column it is a toggle, and the label has to say which
+              // way it goes or a hidden rail looks like a broken one.
+              aria-label={telemetryShown ? t.telemetry.close : t.telemetry.open}
+              title={telemetryShown ? t.telemetry.close : t.telemetry.open}
+              aria-pressed={telemetryShown}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
             >
               <Activity size={18} aria-hidden />

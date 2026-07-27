@@ -40,7 +40,7 @@ beforeAll(() => {
   server.listen({ onUnhandledRequest });
   (Element.prototype as unknown as { scrollTo: () => void }).scrollTo = () => {};
 });
-afterEach(() => { server.resetHandlers(); FakeES.instances.length = 0; });
+afterEach(() => { server.resetHandlers(); FakeES.instances.length = 0; localStorage.clear(); });
 afterAll(() => server.close());
 beforeEach(() => { (globalThis as unknown as { EventSource: unknown }).EventSource = FakeES; });
 
@@ -73,6 +73,26 @@ describe('ChatView (/chat page)', () => {
     expect(screen.queryByRole('dialog', { name: /Conversation history|Historie konverzací/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /Conversation history|Historie konverzací/i }));
     expect(screen.getByRole('dialog', { name: /Conversation history|Historie konverzací/i })).toBeInTheDocument();
+  });
+
+  it('hides and restores the desktop telemetry rail from the header button, and remembers the choice', async () => {
+    const { unmount } = renderChat(<ChatView />);
+    await screen.findByPlaceholderText(/Write a message|Napište zprávu/i);
+    expect(await screen.findByTestId('telemetry-column')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^(Hide telemetry|Skrýt telemetrii)$/i }));
+    expect(screen.queryByTestId('telemetry-column')).toBeNull();
+
+    // The same control brings it back — a hidden rail must not be a one-way door.
+    fireEvent.click(screen.getByRole('button', { name: /^(Show telemetry|Zobrazit telemetrii)$/i }));
+    expect(screen.getByTestId('telemetry-column')).toBeInTheDocument();
+
+    // Hidden is a per-device display choice, so it survives a remount.
+    fireEvent.click(screen.getByRole('button', { name: /^(Hide telemetry|Skrýt telemetrii)$/i }));
+    unmount();
+    renderChat(<ChatView />);
+    await screen.findByPlaceholderText(/Write a message|Napište zprávu/i);
+    await waitFor(() => expect(screen.queryByTestId('telemetry-column')).toBeNull());
   });
 
   it('toggling fullscreen keeps ONE stream, preserves the draft, and never remounts the surface', async () => {

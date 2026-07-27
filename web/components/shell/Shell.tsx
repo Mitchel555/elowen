@@ -106,7 +106,11 @@ function ShellLayout({ children }: { children: ReactNode }) {
             scales down — goes into stretching the same table across a wider, emptier row. Capping it
             keeps a table's density tied to its type size instead of to the window. The heading rides
             inside the cap so it stays aligned with the content beneath it. */}
-        <div className={`mx-auto flex w-full flex-col ${CONTENT_MAX}`}>
+        {/* /chat opts out of the reading measure. It is not a document but an application layout — a
+            conversation column with a telemetry rail docked beside it — and a centred cap leaves the rail
+            floating short of the window edge with dead space behind it, which reads as a bug rather than
+            as breathing room. Routes that ARE documents keep the cap. */}
+        <div className={`mx-auto flex w-full flex-col ${onChat ? '' : CONTENT_MAX}`}>
           {/* Frameless page heading + global actions. In drawer mode it also opens mobile navigation. */}
           <TopBar
             onMenuClick={mode === 'drawer' ? () => setDrawerOpen(true) : undefined}

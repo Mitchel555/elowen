@@ -2,6 +2,7 @@
 import { useRef, useState } from 'react';
 import { useFillHeight } from '../../lib/useFillHeight';
 import { useMobileViewport } from '../../lib/useMobile';
+import { usePersistentState } from '../../lib/usePersistentState';
 import { BrainChatSurface } from '../advisor/BrainChatSurface';
 import { ChatHistoryRail } from '../advisor/ChatHistoryRail';
 import { TelemetryPanel } from '../advisor/TelemetryPanel';
@@ -22,12 +23,20 @@ import { ChatDeckHero } from './ChatDeckHero';
  *  all, which is what would squeeze the conversation off a narrow screen. Until the viewport is measured
  *  (the first commit knows nothing) NEITHER variant mounts — guessing desktop would put the column on a
  *  phone for one commit, queries and all. */
+const RAIL_VISIBILITY = ['shown', 'hidden'] as const;
+type RailVisibility = typeof RAIL_VISIBILITY[number];
+
 export function ChatView() {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const fillHeight = useFillHeight(surfaceRef);
   const mobile = useMobileViewport();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [telemetryOpen, setTelemetryOpen] = useState(false);
+  // Whether the docked column is shown is a per-device display choice, like the nav pin and the UI scale:
+  // it belongs to the screen you are on, not to the user record. The drawer on a phone is transient and
+  // deliberately NOT persisted — a drawer that reopens itself on every visit is a nuisance, not a setting.
+  const [railVisibility, setRailVisibility] = usePersistentState<RailVisibility>('elowen.chat.telemetry', 'shown', RAIL_VISIBILITY);
+  const railShown = railVisibility === 'shown';
   // Track the open DAG by workflow id, not by a click-time copy, so the modal follows the live snapshot
   // while its nodes run — the same rule the rail's process modal follows.
   const [dagId, setDagId] = useState<string | null>(null);
@@ -45,10 +54,11 @@ export function ChatView() {
           <BrainChatSurface
             variant="full"
             onOpenHistory={() => setHistoryOpen(true)}
-            onOpenTelemetry={mobile ? () => setTelemetryOpen(true) : undefined}
+            onOpenTelemetry={mobile ? () => setTelemetryOpen(true) : () => setRailVisibility(railShown ? 'hidden' : 'shown')}
+            telemetryShown={mobile ? undefined : railShown}
           />
         </div>
-        {mobile === false ? <TelemetryPanel variant="column" onOpenWorkflow={openDag} /> : null}
+        {mobile === false && railShown ? <TelemetryPanel variant="column" onOpenWorkflow={openDag} /> : null}
         <ChatHistoryRail variant="drawer" open={historyOpen} onClose={() => setHistoryOpen(false)} />
         {mobile === true ? (
           <TelemetryPanel variant="drawer" open={telemetryOpen} onClose={() => setTelemetryOpen(false)} onOpenWorkflow={openDag} />
