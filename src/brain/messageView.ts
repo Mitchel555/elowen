@@ -302,13 +302,23 @@ export function frameUntrusted(tag: string, preface: string, body: string): stri
  *  the user-visible reply. Removes complete blocks, an unclosed trailing block (a stream cut off before
  *  the answer), and a leading close tag (reasoning that streamed before any open tag). Native-reasoning
  *  models are unaffected — their thinking never appears in the text at all. A reply that is ONLY
- *  reasoning yields '', which every caller already treats as "no text". */
+ *  reasoning yields '', which every caller already treats as "no text".
+ *
+ *  The two open-ended rules are ANCHORED TO A LINE BOUNDARY, and that anchoring is load-bearing. Both
+ *  delete an unbounded span — to end-of-string, and from start-of-string — so an unanchored match turns
+ *  any prose that merely MENTIONS a reasoning tag into a silently truncated answer. That is not
+ *  hypothetical: a report discussing this very function lost ~10 000 characters to it. A genuinely cut-off
+ *  stream always begins its reasoning on a fresh line, and a close tag that really ends streamed reasoning
+ *  is followed by a newline before the answer, so requiring those boundaries keeps every real case while
+ *  leaving inline mentions (`<think>` inside a sentence or backticks) untouched.
+ *  Mirrored by `stripThinking` in plugins/_shared/format.mjs — tests/contract/inlineReasoningParity.test.ts
+ *  holds the two to the same corpus. */
 export function stripInlineReasoning(text: string): string {
   if (!/<\/?think(?:ing)?\b/i.test(text)) return text;
   let out = text
     .replace(/<think(?:ing)?\b[^>]*>[\s\S]*?<\/think(?:ing)?>/gi, '') // complete <think>…</think> blocks
-    .replace(/<think(?:ing)?\b[^>]*>[\s\S]*$/i, '');                   // an unclosed trailing block
-  const lead = /^[\s\S]*?<\/think(?:ing)?>/i.exec(out); // reasoning that streamed before an open tag
+    .replace(/^[ \t]*<think(?:ing)?\b[^>]*>[\s\S]*$/im, '');           // an unclosed trailing block, line-anchored
+  const lead = /^[\s\S]*?<\/think(?:ing)?>[ \t]*(?:\n|$)/i.exec(out); // reasoning that streamed before an open tag
   if (lead) out = out.slice(lead[0].length);
   return out.trim();
 }
