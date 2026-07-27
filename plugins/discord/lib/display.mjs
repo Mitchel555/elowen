@@ -1,1 +1,1 @@
-export { resolveDisplaySettings, updateDisplayOverrides } from '../../_shared/display.mjs';
+export { resolveDisplaySettings, updateDisplayOverrides, observesLiveEvents } from '../../_shared/display.mjs';
