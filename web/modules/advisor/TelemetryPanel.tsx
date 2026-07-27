@@ -5,18 +5,21 @@ import { useTranslation } from '../../lib/i18n';
 import { elowenClient } from '../../lib/elowenClient';
 import { formatTokens, formatCost } from '../../lib/format';
 import { OAuthUsageRail, usageFillClass } from '../settings/OAuthUsageRail';
-import { SpatialMascot } from '../../components/ui/SpatialMascot';
+import { MascotGlyph } from '../../components/ui/SpatialMascot';
 import { useBrainChat } from './BrainChatProvider';
 
 /** The owl presides over the rail the way it tops the CLI panel — and it is not decoration: it mirrors
- *  the agent, animating while a turn runs and settling when it does not, so the rail reads as inhabited
+ *  the agent, breathing while a turn runs and settling when it does not, so the rail reads as inhabited
  *  rather than a dashboard. Kept inside the shared body so the desktop column and the mobile drawer show
- *  the same living header. */
+ *  the same living header.
+ *
+ *  The flat glyph rather than the full WebGL mascot: that scene frames itself at a fixed pixel size, so a
+ *  rail this narrow would crop it down to a pair of eyes. */
 function TelemetryMascot({ busy }: { busy: boolean }) {
   return (
     <div className="flex justify-center pt-2" data-testid="telemetry-mascot">
-      <div className="h-24 w-24">
-        <SpatialMascot state={busy ? 'saving' : 'idle'} />
+      <div className="h-28 w-28">
+        <MascotGlyph state={busy ? 'saving' : 'idle'} />
       </div>
     </div>
   );

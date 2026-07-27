@@ -17,6 +17,21 @@ function StaticMascot({ state }: { state: SpatialMascotState }) {
   );
 }
 
+/** The mascot WITHOUT the WebGL layer, for boxes too small to frame the scene.
+ *
+ *  The 3D camera is orthographic at a fixed zoom, so world units map to a fixed pixel count and the owl
+ *  renders at roughly 179px whatever its container measures. The hero and onboarding are large enough and
+ *  rescale themselves with a CSS transform on top; anything smaller crops the sprite instead, so a
+ *  rail-sized box shows only the middle of its face. This layer is sized in percentages, so it is correct
+ *  at any size, and it keeps the per-state ember animation that makes the mascot read as alive. */
+export function MascotGlyph({ state = 'idle' }: { state?: SpatialMascotState }) {
+  return (
+    <div className="spatial-mascot" role="img" aria-label="Elowen">
+      <StaticMascot state={state} />
+    </div>
+  );
+}
+
 const SpatialMascotScene = dynamic(
   () => import('./SpatialMascotScene').then((mod) => mod.SpatialMascotScene),
   { ssr: false, loading: () => null },
