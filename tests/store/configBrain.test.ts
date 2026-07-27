@@ -46,42 +46,66 @@ describe('ConfigStore brain limits', () => {
   it('defaults to the built-in limits', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     expect(cs.get().brain.limits).toEqual({
-      toolOutputMaxLines: 80, toolOutputMaxChars: 12000, elicitationTimeoutMs: 300000,
+      toolOutputMaxLines: 80, toolOutputMaxChars: 30000, elicitationTimeoutMs: 300000,
       memoryRecallCount: 6, memoryRecallChars: 1500, goalTurnBudget: 8, goalMaxTurns: 64, channelSessionCap: 32,
       delegateContextChars: 20000,
     });
   });
 
-  it('allows question timeouts up to one hour and clamps anything longer', () => {
+  // Every tuning knob is adjustable to its default ±50%; the bound is derived from the default so the
+  // two cannot drift apart. A value inside the band survives untouched, one outside lands on the edge.
+  it('accepts a tuning knob anywhere in its default ±50% band and clamps beyond it', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    cs.update({ brain: { limits: { elicitationTimeoutMs: 3_600_000 } } });
-    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
-    cs.update({ brain: { limits: { elicitationTimeoutMs: 7_200_000 } } });
-    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
+    cs.update({ brain: { limits: { toolOutputMaxChars: 22_000, memoryRecallChars: 900, toolOutputMaxLines: 120 } } });
+    expect(cs.get().brain.limits.toolOutputMaxChars).toBe(22000);
+    expect(cs.get().brain.limits.memoryRecallChars).toBe(900);
+    expect(cs.get().brain.limits.toolOutputMaxLines).toBe(120); // upper edge, exactly in range
+    cs.update({ brain: { limits: { toolOutputMaxChars: 500_000, memoryRecallChars: 10, toolOutputMaxLines: 1 } } });
+    expect(cs.get().brain.limits.toolOutputMaxChars).toBe(45000); // 30 000 + 50%
+    expect(cs.get().brain.limits.memoryRecallChars).toBe(750);    // 1 500 − 50%
+    expect(cs.get().brain.limits.toolOutputMaxLines).toBe(40);    // 80 − 50%
   });
 
-  // The sub-agent context budget must stay under the delegated-scope prompt total (32 000 chars): a scope
-  // over that bound is rejected wholesale, so an operator typing a bigger number would not get a fatter
-  // context, they would get delegations that fail closed.
-  it('clamps the sub-agent context budget to what a delegated scope can carry', () => {
+  // These three are exempt from the ±50% rule because their range is load-bearing: the far ends are real
+  // operating points, not slack. The 1 hour question timeout was an explicit owner request.
+  it('lets the exempt limits reach their far ends and clamps past them', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ brain: { limits: { elicitationTimeoutMs: 3_600_000, goalMaxTurns: 500, channelSessionCap: 256 } } });
+    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
+    expect(cs.get().brain.limits.goalMaxTurns).toBe(500);
+    expect(cs.get().brain.limits.channelSessionCap).toBe(256);
+    cs.update({ brain: { limits: { elicitationTimeoutMs: 30_000, goalMaxTurns: 8, channelSessionCap: 4 } } });
+    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(30_000);
+    expect(cs.get().brain.limits.goalMaxTurns).toBe(8);
+    expect(cs.get().brain.limits.channelSessionCap).toBe(4);
+    cs.update({ brain: { limits: { elicitationTimeoutMs: 7_200_000, goalMaxTurns: 999, channelSessionCap: 1 } } });
+    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
+    expect(cs.get().brain.limits.goalMaxTurns).toBe(500);
+    expect(cs.get().brain.limits.channelSessionCap).toBe(4);
+  });
+
+  // The sub-agent context budget is the one knob whose ceiling is not the ±50% rule: packing re-trims
+  // anything above the delegated-scope prompt total (32 000 chars, shared with the child's role prompt),
+  // so a bigger number would buy the operator no extra context.
+  it('caps the sub-agent context budget at what a packed delegated scope can carry', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     cs.update({ brain: { limits: { delegateContextChars: 500_000 } } });
     expect(cs.get().brain.limits.delegateContextChars).toBe(26000);
     cs.update({ brain: { limits: { delegateContextChars: 10 } } });
-    expect(cs.get().brain.limits.delegateContextChars).toBe(2000);
+    expect(cs.get().brain.limits.delegateContextChars).toBe(10000);
     cs.update({ brain: { limits: { delegateContextChars: 12_345 } } });
     expect(cs.get().brain.limits.delegateContextChars).toBe(12345);
   });
 
   it('merges a partial patch per-field without resetting siblings, and clamps out-of-range values', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    cs.update({ brain: { limits: { goalTurnBudget: 12 } } });
-    expect(cs.get().brain.limits.goalTurnBudget).toBe(12);
+    cs.update({ brain: { limits: { goalTurnBudget: 10 } } });
+    expect(cs.get().brain.limits.goalTurnBudget).toBe(10);
     expect(cs.get().brain.limits.memoryRecallCount).toBe(6); // sibling untouched
     // Clamp both ends + round a fractional value to a whole number.
     cs.update({ brain: { limits: { goalTurnBudget: 999, memoryRecallCount: 0, channelSessionCap: 40.7 } } });
-    expect(cs.get().brain.limits.goalTurnBudget).toBe(50);   // max 50
-    expect(cs.get().brain.limits.memoryRecallCount).toBe(1); // min 1
+    expect(cs.get().brain.limits.goalTurnBudget).toBe(12);   // max 12 (8 + 50%)
+    expect(cs.get().brain.limits.memoryRecallCount).toBe(3); // min 3 (6 − 50%)
     expect(cs.get().brain.limits.channelSessionCap).toBe(41); // rounded, in range
   });
 

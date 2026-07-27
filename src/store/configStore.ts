@@ -198,7 +198,8 @@ export interface BrainLimits {
 }
 export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   toolOutputMaxLines: 80,
-  toolOutputMaxChars: 12000,
+  // Matches Claude Code's BASH_MAX_OUTPUT_DEFAULT (30 000 chars).
+  toolOutputMaxChars: 30_000,
   elicitationTimeoutMs: 300_000,
   memoryRecallCount: 6,
   memoryRecallChars: 1500,
@@ -207,19 +208,32 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   channelSessionCap: 32,
   delegateContextChars: 20_000,
 };
+
+/** Adjustable range of a tuning knob: its default ±50%, derived from the default so raising a default
+ *  later carries its bound with it instead of leaving the two to drift apart. `maxOverride` exists for
+ *  the one knob whose ceiling is set by a downstream cap rather than by this rule. */
+const band = (key: keyof BrainLimits, maxOverride?: number): [min: number, max: number] => {
+  const def = DEFAULT_BRAIN_LIMITS[key];
+  return [Math.round(def / 2), maxOverride ?? Math.round(def * 1.5)];
+};
+
 const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> = {
-  toolOutputMaxLines: [20, 400],
-  toolOutputMaxChars: [2000, 50_000],
+  toolOutputMaxLines: band('toolOutputMaxLines'),
+  toolOutputMaxChars: band('toolOutputMaxChars'),
+  memoryRecallCount: band('memoryRecallCount'),
+  memoryRecallChars: band('memoryRecallChars'),
+  goalTurnBudget: band('goalTurnBudget'),
+  // Ceiling capped below the ±50% rule (which would give 30 000): packDelegatedPromptAppend re-trims
+  // anything above MAX_PROMPT_TOTAL_CHARS (32 000, brain/delegatedScope.ts:33), and that total is
+  // fair-shared with the child's role prompt — so a higher ceiling here would just be trimmed off again.
+  delegateContextChars: band('delegateContextChars', 26_000),
+  // Deliberately exempt from the ±50% rule: for these three the wide range is load-bearing, not a
+  // tuning margin. The 1 hour elicitation ceiling was requested by the instance owner (a question may
+  // legitimately wait out a working session), a YOLO run may need far more turns than the default
+  // safety ceiling, and a busy channel may hold many more live sessions than a quiet one.
   elicitationTimeoutMs: [30_000, 3_600_000],
-  memoryRecallCount: [1, 20],
-  memoryRecallChars: [300, 8000],
-  goalTurnBudget: [1, 50],
   goalMaxTurns: [8, 500],
   channelSessionCap: [4, 256],
-  // The maximum stays under the delegated-scope prompt total (32 000 chars in brain/delegatedScope.ts),
-  // leaving room for the child's role prompt — a scope over that bound is rejected wholesale and the
-  // delegation fails closed.
-  delegateContextChars: [2_000, 26_000],
 };
 /** Merge a (possibly partial, possibly malformed) limits patch onto `fallback`, clamping each field to
  *  its bound and rounding to a whole number; a missing/invalid field keeps the fallback value. */
