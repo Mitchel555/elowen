@@ -1,13 +1,13 @@
 'use client';
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
-import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
-import { emptyView, fromHistory, fromSnapshot, prependHistory, reduce, upsertCard, type ChatTurn, type ChatView, type TranscriptEvent } from '../../lib/transcript';
+import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainModelOption, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
+import { collectSubagents, collectWorkflows, emptyView, fromHistory, fromSnapshot, prependHistory, reduce, upsertCard, type ChatTurn, type ChatView, type SubagentState, type TranscriptEvent, type WorkflowState } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
 import { subscribeRevive, STALE_HIDE_MS } from '../../lib/useRevive';
@@ -101,6 +101,14 @@ export interface BrainChatValue {
   usage: BrainUsage | null;
   /** Project / LSP / MCP sections of the daemon's status poll — the telemetry panel's non-numeric half. */
   telemetry: BrainTelemetry;
+  /** The conversation's autonomous goal, or null when none runs. Server-authoritative: the live `goal`
+   *  event and the reconnect snapshot both replace it wholesale, so it can be cleared, never only set. */
+  goal: BrainGoal | null;
+  /** The delegated sub-agents of this transcript (latest state per child session) — the agents drill-in
+   *  and the telemetry rail read this ONE projection instead of each folding the turns again. */
+  subagents: SubagentState[];
+  /** The workflows (DAGs) of this transcript, latest state per workflow id. */
+  workflows: WorkflowState[];
   lineCfg: StatuslineConfig | null;
   input: string;
   setInput: React.Dispatch<React.SetStateAction<string>>;
@@ -216,6 +224,7 @@ function useBrainChatController(): BrainChatValue {
   const [ready, setReady] = useState(false);
   const [usage, setUsage] = useState<BrainUsage | null>(null);
   const [telemetry, setTelemetry] = useState<BrainTelemetry>(EMPTY_TELEMETRY);
+  const [goal, setGoal] = useState<BrainGoal | null>(null);
   const [lineCfg, setLineCfg] = useState<StatuslineConfig | null>(null);
   const [notice, setNotice] = useState('');
   const [ask, setAsk] = useState<Ask | null>(null);
@@ -340,6 +349,7 @@ function useBrainChatController(): BrainChatValue {
     setAsk(null); // drop any parked question from the previous conversation
     setCards([]); // and any cards from the previous conversation
     setQueued([]); // and any pending mid-turn queue from the previous conversation
+    setGoal(null); // a goal belongs to ONE conversation; the snapshot frame hydrates this one's own
     const generation = nextGeneration();
     const previousSession = boundSessionRef.current;
     const started = await elowenClient.brainStart(opts, { client: clientId(), generation });
@@ -409,6 +419,10 @@ function useBrainChatController(): BrainChatValue {
       // Explicit null included — this frame is the one moment the client can learn a question it never
       // saw is parked, or that one it still shows is long gone.
       if (control) setAsk(control.pendingAsk);
+      // The goal rides beside the journal because it OUTLIVES it: the journal is cleared at settle, so a
+      // client that connects between turns would otherwise show no goal while one is plainly running. The
+      // presence check (not `?? null`) is what distinguishes an older daemon from an explicit "none".
+      if (Object.prototype.hasOwnProperty.call(snap, 'goal')) setGoal(snap.goal ?? null);
       truncatedPendingRef.current = streaming && snap.truncated === true;
     });
     es.addEventListener('text', (e) => {
@@ -453,6 +467,7 @@ function useBrainChatController(): BrainChatValue {
       boundSessionRef.current = ev.sessionId; // rebind (generation preserved)
       setActiveSessionId(ev.sessionId); // the conversation rolled over — the panel's local/foreign split moves with it
       setCards([]); // display cards belonged to the previous conversation
+      setGoal(null); // so did the goal (mirror of the CLI's rollover reset)
       // The rollover empties the transcript and rebuilds the fresh conversation purely from the stream, so
       // close the lazy-load window (+ bump the epoch to discard any older page in flight). Otherwise a stale
       // cursor would page the NEW session's own just-shown turns and double them.
@@ -485,6 +500,24 @@ function useBrainChatController(): BrainChatValue {
       // The child usage is persisted before its terminal progress event. Refresh the parent status now
       // so the session price includes delegated work immediately, not only after the next parent turn.
       if (s.status !== 'running') void elowenClient.brainStatus(boundSessionRef.current).then((status) => { if (generation === genRef.current) setUsage(status.usage); }).catch(() => { /* best-effort */ });
+    });
+    // Whole-DAG snapshot of a running workflow. Folded onto its WorkflowStart tool row (like `subagent`),
+    // which is also what makes it durable — history carries the same attachment after a reload.
+    es.addEventListener('workflow', (e) => {
+      const w = JSON.parse((e as MessageEvent).data) as { id: string; toolCallId: string; title?: string; status: WorkflowState['status']; nodes: WorkflowState['nodes'] };
+      applyEvent({ type: 'workflow', ...w });
+    });
+    // Authoritative goal snapshot — `null` means the goal was cleared, so it is applied unconditionally.
+    es.addEventListener('goal', (e) => {
+      const { goal: next } = JSON.parse((e as MessageEvent).data) as { goal: BrainGoal | null };
+      setGoal(next);
+    });
+    // Full snapshot of the owner's background processes, pushed out of turn on every spawn/exit/kill. It
+    // seeds the SAME query the process panels read (`GET /brain/processes` is their hydration path after a
+    // reconnect), so the live push and the poll can never disagree about what is running.
+    es.addEventListener('process', (e) => {
+      const { processes } = JSON.parse((e as MessageEvent).data) as { processes: ProcessInfo[] };
+      qc.setQueryData(['brain-processes'], processes);
     });
     es.addEventListener('card', (e) => {
       const { card } = JSON.parse((e as MessageEvent).data) as { card: BrainCard };
@@ -657,6 +690,11 @@ function useBrainChatController(): BrainChatValue {
   };
   const onAnswer = (id: string, answers: AskAnswer[]): void => { void elowenClient.brainAnswer(id, answers).catch(() => undefined); setAsk(null); };
   const abort = (): void => { void elowenClient.brainAbort(boundSessionRef.current).catch(() => undefined); };
+
+  // Both projections are pure folds of the transcript, so they survive a reconnect for free: history
+  // carries the same `sub`/`wf` attachments the live events wrote.
+  const subagents = useMemo(() => collectSubagents(turns), [turns]);
+  const workflows = useMemo(() => collectWorkflows(turns), [turns]);
 
   // --- Slash menu (mirrors the CLI palette; single source of truth = GET /brain/commands). ---
   const slashQuery = input.startsWith('/') && !/\s/.test(input) ? input.slice(1).toLowerCase() : null;
@@ -850,7 +888,7 @@ function useBrainChatController(): BrainChatValue {
 
   return {
     turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
-    usage, telemetry, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
+    usage, telemetry, goal, subagents, workflows, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
     showThoughts: thoughts === 'show',

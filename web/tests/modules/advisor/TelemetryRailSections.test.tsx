@@ -1,0 +1,236 @@
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach, beforeEach } from 'vitest';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { setupServer } from 'msw/node';
+import { http, HttpResponse } from 'msw';
+import { onUnhandledRequest } from '../../msw';
+import { createWrapper } from '../../test-utils';
+import { ToastProvider } from '../../../components/ui/Toast';
+import { BrainChat } from '../../../modules/advisor/BrainChat';
+import { BrainChatProvider } from '../../../modules/advisor/BrainChatProvider';
+import { TelemetryPanel } from '../../../modules/advisor/TelemetryPanel';
+import type { ProcessInfo } from '../../../lib/types';
+
+// The rail is the web's answer to the CLI telemetry panel: what runs RIGHT NOW (goal, workflows,
+// sub-agents, background processes) must be visible without opening the transcript, and it must survive
+// a reconnect — a phone that slept and woke up gets a fresh snapshot, never the events it missed.
+
+/** EventSource stand-in that can deliver frames to the registered listeners. */
+class FakeES {
+  static instances: FakeES[] = [];
+  static OPEN = 1;
+  readyState = 1;
+  closed = false;
+  private listeners = new Map<string, ((e: { data?: string }) => void)[]>();
+  constructor(public url: string) { FakeES.instances.push(this); }
+  addEventListener(type: string, fn: (e: { data?: string }) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  close() { this.closed = true; }
+  emit(type: string, data: unknown) {
+    act(() => { for (const fn of this.listeners.get(type) ?? []) fn({ data: JSON.stringify(data) }); });
+  }
+}
+
+const process1: ProcessInfo = {
+  id: 'p1', command: 'npm run dev', cwd: '/var/www/elowen', sessionId: 'brain-1', startedAt: '2026-07-27T10:00:00.000Z',
+  running: true, exitCode: null, completionMode: 'service',
+};
+
+let processes: ProcessInfo[] = [];
+/** How many times the rail's process list was actually served — asserting that a row is ABSENT is only
+ *  meaningful once the data it would have come from has arrived. */
+let processFetches = 0;
+
+const activeGoal = {
+  session_id: 'brain-1', user_id: 1, status: 'active' as const,
+  goal: 'Dokončit telemetrický rail', draft: '', subgoals: '[{"text":"a","done":true},{"text":"b"}]',
+  turns_used: 3, turn_budget: 20, last_verdict: '', last_evidence: '', paused_reason: '',
+  created_at: '2026-07-27 10:00:00', updated_at: '2026-07-27 10:05:00',
+};
+
+const server = setupServer(
+  http.post('*/api/brain/start', () => HttpResponse.json({ sessionId: 'brain-1' }, { status: 201 })),
+  http.get('*/api/brain/messages', ({ request }) => (new URL(request.url).searchParams.has('limit')
+    ? HttpResponse.json({ items: [], hasMore: false, nextBefore: null })
+    : HttpResponse.json([]))),
+  http.get('*/api/brain/status', () => HttpResponse.json({
+    running: true, sessionId: 'brain-1', model: 'm', usage: null, statusline: null, cards: [], queued: [],
+  })),
+  http.get('*/api/brain/processes', () => { processFetches += 1; return HttpResponse.json(processes); }),
+  http.get('*/api/brain/processes/:id/output', () => HttpResponse.json({ output: 'ready on :4500' })),
+  http.get('*/api/brain/rate-limits', () => HttpResponse.json(null)),
+  http.get('*/api/brain/sessions', () => HttpResponse.json([])),
+  http.get('*/api/brain/commands', () => HttpResponse.json({ commands: [] })),
+);
+
+beforeAll(() => {
+  server.listen({ onUnhandledRequest });
+  (Element.prototype as unknown as { scrollTo: () => void }).scrollTo = () => {};
+});
+afterEach(() => {
+  server.resetHandlers();
+  FakeES.instances.length = 0;
+  processes = [];
+  processFetches = 0;
+  localStorage.clear();
+  vi.restoreAllMocks();
+});
+afterAll(() => server.close());
+beforeEach(() => { (globalThis as unknown as { EventSource: unknown }).EventSource = FakeES; });
+
+async function renderRail(onOpenWorkflow?: (id: string) => void): Promise<FakeES> {
+  const { wrapper: Wrapper } = createWrapper();
+  render(
+    <Wrapper><ToastProvider><BrainChatProvider>
+      <BrainChat />
+      <TelemetryPanel variant="column" onOpenWorkflow={onOpenWorkflow} />
+    </BrainChatProvider></ToastProvider></Wrapper>,
+  );
+  await waitFor(() => expect(FakeES.instances.length).toBe(1));
+  return FakeES.instances[0]!;
+}
+
+const snapshot = (over: Record<string, unknown>) => ({
+  type: 'snapshot', sessionId: 'brain-1', hasMore: false, nextBefore: null, history: [], events: [],
+  control: { streaming: false, pendingAsk: null }, ...over,
+});
+
+/** A delegate tool call plus its sub-agent progress — the shape the rail's agent rows are folded from. */
+const subagentEvents = (over: { sessionId: string; status: 'running' | 'done'; task: string; id: string }) => ([
+  { type: 'tool', name: 'Delegate', id: over.id },
+  { type: 'subagent', id: over.id, sessionId: over.sessionId, status: over.status, task: over.task, tools: 1, seconds: 2 },
+]);
+
+const workflowEvents = (status: 'running' | 'done') => ([
+  { type: 'tool', name: 'WorkflowStart', id: 'w-call' },
+  {
+    type: 'workflow', id: 'wf-1', toolCallId: 'w-call', title: 'Rail parity', status,
+    nodes: [
+      { id: 'a', task: 'prozkoumat', status: 'done', deps: [] },
+      { id: 'b', task: 'napsat', status: 'running', deps: ['a'] },
+      { id: 'c', task: 'ověřit', status: 'pending', deps: ['b'] },
+    ],
+  },
+]);
+
+describe('telemetry rail — live work sections', () => {
+  it('lists a running background process and drops the section when the last one exits', async () => {
+    processes = [process1];
+    const es = await renderRail();
+    const section = await screen.findByTestId('telemetry-processes');
+    expect(section.textContent).toContain('npm run dev');
+
+    es.emit('process', { processes: [] });
+    await waitFor(() => expect(screen.queryByTestId('telemetry-processes')).toBeNull());
+  });
+
+  it('shows processes that were already running before this client connected', async () => {
+    // The reconnect case: a woken phone gets no `process` event for work that started while it slept.
+    processes = [process1];
+    await renderRail();
+    const section = await screen.findByTestId('telemetry-processes');
+    expect(section.textContent).toContain('npm run dev');
+  });
+
+  it('leaves out exited processes and undetached foreground calls', async () => {
+    processes = [
+      { ...process1, id: 'p2', command: 'npm test', running: false, exitCode: 0, completionMode: 'job' },
+      { ...process1, id: 'p3', command: 'grep -r needle', completionMode: 'foreground' },
+    ];
+    await renderRail();
+    await waitFor(() => expect(processFetches).toBeGreaterThan(0));
+    expect(screen.queryByTestId('telemetry-processes')).toBeNull();
+  });
+
+  it('opens the existing process output modal from a rail row', async () => {
+    processes = [process1];
+    await renderRail();
+    const section = await screen.findByTestId('telemetry-processes');
+    const row = section.querySelector('button');
+    expect(row).not.toBeNull();
+    await act(async () => { fireEvent.click(row!); });
+    await screen.findByText('ready on :4500');
+  });
+
+  it('shows the active goal and hides the section once it is cleared', async () => {
+    const es = await renderRail();
+    es.emit('goal', { goal: activeGoal });
+    const section = await screen.findByTestId('telemetry-goal');
+    expect(section.textContent).toContain('Dokončit telemetrický rail');
+    expect(section.textContent).toContain('3/20');
+
+    es.emit('goal', { goal: null });
+    await waitFor(() => expect(screen.queryByTestId('telemetry-goal')).toBeNull());
+  });
+
+  it('hydrates the goal from the reconnect snapshot', async () => {
+    const es = await renderRail();
+    es.emit('snapshot', snapshot({ goal: activeGoal }));
+    const section = await screen.findByTestId('telemetry-goal');
+    expect(section.textContent).toContain('Dokončit telemetrický rail');
+  });
+
+  it('clears a goal the reconnect snapshot no longer reports', async () => {
+    const es = await renderRail();
+    es.emit('goal', { goal: activeGoal });
+    await screen.findByTestId('telemetry-goal');
+    es.emit('snapshot', snapshot({ goal: null }));
+    await waitFor(() => expect(screen.queryByTestId('telemetry-goal')).toBeNull());
+  });
+
+  it('lists a running workflow with its node tally and opens it on click', async () => {
+    const onOpen = vi.fn();
+    const es = await renderRail(onOpen);
+    for (const event of workflowEvents('running')) es.emit(event.type, event);
+    const section = await screen.findByTestId('telemetry-workflow');
+    expect(section.textContent).toContain('Rail parity');
+    expect(section.textContent).toContain('1/3');
+
+    await act(async () => { fireEvent.click(section.querySelector('button')!); });
+    expect(onOpen).toHaveBeenCalledWith('wf-1');
+  });
+
+  it('restores a running workflow from the reconnect snapshot tail', async () => {
+    const es = await renderRail();
+    es.emit('snapshot', snapshot({ events: workflowEvents('running') }));
+    const section = await screen.findByTestId('telemetry-workflow');
+    expect(section.textContent).toContain('Rail parity');
+  });
+
+  it('hides the workflow section once the DAG finishes', async () => {
+    const es = await renderRail();
+    for (const event of workflowEvents('running')) es.emit(event.type, event);
+    await screen.findByTestId('telemetry-workflow');
+    for (const event of workflowEvents('done')) es.emit(event.type, event);
+    await waitFor(() => expect(screen.queryByTestId('telemetry-workflow')).toBeNull());
+  });
+
+  it('lists only running sub-agents and opens the agents drill-in on click', async () => {
+    const es = await renderRail();
+    es.emit('snapshot', snapshot({
+      events: [
+        ...subagentEvents({ id: 't1', sessionId: 'child-1', status: 'running', task: 'hledá volající' }),
+        ...subagentEvents({ id: 't2', sessionId: 'child-2', status: 'done', task: 'hotová práce' }),
+      ],
+    }));
+    const section = await screen.findByTestId('telemetry-agents');
+    expect(section.textContent).toContain('hledá volající');
+    expect(section.textContent).not.toContain('hotová práce');
+
+    await act(async () => { fireEvent.click(section.querySelector('button')!); });
+    await screen.findByText('Delegated sub-agents — click one to open its progress');
+  });
+
+  it('counts running sub-agents with the Czech plural forms', async () => {
+    localStorage.setItem('elowen-locale', 'cs');
+    const es = await renderRail();
+    es.emit('snapshot', snapshot({
+      events: [
+        ...subagentEvents({ id: 't1', sessionId: 'child-1', status: 'running', task: 'jedna' }),
+        ...subagentEvents({ id: 't2', sessionId: 'child-2', status: 'running', task: 'dva' }),
+      ],
+    }));
+    const section = await screen.findByTestId('telemetry-agents');
+    await waitFor(() => expect(section.textContent).toContain('2 agenti'));
+  });
+});

@@ -123,6 +123,10 @@ export interface BrainStreamSnapshotFrame {
    *  the tail's shape, decides whether a turn is running and whether a question is parked. Both fields are
    *  explicit, so hydrating from this frame CLEARS what the daemon no longer has. */
   control?: { streaming: boolean; pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null };
+  /** The conversation's durable goal at snapshot time. It is independent of the transient run journal
+   *  (cleared at settle), so this — explicit `null` included — is what lets a reconnecting client learn a
+   *  goal it never saw, or clear one that ended while it was away. Absent means an older daemon. */
+  goal?: BrainGoal | null;
   /** The live journal dropped part of the unsettled run; durable history must be refetched once it settles. */
   truncated?: true;
   hasMore?: boolean;
@@ -142,8 +146,20 @@ export interface BrainCard { id: string; title?: string; items?: BrainCardItem[]
 /** One background shell process (terminal plugin's `Bash(background:true)`) — the process panel
  *  next to the todos lists these, reads output for the modal, and kills on demand. */
 /** `sessionId` is the brain session the process was started in — the panel derives the origin badge
- *  (sub-agent / channel) from it; null when the process has no session. */
-export interface ProcessInfo { id: string; command: string; cwd: string; startedAt: string; sessionId: string | null; running: boolean; exitCode: number | null }
+ *  (sub-agent / channel) from it; null when the process has no session. `completionMode` is `foreground`
+ *  while a still-in-flight `Bash` call can still be detached — not a background job yet, so live panels
+ *  leave those out. */
+export interface ProcessInfo { id: string; command: string; cwd: string; startedAt: string; sessionId: string | null; running: boolean; exitCode: number | null; completionMode?: 'job' | 'service' | 'foreground' }
+
+/** Durable state of one autonomous goal (mirror of the daemon's `BrainGoalState`, src/brain/events.ts),
+ *  narrowed to what the web renders. `subgoals` is the stored JSON array. */
+export interface BrainGoal {
+  status: 'active' | 'draft' | 'paused' | 'done';
+  goal: string;
+  subgoals: string;
+  turns_used: number;
+  turn_budget: number;
+}
 /** Live statusline numbers for the active conversation. */
 export interface BrainUsage {
   tokens: number | null; contextWindow: number; percent: number | null; totalTokens: number; cost: number;

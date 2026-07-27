@@ -2,7 +2,7 @@ import type { BrainCard, BrainMessage, BrainStreamTailEvent, BrainWorkflowView, 
 
 /** The workflow DAG a `WorkflowStart` call is running — the shared wire shape (BrainWorkflowView),
  *  attached to its tool item by call id exactly as `sub` is for a delegate call. */
-type WorkflowState = BrainWorkflowView;
+export type WorkflowState = BrainWorkflowView;
 
 /** Browser MIRROR of the daemon's `src/brain/transcript.ts` (same governance as `web/lib/types.ts`
  *  mirroring `src/brain/events.ts`): the web dock is a standalone Next.js bundle whose Turbopack build
@@ -28,6 +28,10 @@ export type TranscriptEvent =
   | { type: 'notice'; kind: 'retry' | 'compaction'; message: string; done?: boolean }
   | { type: 'session'; sessionId: string }
   | { type: 'subagent'; id: string; sessionId: string; status: 'running' | 'done' | 'error'; task: string; detail?: string; tools: number; tokens?: number; seconds: number; model?: string; background?: boolean; autoDeliver?: boolean; resultDelivery?: 'pending' | 'acknowledged' }
+  /** A whole-DAG snapshot of a running `WorkflowStart` call. Attached to its tool row by call id exactly
+   *  like `subagent` — attaching (not merely projecting) is what makes it durable, so a reconnect rebuilds
+   *  the panel from the transcript instead of losing every workflow it did not witness live. */
+  | { type: 'workflow'; id: string; toolCallId: string; title?: string; status: WorkflowState['status']; nodes: WorkflowState['nodes'] }
   /** A server-delivered user message (a steered mid-turn message never optimistically echoed) — folded as
    *  a 'you' turn. The `queue` snapshot event (PI steering queue) is handled outside this fold. */
   | { type: 'user'; text: string }
@@ -192,7 +196,7 @@ export function prependHistory(view: ChatView, older: BrainMessage[]): ChatView 
  *  wire events down to the ones it understands instead of casting the rest through it. */
 const TRANSCRIPT_EVENT_TYPES = new Set<TranscriptEvent['type']>([
   'text', 'reasoning', 'tool', 'tool_progress', 'diff', 'tool_output', 'tool_end',
-  'notice', 'session', 'subagent', 'user', 'idle', 'error',
+  'notice', 'session', 'subagent', 'workflow', 'user', 'idle', 'error',
 ]);
 
 export function isTranscriptEvent(event: BrainStreamTailEvent): event is BrainStreamTailEvent & TranscriptEvent {
@@ -286,6 +290,16 @@ export function reduce(view: ChatView, e: TranscriptEvent): ChatView {
       }));
       return patched ? { ...view, turns } : view;
     }
+    case 'workflow': {
+      // Like `subagent`: a background workflow can report after the parent turn settled, so patch the
+      // existing WorkflowStart row by call id rather than opening a streaming turn for it.
+      const wf: WorkflowState = {
+        id: e.id, toolCallId: e.toolCallId, status: e.status, nodes: e.nodes,
+        ...(e.title ? { title: e.title } : {}),
+      };
+      const patched = attachToToolInTurns(turns, e.toolCallId, (item) => ({ ...item, wf }));
+      return patched ? { ...view, turns } : view;
+    }
     case 'session': {
       // Idle rollover mid-send: the server moved this message into a FRESH conversation. Reset the
       // transcript — the daemon re-emits the triggering message as a `user` event and streams its reply,
@@ -355,6 +369,20 @@ export function collectSubagents(turns: ChatTurn[]): SubagentState[] {
     for (const seg of turn.segments) {
       if (seg.kind !== 'tools') continue;
       for (const item of seg.items) if (item.sub?.sessionId) byId.set(item.sub.sessionId, item.sub);
+    }
+  }
+  return [...byId.values()];
+}
+
+/** Collect the workflows across the whole transcript (one per workflow id, latest state wins) — the
+ *  source for the rail's workflow section. Mirrors the CLI's `TranscriptModel.workflows()` projection. */
+export function collectWorkflows(turns: ChatTurn[]): WorkflowState[] {
+  const byId = new Map<string, WorkflowState>();
+  for (const turn of turns) {
+    if (turn.role !== 'elowen') continue;
+    for (const seg of turn.segments) {
+      if (seg.kind !== 'tools') continue;
+      for (const item of seg.items) if (item.wf) byId.set(item.wf.id, item.wf);
     }
   }
   return [...byId.values()];

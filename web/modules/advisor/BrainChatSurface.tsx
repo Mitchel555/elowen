@@ -7,7 +7,7 @@ import { plural, useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
 import type { BrainCard, BrainWorkMode } from '../../lib/types';
-import { collectSubagents, groupToolItems, type ChatTurn, type SessionEventItem, type ToolItem } from '../../lib/transcript';
+import { groupToolItems, type ChatTurn, type SessionEventItem, type ToolItem } from '../../lib/transcript';
 import { MorePill } from '../../components/ui/MorePill';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
@@ -429,7 +429,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   const c = useBrainChat();
   const {
     turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
-    usage, lineCfg, currentModel, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
+    usage, lineCfg, currentModel, subagents, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
     ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
     workMode, implementPlan, renameOpen, closeRename, renameSession,
@@ -485,8 +485,6 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   triggerOlderRef.current = triggerOlder;
 
   const active = sessions.data?.find((s) => s.active);
-  // Delegated sub-agents across the transcript — the source for the workflow table + its "N agents" link.
-  const subagents = useMemo(() => collectSubagents(turns), [turns]);
   const runningAgents = subagents.filter((agent) => agent.status === 'running').length;
   // Index of the first live (id-less) turn — the boundary between stored history and the live streaming tail
   // used to key the tail stably across a lazy-load prepend (see the transcript map below).

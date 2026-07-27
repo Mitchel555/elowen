@@ -9,8 +9,9 @@ import { Modal } from '../../components/ui/Modal';
 import type { ProcessInfo } from '../../lib/types';
 
 /** Live output of one background process, polled while it runs. Mirrors the terminal plugin's rolling
- *  buffer (read via GET /brain/processes/:id/output). */
-function ProcessOutputModal({ proc, onClose }: { proc: ProcessInfo; onClose: () => void }) {
+ *  buffer (read via GET /brain/processes/:id/output). Exported so the telemetry rail opens THIS detail
+ *  instead of growing a second output view of its own. */
+export function ProcessOutputModal({ proc, onClose }: { proc: ProcessInfo; onClose: () => void }) {
   const { t } = useTranslation();
   const [output, setOutput] = useState('');
   const preRef = useRef<HTMLPreElement>(null);

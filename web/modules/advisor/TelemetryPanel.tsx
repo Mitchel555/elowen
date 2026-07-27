@@ -1,16 +1,21 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { X } from 'lucide-react';
+import { Target, TerminalSquare, Users, Workflow, X } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
+import { plural } from '../../lib/i18n/plural';
 import { elowenClient } from '../../lib/elowenClient';
+import { useBrainProcesses } from '../../lib/queries';
 import { formatTokens, formatCost } from '../../lib/format';
 import { OAuthUsageRail, usageFillClass } from '../settings/OAuthUsageRail';
 import { MascotGlyph } from '../../components/ui/SpatialMascot';
 import { ResizeHandle } from '../../components/ui/ResizeHandle';
 import { railTypeVars, useTelemetryRailWidth, RAIL_MIN_WIDTH, RAIL_MAX_WIDTH } from '../../lib/useTelemetryRailWidth';
+import { workflowLabel, workflowProgress } from '../../lib/workflowDag';
 import { useBrainChat } from './BrainChatProvider';
+import { ProcessOutputModal } from './ProcessPanel';
 import { CommandOrbit } from './CommandOrbit';
+import type { BrainGoal } from '../../lib/types';
 
 /** The owl presides over the rail the way it tops the CLI panel — and it is not decoration: it mirrors
  *  the agent, breathing while a turn runs and settling when it does not, so the rail reads as inhabited
@@ -79,12 +84,57 @@ function ContextMeter({ percent }: { percent: number }) {
   );
 }
 
-/** The panel's sections, in the CLI rail's order: context fill, subscription limits, project, MCP, LSP.
- *  A section the daemon does not report simply does not render — an empty rail is quieter than a rail
- *  full of dashes. Shared by the desktop column and the mobile drawer. */
-function TelemetryBody() {
+/** One clickable row of a live-work section: a status dot, a truncated label and an optional right-hand
+ *  meta column. The label truncates rather than reserving a width, so the row reads the same at both ends
+ *  of the rail's 240–560px range. */
+function LiveRow({ label, meta, tone, title, onClick, ariaLabel }: {
+  label: string;
+  meta?: string;
+  tone: 'running' | 'idle';
+  title?: string;
+  onClick?: () => void;
+  ariaLabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick}
+      aria-label={ariaLabel}
+      title={title ?? label}
+      className="flex w-full items-center gap-1.5 text-left text-tiny transition-colors hover:text-text disabled:cursor-default"
+    >
+      <span className={`shrink-0 ${tone === 'running' ? 'text-success' : 'text-text-subtle'}`} aria-hidden>●</span>
+      <span className="min-w-0 flex-1 truncate text-text">{label}</span>
+      {meta ? <span className="shrink-0 font-mono tabular-nums text-text-muted">{meta}</span> : null}
+    </button>
+  );
+}
+
+/** Completed vs. total subgoals of a goal's stored JSON array, or null when it holds none. Malformed
+ *  legacy rows are simply omitted — the goal itself still renders. */
+function subgoalTally(raw: string): { done: number; total: number } | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    const done = parsed.filter((entry): entry is { done: boolean } =>
+      typeof entry === 'object' && entry !== null && (entry as { done?: unknown }).done === true).length;
+    return { done, total: parsed.length };
+  } catch {
+    return null;
+  }
+}
+
+/** The panel's sections, in the CLI rail's order: context fill, goal, subscription limits, workflows,
+ *  sub-agents, processes, project, MCP, LSP. A section with nothing to report simply does not render — an
+ *  empty rail is quieter than a rail full of dashes. Shared by the desktop column and the mobile drawer. */
+function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => void }) {
   const { t } = useTranslation();
-  const { usage, telemetry, activeSessionId, busy } = useBrainChat();
+  const { usage, telemetry, activeSessionId, busy, goal, subagents, workflows, setAgentsOpen } = useBrainChat();
+  const { data: allProcesses = [] } = useBrainProcesses();
+  // Track the open process by id, not a click-time copy, so the modal follows the live list (it stops
+  // polling once the process exits, and closes when the process is pruned away).
+  const [openProcessId, setOpenProcessId] = useState<string | null>(null);
   // The subscription rail changes on the scale of hours and lives on its own endpoint (the daemon keeps
   // it out of the hot status poll on purpose) — so it is fetched separately and refreshed slowly.
   const { data: limits } = useQuery({
@@ -98,13 +148,31 @@ function TelemetryBody() {
   const mcp = telemetry.mcp;
   const mcpConnected = mcp?.filter((s) => s.status === 'connected') ?? [];
   const hasProject = !!project?.cwd || !!project?.branch;
+  // Only LIVE work belongs in the rail — a finished goal, DAG, agent or process lives on in the
+  // transcript, and a section listing settled work would push the running one off the screen.
+  const activeGoal: BrainGoal | null = goal?.status === 'active' ? goal : null;
+  const runningWorkflows = workflows.filter((wf) => wf.status === 'running');
+  // A terminal agent whose result the parent has not acknowledged is still live work (CLI parity).
+  const liveAgents = subagents.filter((a) => a.status === 'running' || a.resultDelivery === 'pending');
+  // A `foreground` handle is an in-flight Bash tool call that MAY still be detached, not a background
+  // job — listing it would flash every ordinary shell command through the rail.
+  const processes = allProcesses.filter((p) => p.running && p.completionMode !== 'foreground');
+  const openProcess = processes.find((p) => p.id === openProcessId) ?? null;
   const sections = [
     usage !== null,
+    activeGoal !== null,
     !!limits?.windows.length,
+    runningWorkflows.length > 0,
+    liveAgents.length > 0,
+    processes.length > 0,
     hasProject,
     mcpConnected.length > 0,
     telemetry.lspEnabled !== null,
   ];
+  const goalTurns = activeGoal && activeGoal.turn_budget > 0
+    ? `${activeGoal.turns_used}/${activeGoal.turn_budget} ${plural(t.telemetry.goalTurns, activeGoal.turn_budget)}`
+    : activeGoal ? `${activeGoal.turns_used} ${plural(t.telemetry.goalTurns, activeGoal.turns_used)}` : undefined;
+  const subgoals = activeGoal ? subgoalTally(activeGoal.subgoals) : null;
 
   return (
     <div className="flex flex-col gap-4 px-3 py-3">
@@ -126,10 +194,88 @@ function TelemetryBody() {
         </section>
       ) : null}
 
+      {activeGoal ? (
+        <section className="flex flex-col gap-1" data-testid="telemetry-goal">
+          <SectionHead label={t.telemetry.goal} meta={goalTurns} />
+          <p className="flex items-center gap-1.5 text-tiny">
+            <Target size={11} className="shrink-0 text-accent" aria-hidden />
+            <span className="min-w-0 truncate text-text" title={activeGoal.goal}>{activeGoal.goal}</span>
+          </p>
+          {subgoals ? (
+            <p className="text-tiny text-text-muted">
+              {t.telemetry.goalSubgoals.replace('{done}', String(subgoals.done)).replace('{total}', String(subgoals.total))}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+
       {limits?.windows.length ? (
         <section className="flex flex-col gap-1.5" data-testid="telemetry-limits">
           <SectionHead label={t.telemetry.limits} meta={limits.planType ?? undefined} />
           <OAuthUsageRail usage={limits} />
+        </section>
+      ) : null}
+
+      {runningWorkflows.length > 0 ? (
+        <section className="flex flex-col gap-1" data-testid="telemetry-workflow">
+          <SectionHead label={t.telemetry.workflow} meta={String(runningWorkflows.length)} />
+          <ul className="flex flex-col gap-0.5">
+            {runningWorkflows.map((wf) => (
+              <li key={wf.id} className="flex items-center gap-1.5">
+                <Workflow size={11} className="shrink-0 text-accent" aria-hidden />
+                <LiveRow
+                  label={workflowLabel(wf)}
+                  meta={workflowProgress(wf)}
+                  tone="running"
+                  ariaLabel={t.telemetry.workflowOpen}
+                  title={`${workflowLabel(wf)} — ${workflowProgress(wf)} ${t.telemetry.workflowNodes}`}
+                  {...(onOpenWorkflow ? { onClick: () => onOpenWorkflow(wf.id) } : {})}
+                />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {liveAgents.length > 0 ? (
+        <section className="flex flex-col gap-1" data-testid="telemetry-agents">
+          <SectionHead label={t.telemetry.agents} meta={`${liveAgents.length} ${plural(t.agents.link, liveAgents.length)}`} />
+          <ul className="flex flex-col gap-0.5">
+            {liveAgents.map((agent) => (
+              <li key={agent.sessionId} className="flex items-center gap-1.5">
+                <Users size={11} className="shrink-0 text-text-subtle" aria-hidden />
+                <LiveRow
+                  label={agent.detail || agent.task}
+                  meta={agent.tokens != null ? formatTokens(agent.tokens) : undefined}
+                  tone={agent.status === 'running' ? 'running' : 'idle'}
+                  title={agent.task}
+                  ariaLabel={t.telemetry.agentsOpen}
+                  onClick={() => setAgentsOpen(true)}
+                />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {processes.length > 0 ? (
+        <section className="flex flex-col gap-1" data-testid="telemetry-processes">
+          <SectionHead label={t.telemetry.processes} meta={`${processes.length} ${plural(t.telemetry.processesCount, processes.length)}`} />
+          <ul className="flex flex-col gap-0.5">
+            {processes.map((proc) => (
+              <li key={proc.id} className="flex items-center gap-1.5">
+                <TerminalSquare size={11} className="shrink-0 text-text-subtle" aria-hidden />
+                <LiveRow
+                  label={proc.command}
+                  tone="running"
+                  title={proc.command}
+                  ariaLabel={t.telemetry.processOpen}
+                  onClick={() => setOpenProcessId(proc.id)}
+                />
+              </li>
+            ))}
+          </ul>
+          {openProcess ? <ProcessOutputModal proc={openProcess} onClose={() => setOpenProcessId(null)} /> : null}
         </section>
       ) : null}
 
@@ -190,10 +336,13 @@ function TelemetryBody() {
  *  Only the column is resizable, and the variant is the viewport decision: the host already made it, so
  *  the drag handle needs no media query of its own. A phone drawer has nothing to widen into anyway, and
  *  an edge that swallowed horizontal drags would fight the gesture that closes it. */
-export function TelemetryPanel({ variant, open = false, onClose }: {
+export function TelemetryPanel({ variant, open = false, onClose, onOpenWorkflow }: {
   variant: 'column' | 'drawer';
   open?: boolean;
   onClose?: () => void;
+  /** Open the navigable DAG view for a workflow row. Absent → the rows are inert (they still report the
+   *  running DAGs), so the rail never depends on a host that has no such view to show. */
+  onOpenWorkflow?: (id: string) => void;
 }) {
   const { t } = useTranslation();
   const { width, resizeBy, reset } = useTelemetryRailWidth();
@@ -223,7 +372,7 @@ export function TelemetryPanel({ variant, open = false, onClose }: {
               <X size={16} aria-hidden />
             </button>
           </div>
-          <TelemetryBody />
+          <TelemetryBody onOpenWorkflow={onOpenWorkflow} />
         </aside>
       </div>
     );
@@ -251,7 +400,7 @@ export function TelemetryPanel({ variant, open = false, onClose }: {
       {/* The border runs the full column height while the content itself follows the reader, so the rail
           stays legible through a long transcript instead of scrolling away with the first turns. */}
       <div className="sticky top-0 max-h-[100dvh] overflow-y-auto">
-        <TelemetryBody />
+        <TelemetryBody onOpenWorkflow={onOpenWorkflow} />
       </div>
     </aside>
   );

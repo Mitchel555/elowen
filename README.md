@@ -15,7 +15,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-43853d.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
-[**Docs**](https://elowen.dragocz.dev) · [Getting started](./docs/site/01-getting-started.md) · [CLI](./docs/site/06-cli.md) · [Web UI](./docs/site/05-web-ui.md) · [Architecture](./docs/site/12-architecture.md)
+[**Docs**](https://elowen.run) · [Getting started](./docs/site/01-getting-started.md) · [CLI](./docs/site/06-cli.md) · [Web UI](./docs/site/05-web-ui.md) · [Architecture](./docs/site/12-architecture.md)
 
 </div>
 
@@ -174,7 +174,7 @@ The daemon owns state, scheduling, agent sessions, plugins, and the API. The Web
 
 ## Documentation
 
-The full user guide lives at **[elowen.dragocz.dev](https://elowen.dragocz.dev)** and in [`docs/site`](./docs/site/):
+The full user guide lives at **[elowen.run](https://elowen.run)** and in [`docs/site`](./docs/site/):
 
 | Guide | Covers |
 |---|---|

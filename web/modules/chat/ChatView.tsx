@@ -5,6 +5,7 @@ import { useMobileViewport } from '../../lib/useMobile';
 import { BrainChatSurface } from '../advisor/BrainChatSurface';
 import { ChatHistoryRail } from '../advisor/ChatHistoryRail';
 import { TelemetryPanel } from '../advisor/TelemetryPanel';
+import { WorkflowModal } from '../advisor/WorkflowModal';
 import { ChatDeckHero } from './ChatDeckHero';
 
 /** The full-page chat host. It reads the ONE controller mounted in ShellLayout via the surface + rail
@@ -27,6 +28,10 @@ export function ChatView() {
   const mobile = useMobileViewport();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [telemetryOpen, setTelemetryOpen] = useState(false);
+  // Track the open DAG by workflow id, not by a click-time copy, so the modal follows the live snapshot
+  // while its nodes run — the same rule the rail's process modal follows.
+  const [dagId, setDagId] = useState<string | null>(null);
+  const openDag = (id: string) => { setTelemetryOpen(false); setDagId(id); };
 
   return (
     <>
@@ -43,11 +48,12 @@ export function ChatView() {
             onOpenTelemetry={mobile ? () => setTelemetryOpen(true) : undefined}
           />
         </div>
-        {mobile === false ? <TelemetryPanel variant="column" /> : null}
+        {mobile === false ? <TelemetryPanel variant="column" onOpenWorkflow={openDag} /> : null}
         <ChatHistoryRail variant="drawer" open={historyOpen} onClose={() => setHistoryOpen(false)} />
         {mobile === true ? (
-          <TelemetryPanel variant="drawer" open={telemetryOpen} onClose={() => setTelemetryOpen(false)} />
+          <TelemetryPanel variant="drawer" open={telemetryOpen} onClose={() => setTelemetryOpen(false)} onOpenWorkflow={openDag} />
         ) : null}
+        {dagId ? <WorkflowModal workflowId={dagId} onClose={() => setDagId(null)} /> : null}
       </div>
     </>
   );

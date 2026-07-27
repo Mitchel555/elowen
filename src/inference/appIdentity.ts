@@ -9,7 +9,7 @@
  *  - `ELOWEN_APP_TITLE` — the app name shown on the ranking page.
  *  Note: OpenRouter's canonical title header is `X-OpenRouter-Title`; `X-Title` remains supported for
  *  older compatible relays. There is no categories header, so we send none. */
-const DEFAULT_APP_URL = 'https://elowen.dragocz.dev';
+const DEFAULT_APP_URL = 'https://elowen.run';
 const DEFAULT_APP_TITLE = 'Elowen';
 
 /** The configured public app URL (referer). Trailing slash trimmed so `${APP_URL}/favicon.ico` is clean. */

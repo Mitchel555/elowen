@@ -634,3 +634,17 @@ html[data-effects='full'] .hero-cosmos__orb::after { animation: spatial-ember-fl
   .cmd-orbit--enter .cosmos-fil--flow { opacity: 0; animation: cosmos-fil-appear 0.4s linear forwards; animation-delay: calc(var(--i) * 60ms + 700ms); }
   html[data-effects='full'] .cmd-orbit--enter .cosmos-fil--flow { animation: cosmos-fil-flow 3.2s linear infinite, cosmos-fil-appear 0.4s linear forwards; animation-delay: calc(var(--i) * -0.9s), calc(var(--i) * 60ms + 700ms); }
 }
+
+/* ══════ Workflow DAG modal ══════
+   The dependency graph is drawn by hand (geometry in web/lib/workflowDag.ts): an absolutely positioned
+   node layer over one SVG edge layer, exactly like the cosmos fields' pods over their filaments. Edges
+   borrow the filament stroke vocabulary so the graph reads as the same surface, not a bolted-on chart. */
+.wf-dag__edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.wf-dag__edge { fill: none; stroke: rgb(255 82 54 / 0.24); stroke-width: 1.5; }
+/* An edge feeding a RUNNING node carries the dashed flow stroke — the eye lands on live work first. */
+.wf-dag__edge--live { stroke: rgb(255 154 98 / 0.7); stroke-dasharray: 3 34; }
+.wf-dag__node--running { box-shadow: 0 0 0 1px var(--color-accent), 0 0 18px rgb(255 82 54 / 0.22); }
+@media (prefers-reduced-motion: no-preference) {
+  html[data-effects='full'] .wf-dag__edge--live { animation: cosmos-fil-flow 3.2s linear infinite; }
+  .wf-dag__node--running .wf-dag__pulse { animation: cosmos-breathe 1.8s ease-in-out infinite; }
+}
