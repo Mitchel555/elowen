@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,22 +8,26 @@ import { Readiness } from '../../src/store/readiness.js';
 import { MissionStore } from '../../src/store/missionStore.js';
 import { ProjectStore } from '../../src/store/projectStore.js';
 import { FakeGitReader } from '../../src/git/gitReader.js';
+import { FakeTmuxDriver } from '../../src/tmux/fakeDriver.js';
 import { EventBus } from '../../src/api/sse.js';
 import { createServer } from '../../src/api/server.js';
 import { FakeClock } from '../../src/shared/clock.js';
 import { ConfigStore } from '../../src/store/configStore.js';
 
-function makeApp() {
+function makeApp(extra: { engine?: unknown; missionGit?: unknown; tmux?: unknown } = {}) {
   const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
   const projects = new ProjectStore(db);
+  const tasks = new TaskStore(db);
+  const missions = new MissionStore(db);
   const git = new FakeGitReader({ isRepo: true, status: { branch: 'main', ahead: 0, behind: 0, dirty: 2, clean: false }, branches: [{ name: 'main', current: true }], commits: [{ hash: 'abc123', subject: 'init', author: 'me', relative: '1 hour ago' }] });
   const app = createServer({
-    tasks: new TaskStore(db), readiness: new Readiness(db), missions: new MissionStore(db),
-    bus: new EventBus(), engine: null as any, spawn: null as any, tmux: null as any,
+    tasks, readiness: new Readiness(db), missions,
+    bus: new EventBus(), engine: (extra.engine ?? null) as any, spawn: null as any, tmux: (extra.tmux ?? null) as any,
+    missionGit: extra.missionGit as any,
     project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
     clock: new FakeClock(0), config: new ConfigStore(db), projects, git,
   });
-  return { app };
+  return { app, db, tasks, missions };
 }
 
 describe('projects api', () => {
@@ -77,6 +81,25 @@ describe('projects api', () => {
     const home = await app.request('/projects/1', { method: 'DELETE' });
     expect(home.status).toBe(400);
     expect((await (await app.request('/projects')).json()).some((p: { id: number }) => p.id === 1)).toBe(true);
+  });
+  it('DELETE /projects/:id stops the project\'s running missions and agents before removing its rows', async () => {
+    const disengage = vi.fn().mockResolvedValue(undefined);
+    const cleanup = vi.fn().mockResolvedValue(undefined);
+    const tmux = new FakeTmuxDriver();
+    const { app, db, tasks } = makeApp({ engine: { disengage }, missionGit: { cleanup }, tmux });
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (2,'doomed','/d')").run();
+    tasks.create({ id: 'ep', project_id: 2, title: 'Epic', type: 'epic' });
+    db.prepare("INSERT INTO missions (id,epic_id,autonomy,state) VALUES ('m-ep','ep','L3','active')").run();
+    tasks.create({ id: 'standalone', project_id: 2, title: 'Standalone', labels: ['agent:Nova'] });
+    tasks.setStatus('standalone', 'in_progress');
+    tmux.setPane('elowen-Nova', ''); // simulate the live agent session
+
+    const res = await app.request('/projects/2', { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(disengage).toHaveBeenCalledWith('m-ep');
+    expect(cleanup).toHaveBeenCalledWith('m-ep');
+    expect(await tmux.list()).not.toContain('elowen-Nova'); // the standalone task's agent was stopped too
+    expect((await (await app.request('/projects')).json()).some((p: { id: number }) => p.id === 2)).toBe(false);
   });
   it('PATCH /projects/:id round-trips the tri-state pr_enabled override', async () => {
     const { app } = makeApp();

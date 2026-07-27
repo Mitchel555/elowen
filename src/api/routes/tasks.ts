@@ -244,8 +244,10 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (Array.isArray(b.deps)) d.tasks.setDeps(id, b.deps);
     // Single-edge add (the drag-onto-card "add dependency" gesture): atomic, unlike a client-side
     // fetch-current-deps-then-PATCH-the-whole-array round trip, which races against a concurrent
-    // editor of the same task's deps. setDeps stays the bulk-replace path (the deps modal).
-    if (typeof b.addDep === 'string') d.tasks.addDep(id, b.addDep);
+    // editor of the same task's deps. setDeps stays the bulk-replace path (the deps modal). Unlike
+    // that bulk path, this is one deliberate action, so a rejected edge (missing endpoint, cross-
+    // project) surfaces as a 400 instead of silently vanishing.
+    if (typeof b.addDep === 'string' && !d.tasks.addDep(id, b.addDep)) return c.json({ error: 'invalid dependency' }, 400);
     if (typeof b.parent_id === 'string') {
       // Drag-a-card-onto-another-card "make subtask" gesture. reparent() promotes the target to an
       // epic if needed; if its mission is already live, tick it so the new phase is picked up now
@@ -398,9 +400,12 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
     const existing = d.tasks.get(id);
     if (!existing) return c.json({ error: 'task not found' }, 404);
     if (!canAccessProject(c, existing.project_id)) return c.json({ error: 'forbidden' }, 403);
-    // `?subtree=1` removes a whole mission: disengage it (stops its agents), then delete the epic,
-    // every child task, their dependency edges and the mission row — not just the single task.
-    if (c.req.query('subtree')) {
+    // An epic always removes its whole mission — decided from the task's REAL type, not a caller-
+    // supplied `?subtree=1` flag: deleteEpic() below deletes the whole subtree either way (a plain
+    // DELETE with the flag omitted used to skip straight to it, removing the mission row before it
+    // could be disengaged and leaving its agents/worktree running against a mission that no longer
+    // exists in the DB).
+    if (existing.type === 'epic') {
       // Mission id is `m-<epicId>` by construction. Stop a still-running mission (kills its agents),
       // then free its worktree UNCONDITIONALLY: a naturally-completed ('disengaged') or paused mission
       // keeps its worktree for the PR/feedback path, so disengage() alone would skip it and leak the
@@ -414,6 +419,18 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
       d.events?.deleteForTarget(id);
       d.notes?.deleteAllForTarget(id); // a removed mission leaves no orphan handoff notes under any scope
       return c.json({ ok: true, tasks: removed.tasks });
+    }
+    // A standalone task or a single mission phase: stop its own live agent FIRST — mirrors the
+    // status-revert kill path above (PATCH .../status → open|cancelled) — otherwise the orphaned tmux
+    // session / embedded worker keeps editing the shared checkout after the row (and the UI's view of
+    // it) is already gone.
+    if (existing.status === 'in_progress') {
+      const agent = existing.labels.find((l) => l.startsWith('agent:'))?.slice('agent:'.length);
+      if (agent) {
+        const session = `elowen-${agent}`;
+        if (d.brainWorkers?.isLive(session)) await d.brainWorkers.abort(session).catch(() => { /* already gone */ });
+        else await d.tmux.kill(session).catch(() => { /* already gone */ });
+      }
     }
     d.tasks.delete(id);
     d.bus.publish({ type: 'task', taskId: id, status: 'cancelled' }); // live SSE so open UIs drop the row
@@ -430,6 +447,11 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
     for (const s of (await d.tmux.list()).filter((s) => s.startsWith('elowen-'))) {
       await d.tmux.kill(s).catch(() => { /* already gone */ });
     }
+    // Free every mission's on-disk worktree (and its mission_pr row) before deleteAll() wipes the DB —
+    // the disengage sweep above only reaches 'active'/'stalled' missions, but a paused or naturally-
+    // completed one still holds a worktree for the pause/PR-feedback path. cleanup() is a no-op for a
+    // mission with no PR record, so calling it for every mission id here is safe.
+    for (const missionId of d.tasks.listMissionIds()) await d.missionGit?.cleanup(missionId).catch(() => { /* best-effort */ });
     const removed = d.tasks.deleteAll();
     const events = d.events?.deleteAll() ?? 0;
     return c.json({ ok: true, tasks: removed.tasks, missions: removed.missions, events });

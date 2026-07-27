@@ -60,12 +60,32 @@ export function registerProjectRoutes(app: ElowenApp, ctx: RouteContext): void {
   // Remove a project from elowen entirely: cascades to its tasks, missions, agents and access grants
   // (ProjectStore.remove), but never touches the files on disk. Admin-only; the daemon's home project
   // can't be removed (it's where the daemon itself lives).
-  app.delete('/projects/:id', (c) => {
+  app.delete('/projects/:id', async (c) => {
     if (!d.projects) return c.json({ error: 'projects unavailable' }, 400);
     if (notAdmin(c)) return c.json({ error: 'forbidden' }, 403);
     const id = Number(c.req.param('id'));
     if (id === d.project.id) return c.json({ error: 'cannot remove the home project' }, 400);
     if (!d.projects.get(id)) return c.json({ error: 'project not found' }, 404);
+    // Stop every live agent this project drives BEFORE the transactional cascade removes its rows —
+    // otherwise a running tmux session/embedded worker keeps editing a checkout whose project the UI
+    // already shows as gone. A mission's worktree also leaks (missionGit resolves it via the epic TASK
+    // row, which the cascade deletes), so every mission is freed here too, not just the running ones.
+    // Mirrors the epic-delete teardown at DELETE /tasks/:id.
+    for (const t of d.tasks.list({ project_id: id })) {
+      if (t.type === 'epic') {
+        const missionId = `m-${t.id}`;
+        const mission = d.missions.get(missionId);
+        if (mission && mission.state !== 'disengaged') await d.engine.disengage(missionId).catch(() => { /* best-effort */ });
+        await d.missionGit?.cleanup(missionId).catch(() => { /* best-effort */ });
+        continue;
+      }
+      if (t.status !== 'in_progress') continue;
+      const agent = t.labels.find((l) => l.startsWith('agent:'))?.slice('agent:'.length);
+      if (!agent) continue;
+      const session = `elowen-${agent}`;
+      if (d.brainWorkers?.isLive(session)) await d.brainWorkers.abort(session).catch(() => { /* already gone */ });
+      else await d.tmux.kill(session).catch(() => { /* already gone */ });
+    }
     d.projects.remove(id);
     return c.json({ ok: true });
   });

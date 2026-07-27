@@ -8,9 +8,16 @@ const toTask = (r: Row): Task => ({ ...r, labels: r.labels ? r.labels.split(',')
 // A task is "ready" when it is open, not an epic, and none of its dependencies are still pending
 // (i.e. every depends-on row points to a closed/cancelled task). Both queries share this single
 // `NOT EXISTS` deps check so readiness logic lives in exactly one place — change it once.
+//
+// The inner NOT EXISTS requires the depended-on task to actually EXIST and be closed/cancelled — a
+// dangling edge (its target was deleted, or never existed — the store now rejects new ones, but a
+// legacy row may still be sitting in task_deps) must block readiness forever, not read as vacuously
+// satisfied. A plain `JOIN tasks dt` would silently drop a dangling edge from consideration instead,
+// which is exactly how a typo'd dependency used to let a task start early.
 const READY_DEPS_CLEAR = `NOT EXISTS (
-  SELECT 1 FROM task_deps d JOIN tasks dt ON dt.id = d.depends_on_id
-  WHERE d.task_id = t.id AND dt.status NOT IN ('closed', 'cancelled')
+  SELECT 1 FROM task_deps d
+  WHERE d.task_id = t.id
+    AND NOT EXISTS (SELECT 1 FROM tasks dt WHERE dt.id = d.depends_on_id AND dt.status IN ('closed', 'cancelled'))
 )`;
 
 export class Readiness {
