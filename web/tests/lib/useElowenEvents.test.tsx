@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useElowenEvents } from '../../lib/useElowenEvents';
@@ -106,5 +106,17 @@ describe('useElowenEvents', () => {
     es.readyState = 0; // CONNECTING — browser will retry on its own
     es.onerror?.();
     expect(es.closed).toBe(false);
+  });
+
+  it('reopens the channel when the page wakes on a socket that is no longer live', async () => {
+    const { wrapper } = wrap();
+    renderHook(() => useElowenEvents(), { wrapper });
+    const es = FakeES.last;
+    es.readyState = FakeES.CLOSED; // iOS tore it down while the page was frozen
+
+    act(() => { window.dispatchEvent(new Event('pageshow')); });
+
+    await waitFor(() => expect(FakeES.last).not.toBe(es));
+    expect(es.closed).toBe(true); // the dead one is not left dangling
   });
 });

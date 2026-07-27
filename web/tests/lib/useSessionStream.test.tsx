@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { useSessionStream } from '../../lib/useSessionStream';
 
 class FakeES {
@@ -31,15 +31,18 @@ describe('useSessionStream', () => {
     expect(es.closed).toBe(true);
   });
 
-  // A CLOSED error stops the retry loop (close the source); a transient drop is left to the browser's
+  // A CLOSED error closes the source and retries it with backoff; a transient drop is left to the browser's
   // native auto-reconnect. Auth is never touched here — the session cookie is httpOnly and a real
   // expiry is handled by the regular request path, not this stream.
-  it('closes the source on a CLOSED error', () => {
+  it('closes and reopens the source on a CLOSED error', async () => {
     renderHook(() => useSessionStream('elowen-A'));
     const es = FakeES.last;
     es.readyState = FakeES.CLOSED;
-    es.onerror?.();
+    act(() => es.onerror?.());
     expect(es.closed).toBe(true);
+    // Every frame is a full pane snapshot, so the reopened stream replaces the view instead of appending
+    // to it — the pane cannot be doubled by a reconnect.
+    await waitFor(() => expect(FakeES.last).not.toBe(es), { timeout: 3_000 });
   });
   it('leaves the source open on a transient (non-CLOSED) error', () => {
     renderHook(() => useSessionStream('elowen-A'));
@@ -47,5 +50,15 @@ describe('useSessionStream', () => {
     es.readyState = 0;
     es.onerror?.();
     expect(es.closed).toBe(false);
+  });
+  it('reopens the stream when the page wakes up on a socket that is no longer live', async () => {
+    renderHook(() => useSessionStream('elowen-A'));
+    const es = FakeES.last;
+    es.readyState = FakeES.CLOSED;
+
+    act(() => { window.dispatchEvent(new Event('pageshow')); });
+
+    await waitFor(() => expect(FakeES.last).not.toBe(es));
+    expect(FakeES.last.url).toContain('/sessions/elowen-A/stream');
   });
 });

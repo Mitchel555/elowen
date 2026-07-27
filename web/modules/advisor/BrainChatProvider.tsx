@@ -6,10 +6,13 @@ import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
-import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainProject, BrainStatus, BrainUsage, BrainWorkMode, McpServerStatus, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
-import { fromHistory, prependHistory, reduce, upsertCard, type ChatTurn, type TranscriptEvent } from '../../lib/transcript';
+import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
+import { fromHistory, fromSnapshot, prependHistory, reduce, upsertCard, type ChatTurn, type TranscriptEvent } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
+import { subscribeRevive, STALE_HIDE_MS } from '../../lib/useRevive';
+import { createReconnectController, type ReconnectController } from '../../lib/reconnect';
+import { startStreamWatchdog, REVIVE_SILENCE_LIMIT_MS } from '../../lib/streamWatchdog';
 import {
   BRAIN_COMPOSE_EVENT,
   BRAIN_OPEN_EVENT,
@@ -32,6 +35,9 @@ const WORK_MODES: readonly BrainWorkMode[] = ['build', 'plan', 'workflow'];
 /** What approving a submitted plan sends, verbatim from the CLI's plan follow-up (src/cli/chat/flows.ts)
  *  so both surfaces hand the model the same sentence. Model-facing, hence not translated. */
 const IMPLEMENT_PLAN_PROMPT = 'Implement the plan you proposed above.';
+
+/** How long a freshly opened stream may go without its guaranteed snapshot frame before it is retried. */
+const SNAPSHOT_TIMEOUT_MS = 15_000;
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -247,10 +253,32 @@ function useBrainChatController(): BrainChatValue {
   const esRef = useRef<EventSource | null>(null);
   /** ensureAttached idempotency: once true the stream stays live for the tab's life. */
   const attachedRef = useRef(false);
+  /** One stop beacon per unload. Cleared again if the page turns out to come back (see the revive hook). */
+  const stopSentRef = useRef(false);
+  /** The last snapshot arrived with a truncated run journal: part of the STILL RUNNING turn was dropped by
+   *  the bounded buffer. Durable history only becomes authoritative once the turn settles, so the refetch
+   *  waits for the terminal event rather than replacing a live turn with a half-written one. */
+  const truncatedPendingRef = useRef(false);
+  /** When the stream last delivered anything — an event or the daemon's heartbeat. The silence watchdog and
+   *  the wake-up path both read it off the wall clock, because a frozen page runs no timers. */
+  const lastFrameAtRef = useRef(0);
+  /** Fires when a stream opened but its guaranteed first frame never arrived. */
+  const snapshotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The ONE way back onto a dropped stream. A phone unlock triggers the wake-up, the watchdog and often a
+   *  server error frame at once; without a single controller each would mint its own generation and race. */
+  const reconnectRef = useRef<ReconnectController | null>(null);
 
   const nextGeneration = (): number => (genRef.current += 1);
   const binding = (): BrainBinding => buildBinding(boundSessionRef.current, boundGenRef.current, clientId());
   const bumpFocus = (): void => setFocusNonce((n) => n + 1);
+  // Created on first use and kept in a ref, so the whole tab shares ONE controller across re-renders. It
+  // always reconnects through `connectRef`, i.e. the freshest closure, never the one captured when the
+  // recovery path was registered. A failed attempt is rethrown on purpose: that is what makes the
+  // controller back off and try again instead of leaving the chat dead until the user reloads.
+  const reconnect = (): ReconnectController => (reconnectRef.current ??= createReconnectController(async () => {
+    try { await connectRef.current(); }
+    catch (e) { setReady(true); throw e; }
+  }));
 
   // The newest page bootstraps the transcript; older pages lazy-load on scroll-up. A full refetch (compaction
   // / model-switch markers) re-runs this, which correctly RESETS the lazy-load window to the tail — the
@@ -263,6 +291,16 @@ function useBrainChatController(): BrainChatValue {
     setTurns(fromHistory(page.items).turns);
     historyCursorRef.current = page.nextBefore;
     setHasMoreHistory(page.hasMore);
+  };
+
+  // A snapshot whose run journal had overflowed left the transcript possibly missing part of that turn.
+  // At the terminal boundary (idle, or an error frame ending a turn that never settled) the durable
+  // history is authoritative again, so replace the view from it — the alternative is a silently
+  // inconsistent transcript no later event would ever correct.
+  const repairTruncatedHistory = (): void => {
+    if (!truncatedPendingRef.current) return;
+    truncatedPendingRef.current = false;
+    void loadHistory(genRef.current).catch(() => { /* transcript refetch is best-effort */ });
   };
 
   // Fetch the next older page and prepend it. Guarded against concurrent runs (a fast scroll fires scroll
@@ -298,20 +336,67 @@ function useBrainChatController(): BrainChatValue {
     setCards([]); // and any cards from the previous conversation
     setQueued([]); // and any pending mid-turn queue from the previous conversation
     const generation = nextGeneration();
+    const previousSession = boundSessionRef.current;
     const started = await elowenClient.brainStart(opts, { client: clientId(), generation });
     if (generation !== genRef.current) return; // a newer connect/switch superseded this one
     // Commit the binding only when still current (out-of-order A/B switch guard, mirror BrainClient :168).
     boundSessionRef.current = started.sessionId;
     boundGenRef.current = generation;
-    await loadHistory(generation);
-    if (generation !== genRef.current) return;
+    // The stream's snapshot frame hydrates the transcript (see the `snapshot` listener), so there is no
+    // history fetch here. The view is cleared up front only when what it currently shows does NOT belong to
+    // the conversation being connected — another conversation, or a read-only preview of a foreign session.
+    // A plain reconnect keeps its turns on screen until the frame replaces them, with no blank flash.
+    if (readOnly || (previousSession && previousSession !== started.sessionId)) setTurns([]);
     const st = await elowenClient.brainStatus(boundSessionRef.current).catch(() => null);
     if (generation !== genRef.current) return;
     if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); if (st.pendingAsk) setAsk(st.pendingAsk); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
     // The identity rides purely as query params — native EventSource cannot set headers, and the daemon
     // parses session/client/generation off the URL (tapping the bound conversation, not the active pointer).
-    const params = new URLSearchParams({ session: boundSessionRef.current, client: clientId(), generation: String(boundGenRef.current) });
+    // `snapshot=1` makes the FIRST frame the hydration: the newest history page plus the running turn's
+    // tail, atomic on one server tick. It is what closes the gap a phone lock opens — a native EventSource
+    // reconnect replays nothing, and pairing a separate history fetch with this frame would double every
+    // steered 'you' bubble, since the server withholds exactly those rows from `history` to replay them as
+    // ordering markers in `events`.
+    // `heartbeat=1` upgrades the daemon's keep-alive comment to a named frame: SSE comment lines never
+    // reach an EventSource, so without it a stream that silently died is indistinguishable from an idle one.
+    const params = new URLSearchParams({
+      session: boundSessionRef.current, client: clientId(), generation: String(boundGenRef.current),
+      snapshot: '1', history: String(HISTORY_PAGE), heartbeat: '1',
+    });
     const es = new EventSource(`${BASE}/brain/stream?${params.toString()}`);
+    lastFrameAtRef.current = Date.now();
+    // With `snapshot=1` the first frame is guaranteed, so "the stream opened" finally means "data arrived".
+    // If it does not, the connection is broken in a way EventSource will not report — retry it.
+    if (snapshotTimerRef.current) clearTimeout(snapshotTimerRef.current);
+    snapshotTimerRef.current = setTimeout(() => {
+      if (generation !== genRef.current) return; // a newer connect/switch already took over
+      es.close();
+      reconnect().retry();
+    }, SNAPSHOT_TIMEOUT_MS);
+    // The heartbeat carries nothing: its only job is to prove the channel is still alive to the watchdog.
+    es.addEventListener('heartbeat', () => { lastFrameAtRef.current = Date.now(); });
+    es.addEventListener('snapshot', (e) => {
+      lastFrameAtRef.current = Date.now();
+      if (snapshotTimerRef.current) { clearTimeout(snapshotTimerRef.current); snapshotTimerRef.current = null; }
+      reconnect().succeeded(); // a delivered first frame is the only proof the reconnect worked
+      const snap = JSON.parse((e as MessageEvent).data) as BrainStreamSnapshotFrame;
+      if (generation !== genRef.current) return; // a newer connect/switch already took over
+      // An idle rollover this stream never saw retargeted the binding server-side; follow it, or the
+      // lazy-load and every send would keep naming the retired conversation.
+      if (snap.sessionId && snap.sessionId !== boundSessionRef.current) {
+        boundSessionRef.current = snap.sessionId;
+        setActiveSessionId(snap.sessionId);
+      }
+      historyEpochRef.current++; // the frame REPLACES the transcript — discard any older page in flight
+      historyCursorRef.current = snap.nextBefore ?? null;
+      setHasMoreHistory(snap.hasMore ?? false);
+      setTurns(fromSnapshot(snap).turns);
+      const terminal = snap.events.some((event) => event.type === 'idle' || event.type === 'error');
+      // The journal keeps its terminal event until the next run starts, so an unsettled tail means a turn
+      // really is in flight — that is what revives the thinking indicator after a reconnect.
+      setBusy(!terminal && snap.events.length > 0);
+      truncatedPendingRef.current = !terminal && snap.truncated === true;
+    });
     es.addEventListener('text', (e) => {
       const { delta } = JSON.parse((e as MessageEvent).data) as { delta: string };
       setNotice(''); // first answer text clears any transient runtime notice
@@ -342,10 +427,8 @@ function useBrainChatController(): BrainChatValue {
       // spinner stops. `busy` alone leaves the turn marked streaming, and a reconnect that never succeeds
       // would then spin forever. A successful reconnect refetches history and replaces this line.
       setTurns((cur) => fold(cur, { type: 'error', message }));
-      setTimeout(() => {
-        if (generation !== genRef.current) return; // a newer connect/switch already took over
-        void connect().then(() => setNotice('')).catch(() => setReady(true));
-      }, 2000);
+      repairTruncatedHistory(); // a turn that died without settling is still a truncated transcript
+      reconnect().retry();
     });
     // Idle rollover: the server continued the just-sent message in a FRESH conversation (the previous one
     // sat idle past the cutoff). REBIND to the replacement WITHOUT bumping the generation (mirror
@@ -458,6 +541,7 @@ function useBrainChatController(): BrainChatValue {
       setNotice(''); // turn settled → drop any transient runtime line
       setAsk(null); // a settled turn can't still be waiting on a question
       setTurns((cur) => fold(cur, { type: 'idle' })); // finalize the streaming turn (parity with the CLI fold)
+      repairTruncatedHistory();
       try {
         const { usage: u } = JSON.parse((e as MessageEvent).data) as { usage?: BrainUsage };
         if (u) setUsage(u);
@@ -515,6 +599,7 @@ function useBrainChatController(): BrainChatValue {
   // generation discards any in-flight connect so it can't clobber the read-only view.
   const openReadOnly = async (sessionId: string): Promise<void> => {
     esRef.current?.close();
+    esRef.current = null; // no live stream here — and nothing for the silence watchdog to revive
     nextGeneration();
     setAsk(null); setCards([]); setBusy(false); setNotice('');
     setReadOnly(sessionId);
@@ -656,6 +741,8 @@ function useBrainChatController(): BrainChatValue {
 
   // Keep the live event handlers pointed at the freshest closures (state like readOnly / t) without
   // re-registering the window listeners on every render.
+  const connectRef = useRef<() => Promise<void>>(async () => {});
+  connectRef.current = () => connect();
   const onOpenRef = useRef<(req: BrainOpenRequest | undefined) => void>(() => {});
   onOpenRef.current = (req) => {
     // If this is the first open (nothing mounted yet), ensureAttached boots WITH the pending request.
@@ -692,22 +779,58 @@ function useBrainChatController(): BrainChatValue {
     };
   }, []);
 
-  // Detach-unless-last on tab close: abort THIS client's run and dispose the live session only when it is
-  // the final attachment. Only a genuine unload (pagehide) fires it — a tab switch or a plain SSE blip
-  // must NOT stop the session, so the streaming turn survives. A missed beacon just leaves an orphan live
-  // session, which Fáze 0 accepts (idle-rollover / restart reaps it).
+  // Release this client's binding when the tab really goes away. TWO independent locks keep a phone lock
+  // from being read as a close: `persisted` is set when the page is only FROZEN into the bfcache (the iOS
+  // screen lock), and the beacon that does go out carries `detachOnly`, so the daemon releases the binding
+  // but refuses to tear down a session with work in flight. The second lock matters because an open
+  // WebSocket (the terminal) makes the page bfcache-ineligible, and iOS then reports `persisted: false`
+  // for the very same lock. The abandoned runtime is collected by the daemon's idle reaper.
   useEffect(() => {
-    const onPageHide = () => {
-      if (!attachedRef.current || !boundSessionRef.current) return;
-      elowenClient.brainSessionStop({ session: boundSessionRef.current, client: clientId(), generation: genRef.current });
+    const onPageHide = (e: Event) => {
+      if ((e as PageTransitionEvent).persisted) return; // frozen, not closed — the page is coming back
+      if (stopSentRef.current || !attachedRef.current || !boundSessionRef.current) return;
+      stopSentRef.current = true;
+      elowenClient.brainSessionStop({ session: boundSessionRef.current, client: clientId(), generation: genRef.current, detachOnly: true });
     };
     window.addEventListener('pagehide', onPageHide);
     return () => window.removeEventListener('pagehide', onPageHide);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Waking up (unlock, tab return, bfcache restore, network back) must ACTIVELY recover the stream: the
+  // native EventSource reconnect only reopens the same URL, still carrying the generation the daemon has
+  // tombstoned, and it never refetches the history written while we were away. A full connect() mints a
+  // new generation — the only legitimate way to clear that tombstone — and reloads the transcript.
+  useEffect(() => subscribeRevive(({ hiddenMs }) => {
+    stopSentRef.current = false; // the page came back, so a LATER real close must still be able to send
+    if (!attachedRef.current) return;
+    // The watchdog cannot have run while the page slept — its timers were frozen — so the staleness is
+    // decided here from the wall clock. A momentary hide over a stream that is still being fed needs
+    // nothing; anything longer, or any silence past the wake limit, may have lost frames.
+    const silentMs = Date.now() - lastFrameAtRef.current;
+    if (hiddenMs <= STALE_HIDE_MS && silentMs <= REVIVE_SILENCE_LIMIT_MS && esRef.current?.readyState === EventSource.OPEN) return;
+    reconnect().now();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
+
+  // A dropped SSE connection can sit in readyState OPEN forever with nothing arriving on it — no error, no
+  // close. The daemon's named heartbeat makes that state observable: silence past the limit means dead.
+  useEffect(() => startStreamWatchdog({
+    lastFrameAt: () => lastFrameAtRef.current,
+    onSilent: () => {
+      if (!attachedRef.current || !esRef.current) return;
+      esRef.current.close();
+      reconnect().now();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
+
   // Tear the stream down when the whole provider unmounts (app teardown), matching today's cleanup.
-  useEffect(() => () => esRef.current?.close(), []);
+  useEffect(() => () => {
+    reconnectRef.current?.stop();
+    if (snapshotTimerRef.current) clearTimeout(snapshotTimerRef.current);
+    esRef.current?.close();
+  }, []);
 
   return {
     turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,

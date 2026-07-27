@@ -107,6 +107,23 @@ export type BrainMessage = BrainMessageView;
  *  null once the oldest turn has been loaded, which is also when `hasMore` is false. */
 export interface BrainMessagePage { items: BrainMessage[]; hasMore: boolean; nextBefore: number | null }
 
+/** The chat stream's first frame (`?snapshot=1`): the newest page of durable history plus the current
+ *  run's not-yet-durable tail, captured on one event-loop tick. Mirror of the daemon's `BrainStreamSnapshot`
+ *  (src/brain/session/liveEventReplay.ts), narrowed to what the web reads — the tail is kept as bare tagged
+ *  frames because it also carries out-of-band events the transcript fold has no case for. */
+export type BrainStreamTailEvent = { type: string } & Record<string, unknown>;
+export interface BrainStreamSnapshotFrame {
+  history: BrainMessage[];
+  events: BrainStreamTailEvent[];
+  /** The session actually tapped — differs from the requested one after an idle rollover the dead stream
+   *  never saw. */
+  sessionId?: string;
+  /** The live journal dropped part of the unsettled run; durable history must be refetched once it settles. */
+  truncated?: true;
+  hasMore?: boolean;
+  nextBefore?: number | null;
+}
+
 /** AskUserQuestion wire shapes (mirror src/brain/events.ts). The `ask` SSE event carries `id` +
  *  `questions`; the client POSTs `answers` back to /brain/answer. */
 interface AskOption { label: string; description?: string; preview?: string }

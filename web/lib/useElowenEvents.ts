@@ -3,6 +3,8 @@ import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { QUERY_KEYS } from './queries';
 import { BASE } from './elowenClient';
+import { createReconnectController } from './reconnect';
+import { subscribeRevive, STALE_HIDE_MS } from './useRevive';
 import type { DerivedSignal, PlanJob } from './types';
 
 export interface ReviewEvent { missionId: string; taskId: string; approve: boolean; rationale: string }
@@ -20,9 +22,6 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
   onReviewRef.current = opts?.onReview;
   useEffect(() => {
     let es: EventSource | null = null;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let attempt = 0;       // reconnect backoff step; reset to 0 on a healthy open
-    let stopped = false;   // set on unmount so a pending retry never reopens after teardown
 
     const makeHandler = (invalidate: () => void) => (e: MessageEvent) => {
       try { JSON.parse(e.data); } catch { return; } // skip malformed, keep the stream alive
@@ -104,10 +103,10 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
     // Same-origin SSE through the /api proxy; the httpOnly session cookie rides along via credentials.
     // Reconnects itself with capped exponential backoff so a daemon restart / proxy timeout recovers on
     // its own — load-bearing now that cache freshness relies on SSE invalidation, not a polling fallback.
-    const connect = () => {
-      if (stopped) return;
+    function connect(): void {
+      es?.close();
       es = new EventSource(`${BASE}/events`, { withCredentials: true });
-      es.onopen = () => { attempt = 0; }; // a healthy stream resets the backoff
+      es.onopen = () => reconnect.succeeded(); // a healthy stream resets the backoff
 
       // Native EventSource auto-reconnects on transport drops (browser-managed retry per HTML spec); we
       // only act on a terminal failure (readyState CLOSED) where it has given up — then retry ourselves
@@ -118,9 +117,7 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
       es.onerror = () => {
         if (!es || es.readyState !== EventSource.CLOSED) return;
         es.close();
-        const delay = Math.min(30_000, 1000 * 2 ** attempt); // 1s, 2s, 4s … capped at 30s
-        attempt += 1;
-        retryTimer = setTimeout(connect, delay);
+        reconnect.retry();
       };
 
       es.addEventListener('task', taskHandler);
@@ -132,9 +129,18 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
       es.addEventListener('message', messageHandler);
       es.addEventListener('ask', askHandler);
       es.addEventListener('change', changeHandler);
-    };
-    connect();
+    }
 
-    return () => { stopped = true; if (retryTimer) clearTimeout(retryTimer); es?.close(); };
+    const reconnect = createReconnectController(connect);
+    connect();
+    // A phone that was locked comes back with a socket the browser may still call OPEN while nothing can
+    // ever arrive on it again. Reopening is cheap here (the frames only invalidate caches), so a wake-up
+    // after anything longer than a glance gets a fresh channel rather than a plausible-looking dead one.
+    const offRevive = subscribeRevive(({ hiddenMs }) => {
+      if (es?.readyState === EventSource.OPEN && hiddenMs <= STALE_HIDE_MS) return;
+      reconnect.now();
+    });
+
+    return () => { offRevive(); reconnect.stop(); es?.close(); };
   }, [qc]);
 }

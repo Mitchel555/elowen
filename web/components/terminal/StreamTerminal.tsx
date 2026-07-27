@@ -104,6 +104,11 @@ export function StreamTerminal({ name }: { name: string }) {
   // ready, so without this the PTY never learns the real terminal size and the content can't fill the panel.
   useEffect(() => { if (stream.status === 'open') syncSizeRef.current(); }, [stream.status]);
 
+  // A dropped socket is followed by a fresh `tmux attach`, which repaints the whole pane. Clear the screen
+  // first so the repaint can only ever replace what is displayed, never land underneath it — the pane's own
+  // scrollback lives in tmux and is still reachable there.
+  useEffect(() => { if (stream.status === 'reconnecting') termRef.current?.reset(); }, [stream.status]);
+
   if (fallback) return <Terminal name={name} interactive />;
   return <div ref={ref} className="elowen-terminal h-full w-full overflow-hidden border border-border bg-bg" />;
 }

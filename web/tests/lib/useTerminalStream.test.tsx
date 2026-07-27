@@ -56,11 +56,37 @@ describe('useTerminalStream', () => {
     expect(result.current.status).toBe('unsupported');
   });
 
-  it('treats a normal close as closed', async () => {
+  it('treats a close BEFORE the first open as unsupported (no WS-capable proxy in front of the daemon)', async () => {
     const { result } = renderHook(() => useTerminalStream('elowen-advisor-1', true, () => {}));
     await waitFor(() => expect(FakeWS.last).toBeDefined());
-    act(() => FakeWS.last.onclose?.({ code: 1000 }));
-    expect(result.current.status).toBe('closed');
+    act(() => FakeWS.last.onclose?.({ code: 1006 }));
+    expect(result.current.status).toBe('unsupported');
+  });
+
+  it('reconnects with a fresh ticket after a healthy socket drops', async () => {
+    const { result } = renderHook(() => useTerminalStream('elowen-advisor-1', true, () => {}));
+    await waitFor(() => expect(FakeWS.last).toBeDefined());
+    act(() => FakeWS.last.onopen?.());
+    const first = FakeWS.last;
+
+    act(() => first.onclose?.({ code: 1000 })); // the phone locked and the socket died
+    expect(result.current.status).toBe('reconnecting');
+    // A ticket is single use, so the recovery has to mint a new one — the socket cannot just reopen.
+    await waitFor(() => expect(wsTicket).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    await waitFor(() => expect(FakeWS.last).not.toBe(first));
+    act(() => FakeWS.last.onopen?.());
+    expect(result.current.status).toBe('open');
+  });
+
+  it('reopens the socket when the page wakes up', async () => {
+    renderHook(() => useTerminalStream('elowen-advisor-1', true, () => {}));
+    await waitFor(() => expect(FakeWS.last).toBeDefined());
+    act(() => FakeWS.last.onopen?.());
+    FakeWS.last.readyState = 3; // iOS tore the socket down while the page was frozen
+
+    act(() => { window.dispatchEvent(new Event('pageshow')); });
+
+    await waitFor(() => expect(wsTicket).toHaveBeenCalledTimes(2));
   });
 
   it('falls back to unsupported when the ticket mint fails', async () => {

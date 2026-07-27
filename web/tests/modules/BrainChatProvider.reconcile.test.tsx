@@ -78,30 +78,35 @@ beforeEach(() => {
 describe('BrainChatProvider model-switch reconcile', () => {
   it('switches the model without tearing down / reopening the SSE, and the pushed session-event refetches history once with no duplicate turn', async () => {
     renderChat();
-    // Initial connect: exactly one stream, one history load.
+    // Initial connect: exactly one stream and NO history fetch — the stream's snapshot frame hydrates.
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    await waitFor(() => expect(brainMessagesPage).toHaveBeenCalledTimes(1));
+    expect(brainMessagesPage).not.toHaveBeenCalled();
 
     // A model switch: it hits POST /brain/model but opens NO new EventSource and does NOT reload history
     // (the reconcile arrives over the still-open stream).
     await act(async () => { fireEvent.click(screen.getByText('switch')); });
     await waitFor(() => expect(brainSetModel).toHaveBeenCalledTimes(1));
     expect(FakeEventSource.instances).toHaveLength(1); // no SSE teardown/reopen — invariant 1
-    expect(brainMessagesPage).toHaveBeenCalledTimes(1); // runModel never reloads history
+    expect(brainMessagesPage).not.toHaveBeenCalled(); // runModel never reloads history
 
     // The daemon pushes the reconcile on the SAME stream: exactly one history refetch, and no fabricated
     // 'user' turn (session-event is not a transcript reset).
     await act(async () => { FakeEventSource.instances[0]!.emit('session-event', '{}'); });
-    await waitFor(() => expect(brainMessagesPage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(brainMessagesPage).toHaveBeenCalledTimes(1));
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(screen.getByTestId('turns').textContent).toBe('0'); // no duplicate/extra turn
   });
 
   it('an idle rollover (session event) closes the lazy-load window so a stale cursor cannot re-page the new session', async () => {
-    // Boot with an open window (more history remains, cursor mid-stream).
-    brainMessagesPage.mockResolvedValueOnce({ items: [{ id: 'm1', role: 'user', text: 'q' }], hasMore: true, nextBefore: 1 });
+    // Boot with an open window (more history remains, cursor mid-stream) — the snapshot frame carries it.
     renderChat();
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    await act(async () => {
+      FakeEventSource.instances[0]!.emit('snapshot', JSON.stringify({
+        type: 'snapshot', sessionId: 'brain-1', history: [{ id: 'm1', role: 'user', text: 'q' }],
+        events: [], hasMore: true, nextBefore: 1,
+      }));
+    });
     await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('yes'));
     const pagedCalls = brainMessagesPage.mock.calls.length;
 

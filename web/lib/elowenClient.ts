@@ -238,8 +238,10 @@ export const elowenClient = {
   /** Stop the streaming turn for ALL watchers of the bound conversation (the explicit Stop intent). */
   brainAbort: (session?: string) => req<{ ok: boolean }>('/brain/abort', json(session ? { session } : {})),
   /** Detach-unless-last on tab close: abort this client's run + dispose the live session only when it is
-   *  the final attachment. Fire-and-forget via sendBeacon (keepalive fetch fallback) so it survives unload. */
-  brainSessionStop: (payload: { session?: string; client: string; generation?: number }): void => {
+   *  the final attachment. `detachOnly` (what the web always sends) additionally forbids tearing down a
+   *  session with work in flight — a closing tab must never kill a running agent. Fire-and-forget via
+   *  sendBeacon (keepalive fetch fallback) so it survives unload. */
+  brainSessionStop: (payload: { session?: string; client: string; generation?: number; detachOnly?: boolean }): void => {
     const url = `${BASE}/brain/session/stop`;
     const body = JSON.stringify(payload);
     if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {

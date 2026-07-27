@@ -1,4 +1,4 @@
-import type { BrainCard, BrainMessage, BrainWorkflowView, ToolOutputView } from './types';
+import type { BrainCard, BrainMessage, BrainStreamTailEvent, BrainWorkflowView, ToolOutputView } from './types';
 
 /** The workflow DAG a `WorkflowStart` call is running — the shared wire shape (BrainWorkflowView),
  *  attached to its tool item by call id exactly as `sub` is for a delegate call. */
@@ -185,6 +185,28 @@ export function prependHistory(view: ChatView, older: BrainMessage[]): ChatView 
   const prepend = fromHistory(older).turns.filter((turn) => !turn.id || !known.has(turn.id));
   if (prepend.length === 0) return view;
   return { ...view, turns: [...prepend, ...view.turns] };
+}
+
+/** The event types {@link reduce} folds. A stream snapshot replays the WHOLE live tail, which also carries
+ *  out-of-band frames (card / ask / queue / step) the transcript fold has no case for — this narrows the
+ *  wire events down to the ones it understands instead of casting the rest through it. */
+const TRANSCRIPT_EVENT_TYPES = new Set<TranscriptEvent['type']>([
+  'text', 'reasoning', 'tool', 'tool_progress', 'diff', 'tool_output', 'tool_end',
+  'notice', 'session', 'subagent', 'user', 'idle', 'error',
+]);
+
+export function isTranscriptEvent(event: BrainStreamTailEvent): event is BrainStreamTailEvent & TranscriptEvent {
+  return TRANSCRIPT_EVENT_TYPES.has(event.type as TranscriptEvent['type']);
+}
+
+/** Rebuild the entire view from a stream snapshot frame: the durable history plus the current run's
+ *  not-yet-durable tail, folded in order. REPLACES the view — it is never merged into what is already
+ *  rendered, because the server withholds from `history` exactly those user rows it replays as ordering
+ *  markers in `events`. Merging (or pairing this with a separate history fetch) doubles those bubbles. */
+export function fromSnapshot(snapshot: { history: BrainMessage[]; events: BrainStreamTailEvent[] }): ChatView {
+  let view = fromHistory(snapshot.history);
+  for (const event of snapshot.events) if (isTranscriptEvent(event)) view = reduce(view, event);
+  return view;
 }
 
 /** Fold one brain event into the view. Pure: returns a new ChatView, never mutates the input. */

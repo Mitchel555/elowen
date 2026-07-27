@@ -1,6 +1,48 @@
 import { describe, expect, it } from 'vitest';
-import { emptyView, fromHistory, groupToolItems, prependHistory, reduce } from '../../lib/transcript';
+import { emptyView, fromHistory, fromSnapshot, groupToolItems, prependHistory, reduce } from '../../lib/transcript';
 import type { ToolItem } from '../../lib/transcript';
+
+describe('web fromSnapshot: a reconnect frame rebuilds the whole transcript', () => {
+  /** What the server sends after the phone comes back: the durable prefix WITHOUT the steered row it
+   *  replays as an ordering marker, plus the unsettled tail of the run. */
+  const frame = {
+    history: [
+      { role: 'user' as const, text: 'first', id: 'm1' },
+      { role: 'assistant' as const, text: 'answer', id: 'm2' },
+    ],
+    events: [
+      { type: 'user', text: 'steer now' },
+      { type: 'text', delta: 'working' },
+    ],
+  };
+
+  it('does not double a message that was already on screen before the drop', () => {
+    let live = fromHistory(frame.history);
+    live = reduce(live, { type: 'user', text: 'steer now' });
+    live = reduce(live, { type: 'text', delta: 'working' });
+    expect(live.turns.filter((turn) => turn.role === 'you')).toHaveLength(2);
+
+    const rebuilt = fromSnapshot(frame);
+    expect(rebuilt.turns.map((turn) => (turn.role === 'you' ? `you:${turn.text}` : turn.role)))
+      .toEqual(['you:first', 'elowen', 'you:steer now', 'elowen']);
+    expect(rebuilt.thinking).toBe(true); // no terminal event in the tail — the turn is still running
+  });
+
+  it('ignores out-of-band frames in the replayed tail and settles on a terminal one', () => {
+    const view = fromSnapshot({
+      history: frame.history,
+      events: [
+        { type: 'card', card: { id: 'c1', title: 'x' } },
+        { type: 'text', delta: 'done thinking' },
+        { type: 'queue', items: [] },
+        { type: 'idle' },
+      ],
+    });
+    expect(view.thinking).toBe(false);
+    const last = view.turns.at(-1);
+    expect(last).toMatchObject({ role: 'elowen', streaming: false });
+  });
+});
 
 describe('web groupToolItems: collapse consecutive same-tool pills', () => {
   it('folds a run of the same bare tool into one group with the latest detail and a count', () => {

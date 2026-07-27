@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 import { onUnhandledRequest } from '../../msw';
@@ -22,6 +22,9 @@ class FakeES {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
   }
   close() {}
+  emit(type: string, data: unknown) {
+    act(() => { for (const fn of this.listeners.get(type) ?? []) fn({ data: JSON.stringify(data) }); });
+  }
 }
 
 // A history page carrying every new-parity row: a model-switch event marker, then an assistant turn whose
@@ -60,6 +63,11 @@ describe('BrainChatSurface renders the daemon-parity rows without crashing', () 
   it('shows a session-change event marker and a tool-output notes suffix from seeded history', async () => {
     const { wrapper: Wrapper } = createWrapper();
     render(<Wrapper><ToastProvider><BrainChatProvider><BrainChat /></BrainChatProvider></ToastProvider></Wrapper>);
+    // The transcript is hydrated by the stream's snapshot frame, not by a separate history fetch.
+    await waitFor(() => expect(FakeES.instances.length).toBe(1));
+    FakeES.instances[0]!.emit('snapshot', {
+      type: 'snapshot', sessionId: 'brain-1', history: HISTORY, events: [], hasMore: false, nextBefore: null,
+    });
     // The event row renders its label (eventLabel mirror of the daemon sessionEventLabel).
     expect(await screen.findByText('model → gpt-5.4')).toBeInTheDocument();
     // The tool-output notes suffix renders under the output body.
