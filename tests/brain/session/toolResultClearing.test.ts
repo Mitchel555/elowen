@@ -1,6 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   CLEAR_MIN_BYTES,
+  SPILL_MAX_RESULT_BYTES,
+  SPILL_PREVIEW_CHARS,
   applyToolResultClearing,
   cacheColdAtTurnStart,
   cacheTtlMs,
@@ -9,8 +14,12 @@ import {
   idleThresholdMs,
   installToolResultClearing,
   selectClearableToolResults,
+  selectOversizedToolResults,
   toolResultSpillPath,
 } from '../../../src/brain/session/toolResultClearing.js';
+import { toolResultSpillDir } from '../../../src/shared/paths.js';
+import { openDb } from '../../../src/store/db.js';
+import { BrainStore } from '../../../src/store/brainStore.js';
 import type { PiAgentMessage } from '../../../src/brain/session/historyImageStripping.js';
 
 const T0 = 1_000_000;
@@ -37,6 +46,8 @@ const toolResult = (toolCallId: string, text: string, timestamp: number): PiAgen
 
 const big = 'x'.repeat(CLEAR_MIN_BYTES + 100);
 const small = 'y'.repeat(100);
+/** Over the size trigger by one byte — every character is 1 byte, so length is the byte count. */
+const oversized = `HEAD-${'z'.repeat(SPILL_MAX_RESULT_BYTES - 3)}-TAIL`;
 
 interface Harness {
   session: { agent: { transformContext?: (m: PiAgentMessage[], s?: AbortSignal) => Promise<PiAgentMessage[]> } };
@@ -92,6 +103,29 @@ describe('selectClearableToolResults / clearingCutIndex', () => {
       user('one', T0), toolResult('old-big', big, T0 + 1), user('two', T0 + 2), user('three', T0 + 3),
     ];
     expect(selectClearableToolResults(messages, new Set(['old-big']))).toEqual([]);
+  });
+});
+
+describe('selectOversizedToolResults', () => {
+  it('selects only current-run results above the size trigger, with an id and not already latched', () => {
+    const messages: PiAgentMessage[] = [
+      user('one', T0),
+      toolResult('older-oversized', oversized, T0 + 1), // already sent to the provider — time gate's job
+      user('two', T0 + 2),
+      toolResult('fresh-big-but-under', big, T0 + 3),
+      toolResult('fresh-oversized', oversized, T0 + 4),
+      { role: 'toolResult', toolCallId: '', toolName: 'Bash', content: [{ type: 'text', text: oversized }], isError: false, timestamp: T0 + 5 } as PiAgentMessage,
+    ];
+    const selected = selectOversizedToolResults(messages, new Set());
+    expect(selected.map((s) => s.toolCallId)).toEqual(['fresh-oversized']);
+    expect(selected[0]?.bytes).toBe(oversized.length);
+    expect(selectOversizedToolResults(messages, new Set(['fresh-oversized']))).toEqual([]);
+  });
+
+  it('does not select a result exactly at the threshold', () => {
+    const exact = 'z'.repeat(SPILL_MAX_RESULT_BYTES);
+    const messages: PiAgentMessage[] = [user('one', T0), toolResult('exact', exact, T0 + 1)];
+    expect(selectOversizedToolResults(messages, new Set())).toEqual([]);
   });
 });
 
@@ -328,6 +362,73 @@ describe('installToolResultClearing', () => {
     expect(calls).toEqual(['previous']);
     expect(JSON.stringify(result[1])).toContain('Older tool result cleared');
     expect(() => installToolResultClearing({}, 'sess-1')).not.toThrow();
+  });
+
+  it('leaves a fresh result under the size trigger completely alone', async () => {
+    const h = harness();
+    const underBy1 = 'z'.repeat(SPILL_MAX_RESULT_BYTES);
+    const messages: PiAgentMessage[] = [
+      user('one', T0), assistant('calling', T0 + 1_000),
+      toolResult('fresh-big', big, T0 + 2_000), toolResult('fresh-at-limit', underBy1, T0 + 3_000),
+    ];
+    const result = await h.transform(messages);
+    expect(result).toBe(messages);
+    expect(h.writes.size).toBe(0);
+  });
+
+  it('spills an oversized fresh result on delivery, with a path and a bounded preview', async () => {
+    const h = harness();
+    const messages: PiAgentMessage[] = [
+      user('one', T0), assistant('calling', T0 + 1_000), toolResult('fresh', oversized, T0 + 2_000),
+    ];
+    // No idle gap anywhere: the size trigger fires regardless of the cache gate.
+    const result = await h.transform(messages);
+    const path = toolResultSpillPath('/tmp/spill/sess-1', 'fresh');
+    expect(h.writes.get(path)).toBe(oversized); // the FULL text reaches disk, tail included
+    const text = (result[2] as { content: { type: string; text?: string }[] }).content[0]?.text ?? '';
+    expect(text).toBe(clearedToolResultPlaceholder(path, oversized.length, oversized.slice(0, SPILL_PREVIEW_CHARS)));
+    expect(text).toContain(path);
+    expect(text).toContain('HEAD-zzz'); // the preview is really the head of the content
+    expect(text).not.toContain('-TAIL'); // …and it is bounded: the end only exists on disk
+    expect(text.length).toBeLessThan(SPILL_PREVIEW_CHARS + 500);
+    expect(result[0]).toBe(messages[0]); // nothing else in the turn is touched
+    expect(result[1]).toBe(messages[1]);
+  });
+
+  it('a size-spilled result stays spilled with byte-identical placeholder bytes', async () => {
+    const h = harness();
+    const turn1: PiAgentMessage[] = [
+      user('one', T0), assistant('calling', T0 + 1_000), toolResult('fresh', oversized, T0 + 2_000),
+    ];
+    const first = await h.transform(turn1);
+    const turn2: PiAgentMessage[] = [...turn1, assistant('done', T0 + 3_000), user('two', T0 + 4_000)];
+    const second = await h.transform(turn2);
+    expect(JSON.stringify(second.slice(0, first.length))).toBe(JSON.stringify(first));
+    expect(h.writes.size).toBe(1); // latched: no second write, no second spill file
+  });
+
+  it('spills into the real per-session dir, and the existing session cleanup removes it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'elowen-size-spill-'));
+    vi.stubEnv('HOME', home);
+    try {
+      // Real fs writer and real spill dir — no injection, so this exercises the path the daemon uses.
+      const session: Harness['session'] = { agent: {} };
+      installToolResultClearing(session, 'sess-fs', { idleMs: IDLE });
+      const messages: PiAgentMessage[] = [user('one', T0), toolResult('fresh', oversized, T0 + 1_000)];
+      const result = await session.agent.transformContext!(messages);
+      const text = (result[1] as { content: { type: string; text?: string }[] }).content[0]?.text ?? '';
+      const spilled = /Full output at: (\S+) — read it/.exec(text)?.[1];
+      expect(spilled).toBe(join(toolResultSpillDir(process.env, 'sess-fs'), 'fresh.txt'));
+      expect(readFileSync(spilled!, 'utf8')).toBe(oversized);
+
+      // The spill lands inside the per-session directory the store already sweeps on delete.
+      const store = new BrainStore(openDb(':memory:'));
+      store.createSession({ id: 'sess-fs', userId: 7, model: 'm' });
+      store.deleteSession('sess-fs');
+      expect(existsSync(spilled!)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
