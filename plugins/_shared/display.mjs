@@ -33,6 +33,13 @@ export function resolveDisplaySettings(cfg = {}, channelState = {}) {
   };
 }
 
+/** Whether a turn needs a live-event stream: anything that renders tool activity, a live answer or
+ *  reasoning as the turn runs. False means only `ask` has to be handled, and no live message is opened.
+ *  WhatsApp deliberately gates on its own `streaming` config instead and does not use this. */
+export function observesLiveEvents(display, cfg) {
+  return display.toolActivity !== 'off' || display.answerMode === 'live' || cfg.showReasoning === true;
+}
+
 /** Apply optional `/display` values. `default` clears only that conversation's override; omitted axes are kept. */
 export function updateDisplayOverrides(current = {}, values = {}) {
   const next = { ...current };
