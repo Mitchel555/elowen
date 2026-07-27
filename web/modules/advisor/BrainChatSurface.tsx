@@ -436,7 +436,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     usage, lineCfg, currentModel, subagents, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
     ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
-    workMode, implementPlan, renameOpen, closeRename, renameSession,
+    workMode, implementPlan, planSubmitting, renameOpen, closeRename, renameSession,
   } = c;
 
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -772,7 +772,8 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             <button
               type="button"
               onClick={implementPlan}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 py-1 text-accent transition-colors hover:bg-accent/25"
+              disabled={planSubmitting}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 py-1 text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
             >
               <PlayCircle size={12} aria-hidden />
               {t.brainChat.planImplement}

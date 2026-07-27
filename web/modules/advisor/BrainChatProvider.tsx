@@ -158,6 +158,8 @@ export interface BrainChatValue {
   /** Approve a submitted plan: switch to build mode and send the CLI's implement prompt. Without it a web
    *  user who entered plan mode would have no way to act on the plan they just got. */
   implementPlan: () => void;
+  /** True while an approval is in flight — the button disables itself instead of firing twice. */
+  planSubmitting: boolean;
   /** The `/rename` dialog's open state (the surface renders the modal; the controller owns the write). */
   renameOpen: boolean;
   closeRename: () => void;
@@ -391,14 +393,27 @@ function useBrainChatController(): BrainChatValue {
       es.close();
       reconnect().retry();
     }, SNAPSHOT_TIMEOUT_MS);
+    // EVERY frame must prove it belongs to the stream that is still live before it touches anything.
+    // `close()` does not unschedule a callback the browser already dispatched, so a frame from a superseded
+    // conversation can still run after the next one is open — and these handlers share refs with it. Left
+    // unguarded, a dead stream folded its text into the new conversation and, through `esRef`, closed the
+    // live stream outright; its snapshot also cleared the NEW stream's watchdog timer and reported the
+    // reconnect as succeeded. Registration is synchronous up to `esRef.current = es` below, so no frame can
+    // arrive before that assignment and the identity check is safe. `esRef` is null while a read-only
+    // session is open, where dropping the frame is exactly right.
+    const onFrame = (type: string, handler: (e: Event) => void): void => {
+      es.addEventListener(type, (e) => {
+        if (generation !== genRef.current || es !== esRef.current) return;
+        handler(e);
+      });
+    };
     // The heartbeat carries nothing: its only job is to prove the channel is still alive to the watchdog.
-    es.addEventListener('heartbeat', () => { lastFrameAtRef.current = Date.now(); });
-    es.addEventListener('snapshot', (e) => {
+    onFrame('heartbeat', () => { lastFrameAtRef.current = Date.now(); });
+    onFrame('snapshot', (e) => {
       lastFrameAtRef.current = Date.now();
       if (snapshotTimerRef.current) { clearTimeout(snapshotTimerRef.current); snapshotTimerRef.current = null; }
       reconnect().succeeded(); // a delivered first frame is the only proof the reconnect worked
       const snap = JSON.parse((e as MessageEvent).data) as BrainStreamSnapshotFrame;
-      if (generation !== genRef.current) return; // a newer connect/switch already took over
       // An idle rollover this stream never saw retargeted the binding server-side; follow it, or the
       // lazy-load and every send would keep naming the retired conversation.
       if (snap.sessionId && snap.sessionId !== boundSessionRef.current) {
@@ -425,17 +440,17 @@ function useBrainChatController(): BrainChatValue {
       if (Object.prototype.hasOwnProperty.call(snap, 'goal')) setGoal(snap.goal ?? null);
       truncatedPendingRef.current = streaming && snap.truncated === true;
     });
-    es.addEventListener('text', (e) => {
+    onFrame('text', (e) => {
       const { delta } = JSON.parse((e as MessageEvent).data) as { delta: string };
       setNotice(''); // first answer text clears any transient runtime notice
       applyEvent({ type: 'text', delta });
     });
     // Runtime notices (retry/compaction) — mirror the CLI: show while the phase runs, clear on done.
-    es.addEventListener('notice', (e) => {
+    onFrame('notice', (e) => {
       const { message, done } = JSON.parse((e as MessageEvent).data) as { message: string; done?: boolean };
       setNotice(done ? '' : message);
     });
-    es.addEventListener('error', (e) => {
+    onFrame('error', (e) => {
       // EventSource fires generic 'error' events on connection drops with no payload — those are the
       // browser's own auto-reconnect, leave them be (a plain SSE blip must let the turn survive). Only the
       // brain's error frames carry a JSON body.
@@ -448,7 +463,9 @@ function useBrainChatController(): BrainChatValue {
       // the full connect (which re-runs brainStart and revives the session) shortly. A superseded
       // reconnect (a newer switch bumped the generation meanwhile) is discarded so it can't revive a dead
       // session's view. If the brain is still down, brainStart throws and the retry stops — no tight loop.
-      esRef.current?.close();
+      // Close THIS stream by identity, never `esRef.current`: a frame from a superseded stream would
+      // otherwise tear down whichever stream happens to be live now.
+      es.close();
       setNotice(message);
       // Folding the error ENDS the streaming turn — the tool row's spinner stops and, since the indicator
       // is the fold's own output, so does the thinking indicator. A successful reconnect refetches history
@@ -462,7 +479,7 @@ function useBrainChatController(): BrainChatValue {
     // BrainClient.rebind) so a reconnect after rollover taps the new conversation. Every client — sender
     // and passive alike — resets to the empty fresh conversation and rebuilds from the stream, because the
     // daemon re-emits the triggering message as a `user` event and streams its reply.
-    es.addEventListener('session', (e) => {
+    onFrame('session', (e) => {
       const ev = JSON.parse((e as MessageEvent).data) as { sessionId: string };
       boundSessionRef.current = ev.sessionId; // rebind (generation preserved)
       setActiveSessionId(ev.sessionId); // the conversation rolled over — the panel's local/foreign split moves with it
@@ -478,23 +495,23 @@ function useBrainChatController(): BrainChatValue {
       setNotice(t.brainChat.freshConversation);
       void qc.invalidateQueries({ queryKey: ['brain-sessions'] });
     });
-    es.addEventListener('reasoning', (e) => {
+    onFrame('reasoning', (e) => {
       const { delta } = JSON.parse((e as MessageEvent).data) as { delta: string };
       applyEvent({ type: 'reasoning', delta });
     });
-    es.addEventListener('tool', (e) => {
+    onFrame('tool', (e) => {
       // Keep `id` (the toolCallId): it keys the live `tool_progress` tail onto its in-progress tool pill.
       const { name, detail, icon, id } = JSON.parse((e as MessageEvent).data) as { name: string; detail?: string; icon?: string; id?: string };
       applyEvent({ type: 'tool', name, detail, icon, id });
     });
     // Live streamed output of a running Bash (bounded rolling tail): fold onto its tool pill by id so a
     // long build/test shows output as it runs. The stored history's final output supersedes it on reload.
-    es.addEventListener('tool_progress', (e) => {
+    onFrame('tool_progress', (e) => {
       const { id, text } = JSON.parse((e as MessageEvent).data) as { id: string; text: string };
       applyEvent({ type: 'tool_progress', id, text });
     });
     // Live sub-agent progress (delegate): fold onto its tool item so the agents table + drill-in read it.
-    es.addEventListener('subagent', (e) => {
+    onFrame('subagent', (e) => {
       const s = JSON.parse((e as MessageEvent).data) as { id: string; sessionId: string; status: 'running' | 'done' | 'error'; task: string; detail?: string; tools: number; tokens?: number; seconds: number; model?: string };
       applyEvent({ type: 'subagent', ...s });
       // The child usage is persisted before its terminal progress event. Refresh the parent status now
@@ -503,23 +520,23 @@ function useBrainChatController(): BrainChatValue {
     });
     // Whole-DAG snapshot of a running workflow. Folded onto its WorkflowStart tool row (like `subagent`),
     // which is also what makes it durable — history carries the same attachment after a reload.
-    es.addEventListener('workflow', (e) => {
+    onFrame('workflow', (e) => {
       const w = JSON.parse((e as MessageEvent).data) as { id: string; toolCallId: string; title?: string; status: WorkflowState['status']; nodes: WorkflowState['nodes'] };
       applyEvent({ type: 'workflow', ...w });
     });
     // Authoritative goal snapshot — `null` means the goal was cleared, so it is applied unconditionally.
-    es.addEventListener('goal', (e) => {
+    onFrame('goal', (e) => {
       const { goal: next } = JSON.parse((e as MessageEvent).data) as { goal: BrainGoal | null };
       setGoal(next);
     });
     // Full snapshot of the owner's background processes, pushed out of turn on every spawn/exit/kill. It
     // seeds the SAME query the process panels read (`GET /brain/processes` is their hydration path after a
     // reconnect), so the live push and the poll can never disagree about what is running.
-    es.addEventListener('process', (e) => {
+    onFrame('process', (e) => {
       const { processes } = JSON.parse((e as MessageEvent).data) as { processes: ProcessInfo[] };
       qc.setQueryData(['brain-processes'], processes);
     });
-    es.addEventListener('card', (e) => {
+    onFrame('card', (e) => {
       const { card } = JSON.parse((e as MessageEvent).data) as { card: BrainCard };
       // The terminal plugin's background-process card is rendered by ProcessPanel (API-driven, with kill +
       // output modal), not as a plain CardBlock — use it only as a signal to refresh the process list.
@@ -528,41 +545,41 @@ function useBrainChatController(): BrainChatValue {
     });
     // Full-snapshot pending mid-turn queue (messages sent while a turn streams). Server-authoritative:
     // replace wholesale — the optimistic remove must never fight an incoming snapshot.
-    es.addEventListener('queue', (e) => {
+    onFrame('queue', (e) => {
       const { items } = JSON.parse((e as MessageEvent).data) as { items: { id: string; text: string }[] };
       setQueued(items);
     });
     // The daemon's authoritative render of the user's turn (every real send — immediate or a queued
     // delivery). The composer never echoes optimistically, so THIS folds the 'you' bubble — and the fold
     // marks the turn in flight, which is what raises the thinking indicator.
-    es.addEventListener('user', (e) => {
+    onFrame('user', (e) => {
       const { text } = JSON.parse((e as MessageEvent).data) as { text: string };
       applyEvent({ type: 'user', text });
     });
     // A context compaction was persisted server-side (manual /compact or the auto-compact path): the
     // stored transcript is now a "context compacted" divider + the kept tail. Refetch so the surface
     // collapses to exactly what the model still holds. The one-line status rides the `notice` event.
-    es.addEventListener('compacted', () => {
+    onFrame('compacted', () => {
       void loadHistory(genRef.current).catch(() => { /* transcript refetch is best-effort */ });
     });
     // An owner-driven in-place session change (model switch, mode, reasoning, rename): the server persisted
     // a display marker + respawned the session under the SAME id, so the stream stays open. Refetch history
     // (renders the "model → X" marker + any drained partial turn) and status (model/usage label), WITHOUT
     // reconnecting — this is exactly what keeps every attached client on one stream through a model switch.
-    es.addEventListener('session-event', () => {
+    onFrame('session-event', () => {
       void loadHistory(genRef.current).catch(() => { /* transcript refetch is best-effort */ });
       void elowenClient.brainStatus(boundSessionRef.current)
         .then((st) => { if (generation === genRef.current) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); } })
         .catch(() => { /* status refresh is best-effort */ });
     });
-    es.addEventListener('diff', (e) => {
+    onFrame('diff', (e) => {
       const { diff } = JSON.parse((e as MessageEvent).data) as { diff: string };
       applyEvent({ type: 'diff', diff });
     });
     // The final result block of a completed tool call (Bash output, a Read preview, …): fold it onto its
     // tool pill by id so a finished tool's stand-alone output renders LIVE, not only after a history reload
     // (parity with `diff`; the reducer's `tool_output` case supersedes any live `tool_progress` tail).
-    es.addEventListener('tool_output', (e) => {
+    onFrame('tool_output', (e) => {
       // A submitted plan rides this event too when the result carries a displayable block (a hook-annotated
       // ExitPlanMode), so it is threaded through exactly as on `tool_end`.
       const { output, id, plan } = JSON.parse((e as MessageEvent).data) as { output: ToolOutputView; id?: string; plan?: string };
@@ -572,16 +589,16 @@ function useBrainChatController(): BrainChatValue {
     // addressed to the model and withheld from the transcript, so this is the submitted plan's only live
     // event — without it the plan panel appears solely after a history reload. A plain `tool_end` is a
     // no-op in the reducer.
-    es.addEventListener('tool_end', (e) => {
+    onFrame('tool_end', (e) => {
       const { id, plan } = JSON.parse((e as MessageEvent).data) as { id?: string; plan?: string };
       applyEvent({ type: 'tool_end', id, plan });
     });
     // AskUserQuestion parked the turn — render the inline choice card until the user answers.
-    es.addEventListener('ask', (e) => {
+    onFrame('ask', (e) => {
       const { id, questions, kind } = JSON.parse((e as MessageEvent).data) as { id: string; questions: AskQuestion[]; kind?: 'approval' };
       setAsk({ id, questions, kind });
     });
-    es.addEventListener('idle', (e) => {
+    onFrame('idle', (e) => {
       setNotice(''); // turn settled → drop any transient runtime line
       // A parked question is NOT cleared here. Only the daemon knows whether one is still waiting, and it
       // says so on the snapshot frame; guessing it from a turn boundary is what made the picker vanish
@@ -728,10 +745,19 @@ function useBrainChatController(): BrainChatValue {
     setWorkMode(mode);
     toast(`${t.brainChat.modeSwitched} ${t.brainChat.workMode[mode]}`, 'ok');
   };
+  const [planSubmitting, setPlanSubmitting] = useState(false);
+  const planInFlightRef = useRef(false);
   const implementPlan = (): void => {
-    setWorkMode('build');
+    // The mode follows the daemon's ACCEPTANCE, never the click. Switching to `build` up front removed the
+    // decision row — the only control that can approve the plan — the instant a send failed, leaving the
+    // plan parked with no way to act on it and only a toast to explain why.
+    if (planInFlightRef.current) return; // a ref, not the state: two fast clicks would race a setState
+    planInFlightRef.current = true;
+    setPlanSubmitting(true);
     void elowenClient.brainSend(IMPLEMENT_PLAN_PROMPT, undefined, undefined, binding(), 'build')
-      .catch(() => toast(t.brainChat.sendError, 'error'));
+      .then(() => setWorkMode('build'))
+      .catch(() => toast(t.brainChat.sendError, 'error'))
+      .finally(() => { planInFlightRef.current = false; setPlanSubmitting(false); });
   };
   const renameSession = async (title: string): Promise<void> => {
     setRenameOpen(false);
@@ -893,7 +919,7 @@ function useBrainChatController(): BrainChatValue {
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
     showThoughts: thoughts === 'show',
     setShowThoughts: (v) => setThoughts(v ? 'show' : 'hide'),
-    workMode, setWorkMode: runMode, implementPlan,
+    workMode, setWorkMode: runMode, implementPlan, planSubmitting,
     renameOpen, closeRename: () => setRenameOpen(false), renameSession,
     commands, runSlash: (cmd) => void runSlash(cmd),
     slash: { items: slashItems, open: slashItems.length > 0, modelOptsOpen: modelSlashOpen, clearModelOpts: () => setModelSlashOpen(false) },

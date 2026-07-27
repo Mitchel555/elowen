@@ -146,4 +146,34 @@ describe('web slash commands: work mode + rename', () => {
     await waitFor(() => expect(screen.queryByTestId('chat-plan-decision')).toBeNull());
     expect(screen.queryByTestId('chat-work-mode')).toBeNull();
   });
+
+  it('keeps the plan decision available when approving it fails', async () => {
+    // Leaving plan mode up front removed this row the moment a send failed, so the plan was still waiting
+    // but the only button that could approve it was gone. The mode must follow the daemon's acceptance.
+    server.use(http.post('*/api/brain/send', () => HttpResponse.json({ error: 'nope' }, { status: 500 })));
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBe(1));
+    await runSlash('plan');
+    const es = FakeES.instances[0]!;
+    act(() => {
+      es.emit({ type: 'tool', name: 'ExitPlanMode', id: 'call-1' });
+      es.emit({ type: 'tool_end', id: 'call-1', plan: '1. read\n2. write' });
+      es.emit({ type: 'idle' });
+    });
+    const row = await screen.findByTestId('chat-plan-decision');
+    await act(async () => { fireEvent.click(row.querySelector('button')!); });
+
+    // Still approvable, and still in plan mode — the failed attempt changed nothing.
+    expect(await screen.findByTestId('chat-plan-decision')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-work-mode')).toBeInTheDocument();
+
+    // And a retry works once the daemon accepts it.
+    server.use(http.post('*/api/brain/send', async ({ request }) => {
+      sendBodies.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json({ ok: true }, { status: 202 });
+    }));
+    await act(async () => { fireEvent.click(screen.getByTestId('chat-plan-decision').querySelector('button')!); });
+    await waitFor(() => expect(sendBodies.length).toBe(1));
+    await waitFor(() => expect(screen.queryByTestId('chat-plan-decision')).toBeNull());
+  });
 });
