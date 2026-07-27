@@ -119,15 +119,19 @@ export class TurnContextBuilder {
       autoSaveMemory: memSettings?.autoSave !== false,
       run: <T>(operation: (prompt: string) => Promise<T>): Promise<T> => runWithPolicy(live.policy, async () => {
         let prompt = request.text;
-        // Assigned by the drain below and called only once the prompt has actually reached the provider.
+        // Assigned by the drains below and called only once the prompt has actually reached the provider —
+        // an error or abort before that must leave the notice/orientation pending, not consumed.
         let commitOrientation = (): void => {};
+        let commitSessionNotices = (): void => {};
         if (!isPromptCommand(request.text, live.session)) {
           const turnContext = live.turnContext();
           // One-shot notice of any session-state change (model/mode/rename/reasoning) since the last reply —
-          // drained + cleared here so the agent is told exactly once. Rides under the user message like the
-          // mode reminder (volatile per-turn context, cache-friendly), so it is composed only for a real
-          // prompt turn — never on the prompt-command path, which would drain it without showing it.
-          const sessionChanges = drainSessionNotices(live);
+          // prepared here so the agent is told exactly once, committed (see below) only after delivery.
+          // Rides under the user message like the mode reminder (volatile per-turn context, cache-friendly),
+          // so it is composed only for a real prompt turn — never on the prompt-command path, which would
+          // drain it without showing it.
+          const { block: sessionChanges, commit: commitNotices } = drainSessionNotices(live);
+          commitSessionNotices = commitNotices;
           // A compaction just destroyed the messages holding the agreed plan and every trace of which
           // files were open. Re-orient the model exactly once, next to the other one-shot notices.
           const { block: postCompaction, compacted, commit } = drainPostCompactionContext(this.d.store, live);
@@ -169,6 +173,7 @@ export class TurnContextBuilder {
         }
         const result = await operation(prompt);
         commitOrientation();
+        commitSessionNotices();
         return result;
       }, scope),
     };

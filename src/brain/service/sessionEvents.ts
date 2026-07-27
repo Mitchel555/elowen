@@ -75,17 +75,35 @@ export function flushReasoningMarker(store: BrainStore, live: LiveBrain): void {
   recordSessionEvent(store, live.sessionId, live, 'reasoning', live.thinkingLabels[pending.level] ?? pending.level);
 }
 
-/** Drain the queued session-change notices into a single model-facing <system-reminder>, clearing the
- *  buffer (one-shot). Returns '' when nothing is queued. Placed under the user message like the mode
- *  reminder — it is volatile per-turn context the agent should adapt to, not durable history. */
-export function drainSessionNotices(live: LiveBrain): string {
+/** Prepare the queued session-change notices into a single model-facing <system-reminder>, WITHOUT
+ *  clearing the buffer yet — the same prepare/commit contract as `drainPostCompactionContext`. Returns
+ *  `{ block: '', commit: noop }` when nothing is queued. Placed under the user message like the mode
+ *  reminder — it is volatile per-turn context the agent should adapt to, not durable history.
+ *
+ *  Clearing the buffer here (as the previous one-shot version did) looked equivalent to clearing it once
+ *  the prompt was actually handed to the provider, and it was not: the scheduling directory, template
+ *  rendering, the client-generation check or the prompt call itself can still fail AFTER the buffer is
+ *  emptied, leaving the visible marker in the transcript while the model is never told about the change.
+ *  `commit` removes only the prefix captured HERE, so a notice queued concurrently — while this turn's
+ *  prompt is still being assembled or in flight — survives and is delivered on a later turn instead of
+ *  being silently dropped by a blind clear. */
+export function drainSessionNotices(live: LiveBrain): { block: string; commit: () => void } {
   const notices = live.pendingSessionNotices;
-  if (!notices || notices.length === 0) return '';
-  live.pendingSessionNotices = [];
-  const rows = notices.map((n) => `- The user ${n}.`).join('\n');
-  return '<system-reminder>\n<session-changes>\n'
+  if (!notices || notices.length === 0) return { block: '', commit: () => {} };
+  const captured = notices.length;
+  const rows = notices.slice(0, captured).map((n) => `- The user ${n}.`).join('\n');
+  const block = '<system-reminder>\n<session-changes>\n'
     + `${rows}\n</session-changes>\n`
     + '<instruction>These settings changed since your last reply. Work under the new settings from now on '
     + '(e.g. a new work mode or model) and do not re-confirm them with the user.</instruction>\n'
     + '</system-reminder>';
+  // Committed only once the prompt carrying this block has actually reached the provider (see the
+  // caller). Removing just the captured prefix — not clearing the whole array — means a notice pushed by
+  // a concurrent settings change in that window is not lost with it.
+  const commit = (): void => {
+    const current = live.pendingSessionNotices;
+    if (!current) return;
+    live.pendingSessionNotices = current.length > captured ? current.slice(captured) : [];
+  };
+  return { block, commit };
 }

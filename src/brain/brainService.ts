@@ -492,6 +492,24 @@ export class BrainService {
       : this.attachments.attachedCount(sessionId) === 0;
   }
 
+  /** Whether `sessionId` is safe for `bindChannelContext` to re-key onto a new id right now — the
+   *  review's smallest safe fix for the `/context` move (Tier 2 #13): refuse the bind rather than migrate
+   *  every sidecar map that is keyed on the OLD id (attachments, live children, processRegistry, the goal
+   *  loop). Fails closed like `sessionIsIdle` below, but deliberately does NOT take its "`!live` → idle"
+   *  shortcut: a background delegate, a workflow node or a goal continuation can all still be keyed on
+   *  this id with no LiveBrain currently spawned in memory, and re-keying it would orphan them exactly as
+   *  it would if the session were live. */
+  private isBindQuiescent(sessionId: string): boolean {
+    if (this.sessions.get(sessionId)?.session.isStreaming) return false;
+    // An attached client stream (web dock, CLI tap/subscribe) or a mid-boot start claim both read/write
+    // through the OLD id; neither follows a bare `reassignSession`, so either would go dark or misfire.
+    if (this.attachments.attachedCount(sessionId) !== 0 || this.attachments.hasPendingStartClaim(sessionId)) return false;
+    if (this.sessions.hasActiveChildren(sessionId) || this.sparedChildSessionIds(sessionId).size > 0) return false;
+    if (processRegistry.runningJobCountForSession(sessionId) > 0) return false;
+    if (this.d.store.getGoal(sessionId)?.status === 'active') return false;
+    return true;
+  }
+
   /** Whether this conversation has WORK in flight — a running turn, anything queued behind it, a parked
    *  question, a still-running child/workflow/background job, or an armed goal continuation. Deliberately
    *  FAIL-CLOSED: every uncertain signal counts as busy, because the two callers (a detach-only stop and
@@ -916,6 +934,13 @@ export class BrainService {
       // bind of an already-moved id finds nothing here (the id ceased to exist on the first bind).
       const row = this.d.store.getSession(chosenSessionId);
       if (!row || row.user_id !== callerUserId) throw new Error('unknown session');
+      // Smallest safe fix for the /context move (Tier 2 #13): durable bindings move with reassignSession
+      // below, but the in-memory maps (attachments, live children, processes, the goal loop) do not, so a
+      // session with real work still keyed on its OLD id would be orphaned by the move — refuse it
+      // outright rather than migrate every one of those maps (judged needlessly risky).
+      if (!this.isBindQuiescent(chosenSessionId)) {
+        throw new Error('this conversation has work in progress and cannot be moved into a channel right now');
+      }
       // A bound `elowen chat` terminal was launched with `--session <chosenSessionId>`; the re-key below
       // moves that id out from under it, so its tmux would resume a gone id and the next sweep would reap
       // it as 'conversationGone' — killing the live pane and revoking its token. Tear it down cleanly
@@ -1467,13 +1492,15 @@ export class BrainService {
 
   /** A user changed their active personality profile: respawn so the new persona chunk lands in the
    *  system prompt. The user's own owner-chat session restarts (per-user, safe), AND every channel
-   *  session is dropped so a Discord room respawns on the owner's fresh 'discord' persona — the channel
-   *  session is owner-anchored and shared, so it must not keep the stale persona. History rehydrates from
-   *  SQLite on respawn. Rare operation; serialized on its own key so it never interleaves a reload. */
+   *  session THIS USER OWNS is reset so a Discord room respawns on the owner's fresh 'discord' persona —
+   *  the channel session is owner-anchored and shared, so it must not keep the stale persona. Scoped by
+   *  owner: persona is resolved per channel-session owner at spawn, so a global reset would interrupt
+   *  every OTHER user's channels for a setting that never touched them. History rehydrates from SQLite on
+   *  respawn. Rare operation; serialized on its own key so it never interleaves a reload. */
   async applyPersonalityChange(userId: number): Promise<void> {
     await this.serial(`personality-${userId}`, async () => {
       await this.restart(userId);
-      this.sessions.channelDisposeAll();
+      await this.channelService.resetChannels('personality changed', (ownerUserId) => ownerUserId === userId);
     });
   }
 
@@ -1499,7 +1526,7 @@ export class BrainService {
       for (const [id] of this.sessions.liveEntries()) {
         if (!activeIds.includes(id)) this.sessions.dispose(id);
       }
-      this.sessions.channelDisposeAll();
+      await this.channelService.resetChannels('plugins reloaded');
       // Platform adapters were built by the old registry — disconnect them and start the fresh set.
       this.platforms.stopAll();
       await this.platforms.startAll();

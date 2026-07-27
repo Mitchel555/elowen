@@ -561,7 +561,7 @@ export class ChannelSessionService {
     await this.abortTree(channelId, new Set());
   }
 
-  private async abortTree(channelId: string, seen: Set<string>): Promise<void> {
+  private async abortTree(channelId: string, seen: Set<string>, reason = 'aborted'): Promise<void> {
     if (seen.has(channelId)) return;
     seen.add(channelId);
     const sessionId = channelSessionId(channelId);
@@ -581,18 +581,42 @@ export class ChannelSessionService {
       // prompt settles and throws, so the delegate plugin records ERROR rather than DONE/empty output.
       if (this.d.registry.isActiveChild(ch.sessionId)) this.d.registry.requestPendingAbort(ch.sessionId);
       for (const child of this.d.registry.childrenOf(ch.sessionId)) {
-        if (isChannelSession(child)) await this.abortTree(channelIdOf(child), seen);
+        if (isChannelSession(child)) await this.abortTree(channelIdOf(child), seen, reason);
       }
       this.d.registry.clearChildren(ch.sessionId);
       // Match owner-chat stop semantics: queued steering belongs to the interrupted turn and a parked
       // AskUserQuestion must reject before PI aborts, otherwise `/stop` can leave prompt() hanging.
       ch.session.clearQueue();
       clearDeliveredUserEchoes(ch);
-      this.d.elicitation?.cancelForSession(ch.sessionId, 'aborted');
+      this.d.elicitation?.cancelForSession(ch.sessionId, reason);
       await abortSessionWork(ch.session).catch(() => { /* nothing in flight / already settling */ });
     } finally {
       this.d.registry.endParentAbort(sessionId);
     }
+  }
+
+  /** Reset some/all channel sessions the SAFE way — unlike the old synchronous `channelDisposeAll()`
+   *  (which held no per-channel lock, aborted no turn and waited for nothing), this fences out new
+   *  delegated work, cancels any workflow DAG, releases a parked question and aborts an in-flight turn —
+   *  the exact same tree teardown a platform `/stop` does — BEFORE disposing, and only under the
+   *  channel's own lock so a concurrent send() cannot straddle the teardown.
+   *
+   *  `ownerFilter` narrows the reset to the channel sessions owned by one user (a personality change,
+   *  which must not touch anyone else's room); omitted, every channel is reset (a plugin reload, which
+   *  genuinely is global). */
+  async resetChannels(reason: string, ownerFilter?: (ownerUserId: number) => boolean): Promise<void> {
+    const targets = this.d.registry.channelEntries()
+      .filter(([, ch]) => !ownerFilter || ownerFilter(this.d.store.getSession(ch.sessionId)?.user_id ?? -1))
+      .map(([channelId]) => channelId);
+    await Promise.all(targets.map(async (channelId) => {
+      await this.abortTree(channelId, new Set(), reason);
+      // The abort above interrupts any turn but does not itself remove the record — a concurrent send()
+      // that is already mid-turn is still running its callback under the channel lock, so queue the
+      // actual dispose behind it instead of tearing the record down out from under that turn.
+      await this.d.registry.withLock(channelSessionId(channelId), async () => {
+        this.d.registry.channelDispose(channelId);
+      });
+    }));
   }
 
   /** Compact a channel session's context (a platform `/compact` slash), serialized against its turns so

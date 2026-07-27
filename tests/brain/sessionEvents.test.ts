@@ -145,20 +145,54 @@ describe('scheduleReasoningMarker', () => {
   });
 });
 
+// Prepare/commit (finding 7): the buffer must NOT be cleared until the caller confirms the prompt
+// carrying the block actually reached the provider — the same contract drainPostCompactionContext uses.
+// Clearing eagerly (the old one-shot shape) meant a failure between the drain and the prompt call left
+// the visible marker in the transcript while the model was never told, and a notice queued concurrently
+// (a settings save racing this turn's prompt assembly) was silently dropped.
 describe('drainSessionNotices', () => {
-  it('emits one <system-reminder> for the queued notices, then clears the buffer (one-shot)', () => {
+  it('emits one <system-reminder> for the queued notices and leaves the buffer untouched until commit', () => {
     const live = { pendingSessionNotices: ['switched the work mode to Workflow', 'set your reasoning effort to high'] } as unknown as LiveBrain;
-    const reminder = drainSessionNotices(live);
+    const { block, commit } = drainSessionNotices(live);
 
-    expect(reminder).toContain('<session-changes>');
-    expect(reminder).toContain('- The user switched the work mode to Workflow.');
-    expect(reminder).toContain('- The user set your reasoning effort to high.');
-    expect(reminder).toContain('<instruction>');
+    expect(block).toContain('<session-changes>');
+    expect(block).toContain('- The user switched the work mode to Workflow.');
+    expect(block).toContain('- The user set your reasoning effort to high.');
+    expect(block).toContain('<instruction>');
+    // Not cleared yet — a caller that never commits (a failed prompt) must see it again next time.
+    expect(live.pendingSessionNotices).toEqual(['switched the work mode to Workflow', 'set your reasoning effort to high']);
+
+    commit();
     expect(live.pendingSessionNotices).toEqual([]);
-    expect(drainSessionNotices(live)).toBe('');
   });
 
-  it('returns an empty string when nothing is queued', () => {
-    expect(drainSessionNotices({} as unknown as LiveBrain)).toBe('');
+  it('returns an empty block and a no-op commit when nothing is queued', () => {
+    const live = {} as unknown as LiveBrain;
+    const { block, commit } = drainSessionNotices(live);
+    expect(block).toBe('');
+    expect(() => commit()).not.toThrow();
+  });
+
+  it('a failed/aborted turn that never commits leaves the notices intact for the next attempt', () => {
+    const live = { pendingSessionNotices: ['switched your model to anthropic/claude'] } as unknown as LiveBrain;
+    const { block } = drainSessionNotices(live); // prepared for a prompt that then throws — commit is never called
+    expect(block).toContain('switched your model to anthropic/claude');
+
+    const second = drainSessionNotices(live); // the next attempt sees the SAME notice, not an empty buffer
+    expect(second.block).toContain('switched your model to anthropic/claude');
+    second.commit();
+    expect(live.pendingSessionNotices).toEqual([]);
+  });
+
+  it('commit removes only the captured prefix — a notice queued concurrently (while the prompt is in flight) survives', () => {
+    const live = { pendingSessionNotices: ['switched your model to anthropic/claude'] } as unknown as LiveBrain;
+    const { commit } = drainSessionNotices(live);
+    // A concurrent settings save queues a second notice AFTER this turn's snapshot was captured but
+    // before its prompt delivery is confirmed.
+    live.pendingSessionNotices!.push('switched the work mode to Plan');
+
+    commit();
+
+    expect(live.pendingSessionNotices).toEqual(['switched the work mode to Plan']);
   });
 });
