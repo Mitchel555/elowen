@@ -131,20 +131,25 @@ export function createRouteContext(d: ServerDeps): RouteContext {
   // it needs no extra entry here.
   const agentProjects = (): Set<number> => {
     const ids = new Set<number>();
-    for (const t of d.tasks.list({ status: 'in_progress' })) {
-      if (t.labels.some((l) => l.startsWith('agent:'))) ids.add(t.project_id);
+    // Single pass: one `list()` covers all three groups (in-progress agent tasks, active missions'
+    // epics, still-open epics of agent-labelled children) via an in-memory id→task map, instead of a
+    // `get()` per mission and per agent child — the query count no longer grows with historical tasks.
+    const all = d.tasks.list();
+    const byId = new Map(all.map((t) => [t.id, t]));
+    for (const t of all) {
+      if (t.status === 'in_progress' && t.labels.some((l) => l.startsWith('agent:'))) ids.add(t.project_id);
     }
     for (const m of d.missions.active()) {
-      const epic = d.tasks.get(m.epic_id);
+      const epic = byId.get(m.epic_id);
       if (epic) ids.add(epic.project_id);
     }
     // The final-phase agent closes the epic itself right after closing its own leaf — by then its task
     // is no longer in_progress and the mission has disengaged, so neither set above covers it and the
     // epic-close would 403. A still-open epic that hosted agent work keeps its project reachable to that
     // agent until the epic is actually closed (then it drops out again). No permanent widening.
-    for (const t of d.tasks.list()) {
+    for (const t of all) {
       if (!t.parent_id || !t.labels.some((l) => l.startsWith('agent:'))) continue;
-      const epic = d.tasks.get(t.parent_id);
+      const epic = byId.get(t.parent_id);
       if (epic && epic.status !== 'closed' && epic.status !== 'cancelled') ids.add(epic.project_id);
     }
     return ids;
@@ -272,12 +277,18 @@ export function createRouteContext(d: ServerDeps): RouteContext {
     (missionId ? d.missionGit?.worktreeFor(missionId) : undefined) ?? pathFor(projectId);
 
   // Resolve the target project for a create/plan request. Defaults to the daemon's home project;
-  // any other project_id must exist and be accessible to the caller.
+  // every id — the home project included — must be accessible to the caller. `d.project` is only ever
+  // a source of project DATA for the home id (it may have no row in a legacy single-project daemon);
+  // it must never be used as an authorisation shortcut, or a user/agent confined elsewhere could
+  // create tasks and plans in it.
   const resolveTarget = (c: AccessCtx, projectId?: number):
     | { project: { id: number; path: string } }
     | { error: string; status: 403 | 404 } => {
     const pid = projectId ?? d.project.id;
-    if (pid === d.project.id) return { project: d.project };
+    if (pid === d.project.id) {
+      if (!canAccessProject(c, pid)) return { error: 'forbidden', status: 403 };
+      return { project: d.project };
+    }
     const p = d.projects?.get(pid);
     if (!p) return { error: 'project not found', status: 404 };
     if (!canAccessProject(c, p.id)) return { error: 'forbidden', status: 403 };
