@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
+import { runtimeFooter } from '../_shared/format.mjs';
 
 // `exec` runs the command through the PLATFORM default shell (/bin/sh -c on POSIX, cmd.exe /d /s /c on
 // Windows), so a job's check collector works cross-platform — hardcoding /bin/sh broke every cron on
@@ -140,17 +141,9 @@ export async function runCheck(command, logger, timeoutMs = DEFAULT_CHECK_TIMEOU
 const ok = (text) => ({ content: [{ type: 'text', text }], details: {} });
 const fail = (e) => ok(`Error: ${e instanceof Error ? e.message : String(e)}`);
 
-/** Runtime footer for a delivered cron result — `-# model · 42 %` (Discord subtext), built from the
- *  turn's idle event (model id + context fill). Empty when the turn reported no usable numbers. Mirrors
- *  the streaming reply's footer in the discord plugin so proactive cron pushes read the same. */
-export function cronFooter(idle) {
-  const parts = [];
-  const model = typeof idle?.model === 'string' ? idle.model.split('/').pop() : '';
-  if (model) parts.push(model);
-  const pct = idle?.usage?.percent;
-  if (typeof pct === 'number' && pct >= 0) parts.push(`${Math.round(pct)} %`);
-  return parts.length ? `-# ${parts.join(' · ')}` : '';
-}
+/** The subtext markup a delivered cron result's runtime footer is wrapped in. Cron pushes land on the
+ *  notification channel (Discord), so it is Discord's own subtext fence — see plugins/discord/lib/format.mjs. */
+const FOOTER_FENCE = { open: '-# ', close: '' };
 
 /** Resolve a one-shot spec — "in 20s", "in 20m", "in 2h", "at 18:30" (today, or tomorrow when past) —
  *  to an absolute run time in ms, relative to `now`. "at HH:MM" is the USER's wall clock, so it resolves in
@@ -513,7 +506,7 @@ class CronAdapter {
       // Echo the outcome to the notification channel (Discord) so it reaches the user proactively.
       // A job with nothing to say answers with a quiet marker (isQuietReply) and stays silent.
       if (trimmed && !isQuietReply(trimmed)) {
-        const footer = cronFooter(idle);
+        const footer = runtimeFooter(idle, FOOTER_FENCE);
         // `plain` jobs deliver the reply as-is (persona messages in a dedicated channel don't want
         // the "⏰ job name" banner); the footer subtext stays — it matches streamed replies.
         const header = job.plain ? '' : `⏰ **${job.name}**\n`;

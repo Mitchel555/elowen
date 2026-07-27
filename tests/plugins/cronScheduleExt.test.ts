@@ -9,7 +9,6 @@ const mod = await import(pluginPath) as {
   inHours(hours: string | undefined, now: number): boolean;
   isDue(job: Record<string, unknown>, now: number): boolean;
   isQuietReply(reply: unknown): boolean;
-  cronFooter(idle: unknown): string;
   runCheck(command: string, logger?: { warn?: (m: string) => void }): Promise<{ skip: boolean; output?: string; reason?: string }>;
 };
 
@@ -81,14 +80,6 @@ describe('cronjob schedule extensions', () => {
     expect(mod.isQuietReply('New bookings: 2')).toBe(false);
     expect(mod.isQuietReply('[SILENT] but also this')).toBe(false); // marker + content = real content
     expect(mod.isQuietReply('')).toBe(false);
-  });
-
-  it('cronFooter renders model · context% from the idle event (empty when no data)', () => {
-    expect(mod.cronFooter({ model: 'anthropic/claude-sonnet-5', usage: { percent: 41.6 } })).toBe('-# claude-sonnet-5 · 42 %');
-    expect(mod.cronFooter({ model: 'gpt-5' })).toBe('-# gpt-5');                       // percent missing → model only
-    expect(mod.cronFooter({ usage: { percent: 10 } })).toBe('-# 10 %');                // model missing → percent only
-    expect(mod.cronFooter(null)).toBe('');                                             // no idle event → no footer
-    expect(mod.cronFooter({ usage: { percent: null } })).toBe('');                     // no usable numbers
   });
 
   describe('runCheck (the cheap guard gate)', () => {

@@ -18,10 +18,14 @@ const asText = (r: { content: { text?: string }[] }) => (r.content[0] as { text:
 
 function freshDataRoot(): string { return mkdtempSync(join(tmpdir(), 'elowen-pdata-')); }
 
+/** A turn event the host forwards into the cron handler: the `session` route, plus the `idle` event the
+ *  delivered footer is built from. */
+interface CronTurnEvent { type: string; sessionId?: string; model?: string; usage?: { percent?: number | null } }
+
 /** The cron adapter's internals the tests drive directly (listen + a manual tick, no timers), plus the
  *  resolved scheduler limits (see plugins/cronjob/elowen-plugin.json's "Scheduler" config section). */
 interface CronAdapterUnderTest {
-  listen(fn: (src: SessionSource, text: string, onEvent?: (e: { type: string; sessionId?: string }) => void) => Promise<string | undefined>): void;
+  listen(fn: (src: SessionSource, text: string, onEvent?: (e: CronTurnEvent) => void) => Promise<string | undefined>): void;
   tick(): Promise<void>;
   tickMs: number;
   turnAttempts: number;
@@ -146,6 +150,50 @@ describe('cron tick — origin-bound wake-up routing', () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toContain('Error: turn blew up after the session event');
     expect(JSON.parse(readFileSync(jobsFile(dataRoot), 'utf-8'))).toEqual([]); // one-shot still consumed
+  });
+});
+
+describe('cron tick — delivered runtime footer', () => {
+  const dueJob = () => ({
+    id: 'r1', name: 'report', schedule: 'every 5m', prompt: 'do it',
+    lastRun: new Date(Date.now() - 10 * 60_000).toISOString(), createdAt: new Date().toISOString(),
+  });
+  function writeJobs(dataRoot: string, jobs: Record<string, unknown>[]): void {
+    mkdirSync(join(dataRoot, 'cronjob'), { recursive: true });
+    writeFileSync(jobsFile(dataRoot), JSON.stringify(jobs));
+  }
+
+  async function deliverWithIdle(idle: CronTurnEvent | null): Promise<string> {
+    const dataRoot = freshDataRoot();
+    const delivered: string[] = [];
+    writeJobs(dataRoot, [dueJob()]);
+    const { adapter } = await loadCron(dataRoot, async (t) => { delivered.push(t); });
+    adapter.listen(async (_src, _text, onEvent) => {
+      if (idle) onEvent?.(idle);
+      return 'the report';
+    });
+    await adapter.tick();
+    expect(delivered).toHaveLength(1);
+    return delivered[0]!;
+  }
+
+  it('appends `model · context %` as Discord subtext under the pushed result', async () => {
+    const body = await deliverWithIdle({ type: 'idle', model: 'anthropic/claude-sonnet-5', usage: { percent: 41.6 } });
+    expect(body).toContain('the report');
+    expect(body.endsWith('\n\n-# claude-sonnet-5 · 42 %')).toBe(true);
+  });
+
+  it('omits a NON-FINITE percentage instead of pushing "Infinity %"', async () => {
+    // A zero-sized context window divides out to Infinity in the runtime's accounting; `typeof Infinity`
+    // is 'number', so a mere type check would render it. The percentage must simply drop out.
+    const body = await deliverWithIdle({ type: 'idle', model: 'gpt-5', usage: { percent: Infinity } });
+    expect(body).not.toContain('Infinity');
+    expect(body.endsWith('\n\n-# gpt-5')).toBe(true);
+  });
+
+  it('posts no footer line at all when the turn reported no usable numbers', async () => {
+    expect(await deliverWithIdle(null)).toBe('⏰ **report**\nthe report');
+    expect(await deliverWithIdle({ type: 'idle', usage: { percent: null } })).toBe('⏰ **report**\nthe report');
   });
 });
 
