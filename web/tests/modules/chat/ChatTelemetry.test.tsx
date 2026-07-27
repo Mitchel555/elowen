@@ -135,6 +135,20 @@ describe('chat telemetry panel', () => {
     expect(screen.queryByTestId('telemetry-limits')).toBeNull();
   });
 
+  it('shows the mascot atop the rail, and keeps it when every section is dropped', async () => {
+    setViewport(false);
+    server.use(
+      http.get('*/api/brain/status', () => HttpResponse.json({
+        ...STATUS, project: { cwd: null, branch: null }, mcp: null, lspEnabled: undefined, usage: null,
+      })),
+      http.get('*/api/brain/rate-limits', () => HttpResponse.json(null)),
+    );
+    renderChat(<ChatView />);
+    // Even with nothing to report the rail is inhabited — the owl shows, the empty note beside it.
+    expect(await screen.findByTestId('telemetry-mascot')).toBeInTheDocument();
+    expect(screen.queryByTestId('telemetry-context')).toBeNull();
+  });
+
   it('mounts NO side column on mobile — the rail opens as a drawer from the header instead', async () => {
     setViewport(true);
     renderChat(<ChatView />);
@@ -147,6 +161,8 @@ describe('chat telemetry panel', () => {
     const drawer = await screen.findByTestId('telemetry-drawer');
     expect(drawer).toBeInTheDocument();
     expect(screen.getByTestId('telemetry-project').textContent).toContain('/var/www/elowen');
+    // The phone rail is the same living panel, not a stripped-down one: the mascot is in the drawer too.
+    expect(screen.getByTestId('telemetry-mascot')).toBeInTheDocument();
     expect(screen.queryByTestId('telemetry-column')).toBeNull();
   });
 

@@ -74,3 +74,14 @@
      compact UI zoom. Individual reading surfaces constrain their own prose where needed. */
   --content-max: none;
 }
+
+/* A phone is held at arm's length and read at a glance, so the two smallest text tokens grow on small
+   screens: 9px metadata is simply unreadable there. The utilities compile to `var(--text-tiny)` /
+   `var(--text-caption)`, so every use picks the bump up with no per-component change — and desktop, where
+   the compact scale is deliberate, is untouched. */
+@media (max-width: 767px) {
+  :root {
+    --text-tiny: 0.6875rem;    /* 9px  -> 11px */
+    --text-caption: 0.8125rem; /* 11px -> 13px */
+  }
+}

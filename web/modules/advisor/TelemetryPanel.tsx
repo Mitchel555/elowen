@@ -5,7 +5,22 @@ import { useTranslation } from '../../lib/i18n';
 import { elowenClient } from '../../lib/elowenClient';
 import { formatTokens, formatCost } from '../../lib/format';
 import { OAuthUsageRail, usageFillClass } from '../settings/OAuthUsageRail';
+import { SpatialMascot } from '../../components/ui/SpatialMascot';
 import { useBrainChat } from './BrainChatProvider';
+
+/** The owl presides over the rail the way it tops the CLI panel — and it is not decoration: it mirrors
+ *  the agent, animating while a turn runs and settling when it does not, so the rail reads as inhabited
+ *  rather than a dashboard. Kept inside the shared body so the desktop column and the mobile drawer show
+ *  the same living header. */
+function TelemetryMascot({ busy }: { busy: boolean }) {
+  return (
+    <div className="flex justify-center pt-2" data-testid="telemetry-mascot">
+      <div className="h-24 w-24">
+        <SpatialMascot state={busy ? 'saving' : 'idle'} />
+      </div>
+    </div>
+  );
+}
 
 /** A section heading: a quiet label with an optional right-aligned meta value, mirroring the CLI rail. */
 function SectionHead({ label, meta }: { label: string; meta?: string }) {
@@ -36,7 +51,7 @@ function ContextMeter({ percent }: { percent: number }) {
  *  full of dashes. Shared by the desktop column and the mobile drawer. */
 function TelemetryBody() {
   const { t } = useTranslation();
-  const { usage, telemetry, activeSessionId } = useBrainChat();
+  const { usage, telemetry, activeSessionId, busy } = useBrainChat();
   // The subscription rail changes on the scale of hours and lives on its own endpoint (the daemon keeps
   // it out of the hot status poll on purpose) — so it is fetched separately and refreshed slowly.
   const { data: limits } = useQuery({
@@ -57,12 +72,14 @@ function TelemetryBody() {
     mcpConnected.length > 0,
     telemetry.lspEnabled !== null,
   ];
-  if (!sections.some(Boolean)) {
-    return <p className="px-3 py-3 text-xs text-text-muted">{t.telemetry.empty}</p>;
-  }
 
   return (
     <div className="flex flex-col gap-4 px-3 py-3">
+      <TelemetryMascot busy={busy} />
+      {!sections.some(Boolean) ? (
+        <p className="text-xs text-text-muted">{t.telemetry.empty}</p>
+      ) : (
+        <>
       {usage ? (
         <section className="flex flex-col gap-1.5" data-testid="telemetry-context">
           <SectionHead
@@ -123,6 +140,8 @@ function TelemetryBody() {
           </p>
         </section>
       ) : null}
+        </>
+      )}
     </div>
   );
 }
@@ -161,7 +180,7 @@ export function TelemetryPanel({ variant, open = false, onClose }: {
               onClick={onClose}
               aria-label={t.telemetry.close}
               title={t.telemetry.close}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
             >
               <X size={16} aria-hidden />
             </button>
