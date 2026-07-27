@@ -4625,6 +4625,58 @@ describe('retention janitor — pending cron wake-up protection', () => {
   });
 });
 
+describe('BrainService.readSubagent (a parent recovering a stored final result)', () => {
+  const SCOPE = { admin: true, projectIds: [], owner: true, permissionBoundary: null };
+
+  async function seed(child = 'brain-ch-subagent-sub-read-1') {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId, delegatedAccess: SCOPE });
+    const sessions = (svc as unknown as {
+      sessions: { setChildRunning(parent: string, child: string, running: boolean): void };
+    }).sessions;
+    return { d, svc, sessionId, child, sessions };
+  }
+
+  it('reads its own child\'s final stored assistant text', async () => {
+    const { d, svc, sessionId, child } = await seed();
+    d.store.appendMessage({
+      id: 'assistant-final', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: [{ type: 'text', text: 'full durable report' }] },
+    });
+
+    expect(svc.readSubagent(sessionId, child)).toBe('full durable report');
+  });
+
+  it('refuses a running child even when an earlier assistant message is already stored', async () => {
+    const { d, svc, sessionId, child, sessions } = await seed();
+    d.store.appendMessage({
+      id: 'assistant-partial', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: 'an earlier turn, not the current final result' },
+    });
+    sessions.setChildRunning(sessionId, child, true);
+
+    expect(() => svc.readSubagent(sessionId, child)).toThrow(/still running/);
+  });
+
+  it('refuses a child of a different parent even when both parents have the same owner', async () => {
+    const { d, svc, sessionId } = await seed();
+    d.store.createSession({ id: 'brain-1-sibling-read', userId: 1, model: 'm' });
+    d.store.createSession({
+      id: 'brain-ch-subagent-sub-other-read', userId: 1, model: 'm',
+      parentSessionId: 'brain-1-sibling-read', delegatedAccess: SCOPE,
+    });
+    d.store.appendMessage({
+      id: 'other-assistant-final', sessionId: 'brain-ch-subagent-sub-other-read', parentId: null, role: 'assistant',
+      content: { content: 'secret sibling report' },
+    });
+
+    expect(() => svc.readSubagent(sessionId, 'brain-ch-subagent-sub-other-read'))
+      .toThrow(/unknown sub-agent for this conversation/);
+  });
+});
+
 describe('BrainService.continueSubagent (a delegating turn picking a sub-agent back up)', () => {
   const SCOPE = { admin: true, projectIds: [], owner: true, permissionBoundary: null };
   const ADMIN_ACCESS = { admin: true, projectIds: [], owner: true, permissionBoundary: null };

@@ -22,18 +22,27 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
    *  standing in for the store is also the assertion that scoping happens host-side. */
   let byParent: Map<string, DelegatedChildSummary[]>;
   let asked: { parent: string; limit?: number }[];
+  let read: { parent: string; child: string }[];
   let continued: { parent: string; child: string; text: string }[];
+  let readResult: string | Error;
   let reply: string | Error;
 
   beforeEach(async () => {
     byParent = new Map();
     asked = [];
+    read = [];
     continued = [];
+    readResult = 'the stored final answer';
     reply = 'the sub-agent answered';
     reg = await loadPlugins({
       dirs: [join(repoRoot, 'plugins')], enabled: ['subagent'], logger: log,
       delegatedChildren: {
         runs: (parent, limit) => { asked.push({ parent, limit }); return byParent.get(parent) ?? []; },
+        read: (parent, childSessionId) => {
+          read.push({ parent, child: childSessionId });
+          if (readResult instanceof Error) throw readResult;
+          return readResult;
+        },
         continue: async (parent, childSessionId, text) => {
           continued.push({ parent, child: childSessionId, text });
           if (reply instanceof Error) throw reply;
@@ -103,6 +112,55 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       const res = await call('DelegateList', {});
       expect(res.content[0]!.text).toMatch(/no sub-agents/i);
       expect(asked).toEqual([]);
+    });
+  });
+
+  describe('DelegateRead', () => {
+    it('pages stored text with exact ranges and an unambiguous next offset', async () => {
+      readResult = 'abcdefghij';
+
+      const first = await call('DelegateRead', {
+        id: 'brain-ch-subagent-sub-dlg-abc', offset: 3, limit: 4,
+      }, 'brain-1');
+      expect(read).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-sub-dlg-abc' }]);
+      expect(first.content[0]!.text).toContain('10 characters total');
+      expect(first.content[0]!.text).toContain('returned range [3, 7)');
+      expect(first.content[0]!.text).toContain('"offset":7');
+      expect(first.content[0]!.text).toMatch(/\n\ndefg$/);
+      expect(first.details).toMatchObject({
+        offset: 3, end: 7, totalLength: 10, returnedLength: 4, hasMore: true, nextOffset: 7,
+      });
+
+      const last = await call('DelegateRead', {
+        id: 'brain-ch-subagent-sub-dlg-abc', offset: 7, limit: 4,
+      }, 'brain-1');
+      expect(last.content[0]!.text).toContain('returned range [7, 10)');
+      expect(last.content[0]!.text).toContain('complete remaining text');
+      expect(last.content[0]!.text).toMatch(/\n\nhij$/);
+      expect(last.details).toMatchObject({
+        offset: 7, end: 10, totalLength: 10, returnedLength: 3, hasMore: false,
+      });
+      expect(last.details?.nextOffset).toBeUndefined();
+    });
+
+    it('returns an unknown id as a readable recoverable error instead of throwing', async () => {
+      readResult = new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+      const res = await call('DelegateRead', { id: 'brain-ch-subagent-nope' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/use DelegateList/);
+    });
+
+    it('returns missing final text as a readable recoverable error instead of throwing', async () => {
+      readResult = new Error('that sub-agent has not produced final assistant text yet — wait for it to finish, then try DelegateRead again');
+      const res = await call('DelegateRead', { id: 'brain-ch-subagent-sub-running' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/wait for it to finish/);
+    });
+
+    it('refuses outside a conversation turn rather than falling back to another parent', async () => {
+      const res = await call('DelegateRead', { id: 'brain-ch-subagent-sub-dlg-abc' });
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(read).toEqual([]);
     });
   });
 

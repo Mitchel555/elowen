@@ -9,10 +9,12 @@ import type { DelegatedChildSummary } from '../store/brainDelegationStore.js';
 export type { DelegatedChildSummary };
 
 /** The host's bridge to the DURABLE side of delegation: which sub-agents a conversation already ran,
- *  and continuing one of them. Both are keyed on the parent session the HOST resolves from the live turn
- *  — never on anything the plugin supplies — so a plugin cannot address another conversation's children. */
+ *  reading their stored final replies, and continuing one of them. Every operation is keyed on the parent
+ *  session the HOST resolves from the live turn — never on anything the plugin supplies — so a plugin
+ *  cannot address another conversation's children. */
 export interface DelegatedChildBridge {
   runs(parentSessionId: string, limit?: number): DelegatedChildSummary[];
+  read(parentSessionId: string, childSessionId: string): string;
   continue(
     parentSessionId: string,
     childSessionId: string,
@@ -464,6 +466,10 @@ export interface PluginContext {
    *  conversation's or another account's children are not merely hidden but unaddressable. Empty outside
    *  a prompt turn, or when nothing is wired. */
   subagentRuns(limit?: number): DelegatedChildSummary[];
+  /** Read the final stored assistant text of a sub-agent listed by {@link subagentRuns}. The host anchors
+   *  the lookup to the current turn's session; the plugin supplies only the child id and cannot widen the
+   *  parent scope. Throws for unknown/foreign children, invalid delegated scope, or no final text yet. */
+  readSubagent(sessionId: string): string;
   /** Send a follow-up to a sub-agent listed by {@link subagentRuns} and resolve with its reply. The child
    *  resumes its own transcript with full context preserved — this is how a delegating agent refines a
    *  finished sub-agent's work instead of respawning one that has to rediscover everything.

@@ -104,8 +104,9 @@ export interface LoadPluginsOptions {
   /** The operator's delegated-context budget (Settings → Elowen AI → Limits), exposed to plugins as
    *  ctx.delegateContextChars(). Read live so a change applies without a reload. */
   delegateContextChars?: () => number;
-  /** Durable sub-agent persistence, exposed to plugins as ctx.subagentRuns() / ctx.continueSubagent().
-   *  Absent (worker or unit-test wiring) → listing is empty and continuing is refused. */
+  /** Durable sub-agent persistence, exposed to plugins as ctx.subagentRuns(), ctx.readSubagent(), and
+   *  ctx.continueSubagent(). Absent (worker or unit-test wiring) → listing is empty and reads/continuations
+   *  are refused. */
   delegatedChildren?: DelegatedChildBridge;
   logger: PluginLogger;
 }

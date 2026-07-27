@@ -18,6 +18,10 @@ const MAX_BACKGROUND_JOBS = 64;
 const JOB_RETENTION_MS = 60 * 60_000;
 const MAX_STORED_RESULT_CHARS = 100_000;
 const MAX_STORED_TASK_CHARS = 2_000;
+// Match workflow result bodies: 8k is useful for reports while leaving headroom under the default 12k
+// tool-output display cap for range metadata and the explicit next-page instruction.
+const DEFAULT_READ_CHARS = 8_000;
+const MAX_READ_CHARS = 50_000;
 // A child that starts background work gets a bounded number of extra collect turns to read the output
 // and produce the real conclusion, each waiting at most this long for the session's jobs to go idle.
 const MAX_COLLECT_TURNS = 8;
@@ -618,6 +622,53 @@ export function register(ctx) {
           + lines.join('\n'),
         { subagents: runs },
       );
+    },
+  }));
+
+  ctx.registerTool(defineTool({
+    name: 'DelegateRead', label: 'Read sub-agent result',
+    description: 'Read the final stored assistant text from a finished sub-agent listed by DelegateList. '
+      + 'Use offset and limit to recover a long result across calls. Every response states the total length, '
+      + 'the exact returned range, and the next offset when more remains. The host scopes the id to this '
+      + 'conversation; another conversation\'s sub-agent is never readable.',
+    parameters: Type.Object({
+      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+      limit: Type.Optional(Type.Number({
+        description: `Maximum characters to return (default ${DEFAULT_READ_CHARS}, capped at ${MAX_READ_CHARS}).`,
+      })),
+      offset: Type.Optional(Type.Number({ description: 'Character offset to start from (default 0).' })),
+    }),
+    execute: async (_id, p) => {
+      if (!ctx.readSubagent) return ok('Error: reading a sub-agent is not wired up on this server.');
+      try {
+        const text = ctx.readSubagent(String(p.id ?? '').trim());
+        const requestedLimit = typeof p.limit === 'number' && Number.isFinite(p.limit)
+          ? Math.floor(p.limit)
+          : DEFAULT_READ_CHARS;
+        const limit = Math.min(MAX_READ_CHARS, Math.max(1, requestedLimit));
+        const offset = typeof p.offset === 'number' && Number.isFinite(p.offset)
+          ? Math.max(0, Math.floor(p.offset))
+          : 0;
+        const totalLength = text.length;
+        if (offset > totalLength) {
+          return ok(`Error: offset ${offset} is beyond the final assistant text (${totalLength} characters total). Use an offset from 0 to ${totalLength}.`);
+        }
+        const end = Math.min(totalLength, offset + limit);
+        const slice = text.slice(offset, end);
+        const hasMore = end < totalLength;
+        const next = hasMore
+          ? ` More remains; fetch the next part with DelegateRead({"id":"${String(p.id ?? '').trim()}","offset":${end},"limit":${limit}}).`
+          : ' This is the complete remaining text.';
+        return ok(
+          `Sub-agent final assistant text: ${totalLength} characters total; returned range [${offset}, ${end}) (${slice.length} characters).${next}\n\n${slice}`,
+          {
+            sessionId: String(p.id ?? '').trim(), offset, limit, end, totalLength,
+            returnedLength: slice.length, hasMore, ...(hasMore ? { nextOffset: end } : {}),
+          },
+        );
+      } catch (e) {
+        return ok(`Error: ${errorText(e)}`);
+      }
     },
   }));
 

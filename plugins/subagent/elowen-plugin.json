@@ -11,6 +11,7 @@
       "DelegateResult",
       "DelegateModels",
       "DelegateList",
+      "DelegateRead",
       "DelegateContinue",
       "WorkflowStart",
       "WorkflowAddNodes",
@@ -26,6 +27,7 @@
     "DelegateResult": "\ud83d\udce5",
     "DelegateModels": "\ud83e\udd1d",
     "DelegateList": "\ud83d\udccb",
+    "DelegateRead": "\ud83d\udcd6",
     "DelegateContinue": "\u2709\ufe0f",
     "WorkflowStart": "\ud83d\udd00",
     "WorkflowAddNodes": "\u2795",
@@ -36,6 +38,7 @@
     "DelegateResult",
     "DelegateModels",
     "DelegateList",
+    "DelegateRead",
     "WorkflowStatus"
   ]
 }

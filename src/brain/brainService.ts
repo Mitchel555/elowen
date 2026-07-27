@@ -1123,6 +1123,30 @@ export class BrainService {
     await this.sendDelegated(userId, sessionId, text);
   }
 
+  /** A delegating turn reading the final stored reply of one of its own sub-agents. The durable parent
+   *  relation and sub-agent id family are the confidentiality boundary; requiring a resolvable delegated
+   *  scope also rejects legacy/corrupt children exactly like continuation does.
+   *
+   *  `scopeExceedsCurrentAccess` deliberately does not apply here: reading stored text executes no child
+   *  tools and cannot revive its captured permissions. Applying a write-time execution check would only
+   *  make an already-authorized parent lose access to its own durable result after its tool scope narrows. */
+  readSubagent(parentSessionId: string, childSessionId: string): string {
+    const row = this.d.store.getSession(childSessionId);
+    if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
+      throw new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+    }
+    if (this.sessions.isActiveChild(childSessionId)) {
+      throw new Error('that sub-agent is still running — wait for it to finish before reading its final assistant text');
+    }
+    const scope = this.d.store.delegatedAccessFor(childSessionId);
+    if (!scope) throw new Error('delegated access unavailable');
+    const text = lastAssistantText(this.d.store, childSessionId);
+    if (!text) {
+      throw new Error('that sub-agent has not produced final assistant text yet — wait for it to finish, then try DelegateRead again; if it finished empty, use DelegateContinue to ask for a conclusion');
+    }
+    return text;
+  }
+
   /** A delegating TURN continuing one of its own sub-agents: the child picks its transcript back up
    *  (rehydrated from SQLite) and answers this follow-up, whose reply is returned to the caller — the
    *  agent-facing counterpart of the owner's drill-in `sendToSubagent`, which streams to a human instead.

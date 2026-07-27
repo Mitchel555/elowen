@@ -334,11 +334,18 @@ export class PluginRegistry {
       currentIdentity,
       currentSessionId,
       // The parent anchor is read from the HOST's own turn scope, never taken from the plugin: that is
-      // the whole scoping boundary for both calls. Outside a prompt turn there is no conversation to
-      // scope to, so listing is empty and continuing is refused rather than falling back to "any parent".
+      // the whole scoping boundary for all three calls. Outside a prompt turn there is no conversation to
+      // scope to, so listing is empty and reading/continuing are refused rather than using "any parent".
       subagentRuns: (limit) => {
         const parentSessionId = currentSessionId();
         return parentSessionId && delegatedChildren ? delegatedChildren.runs(parentSessionId, limit) : [];
+      },
+      readSubagent: (sessionId) => {
+        const parentSessionId = currentSessionId();
+        if (!parentSessionId || !delegatedChildren) {
+          throw new Error('reading a sub-agent is only available inside a conversation turn');
+        }
+        return delegatedChildren.read(parentSessionId, sessionId);
       },
       continueSubagent: (sessionId, text) => {
         const parentSessionId = currentSessionId();

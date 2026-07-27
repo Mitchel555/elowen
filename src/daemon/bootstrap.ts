@@ -639,6 +639,10 @@ export async function buildApp(opts: BuildOpts) {
       // session the registry reads off the live turn, so a plugin can only ever reach its OWN children.
       delegatedChildren: {
         runs: (parentSessionId, limit) => brainStore.listDelegatedChildren(parentSessionId, limit),
+        read: (parentSessionId, childSessionId) => {
+          if (!brain) throw new Error('the brain is not available on this deployment');
+          return brain.readSubagent(parentSessionId, childSessionId);
+        },
         continue: (parentSessionId, childSessionId, text, access) => brain
           ? brain.continueSubagent(parentSessionId, childSessionId, text, access)
           : Promise.reject(new Error('the brain is not available on this deployment')),
