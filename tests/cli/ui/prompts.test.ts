@@ -1,10 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { box, printableInput, editField, inputWindow, newFieldState, type FieldState } from '../../../src/cli/ui/prompts.js';
+import { box, log, printableInput, editField, inputWindow, newFieldState, type FieldState } from '../../../src/cli/ui/prompts.js';
 import { MASCOT_ART } from '../../../src/cli/chat/mascot.js';
 import { formatK, padAnsi } from '../../../src/cli/ui/text.js';
 
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b_pi:c\x07/g, '');
+
+// A code point is a lone (unpaired) UTF-16 surrogate — the garbage a code-unit-at-a-time edit leaves
+// behind when it splits an emoji's surrogate pair.
+const hasLoneSurrogate = (s: string): boolean => {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const n = s.charCodeAt(i + 1);
+      if (!(n >= 0xdc00 && n <= 0xdfff)) return true;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+};
 
 /** Drive a block of code with process.stdout mocked to a fixed size + TTY-ness, restoring after. */
 function withTerminal(opts: { columns?: number; rows?: number; isTTY?: boolean }, fn: () => void): void {
@@ -119,27 +135,43 @@ describe('cli TextPrompt editField reducer', () => {
   it('an empty prefill accepts the first key as the value (no type-over surprise)', () => {
     expect(type('', 'h', 'i').value).toBe('hi');
   });
+
+  it('backspace at the end of an emoji removes the whole cluster, not one surrogate half', () => {
+    const state = type('a😀', KEY.backspace);
+    expect(state.value).toBe('a');
+    expect(hasLoneSurrogate(state.value)).toBe(false);
+  });
+
+  it('backspace after two emoji removes only the trailing one, leaving the first intact', () => {
+    const state = type('😀😀', KEY.backspace);
+    expect(state.value).toBe('😀');
+    expect(hasLoneSurrogate(state.value)).toBe(false);
+  });
+
+  it('left arrow before an emoji, then delete, removes the whole cluster', () => {
+    // 'ab😀cd', caret home then two rights lands right before the emoji (after 'ab').
+    const state = type('ab😀cd', KEY.home, KEY.right, KEY.right, KEY.del);
+    expect(state.value).toBe('abcd');
+    expect(state.cursor).toBe(2);
+    expect(hasLoneSurrogate(state.value)).toBe(false);
+  });
+
+  it('right arrow steps over an emoji as one cluster, not one surrogate half', () => {
+    const state = type('😀b', KEY.home, KEY.right);
+    expect(state.cursor).toBe(2); // past the whole 2-unit emoji, not 1
+  });
+
+  it('backspace removes a base character + combining mark as one cluster', () => {
+    // 'e' + combining acute (U+0301) — two UTF-16 units, one grapheme cluster.
+    const state = type('e\u0301', KEY.backspace);
+    expect(state.value).toBe('');
+  });
 });
 
 describe('cli TextPrompt input window (width-aware, grapheme-safe)', () => {
   // The caret marker has zero visible width; strip it (and any color) before measuring/inspecting.
   const CARET = '\x1b_pi:c\x07';
   const visible = (s: string): number => visibleWidth(stripAnsi(s));
-  // A code point is a lone (unpaired) UTF-16 surrogate — the garbage a naive .slice() through an
-  // astral character leaves behind.
-  const hasLoneSurrogate = (s: string): boolean => {
-    for (let i = 0; i < s.length; i++) {
-      const c = s.charCodeAt(i);
-      if (c >= 0xd800 && c <= 0xdbff) { // high surrogate: must be followed by a low surrogate
-        const n = s.charCodeAt(i + 1);
-        if (!(n >= 0xdc00 && n <= 0xdfff)) return true;
-        i++;
-      } else if (c >= 0xdc00 && c <= 0xdfff) { // low surrogate with no preceding high
-        return true;
-      }
-    }
-    return false;
-  };
 
   it('a plain ASCII value shorter than the window renders in full with the caret at the end', () => {
     const out = inputWindow('admin', 5, 20, false, CARET);
@@ -217,6 +249,61 @@ describe('cli box renderer (single source, always wraps)', () => {
       expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(50); // clamped to termWidth - margin
       expect(stripAnsi(rows.join(''))).not.toContain('…'); // still wrapped, not clipped
     });
+  });
+});
+
+describe('cli box renderer ANSI safety boundary (finding: no sanitization in the setup/prompt TUI)', () => {
+  // box() is the single shared renderer for prompts/setup — dynamic content (e.g. a model id fetched from
+  // an external provider's /models endpoint) must never reach the terminal with its own control sequences.
+  it('strips a cursor-control CSI sequence embedded in a dynamic label', () => {
+    withTerminal({ columns: 80 }, () => {
+      const rows = box([`model-id\x1b[2J\x1b[Hwiped`]);
+      const joined = rows.join('');
+      expect(joined).not.toContain('\x1b[2J');
+      expect(joined).not.toContain('\x1b[H');
+      expect(stripAnsi(joined)).toContain('model-idwiped');
+    });
+  });
+
+  it('strips an OSC 52 clipboard-write sequence', () => {
+    withTerminal({ columns: 80 }, () => {
+      const rows = box(['name\x1b]52;c;Zm9yZ2Vk\x07tail']);
+      const joined = rows.join('');
+      expect(joined).not.toContain('\x1b]52;');
+      expect(stripAnsi(joined)).toContain('nametail');
+    });
+  });
+
+  it('strips a DCS sequence', () => {
+    withTerminal({ columns: 80 }, () => {
+      const rows = box(['before\x1bPdanger\x1b\\after']);
+      const joined = rows.join('');
+      expect(joined).not.toContain('\x1bP');
+      expect(stripAnsi(joined)).toContain('beforeafter');
+    });
+  });
+
+  it('keeps our own SGR colour codes intact — a sanitizer that strips everything is just as broken', () => {
+    withTerminal({ columns: 80 }, () => {
+      const rows = box(['\x1b[31mred\x1b[0m plain text']);
+      const joined = rows.join('');
+      expect(joined).toContain('\x1b[31mred\x1b[0m');
+      expect(stripAnsi(joined)).toContain('red plain text');
+    });
+  });
+});
+
+describe('cli log.* ANSI safety boundary', () => {
+  it('sanitizes a hostile direct log message (bypasses box(), writes straight to stdout)', () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      log.error('sign-in failed\x1b]52;c;Zm9yZ2Vk\x07 tail');
+      const out = write.mock.calls.map((call) => String(call[0])).join('');
+      expect(out).not.toContain('\x1b]52;');
+      expect(stripAnsi(out)).toContain('sign-in failed tail');
+    } finally {
+      write.mockRestore();
+    }
   });
 });
 
