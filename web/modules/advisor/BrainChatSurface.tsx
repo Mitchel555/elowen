@@ -4,6 +4,7 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, PlayCircle } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
+import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
@@ -21,6 +22,8 @@ import { ChatHistoryRail } from './ChatHistoryRail';
 import { ModelPicker } from './ModelPicker';
 import { useBrainChat } from './BrainChatProvider';
 import { formatTokens, formatCost, formatDuration } from '../../lib/format';
+
+const FULLSCREEN_VALUES = ['on', 'off'] as const;
 
 /** Sanitized-markdown block for one assistant text segment (marked + DOMPurify, no bubble). */
 function TextSegment({ text, className = '' }: { text: string; className?: string }) {
@@ -439,8 +442,14 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   const [pickerOpen, setPickerOpen] = useState(false);
   const [slashIdx, setSlashIdx] = useState(0);
   // Fullscreen is a CSS-only overlay on the SAME root node (never a portal/remount), so the stream,
-  // draft and running turn survive the toggle. Only meaningful for the full /chat variant.
-  const [fullscreen, setFullscreen] = useState(false);
+  // draft and running turn survive the toggle. Only meaningful for the full /chat variant. Persisted
+  // per device like the rail's width and the reasoning toggle: someone who reads in fullscreen wants it
+  // on the next visit too, and re-entering it on every reload is exactly the chore they complained about.
+  const [fullscreenPref, setFullscreenPref] = usePersistentState<'on' | 'off'>('elowen.chat.fullscreen', 'off', FULLSCREEN_VALUES);
+  const fullscreen = fullscreenPref === 'on';
+  // Stable identity on purpose: two effects below close over this, and a fresh function each render would
+  // re-subscribe the Escape listener on every keystroke.
+  const setFullscreen = useCallback((on: boolean): void => setFullscreenPref(on ? 'on' : 'off'), [setFullscreenPref]);
   const mobile = useMobile();
   const fileRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -570,7 +579,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [fullscreen, slashOpen]);
+  }, [fullscreen, slashOpen, setFullscreen]);
 
   // Auto-enter fullscreen ONCE on a phone so the conversation owns the whole viewport (the embedded /chat
   // page is cramped there). The user can still toggle back out — an orientation change that re-crosses the
@@ -578,7 +587,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   const autoFullscreenedRef = useRef(false);
   useEffect(() => {
     if (variant === 'full' && mobile && !autoFullscreenedRef.current) { autoFullscreenedRef.current = true; setFullscreen(true); }
-  }, [variant, mobile]);
+  }, [variant, mobile, setFullscreen]);
 
   const newChat = () => { setPickerOpen(false); void switchSession({ fresh: true }).catch(() => toast(t.brainChat.searchOpenError, 'error')); };
 
@@ -665,7 +674,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           </button>
           <button
             type="button"
-            onClick={() => setFullscreen((v) => !v)}
+            onClick={() => setFullscreen(!fullscreen)}
             aria-pressed={fullscreen}
             aria-label={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
             title={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
