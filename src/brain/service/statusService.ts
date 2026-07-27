@@ -383,6 +383,10 @@ export class BrainStatusService {
       sessionId,
       goal: this.d.store.getGoal(sessionId) ?? null,
       history: page ? page.items : clean,
+      control: {
+        streaming: !!live && (live.session.isStreaming || this.d.sessions.hasActiveChildren(live.sessionId)),
+        pendingAsk: live ? this.d.elicitation.pendingForSession(live.sessionId) : null,
+      },
       ...(page ? { hasMore: page.hasMore, nextBefore: page.nextBefore } : {}),
       ...replay,
     };

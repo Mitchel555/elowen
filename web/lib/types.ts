@@ -118,6 +118,11 @@ export interface BrainStreamSnapshotFrame {
   /** The session actually tapped — differs from the requested one after an idle rollover the dead stream
    *  never saw. */
   sessionId?: string;
+  /** The daemon's authoritative control state at snapshot time (mirror of `BrainStreamControl`). The tail
+   *  is transient — cleared at settle, bounded, and terminal-less across an internal retry — so this, not
+   *  the tail's shape, decides whether a turn is running and whether a question is parked. Both fields are
+   *  explicit, so hydrating from this frame CLEARS what the daemon no longer has. */
+  control?: { streaming: boolean; pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null };
   /** The live journal dropped part of the unsettled run; durable history must be refetched once it settles. */
   truncated?: true;
   hasMore?: boolean;

@@ -7,7 +7,7 @@ import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
 import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
-import { fromHistory, fromSnapshot, prependHistory, reduce, upsertCard, type ChatTurn, type TranscriptEvent } from '../../lib/transcript';
+import { emptyView, fromHistory, fromSnapshot, prependHistory, reduce, upsertCard, type ChatTurn, type ChatView, type TranscriptEvent } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
 import { subscribeRevive, STALE_HIDE_MS } from '../../lib/useRevive';
@@ -60,12 +60,6 @@ async function readAttachment(file: File): Promise<Attachment | null> {
   if (text.includes('\u0000')) return null; // binary — not inlinable
   return { name: file.name, kind: 'text', mimeType: file.type || 'text/plain', data: text };
 }
-
-/** The transcript view-model + fold live in the shared `web/lib/transcript.ts` mirror (kept in lockstep
- *  with the daemon's `src/brain/transcript.ts`) — the SSE handlers fold events through `reduce`, history
- *  loads through `fromHistory`, and cards through `upsertCard`, exactly like the CLI TUI. The controller
- *  keeps its own `busy`/`notice` React state, so `fold` takes only the reducer's resulting turns. */
-const fold = (turns: ChatTurn[], e: TranscriptEvent): ChatTurn[] => reduce({ turns, thinking: true }, e).turns;
 
 type Ask = { id: string; questions: AskQuestion[]; kind?: 'approval' };
 type SlashItem = { key: string; label: string; desc?: string; run: () => void };
@@ -197,7 +191,16 @@ function useBrainChatController(): BrainChatValue {
   const sessions = useBrainSessions();
   const { data: commands = [] } = useBrainCommands();
 
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  // The transcript view-model + fold live in the shared `web/lib/transcript.ts` mirror (kept in lockstep
+  // with the daemon's `src/brain/transcript.ts`): SSE events fold through `reduce`, history through
+  // `fromHistory`, cards through `upsertCard` — exactly like the CLI TUI. The WHOLE `ChatView` is the
+  // state, `thinking` included, because the CLI reads its own indicator off that same fold
+  // (`rt.transcript.thinking`). A second React copy of it is what let the web hold a Stop button the CLI
+  // had long dropped, so `busy` is derived here and never stored.
+  const [view, setView] = useState<ChatView>(emptyView());
+  const turns = view.turns;
+  const busy = view.thinking;
+  const applyEvent = (e: TranscriptEvent): void => setView((cur) => reduce(cur, e));
   // Lazy-load history state: `hasMoreHistory` is reactive (drives the scroll-up sentinel); the cursor and
   // the in-flight guard are refs — they change across async fetches and must not each trigger a re-render.
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
@@ -210,7 +213,6 @@ function useBrainChatController(): BrainChatValue {
   // transcript or double the rolled-over turns.
   const historyEpochRef = useRef(0);
   const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [usage, setUsage] = useState<BrainUsage | null>(null);
   const [telemetry, setTelemetry] = useState<BrainTelemetry>(EMPTY_TELEMETRY);
@@ -288,7 +290,10 @@ function useBrainChatController(): BrainChatValue {
     const epoch = ++historyEpochRef.current; // this reset invalidates any older page still in flight
     const page = await elowenClient.brainMessagesPage(boundSessionRef.current, { limit: HISTORY_PAGE });
     if (generation !== genRef.current || epoch !== historyEpochRef.current) return; // superseded — don't clobber
-    setTurns(fromHistory(page.items).turns);
+    // A refetch can land MID-TURN (an auto-compaction persists while the reply streams), and durable
+    // history knows nothing about the running turn — so the refetch replaces the turns and leaves the
+    // in-flight flag exactly where the stream put it.
+    setView((cur) => ({ ...fromHistory(page.items), thinking: cur.thinking }));
     historyCursorRef.current = page.nextBefore;
     setHasMoreHistory(page.hasMore);
   };
@@ -317,7 +322,7 @@ function useBrainChatController(): BrainChatValue {
     try {
       const page = await elowenClient.brainMessagesPage(boundSessionRef.current, { limit: HISTORY_PAGE, before });
       if (generation !== genRef.current || epoch !== historyEpochRef.current) return; // switch/reset superseded this
-      setTurns((cur) => prependHistory({ turns: cur, thinking: false }, page.items).turns);
+      setView((cur) => prependHistory(cur, page.items));
       historyCursorRef.current = page.nextBefore;
       setHasMoreHistory(page.hasMore);
     } finally {
@@ -346,10 +351,13 @@ function useBrainChatController(): BrainChatValue {
     // history fetch here. The view is cleared up front only when what it currently shows does NOT belong to
     // the conversation being connected — another conversation, or a read-only preview of a foreign session.
     // A plain reconnect keeps its turns on screen until the frame replaces them, with no blank flash.
-    if (readOnly || (previousSession && previousSession !== started.sessionId)) setTurns([]);
+    if (readOnly || (previousSession && previousSession !== started.sessionId)) setView(emptyView());
     const st = await elowenClient.brainStatus(boundSessionRef.current).catch(() => null);
     if (generation !== genRef.current) return;
-    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); if (st.pendingAsk) setAsk(st.pendingAsk); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
+    // Every field here is hydration from the server, so each one is applied UNCONDITIONALLY: a
+    // `if (st.x) setX(st.x)` can only ever set, which leaves a question the daemon already settled on
+    // screen (and unanswerable) instead of clearing it.
+    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); setAsk(st.pendingAsk ?? null); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
     // The identity rides purely as query params — native EventSource cannot set headers, and the daemon
     // parses session/client/generation off the URL (tapping the bound conversation, not the active pointer).
     // `snapshot=1` makes the FIRST frame the hydration: the newest history page plus the running turn's
@@ -390,17 +398,23 @@ function useBrainChatController(): BrainChatValue {
       historyEpochRef.current++; // the frame REPLACES the transcript — discard any older page in flight
       historyCursorRef.current = snap.nextBefore ?? null;
       setHasMoreHistory(snap.hasMore ?? false);
-      setTurns(fromSnapshot(snap).turns);
-      const terminal = snap.events.some((event) => event.type === 'idle' || event.type === 'error');
-      // The journal keeps its terminal event until the next run starts, so an unsettled tail means a turn
-      // really is in flight — that is what revives the thinking indicator after a reconnect.
-      setBusy(!terminal && snap.events.length > 0);
-      truncatedPendingRef.current = !terminal && snap.truncated === true;
+      const folded = fromSnapshot(snap);
+      // The daemon's control state wins over anything the tail's shape suggests: the journal is cleared at
+      // settle, bounded, and carries no terminal event across an internal retry, so reading "a turn is
+      // running" out of it drifts in BOTH directions — a stuck Stop button on a non-transcript tail, a
+      // dead one on a retry. Absent `control` means an older daemon; then the fold is all there is.
+      const control = snap.control;
+      const streaming = control ? control.streaming : folded.thinking;
+      setView({ ...folded, thinking: streaming });
+      // Explicit null included — this frame is the one moment the client can learn a question it never
+      // saw is parked, or that one it still shows is long gone.
+      if (control) setAsk(control.pendingAsk);
+      truncatedPendingRef.current = streaming && snap.truncated === true;
     });
     es.addEventListener('text', (e) => {
       const { delta } = JSON.parse((e as MessageEvent).data) as { delta: string };
       setNotice(''); // first answer text clears any transient runtime notice
-      setTurns((cur) => fold(cur, { type: 'text', delta }));
+      applyEvent({ type: 'text', delta });
     });
     // Runtime notices (retry/compaction) — mirror the CLI: show while the phase runs, clear on done.
     es.addEventListener('notice', (e) => {
@@ -421,12 +435,11 @@ function useBrainChatController(): BrainChatValue {
       // reconnect (a newer switch bumped the generation meanwhile) is discarded so it can't revive a dead
       // session's view. If the brain is still down, brainStart throws and the retry stops — no tight loop.
       esRef.current?.close();
-      setBusy(false);
       setNotice(message);
-      // Fold the error into the transcript as well: it ENDS the streaming turn, so the tool row's running
-      // spinner stops. `busy` alone leaves the turn marked streaming, and a reconnect that never succeeds
-      // would then spin forever. A successful reconnect refetches history and replaces this line.
-      setTurns((cur) => fold(cur, { type: 'error', message }));
+      // Folding the error ENDS the streaming turn — the tool row's spinner stops and, since the indicator
+      // is the fold's own output, so does the thinking indicator. A successful reconnect refetches history
+      // and replaces this line.
+      applyEvent({ type: 'error', message });
       repairTruncatedHistory(); // a turn that died without settling is still a truncated transcript
       reconnect().retry();
     });
@@ -446,29 +459,29 @@ function useBrainChatController(): BrainChatValue {
       historyCursorRef.current = null;
       setHasMoreHistory(false);
       historyEpochRef.current++;
-      setTurns((cur) => fold(cur, { type: 'session', sessionId: ev.sessionId }));
+      applyEvent({ type: 'session', sessionId: ev.sessionId });
       setNotice(t.brainChat.freshConversation);
       void qc.invalidateQueries({ queryKey: ['brain-sessions'] });
     });
     es.addEventListener('reasoning', (e) => {
       const { delta } = JSON.parse((e as MessageEvent).data) as { delta: string };
-      setTurns((cur) => fold(cur, { type: 'reasoning', delta }));
+      applyEvent({ type: 'reasoning', delta });
     });
     es.addEventListener('tool', (e) => {
       // Keep `id` (the toolCallId): it keys the live `tool_progress` tail onto its in-progress tool pill.
       const { name, detail, icon, id } = JSON.parse((e as MessageEvent).data) as { name: string; detail?: string; icon?: string; id?: string };
-      setTurns((cur) => fold(cur, { type: 'tool', name, detail, icon, id }));
+      applyEvent({ type: 'tool', name, detail, icon, id });
     });
     // Live streamed output of a running Bash (bounded rolling tail): fold onto its tool pill by id so a
     // long build/test shows output as it runs. The stored history's final output supersedes it on reload.
     es.addEventListener('tool_progress', (e) => {
       const { id, text } = JSON.parse((e as MessageEvent).data) as { id: string; text: string };
-      setTurns((cur) => fold(cur, { type: 'tool_progress', id, text }));
+      applyEvent({ type: 'tool_progress', id, text });
     });
     // Live sub-agent progress (delegate): fold onto its tool item so the agents table + drill-in read it.
     es.addEventListener('subagent', (e) => {
       const s = JSON.parse((e as MessageEvent).data) as { id: string; sessionId: string; status: 'running' | 'done' | 'error'; task: string; detail?: string; tools: number; tokens?: number; seconds: number; model?: string };
-      setTurns((cur) => fold(cur, { type: 'subagent', ...s }));
+      applyEvent({ type: 'subagent', ...s });
       // The child usage is persisted before its terminal progress event. Refresh the parent status now
       // so the session price includes delegated work immediately, not only after the next parent turn.
       if (s.status !== 'running') void elowenClient.brainStatus(boundSessionRef.current).then((status) => { if (generation === genRef.current) setUsage(status.usage); }).catch(() => { /* best-effort */ });
@@ -487,12 +500,11 @@ function useBrainChatController(): BrainChatValue {
       setQueued(items);
     });
     // The daemon's authoritative render of the user's turn (every real send — immediate or a queued
-    // delivery). The composer never echoes optimistically, so THIS folds the 'you' bubble; a reply is now
-    // streaming, so flip busy on for the thinking indicator.
+    // delivery). The composer never echoes optimistically, so THIS folds the 'you' bubble — and the fold
+    // marks the turn in flight, which is what raises the thinking indicator.
     es.addEventListener('user', (e) => {
       const { text } = JSON.parse((e as MessageEvent).data) as { text: string };
-      setBusy(true);
-      setTurns((cur) => fold(cur, { type: 'user', text }));
+      applyEvent({ type: 'user', text });
     });
     // A context compaction was persisted server-side (manual /compact or the auto-compact path): the
     // stored transcript is now a "context compacted" divider + the kept tail. Refetch so the surface
@@ -512,7 +524,7 @@ function useBrainChatController(): BrainChatValue {
     });
     es.addEventListener('diff', (e) => {
       const { diff } = JSON.parse((e as MessageEvent).data) as { diff: string };
-      setTurns((cur) => fold(cur, { type: 'diff', diff }));
+      applyEvent({ type: 'diff', diff });
     });
     // The final result block of a completed tool call (Bash output, a Read preview, …): fold it onto its
     // tool pill by id so a finished tool's stand-alone output renders LIVE, not only after a history reload
@@ -521,7 +533,7 @@ function useBrainChatController(): BrainChatValue {
       // A submitted plan rides this event too when the result carries a displayable block (a hook-annotated
       // ExitPlanMode), so it is threaded through exactly as on `tool_end`.
       const { output, id, plan } = JSON.parse((e as MessageEvent).data) as { output: ToolOutputView; id?: string; plan?: string };
-      setTurns((cur) => fold(cur, { type: 'tool_output', output, id, plan }));
+      applyEvent({ type: 'tool_output', output, id, plan });
     });
     // A tool that settled with nothing to display. Folded ONLY for its `plan`: an `ExitPlanMode` result is
     // addressed to the model and withheld from the transcript, so this is the submitted plan's only live
@@ -529,7 +541,7 @@ function useBrainChatController(): BrainChatValue {
     // no-op in the reducer.
     es.addEventListener('tool_end', (e) => {
       const { id, plan } = JSON.parse((e as MessageEvent).data) as { id?: string; plan?: string };
-      setTurns((cur) => fold(cur, { type: 'tool_end', id, plan }));
+      applyEvent({ type: 'tool_end', id, plan });
     });
     // AskUserQuestion parked the turn — render the inline choice card until the user answers.
     es.addEventListener('ask', (e) => {
@@ -537,10 +549,11 @@ function useBrainChatController(): BrainChatValue {
       setAsk({ id, questions, kind });
     });
     es.addEventListener('idle', (e) => {
-      setBusy(false);
       setNotice(''); // turn settled → drop any transient runtime line
-      setAsk(null); // a settled turn can't still be waiting on a question
-      setTurns((cur) => fold(cur, { type: 'idle' })); // finalize the streaming turn (parity with the CLI fold)
+      // A parked question is NOT cleared here. Only the daemon knows whether one is still waiting, and it
+      // says so on the snapshot frame; guessing it from a turn boundary is what made the picker vanish
+      // before the user could answer it.
+      applyEvent({ type: 'idle' }); // finalize the streaming turn (parity with the CLI fold)
       repairTruncatedHistory();
       try {
         const { usage: u } = JSON.parse((e as MessageEvent).data) as { usage?: BrainUsage };
@@ -601,7 +614,10 @@ function useBrainChatController(): BrainChatValue {
     esRef.current?.close();
     esRef.current = null; // no live stream here — and nothing for the silence watchdog to revive
     nextGeneration();
-    setAsk(null); setCards([]); setBusy(false); setNotice('');
+    setAsk(null); setCards([]); setNotice('');
+    // The composer is about to be replaced by the read-only banner, so drop the in-flight marker at once
+    // rather than only when the stored history lands below.
+    setView((cur) => ({ ...cur, thinking: false }));
     setReadOnly(sessionId);
     // Read-only previews (a channel / task worker) load their full stored history in one shot — no scroll-up
     // lazy-load — so close the window: null cursor + no "more" (+ bump the epoch to discard an in-flight page).
@@ -609,7 +625,7 @@ function useBrainChatController(): BrainChatValue {
     setHasMoreHistory(false);
     historyEpochRef.current++;
     const msgs = await elowenClient.brainMessages(sessionId);
-    setTurns(fromHistory(msgs).turns);
+    setView(fromHistory(msgs));
     setReady(true);
   };
 

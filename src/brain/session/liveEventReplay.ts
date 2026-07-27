@@ -1,4 +1,4 @@
-import type { BrainEvent, BrainGoalState } from '../events.js';
+import type { AskQuestion, BrainEvent, BrainGoalState } from '../events.js';
 import type { BrainMessageView } from '../messageView.js';
 
 /** A bounded snapshot of events emitted during the currently unsettled run. The durable transcript
@@ -24,6 +24,19 @@ export interface LiveEventTransportSnapshot extends LiveEventSnapshot {
   truncated?: true;
 }
 
+/** Authoritative control state of the tapped conversation, read on the same event-loop tick as the
+ *  journal. The journal alone cannot answer either question: it is cleared at settle, bounded, and
+ *  deliberately holds no terminal event across an internal retry — so "is a turn running" and "is a
+ *  question parked" are read from the live session and the elicitation registry instead of guessed
+ *  from the tail. Every field is explicit (never omitted-means-unchanged) so a client can CLEAR what
+ *  it hydrated earlier, which is what a set-only hydration could never do. */
+interface BrainStreamControl {
+  /** A turn is in flight right now — PI streaming, or a delegated child still working. */
+  streaming: boolean;
+  /** The question parked for this conversation, `null` when none is. */
+  pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null;
+}
+
 /** First frame on an opt-in snapshot SSE stream. `history` is the durable clean transcript; `events`
  *  is the current run's not-yet-durable tail. Replacing the client view from this frame makes repeated
  *  snapshot reconnects idempotent instead of appending duplicate deltas. */
@@ -37,6 +50,8 @@ export interface BrainStreamSnapshot extends LiveEventSnapshot {
   /** The actual tapped session. It can differ from the query after an idle rollover retargeted this
    * stable client while its previous SSE was down. */
   sessionId?: string;
+  /** See {@link BrainStreamControl}. Optional only for rolling compatibility with an older daemon. */
+  control?: BrainStreamControl;
   run?: number;
   eventCursors?: number[];
   truncated?: true;

@@ -3380,6 +3380,38 @@ describe('sub-agent session tap + owner steering', () => {
     attached.off();
   });
 
+  // The run journal is transient — cleared at settle, bounded, and holding no terminal event across an
+  // internal retry — so a client that derives "a turn is running" from its tail drifts from the daemon
+  // (the web's stuck Stop button). The snapshot therefore carries the authoritative answer.
+  it('carries the authoritative streaming flag and parked question in the snapshot frame', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    const internals = svc as unknown as {
+      elicitation: {
+        ask: (sessionId: string, questions: { question: string; header: string; multiSelect: boolean; options: never[] }[], emit: () => void) => Promise<unknown>;
+        cancelForSession: (sessionId: string) => void;
+      };
+    };
+
+    expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
+      .toEqual({ streaming: false, pendingAsk: null });
+
+    d.session.isStreaming = true;
+    void internals.elicitation.ask(sessionId, [{
+      question: 'Continue?', header: 'Continue', multiSelect: false, options: [],
+    }], () => {}).catch(() => undefined);
+    const parked = svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control;
+    expect(parked?.streaming).toBe(true);
+    expect(parked?.pendingAsk).toMatchObject({ questions: [{ header: 'Continue' }] });
+
+    // A settled turn reports honestly again, even though the journal is unchanged.
+    internals.elicitation.cancelForSession(sessionId);
+    d.session.isStreaming = false;
+    expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
+      .toEqual({ streaming: false, pendingAsk: null });
+  });
+
   it('windows the snapshot history AFTER removing journaled rows, with a cursor the lazy-load can continue', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

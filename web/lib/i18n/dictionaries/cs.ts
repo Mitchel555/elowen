@@ -1515,7 +1515,8 @@ export const cs = {
   agents: {
     title: 'Agenti',
     subtitle: 'Delegovaní sub-agenti — kliknutím otevřete jejich průběh',
-    link: 'agentů',
+    link: { one: 'agent', few: 'agenti', many: 'agentů' },
+    linkDone: { one: 'hotový agent', few: 'hotoví agenti', many: 'hotových agentů' },
     task: 'Úkol',
     model: 'Model',
     tokens: 'Tokeny',
@@ -1613,6 +1614,7 @@ export const cs = {
   },
   telemetry: {
     title: 'Telemetrie',
+    resize: 'Šířka panelu telemetrie',
     open: 'Zobrazit telemetrii',
     close: 'Skrýt telemetrii',
     empty: 'Zatím nejsou k dispozici žádná data.',

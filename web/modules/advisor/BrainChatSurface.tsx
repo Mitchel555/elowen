@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, PlayCircle } from 'lucide-react';
-import { useTranslation } from '../../lib/i18n';
+import { plural, useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
 import type { BrainCard, BrainWorkMode } from '../../lib/types';
@@ -487,6 +487,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   const active = sessions.data?.find((s) => s.active);
   // Delegated sub-agents across the transcript — the source for the workflow table + its "N agents" link.
   const subagents = useMemo(() => collectSubagents(turns), [turns]);
+  const runningAgents = subagents.filter((agent) => agent.status === 'running').length;
   // Index of the first live (id-less) turn — the boundary between stored history and the live streaming tail
   // used to key the tail stably across a lazy-load prepend (see the transcript map below).
   const firstLiveTurn = turns.findIndex((turn) => !turn.id);
@@ -724,7 +725,11 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             className="flex items-center gap-1.5 self-start rounded-md border border-border bg-elevated px-2 py-1 text-tiny text-text-muted transition-colors hover:text-text"
           >
             <Users size={11} aria-hidden />
-            <span>{subagents.filter((s) => s.status === 'running').length || subagents.length} {t.agents.link}</span>
+            {/* Never fall back to the transcript's total when nothing runs: that is what let a finished
+                agent be announced as a running one. No runner left → the chip names the finished work. */}
+            <span>{runningAgents > 0
+              ? `${runningAgents} ${plural(t.agents.link, runningAgents)}`
+              : `${subagents.length} ${plural(t.agents.linkDone, subagents.length)}`}</span>
             <ChevronRight size={12} aria-hidden />
           </button>
         ) : null}

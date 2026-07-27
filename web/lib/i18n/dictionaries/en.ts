@@ -1515,7 +1515,8 @@ export const en = {
   agents: {
     title: 'Agents',
     subtitle: 'Delegated sub-agents — click one to open its progress',
-    link: 'agents',
+    link: { one: 'agent', few: 'agents', many: 'agents' },
+    linkDone: { one: 'finished agent', few: 'finished agents', many: 'finished agents' },
     task: 'Task',
     model: 'Model',
     tokens: 'Tokens',
@@ -1613,6 +1614,7 @@ export const en = {
   },
   telemetry: {
     title: 'Telemetry',
+    resize: 'Telemetry panel width',
     open: 'Show telemetry',
     close: 'Hide telemetry',
     empty: 'No telemetry available yet.',
