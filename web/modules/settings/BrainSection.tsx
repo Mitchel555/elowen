@@ -305,12 +305,25 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
   // so an out-of-range keystroke is corrected server-side; the inputs carry the same bounds for the UI.
   const [limits, setLimits] = useState<BrainLimits | null>(null);
   const [limitsSeeded, setLimitsSeeded] = useState(false);
+  // Fields the daemon sent back lowered, i.e. clamped. The save response IS the effective config, so a
+  // clamp is compared against exactly what was sent; the editor then says so per row instead of leaving
+  // the operator believing a refused value took effect. A field that saves unchanged drops out again.
+  const [appliedLimits, setAppliedLimits] = useState<Partial<BrainLimits>>({});
   useEffect(() => {
     if (config && !limitsSeeded) { setLimits(config.brain?.limits ?? BRAIN_LIMIT_DEFAULTS); setLimitsSeeded(true); }
   }, [config, limitsSeeded]);
   const { status: limitsStatus, retry: retryLimits } = useAutoSaveStatus([limits], async () => {
     if (!limits) return;
-    try { await updateConfig.mutateAsync({ brain: { limits } }); }
+    try {
+      const saved = await updateConfig.mutateAsync({ brain: { limits } });
+      const effective = saved.brain?.limits;
+      const clamped: Partial<BrainLimits> = {};
+      for (const key of Object.keys(limits) as (keyof BrainLimits)[]) {
+        const value = effective?.[key];
+        if (value !== undefined && value !== limits[key]) clamped[key] = value;
+      }
+      setAppliedLimits(clamped);
+    }
     catch (error) { toast(t.brain.saveError, 'error'); throw error; }
   }, { ready: limitsSeeded && !!limits });
 
@@ -416,6 +429,7 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
       {limits && limitsOpen ? (
             <BrainLimitsModal
               limits={limits}
+              applied={appliedLimits}
               onChange={(fn) => setLimits((cur) => (cur ? fn(cur) : cur))}
               onClose={() => setLimitsOpen(false)}
               presentation="drawer"

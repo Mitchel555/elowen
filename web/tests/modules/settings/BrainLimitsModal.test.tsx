@@ -34,7 +34,7 @@ describe('BrainLimitsModal', () => {
     );
 
     expect(screen.getByText('5 min')).toBeTruthy();
-    expect(screen.getByText('≈ 3.0k tokens')).toBeTruthy();
+    expect(screen.getByText('≈ 7.5k tokens')).toBeTruthy();
     fireEvent.change(screen.getByRole('slider', { name: 'Question timeout' }), { target: { value: '10' } });
     fireEvent.change(screen.getByRole('slider', { name: 'Tool output — tokens' }), { target: { value: '4000' } });
 
@@ -61,6 +61,25 @@ describe('BrainLimitsModal', () => {
     const update = updates[0];
     if (!update) throw new Error('slider change did not reach onChange');
     expect(update(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(3600000);
+  });
+
+  it('names the value actually in force on a field the daemon clamped', () => {
+    render(
+      <LanguageProvider>
+        <BrainLimitsModal
+          limits={{ ...BRAIN_LIMIT_DEFAULTS, memoryRecallCount: 9 }}
+          applied={{ memoryRecallCount: 6 }}
+          onChange={() => {}}
+          onClose={() => {}}
+        />
+      </LanguageProvider>,
+    );
+
+    // The row keeps showing what the operator set — the note is what stops that from being a lie.
+    expect(screen.getByText('9')).toBeTruthy();
+    expect(screen.getByText('Saved as 6 — the value you set was outside the allowed range.')).toBeTruthy();
+    // Every other row saved as asked, so none of them carries a note.
+    expect(screen.getAllByText(/^Saved as /)).toHaveLength(1);
   });
 
   it('opens field help as a floating layer above the limits modal', () => {
