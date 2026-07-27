@@ -150,6 +150,7 @@ function normalizeWorkflowState(raw: unknown): BrainWorkflowRun | undefined {
   if (typeof o.toolCallId !== 'string' || !o.toolCallId || o.toolCallId.length > 512) return undefined;
   if (o.status !== 'running' && o.status !== 'done' && o.status !== 'error' && o.status !== 'cancelled') return undefined;
   if (o.title !== undefined && typeof o.title !== 'string') return undefined;
+  if (o.background !== undefined && typeof o.background !== 'boolean') return undefined;
   if (!Array.isArray(o.nodes) || o.nodes.length > MAX_WORKFLOW_NODES) return undefined;
   const nodes: WorkflowNode[] = [];
   const seen = new Set<string>();
@@ -164,6 +165,11 @@ function normalizeWorkflowState(raw: unknown): BrainWorkflowRun | undefined {
     toolCallId: o.toolCallId,
     ...(typeof o.title === 'string' ? { title: bounded(o.title, 200) } : {}),
     status: o.status,
+    // Load-bearing, not display trivia: BrainService.sparedChildSessionIds reads it to spare a background
+    // workflow's node sessions from a parent abort, exactly as it spares a detached delegate's child.
+    // Dropping it here silently turned that sparing into dead code, so any stop/detach on the origin
+    // conversation killed every node of a running background workflow.
+    ...(o.background === true ? { background: true } : {}),
     nodes,
   };
 }

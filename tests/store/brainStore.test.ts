@@ -1242,6 +1242,22 @@ describe('BrainStore', () => {
       expect(store.upsertWorkflowRun('root', wf({ nodes: [{ id: 'a', task: 't', status: 'done', deps: [], result: 42 }] }))).toBe(false);
     });
 
+    // Same whitelist hazard, one level up. `background` is not display trivia: sparedChildSessionIds
+    // reads it to spare a running background workflow's node sessions from a parent abort. While the
+    // whitelist dropped it the sparing was dead code, so any stop or detach on the origin conversation
+    // aborted every node of a background workflow that had been promised it keeps running.
+    it('round-trips the background flag that parent-abort sparing depends on', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+      expect(store.upsertWorkflowRun('root', wf({ background: true }))).toBe(true);
+      expect(store.getWorkflowRuns('root')[0]?.background).toBe(true);
+      // A foreground workflow must stay unflagged rather than acquire a falsy key.
+      expect(store.upsertWorkflowRun('root', wf({ id: 'wf-2', toolCallId: 'call-2' }))).toBe(true);
+      expect(store.getWorkflowRuns('root').find((r) => r.id === 'wf-2')?.background).toBeUndefined();
+      // Malformed rejects the snapshot rather than coercing, like the node-level fields above.
+      expect(store.upsertWorkflowRun('root', wf({ id: 'wf-3', toolCallId: 'call-3', background: 'yes' }))).toBe(false);
+    });
+
     it('keeps only the newest snapshot per tool call, and binds a tool call to its first workflow id', () => {
       store.createSession({ id: 'root', userId: 1, model: 'm' });
       store.upsertWorkflowRun('root', wf({ nodes: [] }));
