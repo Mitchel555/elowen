@@ -42,9 +42,9 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
     if (task.includes('FAIL')) return 'Error: boom';
     // A node's own task is capped at 4 000 chars, so a report bigger than that cannot be echoed back from
     // it — `BULK:<n>` asks for a result of n chars instead, the way a real node returns far more than it
-    // was asked.
+    // was asked. It ends in `:CONCLUSION`, so a test can tell whether the END of a report survived.
     const bulk = /BULK:(\d+)/.exec(task);
-    return bulk ? `done:${task}:${'x'.repeat(Number(bulk[1]))}` : `done:${task}`;
+    return bulk ? `done:${task}:${'x'.repeat(Number(bulk[1]))}:CONCLUSION` : `done:${task}`;
   };
   const ctx = {
     registerTool: (def: Tool) => { tools.set(def.name, def); },
@@ -268,6 +268,29 @@ describe('workflow engine', () => {
       expect(size, `node ${id}`).toBeGreaterThan(3_000);
     }
     for (const id of branches) expect(synthesis).toMatch(new RegExp(`truncated to fit[^\\n]*${id}`));
+  });
+
+  // A node's report is capped at 8 000 chars before it reaches the parent's summary or any dependent. Over
+  // that cap it has to lose its HEAD: a report's conclusion is its last line, and cutting the tail is exactly
+  // what destroyed a delegated report's conclusion on delivery.
+  it('keeps the END of an over-cap node result, in the summary and in what a dependent reads', async () => {
+    const { tools, contextOf } = harness();
+    const res = await tools.get('WorkflowStart')!.execute('t-tail', {
+      nodes: [
+        { id: 'a', task: 'a BULK:9000' },
+        { id: 'b', task: 'b', deps: ['a'] },
+      ],
+    });
+    const summary = res.content[0]!.text;
+    expect(summary).toContain(':CONCLUSION'); // the end survived
+    expect(summary).not.toContain('done:a BULK:9000'); // the head is what paid for it
+    expect(summary).toMatch(/\[truncated: first \d+ chars dropped, end kept — read it in full with DelegateRead\]/);
+    // The dependent reads the same end, marked as cut. It is NOT pointed at DelegateRead: that reads a
+    // session's own children, and the node it depends on is a sibling.
+    const dependent = contextOf('b');
+    expect(dependent).toContain(':CONCLUSION');
+    expect(dependent).toContain('[truncated]');
+    expect(dependent).not.toContain('DelegateRead');
   });
 
   // The budget is an operator setting (Settings → Elowen AI → Limits), read live off the plugin context.

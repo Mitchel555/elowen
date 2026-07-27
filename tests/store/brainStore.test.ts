@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openDb, type Db } from '../../src/store/db.js';
 import { BrainStore, SESSION_EVENT_KINDS, syntheticRestartResultId } from '../../src/store/brainStore.js';
 import { planSlug } from '../../src/shared/planSlug.js';
+
+// The delivery path's tail truncation is a deliberate mirror of the subagent plugin's (neither side can
+// import the other). Loading the plugin copy here is what keeps the two from drifting apart.
+const { clipTail } = await import(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../plugins/subagent/lib/results.mjs')
+) as { clipTail(text: string, limit: number): string };
 
 describe('BrainStore', () => {
   let store: BrainStore;
@@ -234,6 +242,46 @@ describe('BrainStore', () => {
     expect(store.enqueueSubagentResult('root', {
       id: 'wrong-call', toolCallId: 'missing', sessionId: 'child', status: 'done', task: 'x', result: 'x', tools: 1, seconds: 1,
     })).toBe(false);
+  });
+
+  // The last bound a delegated result passes before it is delivered to the parent. Over the ceiling it keeps
+  // its END — a report's conclusion is its last paragraph — and says so in the same words the plugin uses.
+  it('keeps the END of an over-long result on the delivery path, exactly as the plugin does', () => {
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+    store.upsertSubagentRun('root', {
+      id: 'delegate-1', sessionId: 'child', status: 'done', task: 'inspect', tools: 1, seconds: 1,
+    });
+    const conclusion = 'CONCLUSION: the lock is never released on the error path.';
+    const report = `OPENING: how I looked.\n${'y'.repeat(120_000)}\n${conclusion}`;
+    expect(store.enqueueSubagentResult('root', {
+      id: 'dlg-long', toolCallId: 'delegate-1', sessionId: 'child', status: 'done', task: 'inspect',
+      result: report, tools: 1, seconds: 1,
+    })).toBe(true);
+
+    const stored = store.pendingSubagentResults('root')[0]!.result!;
+    expect(stored.endsWith(conclusion)).toBe(true);
+    expect(stored).not.toContain('OPENING: how I looked.');
+    expect(stored).toMatch(/^\[truncated: first \d+ chars dropped, end kept — read it in full with DelegateRead\]\n/);
+    expect(stored.length).toBeLessThanOrEqual(100_000);
+    expect(stored).toBe(clipTail(report, 100_000)); // the two copies must not drift
+  });
+
+  // A DAG summary is every node's result end to end, so it is the payload that really can exceed the
+  // ceiling — and cutting its head costs the FIRST nodes, not the last ones the parent was waiting for.
+  it('keeps the END of an over-long workflow summary too', () => {
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    expect(store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'done', nodes: [] })).toBe(true);
+    const lastNode = '[write] DONE\nthe document is published.';
+    const summary = `[gather] DONE\n${'y'.repeat(120_000)}\n${lastNode}`;
+    expect(store.enqueueWorkflowResult('root', {
+      id: 'wf-1', toolCallId: 'wfcall-1', status: 'done', result: summary,
+    })).toBe(true);
+
+    const stored = store.pendingSubagentResults('root')[0]!.result!;
+    expect(stored.endsWith(lastNode)).toBe(true);
+    expect(stored).not.toContain('[gather] DONE');
+    expect(stored).toBe(clipTail(summary, 100_000));
   });
 
   describe('workflow results share the delegated-result inbox with a kind discriminator', () => {

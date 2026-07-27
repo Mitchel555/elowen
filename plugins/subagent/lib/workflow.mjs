@@ -15,6 +15,7 @@ import {
   TRUNCATION_MARKER,
   resolveContextTotalChars,
 } from './limits.mjs';
+import { clipTail } from './results.mjs';
 
 const MAX_WORKFLOWS = 16;
 const WORKFLOW_RETENTION_MS = 60 * 60_000;
@@ -36,6 +37,12 @@ const DEP_BLOCK_SEPARATOR = '\n\n';
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
 const errorText = (e) => (e instanceof Error ? e.message : String(e));
 const clip = (text, limit) => (text.length <= limit ? text : `${text.slice(0, limit)}${TRUNCATION_MARKER}`);
+/** A dependency block keeps the END of the result for the same reason the result itself does — the finding is
+ *  in the last paragraph — but with the bare marker PREPENDED rather than clipTail's note. It costs exactly
+ *  TRUNCATION_MARKER.length, which the per-block budget arithmetic below reserves, and DelegateRead would be
+ *  no use to a node anyway: it reads a session's own children, and a sibling node is not one. `depIntro`
+ *  already names, to the node, every dependency it is not seeing whole. */
+const clipDep = (text, limit) => (text.length <= limit ? text : `[truncated]\n${text.slice(-limit)}`);
 const depBlockHeading = (id) => `## Result from node "${id}"\n`;
 /** The note introducing the dependency blocks, naming the ones the node is not seeing in full. */
 const depIntro = (truncatedIds) => 'Results from the nodes this one depends on follow, one block per node.'
@@ -221,7 +228,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       contextParts.push(depIntro(depResults.filter((d) => d.result.length > perDep).map((d) => d.id)));
       for (let i = 0; i < depResults.length; i += perChunk) {
         contextParts.push(depResults.slice(i, i + perChunk)
-          .map((d) => `${depBlockHeading(d.id)}${clip(d.result, perDep)}`)
+          .map((d) => `${depBlockHeading(d.id)}${clipDep(d.result, perDep)}`)
           .join(DEP_BLOCK_SEPARATOR));
       }
     }
@@ -268,7 +275,9 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       const raw = await getRun()(collectSource, node.task, onEvent);
       const reply = raw || '(the node returned nothing)';
       if (reply.startsWith('Error:')) { ns.status = 'error'; ns.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_RESULT_CHARS); }
-      else { ns.status = 'done'; ns.result = clip(reply, MAX_RESULT_CHARS); }
+      // The node's answer reaches the parent through `summarize` and its dependents through the blocks above:
+      // keep its END, where a report's conclusion is. An error stays head-first — it leads with what broke.
+      else { ns.status = 'done'; ns.result = clipTail(reply, MAX_RESULT_CHARS); }
     } catch (e) {
       ns.status = 'error';
       ns.error = clip(errorText(e), MAX_RESULT_CHARS);

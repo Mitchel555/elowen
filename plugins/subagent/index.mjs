@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
+import { clipTail } from './lib/results.mjs';
 import {
   CONTEXT_HEADER,
   MAX_CONTEXT_CHUNK_CHARS,
@@ -464,7 +465,9 @@ export function register(ctx) {
             state.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_STORED_RESULT_CHARS);
           } else {
             state.status = 'done';
-            state.result = clip(reply, MAX_STORED_RESULT_CHARS);
+            // The ONE result the parent reads, foreground return and background delivery alike: keep its END.
+            // An error is left head-first on purpose — what an error says is in its first line, not its last.
+            state.result = clipTail(reply, MAX_STORED_RESULT_CHARS);
           }
         } catch (e) {
           state.status = 'error';
