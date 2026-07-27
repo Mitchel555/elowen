@@ -52,6 +52,14 @@ describe('ConfigStore brain limits', () => {
     });
   });
 
+  it('allows question timeouts up to one hour and clamps anything longer', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ brain: { limits: { elicitationTimeoutMs: 3_600_000 } } });
+    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
+    cs.update({ brain: { limits: { elicitationTimeoutMs: 7_200_000 } } });
+    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
+  });
+
   // The sub-agent context budget must stay under the delegated-scope prompt total (32 000 chars): a scope
   // over that bound is rejected wholesale, so an operator typing a bigger number would not get a fatter
   // context, they would get delegations that fail closed.

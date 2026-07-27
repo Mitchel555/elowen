@@ -210,7 +210,7 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
 const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> = {
   toolOutputMaxLines: [20, 400],
   toolOutputMaxChars: [2000, 50_000],
-  elicitationTimeoutMs: [30_000, 1_800_000],
+  elicitationTimeoutMs: [30_000, 3_600_000],
   memoryRecallCount: [1, 20],
   memoryRecallChars: [300, 8000],
   goalTurnBudget: [1, 50],
