@@ -12,6 +12,7 @@
 // (/var/www/.config/elowen/elowen.db), config dir or systemd services, and never runs `elowen up`.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -76,7 +77,7 @@ export async function spawnRealDaemon(opts) {
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const bootstrapUser = 'admin';
-  const bootstrapPass = `e2e-${Math.random().toString(36).slice(2)}`;
+  const bootstrapPass = `e2e-${randomBytes(18).toString('base64url')}`;
 
   // Start from a filtered copy of the parent env: drop every ELOWEN_* prod var and every agent-CLI config
   // override so nothing points back at prod paths, then set our own throwaway values + a redirected HOME.
