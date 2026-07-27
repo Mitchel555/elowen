@@ -1,4 +1,5 @@
 'use client';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
@@ -7,20 +8,47 @@ import { formatTokens, formatCost } from '../../lib/format';
 import { OAuthUsageRail, usageFillClass } from '../settings/OAuthUsageRail';
 import { MascotGlyph } from '../../components/ui/SpatialMascot';
 import { useBrainChat } from './BrainChatProvider';
+import { CommandOrbit } from './CommandOrbit';
 
 /** The owl presides over the rail the way it tops the CLI panel — and it is not decoration: it mirrors
  *  the agent, breathing while a turn runs and settling when it does not, so the rail reads as inhabited
  *  rather than a dashboard. Kept inside the shared body so the desktop column and the mobile drawer show
  *  the same living header.
  *
+ *  It is also the door to the command field: clicking it opens the orbital field of slash commands as an
+ *  overlay. An overlay rather than the rail itself — an orbit needs roughly 26rem before its pods start
+ *  colliding with the core, and the rail is 15rem (18rem as a phone drawer).
+ *
  *  The flat glyph rather than the full WebGL mascot: that scene frames itself at a fixed pixel size, so a
  *  rail this narrow would crop it down to a pair of eyes. */
 function TelemetryMascot({ busy }: { busy: boolean }) {
+  const { t } = useTranslation();
+  const [fieldOpen, setFieldOpen] = useState(false);
+  const mascotRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  // Closing returns focus to the owl explicitly. The overlay restores whatever was focused when it
+  // opened, which is the owl only when it was opened by an actual click — a pointer tap leaves focus on
+  // the body on some browsers, and the user would land back at the top of the document.
+  useEffect(() => {
+    if (wasOpen.current && !fieldOpen) mascotRef.current?.focus();
+    wasOpen.current = fieldOpen;
+  }, [fieldOpen]);
   return (
-    <div className="flex justify-center pt-2" data-testid="telemetry-mascot">
-      <div className="h-28 w-28">
+    <div className="flex justify-center pt-2">
+      <button
+        ref={mascotRef}
+        type="button"
+        data-testid="telemetry-mascot"
+        aria-label={t.brainChat.commandField.open}
+        title={t.brainChat.commandField.open}
+        aria-haspopup="dialog"
+        aria-expanded={fieldOpen}
+        onClick={() => setFieldOpen(true)}
+        className="h-28 w-28 rounded-full transition-transform hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text"
+      >
         <MascotGlyph state={busy ? 'saving' : 'idle'} />
-      </div>
+      </button>
+      {fieldOpen ? <CommandOrbit onClose={() => setFieldOpen(false)} /> : null}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { ShieldQuestion, Coins, Radio, AlarmClock, type LucideIcon } from 'lucid
 import { currentMonthBounds } from './metrics';
 import { buildUsageSummary } from '../stats/usageBars';
 import { nextCronRun } from '../../lib/cron';
+import { appendFilament, lightFilament } from '../../lib/cosmosFilaments';
 import { formatCost } from '../../lib/format';
 import { useTranslation } from '../../lib/i18n';
 import {
@@ -22,8 +23,6 @@ import type { AgentPresenceState } from './useAgentPresence';
 /** 0.5rem slack under the hero's 26rem cosmos column so subpixel rounding can't flap the mode. */
 const ORBIT_MIN_WIDTH_PX = 408;
 const ORBIT_MIN_HEIGHT_PX = 336;
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
 
 type PodId = 'decisions' | 'agents' | 'cron' | 'cost';
 
@@ -164,26 +163,12 @@ export function HeroCosmos({ now, state, presenceLabel }: {
         pod.style.top = `${y}px`;
         pod.style.setProperty('--fx', `${cx - x}px`);
         pod.style.setProperty('--fy', `${cy - y}px`);
-        // Filament: the same gently curved base + drifting flow overlay as the settings cosmos.
-        const mx = (cx + x) / 2 + (y - cy) * 0.12;
-        const my = (cy + y) / 2 - (x - cx) * 0.12;
-        const d = `M${cx} ${cy} Q${mx} ${my} ${x} ${y}`;
-        for (const kind of ['base', 'flow'] as const) {
-          const path = document.createElementNS(SVG_NS, 'path');
-          path.setAttribute('d', d);
-          path.setAttribute('fill', 'none');
-          path.setAttribute('stroke-width', '1');
-          path.classList.add(`cosmos-fil--${kind}`);
-          path.dataset.pod = id;
-          path.style.setProperty('--i', pod.style.getPropertyValue('--i'));
-          if (kind === 'base' && typeof path.getTotalLength === 'function') {
-            const len = path.getTotalLength();
-            path.style.setProperty('--len', String(len));
-            path.setAttribute('stroke-dasharray', String(len));
-          }
-          if (alertRef.current && id === 'decisions') path.classList.add('hero-fil--alert');
-          svg.appendChild(path);
-        }
+        // Filament: the same gently curved base + drifting flow overlay as every other cosmos field.
+        appendFilament(svg, { x: cx, y: cy }, { x, y }, {
+          pod: id,
+          index: pod.style.getPropertyValue('--i'),
+          ...(alertRef.current && id === 'decisions' ? { extraClass: 'hero-fil--alert' } : {}),
+        });
       }
     };
 
@@ -193,17 +178,11 @@ export function HeroCosmos({ now, state, presenceLabel }: {
     resize?.observe(root);
 
     // Hovering a pod lights up its filament and dims the others.
-    const setLit = (id: string | null) => {
-      for (const path of svg.querySelectorAll('path')) {
-        path.classList.remove('is-lit', 'is-dim');
-        if (id != null) path.classList.add(path.dataset.pod === id ? 'is-lit' : 'is-dim');
-      }
-    };
     const onOver = (event: PointerEvent) => {
       const pod = event.target instanceof Element ? event.target.closest<HTMLElement>('.hero-cosmos__pod') : null;
-      setLit(pod?.dataset.pod ?? null);
+      lightFilament(svg, pod?.dataset.pod ?? null);
     };
-    const onOut = () => setLit(null);
+    const onOut = () => lightFilament(svg, null);
     podsLayer.addEventListener('pointerover', onOver);
     podsLayer.addEventListener('pointerleave', onOut);
 
