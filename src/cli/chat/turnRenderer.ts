@@ -3,6 +3,7 @@ import type { MarkdownTheme } from '@earendil-works/pi-tui';
 import type { ChatTurn, ToolItem } from '../../brain/transcript.js';
 import { groupToolItems, failureSignature, submittedPlanOf } from '../../brain/transcript.js';
 import { formatDuration, formatK, padAnsi, terminalInlineText, terminalPlainText } from '../ui/text.js';
+import { toolGlyph } from '../../shared/toolGlyph.js';
 import { framedDiffBlock, toolOutputBlock, UserBlock, workflowCounts, workflowTitle } from './components.js';
 import { ensureLang, langForPath } from './codeHighlight.js';
 import { chatTheme, color, paintRow } from './theme.js';
@@ -57,20 +58,10 @@ export function toolRowSpec(name: string, detail?: string): { glyph: string; tit
   // "Write" — so the real name is shown verbatim; a search detail is the query, hence quoted.
   const isSearch = /(search|grep|glob)/i.test(safeName);
   const title = !safeDetail ? safeName : isSearch ? `${safeName} "${safeDetail}"` : `${safeName} ${safeDetail}`;
-  if (isSearch) return { glyph: '✱', title };
-  if (/(edit|patch|update|modify|replace)/i.test(safeName)) return { glyph: '←', title };
-  if (/(write|create)/i.test(safeName)) return { glyph: '←', title };
-  if (/(read|open|cat)/i.test(safeName)) return { glyph: '→', title };
-  if (/list_?dir/i.test(safeName)) return { glyph: '→', title };
-  if (/diff/i.test(safeName)) return { glyph: '←', title };
-  // LSP (diagnostics / definitions / references / symbols) uses the universal monochrome glyph — the CLI
-  // never renders the colored per-tool icon (that 🔎 is for the web/Discord clients). Deliberately NOT the
-  // search ✱: an LSP check is not a search. Kept as an explicit branch (the default is also ⚙) so the intent
-  // survives. This ⚙ shows on LSP's compact marker row (empty result); the usual case — a result block —
-  // leads with the shared ← connector like every other shown-output tool.
-  if (/(lsp|diagnostic)/i.test(safeName)) return { glyph: '⚙', title };
-  if (/(fetch|web|http|url)/i.test(safeName)) return { glyph: '%', title };
-  return { glyph: '⚙', title };
+  // The marker itself is shared with the web (src/shared/toolGlyph.ts) so the two surfaces agree; only the
+  // title is terminal-specific. LSP's ⚙ shows on its compact marker row (empty result); the usual case —
+  // a result block — leads with the shared ← connector like every other shown-output tool.
+  return { glyph: toolGlyph(safeName), title };
 }
 
 const blockFill = (text: string, width: number): string => paintRow(chatTheme().modalBg, text, width);

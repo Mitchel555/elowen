@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, PlayCircle } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, PlayCircle } from 'lucide-react';
+import { toolGlyph } from '../../lib/toolGlyph';
 import { plural, useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
@@ -159,7 +160,7 @@ function ToolPills({ tools, full, live }: { tools: ToolItem[]; full?: boolean; l
           <>
             {running
               ? <Loader2 size={10} role="status" aria-label={t.brainChat.toolRunning} className="shrink-0 animate-spin text-warning" />
-              : tool.icon ? <span aria-hidden className="shrink-0 opacity-70">{tool.icon}</span> : <Wrench size={9} aria-hidden className="shrink-0 opacity-70" />}
+              : <span aria-hidden className="shrink-0 select-none opacity-70">{toolGlyph(tool.name)}</span>}
             <span className="shrink-0 text-text-muted">{tool.name}</span>
             {tool.detail ? <span className="truncate opacity-60">{tool.detail}</span> : null}
             {group.count > 1 ? <span className="shrink-0 tabular-nums opacity-50">×{group.count}</span> : null}

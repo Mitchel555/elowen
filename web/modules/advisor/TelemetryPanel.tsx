@@ -51,10 +51,13 @@ function TelemetryMascot({ busy }: { busy: boolean }) {
         aria-haspopup="dialog"
         aria-expanded={fieldOpen}
         onClick={() => setFieldOpen(true)}
-        // Sized as a share of the rail rather than a fixed 7rem: the column is draggable from 15rem to
+        // Sized as a share of the rail rather than a fixed size: the column is draggable from 15rem to
         // 35rem, and a mascot frozen at one size looks lost in a wide rail and crowds a narrow one. The
         // glyph itself has no intrinsic size (it fills its parent), so the square has to come from here.
-        className="aspect-square w-[42%] min-w-[6.5rem] max-w-[11rem] rounded-full transition-transform hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text"
+        // The floor is deliberately NOT in proportion to the share: at the narrowest rail the percentage
+        // already yields less than the floor would, so raising it would push the mascot wider than the
+        // column that has to hold it.
+        className="aspect-square w-[84%] min-w-[8rem] max-w-[22rem] rounded-full transition-transform hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text"
       >
         <MascotGlyph state={busy ? 'saving' : 'idle'} />
       </button>
