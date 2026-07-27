@@ -29,14 +29,14 @@ function fakeBrain() {
   const sends: { id: number; text: string; mode?: string }[] = [];
   const boundSendCalls: { session?: string; client?: { id: string; generation: number } }[] = [];
   const fastCalls: { id: number; on?: boolean; session?: string }[] = [];
-  const stopSessionCalls: { id: number; session?: string; client?: string; generation?: number }[] = [];
+  const stopSessionCalls: { id: number; session?: string; client?: string; generation?: number; detachOnly?: boolean }[] = [];
   const interruptQueuedCalls: { id: number; session?: string; client?: { id: string; generation: number } }[] = [];
   const detachSubagentCalls: { id: number; session?: string; client?: { id: string; generation: number } }[] = [];
   const detachCommandCalls: { id: number; session?: string; client?: { id: string; generation: number } }[] = [];
   const killCommandCalls: { id: number; session?: string; client?: { id: string; generation: number } }[] = [];
   const detachWorkflowCalls: { id: number; session?: string; client?: { id: string; generation: number } }[] = [];
   const startCalls: { id: number; opts?: { fresh?: boolean; clientId?: string; clientGeneration?: number } }[] = [];
-  const tapSnapshotCalls: { id: number; session: string }[] = [];
+  const tapSnapshotCalls: { id: number; session: string; history?: { limit: number; before?: number } }[] = [];
   const subagentSends: { id: number; session: string; text: string }[] = [];
   const acceptedSendFailures: { session: string; message: string }[] = [];
   const turnRequests: Omit<TurnRequest, 'onAdmitted'>[] = [];
@@ -168,8 +168,11 @@ function fakeBrain() {
     },
     subscribe: () => () => {},
     tapSession: () => () => {},
-    tapSessionSnapshot: (id: number, session: string, listener: (event: BrainEvent) => void) => {
-      tapSnapshotCalls.push({ id, session });
+    tapSessionSnapshot: (
+      id: number, session: string, listener: (event: BrainEvent) => void,
+      _client?: string, _generation?: number, history?: { limit: number; before?: number },
+    ) => {
+      tapSnapshotCalls.push({ id, session, history });
       // Arrives after the atomic snapshot was captured but while its first SSE frame is flushing.
       const publishPending = () => { for (const event of snapshotPending) listener(event); };
       if (snapshotPendingSync) publishPending();
@@ -204,8 +207,8 @@ function fakeBrain() {
       fastCalls.push({ id, on, session });
       return { fast: on ?? true, fastAvailable: true };
     },
-    stopSession: async (id: number, session?: string, client?: string, generation?: number) => {
-      stopSessionCalls.push({ id, session, client, generation });
+    stopSession: async (id: number, session?: string, client?: string, generation?: number, opts?: { detachOnly?: boolean }) => {
+      stopSessionCalls.push({ id, session, client, generation, detachOnly: opts?.detachOnly });
       return { stopped: true, disposed: true };
     },
     interruptQueued: async (id: number, session?: string, client?: { id: string; generation: number }) => {
@@ -436,13 +439,71 @@ describe('brain routes', () => {
     }
     ac.abort();
     await reader.cancel().catch(() => {});
-    expect(brain.tapSnapshotCalls).toEqual([{ id: 2, session: 'brain-ch-subagent-a' }]);
+    expect(brain.tapSnapshotCalls).toEqual([{ id: 2, session: 'brain-ch-subagent-a', history: undefined }]);
     expect(body).toContain('event: snapshot');
     expect(body).toContain('id: 7');
     expect(body).toContain('stored child turn');
     expect(body).toContain('running child output');
     expect(body).toContain('post-snapshot event');
     expect(body.indexOf('running child output')).toBeLessThan(body.indexOf('post-snapshot event'));
+  });
+
+  it('forwards a `history` window to the snapshot tap only when the client asked for one', async () => {
+    const { app, amyTok, brain } = setup();
+    const open = async (query: string): Promise<void> => {
+      const ac = new AbortController();
+      const res = await app.request(`/brain/stream?${query}`, {
+        headers: { authorization: `Bearer ${amyTok}` }, signal: ac.signal,
+      });
+      const reader = res.body!.getReader();
+      await reader.read();
+      ac.abort();
+      await reader.cancel().catch(() => {});
+    };
+    await open('session=brain-ch-subagent-a&snapshot=1&history=50');
+    await open('session=brain-ch-subagent-a&snapshot=1&history=nonsense');
+    expect(brain.tapSnapshotCalls.map((call) => call.history)).toEqual([{ limit: 50 }, undefined]);
+  });
+
+  it('keeps the keep-alive a comment by default and upgrades it to a named frame on ?heartbeat=1', async () => {
+    const readKeepAlive = async (query: string): Promise<string> => {
+      const { app, amyTok } = setup();
+      const ac = new AbortController();
+      const res = await app.request(`/brain/stream?${query}`, {
+        headers: { authorization: `Bearer ${amyTok}` }, signal: ac.signal,
+      });
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let body = '';
+      const pump = (async () => {
+        for (let i = 0; i < 12; i++) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          body += decoder.decode(chunk.value, { stream: true });
+          if (body.includes(': ping') || body.includes('event: heartbeat')) break;
+        }
+      })();
+      await vi.advanceTimersByTimeAsync(31_000);
+      await pump;
+      ac.abort();
+      await reader.cancel().catch(() => {});
+      return body;
+    };
+
+    vi.useFakeTimers();
+    try {
+      // An EventSource never surfaces comment lines, so the plain ping cannot drive a client watchdog —
+      // but the CLI/Discord contract is "only BrainEvent types on the wire", hence the opt-in.
+      const plain = await readKeepAlive('session=brain-ch-subagent-a&snapshot=1');
+      expect(plain).toContain(': ping');
+      expect(plain).not.toContain('event: heartbeat');
+
+      const named = await readKeepAlive('session=brain-ch-subagent-a&snapshot=1&heartbeat=1');
+      expect(named).toContain('event: heartbeat');
+      expect(named).not.toContain(': ping');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('unsubscribes and closes an opt-in snapshot stream when the raw pre-snapshot queue overflows', async () => {
@@ -541,7 +602,16 @@ describe('brain routes', () => {
     const res = await app.request('/brain/session/stop', post(amyTok, { session: 'brain-child', client: 'cli-a', generation: 3 }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ stopped: true, disposed: true });
-    expect(brain.stopSessionCalls).toEqual([{ id: 2, session: 'brain-child', client: 'cli-a', generation: 3 }]);
+    expect(brain.stopSessionCalls).toEqual([{ id: 2, session: 'brain-child', client: 'cli-a', generation: 3, detachOnly: false }]);
+  });
+
+  // The web beacon's non-destructive stop: the flag has to reach the service, or a closing tab keeps
+  // killing running agents exactly as before.
+  it('forwards detachOnly from the web beacon to the service', async () => {
+    const { app, amyTok, brain } = setup();
+    const res = await app.request('/brain/session/stop', post(amyTok, { session: 'brain-child', client: 'web-x', generation: 3, detachOnly: true }));
+    expect(res.status).toBe(200);
+    expect(brain.stopSessionCalls).toEqual([{ id: 2, session: 'brain-child', client: 'web-x', generation: 3, detachOnly: true }]);
   });
 
   it('interrupts queued work with the bound CLI generation intact', async () => {

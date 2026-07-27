@@ -373,11 +373,20 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
   }));
 
   // Closing a session-bound client: abort its active run and dispose the live PI session only when no
-  // other client is attached. Persisted history remains resumable.
+  // other client is attached. Persisted history remains resumable. `detachOnly` (the web beacon) keeps the
+  // binding release but refuses the teardown while work is in flight — a closing tab must not kill an
+  // agent. Logged on both outcomes: this route used to be silent, which made a phone-lock teardown
+  // impossible to confirm from the daemon log.
   app.post('/brain/session/stop', withBrain(async (c, brain) => {
-    const { session, client, generation } = await parseBody(c, brainStopSchema);
-    try { return c.json(await brain.stopSession(c.get('user').id, session, client, generation)); }
-    catch (e) { return c.json({ error: (e as Error).message }, 404); }
+    const { session, client, generation, detachOnly } = await parseBody(c, brainStopSchema);
+    try {
+      const result = await brain.stopSession(c.get('user').id, session, client, generation, { detachOnly: detachOnly === true });
+      logger('brain').info(`session stop: session=${session ?? '-'} client=${client ?? '-'} generation=${generation ?? '-'} detachOnly=${detachOnly === true} → stopped=${result.stopped} disposed=${result.disposed}`);
+      return c.json(result);
+    } catch (e) {
+      logger('brain').warn(`session stop failed: session=${session ?? '-'} client=${client ?? '-'} — ${(e as Error).message}`);
+      return c.json({ error: (e as Error).message }, 404);
+    }
   }));
 
   // Switch the active conversation (or the caller's explicit `session`) to another configured model (the
@@ -714,6 +723,9 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     // Explicit opt-in: normal parent/web streams keep their existing non-replaying contract. Drill-in
     // clients request one replace-in-place snapshot so reconnecting never appends duplicate deltas.
     const withSnapshot = !!session && c.req.query('snapshot') === '1';
+    // The snapshot's history is windowed only for a client that asked for a page (`?history=<n>`, the web
+    // chat's lazy-load). Without it the frame keeps carrying the full transcript — the CLI's contract.
+    const historyWindow = withSnapshot ? messagePageOpts(c.req.query('history')) : undefined;
     return streamSSE(c, async stream => {
       let off: (() => void) | null = null;
       let ready = !withSnapshot;
@@ -758,7 +770,7 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
       let snapshot: ReturnType<typeof brain.tapSessionSnapshot>['snapshot'] | null = null;
       try {
         if (session && withSnapshot) {
-          const attached = brain.tapSessionSnapshot(userId, session, deliver, clientId, clientGeneration);
+          const attached = brain.tapSessionSnapshot(userId, session, deliver, clientId, clientGeneration, historyWindow);
           off = attached.off;
           snapshot = attached.snapshot;
         } else off = session
@@ -786,10 +798,17 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
       }
       // Comment flush so the channel connects through the BFF proxy on a quiet system (see /events).
       await stream.write(': connected\n\n');
+      // An SSE comment line never surfaces in an EventSource, so `: ping` is invisible to a browser client
+      // and cannot carry a silence watchdog. `?heartbeat=1` upgrades the keep-alive to a named frame the
+      // client CAN observe; it stays opt-in so CLI, Discord and JSONL consumers keep reading a stream whose
+      // events are only ever BrainEvent types.
+      const namedHeartbeat = c.req.query('heartbeat') === '1';
       while (!c.req.raw.signal.aborted) {
         await stream.sleep(30000);
         if (c.req.raw.signal.aborted) break;
-        await stream.write(': ping\n\n');
+        if (!namedHeartbeat) { await stream.write(': ping\n\n'); continue; }
+        writes = writes.then(() => stream.writeSSE({ data: '{}', event: 'heartbeat' })).catch(() => undefined);
+        await writes;
       }
     });
   });

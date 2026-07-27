@@ -3380,6 +3380,44 @@ describe('sub-agent session tap + owner steering', () => {
     attached.off();
   });
 
+  it('windows the snapshot history AFTER removing journaled rows, with a cursor the lazy-load can continue', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    for (const n of [1, 2, 3, 4, 5]) {
+      d.store.appendMessage({
+        id: `u${n}`, sessionId: 'brain-1', parentId: null, role: 'user',
+        content: { role: 'user', content: `msg ${n}` },
+      });
+    }
+    // A steered message is durable AND replayed as an ordering marker, so it is cut from the history half.
+    d.emit({ type: 'agent_start' });
+    d.session.isStreaming = true;
+    await svc.send({ userId: 1, text: 'steer now' });
+    d.deliverQueued('steer now');
+    d.session.isStreaming = false;
+
+    const full = svc.tapSessionSnapshot(1, 'brain-1', () => {});
+    expect(full.snapshot.history.map((row) => row.text)).toEqual(['msg 1', 'msg 2', 'msg 3', 'msg 4', 'msg 5']);
+    expect(full.snapshot.hasMore).toBeUndefined(); // no window requested → the CLI's whole-transcript frame
+    expect(full.snapshot.nextBefore).toBeUndefined();
+    full.off();
+
+    const windowed = svc.tapSessionSnapshot(1, 'brain-1', () => {}, undefined, undefined, { limit: 3 });
+    // Windowing before the removal would spend one slot on the journaled row and lose `msg 3`.
+    expect(windowed.snapshot.history.map((row) => row.text)).toEqual(['msg 3', 'msg 4', 'msg 5']);
+    expect(windowed.snapshot.events.some((event) => event.type === 'user')).toBe(true);
+    expect(windowed.snapshot.hasMore).toBe(true);
+    expect(windowed.snapshot.nextBefore).toBe(2);
+    // The cursor lives in the same index space as GET /brain/messages: continuing from it yields exactly
+    // the older turns, with no gap and no repeat.
+    const older = svc.messagesPage(1, 'brain-1', { limit: 3, before: windowed.snapshot.nextBefore ?? undefined });
+    expect(older.items.map((row) => row.text)).toEqual(['msg 1', 'msg 2']);
+    expect(older.hasMore).toBe(false);
+    expect(older.nextBefore).toBeNull();
+    windowed.off();
+  });
+
   it('includes the durable goal in every reconnect snapshot after replay journal boundaries', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

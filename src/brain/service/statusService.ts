@@ -358,7 +358,7 @@ export class BrainStatusService {
   /** Atomic, idempotent first frame for an opt-in fixed-session SSE stream. Reads the clean durable
    *  history and the live run journal synchronously on the same event-loop turn, so an event cannot
    *  fall between the two halves. The route installs its tap immediately before calling this method. */
-  streamSnapshot(userId: number, sessionId: string): BrainStreamSnapshot {
+  streamSnapshot(userId: number, sessionId: string, history?: MessagePageOpts): BrainStreamSnapshot {
     const row = this.d.store.getSession(sessionId);
     if (!row || row.user_id !== userId) throw new Error('unknown session');
     const live = this.d.sessions.get(sessionId)
@@ -366,17 +366,24 @@ export class BrainStatusService {
     const replay = live?.replay.transportSnapshot() ?? { cursor: 0, events: [], run: 0, eventCursors: [] };
     const orderedUserRows = new Set(replay.events.flatMap((event) =>
       event.type === 'user' && event.durableId ? [event.durableId] : []));
+    // Journaled users are already durable, but replaying them is what preserves their position among
+    // pre/post-steer deltas. Remove exactly those id-matched rows from the history prefix (no text
+    // guessing: display text may differ from persisted image/mention framing).
+    const clean = this.shapedHistory(
+      sessionId,
+      this.d.store.getMessages(sessionId).filter((message) => !orderedUserRows.has(message.id)),
+    );
+    // Window AFTER the removal, never before: cutting first would let a journaled row consume a slot of
+    // the window and drop a real turn out of the page. The removed rows all belong to the UNSETTLED run,
+    // i.e. the very tail, so everything before `nextBefore` is identical in the unfiltered array the
+    // lazy-load pages through — the cursor stays valid across the two endpoints.
+    const page = history ? windowViews(clean, history) : undefined;
     return {
       type: 'snapshot',
       sessionId,
       goal: this.d.store.getGoal(sessionId) ?? null,
-      // Journaled users are already durable, but replaying them is what preserves their position among
-      // pre/post-steer deltas. Remove exactly those id-matched rows from the history prefix (no text
-      // guessing: display text may differ from persisted image/mention framing).
-      history: this.shapedHistory(
-        sessionId,
-        this.d.store.getMessages(sessionId).filter((message) => !orderedUserRows.has(message.id)),
-      ),
+      history: page ? page.items : clean,
+      ...(page ? { hasMore: page.hasMore, nextBefore: page.nextBefore } : {}),
       ...replay,
     };
   }

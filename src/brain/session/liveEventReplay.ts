@@ -40,6 +40,11 @@ export interface BrainStreamSnapshot extends LiveEventSnapshot {
   run?: number;
   eventCursors?: number[];
   truncated?: true;
+  /** Present only when the client asked for a WINDOWED history (`?history=<n>`): the lazy-load cursor of
+   * the page in `history`, in the same index space GET /brain/messages pages through. Absent means the
+   * frame carries the whole transcript (the CLI's contract, unchanged). */
+  hasMore?: boolean;
+  nextBefore?: number | null;
 }
 
 const MAX_EVENTS = 512;

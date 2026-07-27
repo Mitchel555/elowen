@@ -977,6 +977,13 @@ export async function buildApp(opts: BuildOpts) {
     const stopTerminalSweep = clock.setInterval(() => {
       void brainTerminal?.sweep().catch((e) => log.error('brain terminal sweep failed', e));
     }, 60_000);
+    // Reap live PI sessions nobody watches and nothing runs in. A client's binding expires on its own
+    // TTL, but the RUNTIME was owned by no one: a browser tab closed over a running agent (which no
+    // longer stops it) would otherwise leak its session until the daemon restarted. The countdown starts
+    // only once a session is both unwatched and idle, so a long unattended run is never cut short.
+    const stopIdleSessionReap = clock.setInterval(() => {
+      void brain?.reapIdleLiveSessions().catch((e) => log.error('idle live-session reap failed', e));
+    }, 60_000);
     // PR feedback loop (no-op unless PR mode + open PRs): poll each open PR for fresh actionable review
     // feedback and, within the fix budget, route it through the pilot (1..N fix phases on the mission's
     // exec) then re-engage the mission so an agent applies them. Relay-only (no agent pilot) degrades to
@@ -1016,7 +1023,7 @@ export async function buildApp(opts: BuildOpts) {
     const stopEmbedQueue = clock.setInterval(() => {
       void embedQueue.drain().catch((e) => log.error('embed queue drain failed', e));
     }, 30_000);
-    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopTicketSweep(); stopTerminalSweep(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
+    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopTicketSweep(); stopTerminalSweep(); stopIdleSessionReap(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
   };
   return { app, startLoops, tickets, tmux };
 }

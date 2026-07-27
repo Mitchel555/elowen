@@ -23,6 +23,8 @@ import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
 import { isNonUserSession, isOwnedUserSession, isChannelSession, isSubagentSession, channelIdOf, defaultUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
 import { lastAssistantText } from './goal.js';
 import { ClientAttachments } from './service/attachments.js';
+import { IdleSessionClock } from './service/liveSessionReaper.js';
+import { SESSION_IDLE_ROLLOVER_MS } from './session/idleRollover.js';
 import { PermissionApprovalService } from './service/permissionApproval.js';
 import { GoalLoopService } from './service/goalLoop.js';
 import { LiveSessionSpawner } from './service/spawner.js';
@@ -93,6 +95,8 @@ export class BrainService {
   private cards = new CardRegistry(() => this.d.store);
   /** Live client streams + long-lived session taps → the session each is attached to. */
   private attachments = new ClientAttachments();
+  /** How long each live conversation has been continuously unwatched AND idle — the reaper's clock. */
+  private readonly idleClock = new IdleSessionClock();
   /** Effective tool permissions per turn + the approval channel + the session YOLO override. */
   private permissionSvc: PermissionApprovalService;
   /** The autonomous goal loop: /goal surface, continuation timers, post-turn judge. */
@@ -487,11 +491,48 @@ export class BrainService {
       : this.attachments.attachedCount(sessionId) === 0;
   }
 
+  /** Whether this conversation has WORK in flight — a running turn, anything queued behind it, a parked
+   *  question, a still-running child/workflow/background job, or an armed goal continuation. Deliberately
+   *  FAIL-CLOSED: every uncertain signal counts as busy, because the two callers (a detach-only stop and
+   *  the idle reaper) both destroy a live runtime when it answers false, and the cost of a false "idle" is
+   *  killed work while the cost of a false "busy" is a runtime that lives one sweep longer. */
+  private sessionIsIdle(sessionId: string): boolean {
+    const live = this.sessions.get(sessionId);
+    if (!live) return true; // nothing live to protect
+    if (live.session.isStreaming) return false;
+    if (this.sessions.isParentAborting(sessionId) || this.sessions.hasPendingAbort(sessionId)) return false;
+    if (live.session.getSteeringMessages().length > 0 || live.session.getFollowUpMessages().length > 0) return false;
+    if (live.queuedSteer?.length || live.queuedFollowUp?.length) return false;
+    if (live.pendingCompactionEchoes?.length || live.deliveringUserEchoes?.length) return false;
+    if (this.elicitation.pendingForSession(sessionId) !== null) return false;
+    // Foreground children plus the detached/background delegates and workflow nodes that deliver their
+    // results back INTO this conversation — tearing the parent down would strand every one of them.
+    if (this.sessions.hasActiveChildren(sessionId) || this.sparedChildSessionIds(sessionId).size > 0) return false;
+    if (processRegistry.runningJobCountForSession(sessionId) > 0) return false;
+    // An active goal re-prompts this very session from a timer, so it is work in flight even between turns.
+    if (this.d.store.getGoal(sessionId)?.status === 'active') return false;
+    return true;
+  }
+
+  /** Final teardown of one live conversation, shared by the last-watcher stop and the idle reaper. The
+   *  caller owns the `markDisposing` guard and the session lock. */
+  private disposeLiveSession(sessionId: string, reason: string): void {
+    this.goals.cancelGoalContinuation(sessionId);
+    this.elicitation.cancelForSession(sessionId, reason);
+    this.cards.clearSession(sessionId);
+    this.sessions.dispose(sessionId);
+  }
+
   /** A CLI is closing: stop its bound run and release the live PI session unless another INTERACTIVE
    *  client (one identifying itself with a stable client id) is still on this conversation. A passive
    *  web-dock subscription does not hold the turn open — it only watches. History stays in SQLite and can
-   *  be resumed. Idempotent for an already-stopped conversation. */
-  async stopSession(userId: number, session?: string, clientId?: string, clientGeneration?: number): Promise<{ stopped: boolean; disposed: boolean }> {
+   *  be resumed. Idempotent for an already-stopped conversation.
+   *
+   *  `detachOnly` (the web beacon) keeps the binding release but refuses the destructive half unless the
+   *  conversation is idle: closing the last browser tab over a RUNNING agent must never kill it — that is
+   *  what the Stop button is for. The abandoned runtime is collected later by reapIdleLiveSessions. The
+   *  CLI omits the flag and keeps its original semantics (closing the terminal aborts its own run). */
+  async stopSession(userId: number, session?: string, clientId?: string, clientGeneration?: number, opts?: { detachOnly?: boolean }): Promise<{ stopped: boolean; disposed: boolean }> {
     // Consume the authenticated client's attachment FIRST. Its binding follows idle rollover inside the
     // daemon, so it is more authoritative than the (possibly pre-rollover) id the CLI last observed.
     // Releasing invokes only this client's stream disposer; every other attachment remains counted.
@@ -519,6 +560,8 @@ export class BrainService {
       // Same predicate the pre-lock abort used, re-evaluated because a client can attach while this waited
       // on the session lock. Deciding it twice with two copies of the rule is how they drift apart.
       if (!this.mayAbortOnStop(sessionId, clientId)) return { stopped: true, disposed: false };
+      // A detaching web tab may release its binding but never tear down work in flight.
+      if (opts?.detachOnly && !this.sessionIsIdle(sessionId)) return { stopped: false, disposed: false };
       // From here the record stays registered while we await, but it is doomed. Mark it so a concurrent
       // ensureLive() queues on the session lock and respawns behind the dispose, instead of fast-pathing
       // onto a handle this teardown is about to throw away.
@@ -538,10 +581,7 @@ export class BrainService {
           this.sessions.clearDisposing(sessionId); // teardown abandoned — the record is healthy again
           return { stopped: true, disposed: false };
         }
-        this.goals.cancelGoalContinuation(sessionId);
-        this.elicitation.cancelForSession(sessionId, 'client closed');
-        this.cards.clearSession(sessionId);
-        this.sessions.dispose(sessionId);
+        this.disposeLiveSession(sessionId, 'client closed');
       } catch (e) {
         this.sessions.clearDisposing(sessionId);
         throw e;
@@ -564,7 +604,10 @@ export class BrainService {
     // Only the PI-level interrupt, never the full abort(): abort() throws on an already-stopped session
     // and stopSession must stay idempotent. The serialized teardown below still does the real cascade.
     const runningLive = this.sessions.get(target);
-    if (runningLive && this.mayAbortOnStop(target, clientId)) {
+    // A detach-only stop never interrupts: it may only reach the teardown below for an IDLE session, and
+    // an idle session has no turn to interrupt. Skipping it here is what keeps the beacon non-destructive
+    // — this pre-lock signal lands before `cleanUp` can veto anything.
+    if (!opts?.detachOnly && runningLive && this.mayAbortOnStop(target, clientId)) {
       // Signal only — deliberately NOT awaited, so cleanUp reserves the lock in THIS tick. Awaiting would
       // let a start arriving during the interrupt take the lock first, breaking "a start racing a teardown
       // respawns behind the dispose". This DOES leave a window where the turn is dying but the session is
@@ -584,6 +627,45 @@ export class BrainService {
       });
     }
     return this.serial(target, async () => cleanUp(target));
+  }
+
+  /** Whether this live conversation is a candidate for the idle reaper right now: no client watching it
+   *  in any form, and no work in flight. Channel/task sessions are excluded — they have their own LRU. */
+  private reapableNow(sessionId: string): boolean {
+    if (isNonUserSession(sessionId)) return false;
+    if (!this.sessions.has(sessionId) || this.sessions.isDisposing(sessionId)) return false;
+    if (this.sessions.isActiveChild(sessionId)) return false;
+    if (this.attachments.attachedCount(sessionId) !== 0) return false;
+    if (this.attachments.hasLiveStableClient(sessionId) || this.attachments.hasPendingStartClaim(sessionId)) return false;
+    return this.sessionIsIdle(sessionId);
+  }
+
+  /** Periodic sweep (daemon bootstrap, 60s): dispose live PI sessions that nobody has watched and nothing
+   *  has run in for a full SESSION_IDLE_ROLLOVER_MS. This is the counterpart of the non-destructive web
+   *  stop — a client's binding expires on its own TTL, but before this nothing ever released the RUNTIME,
+   *  so a tab closed over a running agent leaked its session until the daemon restarted. Returns the ids
+   *  reaped. History stays in SQLite; the next message respawns the conversation. */
+  async reapIdleLiveSessions(now: number = Date.now()): Promise<string[]> {
+    const due = this.idleClock.due(
+      this.sessions.liveEntries().map(([sessionId]) => ({ sessionId, reapable: this.reapableNow(sessionId) })),
+      now,
+      SESSION_IDLE_ROLLOVER_MS,
+    );
+    const reaped: string[] = [];
+    for (const sessionId of due) {
+      const idleFor = now - (this.idleClock.reapableSince(sessionId) ?? now);
+      await this.serial(sessionId, async () => {
+        // Re-check under the lock: a client can attach, or a turn start, while earlier reaps awaited.
+        if (!this.reapableNow(sessionId)) return;
+        this.sessions.markDisposing(sessionId);
+        try { this.disposeLiveSession(sessionId, 'idle session reaped'); }
+        catch (e) { this.sessions.clearDisposing(sessionId); throw e; }
+        this.idleClock.forget(sessionId);
+        reaped.push(sessionId);
+        logger('brain').info(`reaped idle live session ${sessionId} (unwatched and idle for ${Math.round(idleFor / 60_000)}m)`);
+      });
+    }
+    return reaped;
   }
 
   /** Settle a parked `AskUserQuestion` with the user's picks (from POST /brain/answer or a Discord
@@ -996,13 +1078,13 @@ export class BrainService {
   /** Install a fixed-session tap and capture its durable+live snapshot without yielding. The caller
    *  must buffer listener events until it has written `snapshot`; because both operations are
    *  synchronous, every event belongs exactly once (inside the snapshot or after it). */
-  tapSessionSnapshot(userId: number, sessionId: string, listener: (e: BrainEvent) => void, clientId?: string, clientGeneration?: number): { off: () => void; snapshot: BrainStreamSnapshot } {
+  tapSessionSnapshot(userId: number, sessionId: string, listener: (e: BrainEvent) => void, clientId?: string, clientGeneration?: number, history?: MessagePageOpts): { off: () => void; snapshot: BrainStreamSnapshot } {
     // A reconnect can carry the pre-rollover id while its stable client binding has already moved to the
     // fresh session. Resolve once up front so BOTH the tap and atomic history/journal snapshot name the
     // same target; otherwise the tap follows fresh but the first frame accidentally hydrates old history.
     const targetSessionId = this.lifecycle.resolveStreamSession(userId, sessionId, clientId, clientGeneration);
     const off = this.lifecycle.tapSession(userId, targetSessionId, listener, clientId, clientGeneration);
-    try { return { off, snapshot: this.statusView.streamSnapshot(userId, targetSessionId) }; }
+    try { return { off, snapshot: this.statusView.streamSnapshot(userId, targetSessionId, history) }; }
     catch (error) { off(); throw error; }
   }
 

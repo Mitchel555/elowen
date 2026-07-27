@@ -22,6 +22,10 @@ export const brainStopSchema = z.object({
   session: z.string().max(200).optional(),
   client: z.string().min(1).max(200).optional(),
   generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  /** POST /brain/session/stop only: release this client's binding, but tear the live session down ONLY
+   *  when it is idle. The web beacon sets it so a closing tab can never kill a running agent; the CLI
+   *  omits it and keeps the original "closing the terminal ends my run" semantics. */
+  detachOnly: z.boolean().optional(),
 });
 
 /** Rename one of the caller's conversations (PATCH /brain/sessions/:id). A non-string/absent title is a
