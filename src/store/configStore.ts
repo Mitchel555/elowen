@@ -269,6 +269,32 @@ function sanitizeStringList(input: unknown): string[] {
   return Array.isArray(input) ? input.filter((v): v is string => typeof v === 'string' && v.length > 0) : [];
 }
 
+/** Keep only well-formed custom-model entries ({ label, exec }, both non-empty strings). A malformed
+ *  entry — e.g. a numeric `exec` from a hand-edited row or a loose PUT — is dropped rather than
+ *  persisted, since a model picker would otherwise render it as a broken/undefined option. */
+function sanitizeCustomModels(input: unknown): { label: string; exec: string }[] {
+  if (!Array.isArray(input)) return [];
+  const out: { label: string; exec: string }[] = [];
+  for (const v of input) {
+    if (!v || typeof v !== 'object') continue;
+    const { label, exec } = v as Partial<{ label: unknown; exec: unknown }>;
+    if (typeof label === 'string' && label && typeof exec === 'string' && exec) out.push({ label, exec });
+  }
+  return out;
+}
+
+/** Keep only the string-valued entries of a model-notes map. A non-string value (e.g. a stray number
+ *  from a hand-edited row or a loose PUT) would otherwise reach `modelsBlock()`'s `.trim()` and throw,
+ *  breaking auto-model planning until the row is repaired by hand (review-api-store-sol, finding 7). */
+function sanitizeModelNotes(input: unknown): Record<string, string> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
 const DEFAULT_CONFIG: ElowenConfig = {
   allowedExecs: [...KNOWN_EXECS],
   customModels: [],
@@ -407,12 +433,14 @@ export class ConfigStore {
       // wrong runtime shape (e.g. allowedExecs as a string), which would crash callers that .map it.
       // So each typed field is shape-checked; a bad value falls back to its default.
       return {
-        allowedExecs: Array.isArray(p.allowedExecs) ? p.allowedExecs : d.allowedExecs,
-        customModels: Array.isArray(p.customModels) ? p.customModels : [],
-        hiddenPresets: Array.isArray(p.hiddenPresets) ? p.hiddenPresets : [],
+        // Element-level sanitisers, not just an Array.isArray check: a database written by an older
+        // build (or hand-edited) can hold an array whose elements are the wrong runtime type.
+        allowedExecs: Array.isArray(p.allowedExecs) ? sanitizeStringList(p.allowedExecs) : d.allowedExecs,
+        customModels: sanitizeCustomModels(p.customModels),
+        hiddenPresets: Array.isArray(p.hiddenPresets) ? sanitizeStringList(p.hiddenPresets) : [],
         // Seed built-in notes under any stored notes so known models always carry a description,
         // while user edits (including an explicit '' to clear one) take precedence.
-        modelNotes: (p.modelNotes && typeof p.modelNotes === 'object' && !Array.isArray(p.modelNotes)) ? { ...d.modelNotes, ...(p.modelNotes as Record<string, string>) } : { ...d.modelNotes },
+        modelNotes: (p.modelNotes && typeof p.modelNotes === 'object' && !Array.isArray(p.modelNotes)) ? { ...d.modelNotes, ...sanitizeModelNotes(p.modelNotes) } : { ...d.modelNotes },
         autopilot: mergeAutopilot(p.autopilot, d.autopilot),
         providers: { ...d.providers, ...sanitizeProviders(p.providers) },
         apiKey: typeof p.apiKey === 'string' ? p.apiKey : null,
@@ -433,8 +461,8 @@ export class ConfigStore {
         // "no plugins" decision, never the fresh-install defaults). Absent block → legacyEmptyPlugins().
         plugins: (p.plugins && typeof p.plugins === 'object' && !Array.isArray(p.plugins))
           ? {
-              enabled: Array.isArray(p.plugins.enabled) ? p.plugins.enabled : [],
-              removed: Array.isArray(p.plugins.removed) ? p.plugins.removed : [],
+              enabled: Array.isArray(p.plugins.enabled) ? sanitizeStringList(p.plugins.enabled) : [],
+              removed: Array.isArray(p.plugins.removed) ? sanitizeStringList(p.plugins.removed) : [],
               config: (p.plugins.config && typeof p.plugins.config === 'object' && !Array.isArray(p.plugins.config))
                 ? (p.plugins.config as Record<string, Record<string, unknown>>) : {},
             }
@@ -533,15 +561,17 @@ export class ConfigStore {
     // The pilot/overseer/default exec must resolve to a real program — mirror the API's
     // allowedExecs guard so an admin can't persist a bare bogus spec (e.g. 'foo') that
     // resolveExecutor would silently turn into a non-existent claude-code model (audit O22).
-    const allowed = patch.allowedExecs ?? cur.allowedExecs;
+    // Element-level sanitised regardless of source: a stored value is already clean (idempotent), a
+    // patched one might not be — the API's Zod schema is the first gate, this is the second.
+    const allowed = sanitizeStringList(patch.allowedExecs ?? cur.allowedExecs);
     const pilotExec = this.normalizeExec(patch.autopilot?.pilotExec, cur.autopilot.pilotExec, allowed, '');
     const overseerExec = this.normalizeExec(patch.autopilot?.overseerExec, cur.autopilot.overseerExec, allowed, '');
     const defaultExec = this.normalizeExec(patch.defaults?.exec, cur.defaults.exec, allowed, cur.defaults.exec);
     this.write({
       allowedExecs: allowed,
-      customModels: patch.customModels ?? cur.customModels,
-      hiddenPresets: patch.hiddenPresets ?? cur.hiddenPresets,
-      modelNotes: patch.modelNotes ?? cur.modelNotes,
+      customModels: sanitizeCustomModels(patch.customModels ?? cur.customModels),
+      hiddenPresets: sanitizeStringList(patch.hiddenPresets ?? cur.hiddenPresets),
+      modelNotes: sanitizeModelNotes(patch.modelNotes ?? cur.modelNotes),
       // Merge the plain fields, then override the two exec fields with their allow-list-validated values.
       autopilot: { ...mergeAutopilot(patch.autopilot, cur.autopilot), pilotExec, overseerExec },
       providers: patch.providers ? { ...cur.providers, ...sanitizeProviders(patch.providers) } : cur.providers,
@@ -559,8 +589,8 @@ export class ConfigStore {
       lspEnabled: typeof patch.lspEnabled === 'boolean' ? patch.lspEnabled : cur.lspEnabled,
       webPush: cur.webPush, // VAPID keys are managed via setWebPushKeys, never through the config patch
       plugins: {
-        enabled: patch.plugins?.enabled ?? cur.plugins.enabled,
-        removed: patch.plugins?.removed ?? cur.plugins.removed,
+        enabled: sanitizeStringList(patch.plugins?.enabled ?? cur.plugins.enabled),
+        removed: sanitizeStringList(patch.plugins?.removed ?? cur.plugins.removed),
         // Merge per-plugin config so a patch touching one plugin never wipes another's slice.
         config: patch.plugins?.config ? { ...cur.plugins.config, ...patch.plugins.config } : cur.plugins.config,
       },

@@ -8,11 +8,10 @@ import { ELOWEN_VERSION, ELOWEN_INSTALLED_AT, ELOWEN_PORT, defaultLatestVersion,
 import { parseBody, queryInt } from '../validation.js';
 import { LOG_DIR } from '../../shared/logger.js';
 import { listLogFiles, readLogFile, deleteLogFile, deleteAllLogFiles, DEFAULT_LOG_TAIL_LINES, MAX_LOG_TAIL_LINES } from '../../integrations/logFiles.js';
-import { pushSubscribeSchema, pushUnsubscribeSchema, systemRestartSchema } from '../schemas/config.js';
+import { pushSubscribeSchema, pushUnsubscribeSchema, systemRestartSchema, configPatchSchema } from '../schemas/config.js';
 import { resolveExecutor } from '../../overseer/routing.js';
 import { DEFAULT_BINS, BARE_PLAIN_PROGRAM, parseElowenExec } from '../../shared/execs.js';
 import type { ElowenEvent } from '../sse.js';
-import type { ConfigPatch } from '../../store/configStore.js';
 import type { ElowenApp, RouteContext } from '../context.js';
 import { readSystemDiagnostics } from '../systemDiagnostics.js';
 import { webhookProxyStatus } from '../webhookProxy.js';
@@ -81,7 +80,7 @@ export function registerConfigRoutes(app: ElowenApp, ctx: RouteContext): void {
     // app can populate model pickers etc. During setup (no users yet) it's open so onboarding can
     // save providers/the API key before the first admin exists.
     if (notAdminUnlessSetup(c)) return c.json({ error: 'forbidden' }, 403);
-    const patch = await c.req.json() as ConfigPatch;
+    const patch = await parseBody(c, configPatchSchema);
     const updated = d.config.update(patch);
     // Apply a patched LSP toggle to the live manager too — it otherwise reads the flag only at boot,
     // and a config-only write would leave the runtime out of sync until the next restart.
