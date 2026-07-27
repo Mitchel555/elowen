@@ -450,6 +450,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // Stable identity on purpose: two effects below close over this, and a fresh function each render would
   // re-subscribe the Escape listener on every keystroke.
   const setFullscreen = useCallback((on: boolean): void => setFullscreenPref(on ? 'on' : 'off'), [setFullscreenPref]);
+  // Running agents and background processes are reported in exactly ONE place. The docked rail lists both
+  // (and drills into both), so while it is open the in-transcript copies are redundant — the same work was
+  // being announced twice. `telemetryShown` is undefined wherever there is no docked rail (the compact dock,
+  // and a phone where the rail is a drawer), so only an actually-visible rail takes ownership; hidden or
+  // absent hands the reporting back to the transcript rather than dropping it.
+  const railOwnsLiveWork = telemetryShown === true;
   const mobile = useMobile();
   const fileRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -728,9 +734,11 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             gap flow exactly as before. `empty:hidden` drops the group when everything in it is null. */}
         <div className={variant === 'full' ? 'mt-4 flex flex-col gap-3 empty:hidden' : 'contents'}>
         {cards.filter((cd) => cd.id !== 'bg-processes').map((card) => <CardBlock key={card.id} card={card} />)}
-        <ProcessPanel activeSessionId={activeSessionId} />
-        {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). */}
-        {subagents.length > 0 ? (
+        {railOwnsLiveWork ? null : <ProcessPanel activeSessionId={activeSessionId} />}
+        {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). The
+            table itself stays mounted below whatever the rail does — `agentsOpen` lives in the provider, so
+            the rail's own agent row opens THIS instance. Only the chip is redundant beside an open rail. */}
+        {subagents.length > 0 && !railOwnsLiveWork ? (
           <button
             type="button"
             onClick={() => setAgentsOpen(true)}
