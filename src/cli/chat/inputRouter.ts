@@ -1,7 +1,7 @@
 import type { TUI } from '@earendil-works/pi-tui';
 import type { ChatState } from './chatState.js';
 import type { ChatEditor } from './picker.js';
-import type { StreamCoordinatorPort } from './streamCoordinator.js';
+import { foregroundWork, type StreamCoordinatorPort } from './streamCoordinator.js';
 import type { KeybindAction, Keymap } from './keys.js';
 import {
   isDownKey, isEnterKey, isEscapeKey, isKeyRelease, isPageDownKey, isPageUpKey, isTabByte, isUpKey,
@@ -314,11 +314,7 @@ export class InputRouter {
     // Ctrl+B is also the editor's standard backward-character chord. Claim it only while a real
     // foreground delegate OR a running foreground command can be detached; otherwise PI's editor keeps its
     // native cursor behavior.
-    if (action === 'subagent_background') {
-      const hasForegroundSubagent = stream.subagentStates().some((agent) => agent.status === 'running' && agent.background !== true);
-      const hasForegroundCommand = rt.processes.some((proc) => proc.running && proc.completionMode === 'foreground');
-      if (!hasForegroundSubagent && !hasForegroundCommand) return undefined;
-    }
+    if (action === 'subagent_background' && foregroundWork(stream, rt.processes).total === 0) return undefined;
     if (action) { context.dispatchAction(action); return { consume: true }; }
     if (editing && editor.getText() === '' && data === '/') {
       context.openSlash();

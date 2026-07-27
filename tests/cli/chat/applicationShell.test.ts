@@ -720,6 +720,50 @@ describe('chat application shell ownership', () => {
     router.stop();
   });
 
+  it('claims Ctrl+B for the dispatch when only a running foreground workflow is present', () => {
+    let listener!: (data: string) => { consume: boolean } | undefined;
+    const tui = { addInputListener: vi.fn((next) => { listener = next; return vi.fn(); }) } as unknown as TUI;
+    const dispatchAction = vi.fn();
+    const context = {
+      state: { childView: null, processes: [] }, term: { columns: 80, write: vi.fn() },
+      editor: { focused: true, getText: () => 'abc' },
+      stream: { subagentStates: () => [], workflowStates: () => [{ id: 'wf1', status: 'running' }] },
+      quit: vi.fn(), renderForced: vi.fn(),
+      keymap: () => ({ matches: () => false, isLeader: () => false, directAction: () => 'subagent_background' }),
+      leader: () => ({ pending: () => false }), dispatchAction, render: vi.fn(),
+      animations: { nudgeMascot: vi.fn() }, hasMessages: () => true,
+      panelVisible: () => false, slashOverlay: () => null, mentionOverlay: () => null,
+    } as unknown as ChatInputContext;
+    const router = new InputRouter(tui, context);
+    router.attach();
+
+    expect(listener('\x02')).toEqual({ consume: true });
+    expect(dispatchAction).toHaveBeenCalledWith('subagent_background');
+    router.stop();
+  });
+
+  it('leaves Ctrl+B alone when the only workflow is already detached', () => {
+    let listener!: (data: string) => { consume: boolean } | undefined;
+    const tui = { addInputListener: vi.fn((next) => { listener = next; return vi.fn(); }) } as unknown as TUI;
+    const dispatchAction = vi.fn();
+    const context = {
+      state: { childView: null, processes: [] }, term: { columns: 80, write: vi.fn() },
+      editor: { focused: true, getText: () => 'abc' },
+      stream: { subagentStates: () => [], workflowStates: () => [{ id: 'wf1', status: 'running', background: true }] },
+      quit: vi.fn(), renderForced: vi.fn(),
+      keymap: () => ({ matches: () => false, isLeader: () => false, directAction: () => 'subagent_background' }),
+      leader: () => ({ pending: () => false }), dispatchAction, render: vi.fn(),
+      animations: { nudgeMascot: vi.fn() }, hasMessages: () => true,
+      panelVisible: () => false, slashOverlay: () => null, mentionOverlay: () => null,
+    } as unknown as ChatInputContext;
+    const router = new InputRouter(tui, context);
+    router.attach();
+
+    expect(listener('\x02')).toBeUndefined();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    router.stop();
+  });
+
   it('InputRouter gives the transcript scrollbar first refusal and preserves drag through release', () => {
     let listener!: (data: string) => { consume: boolean } | undefined;
     const tui = { addInputListener: vi.fn((next) => { listener = next; return vi.fn(); }) } as unknown as TUI;

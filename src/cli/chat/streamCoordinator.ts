@@ -31,6 +31,26 @@ export interface StreamCoordinatorPort {
   stop(): void;
 }
 
+/** The foreground work Ctrl+B can detach, counted per kind. Both the key guard (which decides whether to
+ *  claim the chord at all, since it is also the editor's backward-character binding) and the action that
+ *  runs on dispatch need this same predicate. Written out separately in each, the guard was never taught
+ *  about workflows, so a running DAG left the chord falling through to a cursor move — the dispatch that
+ *  knew how to detach it was simply never reached.
+ *
+ *  Only work still BLOCKING the turn counts. The plugin skips already-background items anyway, but
+ *  counting them made a conversation whose only workflow was already detached take the "moving work to the
+ *  background" path and then report that it had finished or moved — when the honest answer is that there
+ *  was nothing in the foreground to move. */
+export function foregroundWork(
+  stream: StreamCoordinatorPort,
+  processes: ChatState['processes'],
+): { subagents: number; commands: number; workflows: number; total: number } {
+  const subagents = stream.subagentStates().filter((agent) => agent.status === 'running' && agent.background !== true).length;
+  const commands = processes.filter((proc) => proc.running && proc.completionMode === 'foreground').length;
+  const workflows = stream.workflowStates().filter((workflow) => workflow.status === 'running' && workflow.background !== true).length;
+  return { subagents, commands, workflows, total: subagents + commands + workflows };
+}
+
 /** Application-owned event/hydration coordinator. Parent and child use independent lanes of the one
  * explicitly injected bounded hydrator; all callbacks also capture their stream/session generation. */
 export class StreamCoordinator implements StreamCoordinatorPort {

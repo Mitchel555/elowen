@@ -30,7 +30,7 @@ import { scoreModels, type ModelOption } from './fuzzy.js';
 import { WORK_MODE_LABEL, WORK_MODE_NOTICE, type BrainWorkMode } from './brainClient.js';
 import type { ChatState } from './chatState.js';
 import type { ChatApplicationActions, ChatApplicationResources } from './chatCapabilities.js';
-import type { StreamCoordinatorPort } from './streamCoordinator.js';
+import { foregroundWork, type StreamCoordinatorPort } from './streamCoordinator.js';
 import { AnimationController } from './animationController.js';
 import { InputRouter } from './inputRouter.js';
 import { OverlayController } from './overlayController.js';
@@ -1272,17 +1272,8 @@ export function createChatComposition(
         // and/or a running Bash command. Each detach resolves only that wait — the child channel or the
         // process keeps running and its completion is delivered back to this conversation asynchronously.
         case 'subagent_background': {
-          const fgSubagents = stream.subagentStates()
-            .filter((agent) => agent.status === 'running' && agent.background !== true).length;
-          const fgCommands = rt.processes
-            .filter((proc) => proc.running && proc.completionMode === 'foreground').length;
-          // Only a workflow still BLOCKING the turn counts. The plugin skips already-background ones
-          // anyway, but counting them here made a conversation whose only workflow was already detached
-          // take the "moving work to the background" path and then report that it had finished or moved —
-          // when the honest answer is that there was nothing in the foreground to move.
-          const fgWorkflows = stream.workflowStates()
-            .filter((workflow) => workflow.status === 'running' && workflow.background !== true).length;
-          if (fgSubagents === 0 && fgCommands === 0 && fgWorkflows === 0) {
+          const { subagents: fgSubagents, commands: fgCommands, workflows: fgWorkflows, total } = foregroundWork(stream, rt.processes);
+          if (total === 0) {
             rt.notice = color.dim('nothing running in the foreground to background');
             render('input:foreground-background-empty');
             return;
