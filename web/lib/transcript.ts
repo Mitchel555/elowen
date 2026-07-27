@@ -199,7 +199,7 @@ const TRANSCRIPT_EVENT_TYPES = new Set<TranscriptEvent['type']>([
   'notice', 'session', 'subagent', 'workflow', 'user', 'idle', 'error',
 ]);
 
-export function isTranscriptEvent(event: BrainStreamTailEvent): event is BrainStreamTailEvent & TranscriptEvent {
+function isTranscriptEvent(event: BrainStreamTailEvent): event is BrainStreamTailEvent & TranscriptEvent {
   return TRANSCRIPT_EVENT_TYPES.has(event.type as TranscriptEvent['type']);
 }
 

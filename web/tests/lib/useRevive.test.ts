@@ -59,15 +59,17 @@ describe('useRevive — shared wake-up emitter', () => {
     expect(seen).toHaveLength(2);
   });
 
-  it('reports a reconnect after the network dropped', () => {
+  it('wakes when the network comes back, and not when it drops', () => {
     const seen: ReviveEvent[] = [];
     const off = subscribeRevive((e) => seen.push(e));
+
+    // Going offline is not a wake: there is nothing to recover while the connection is still down.
     window.dispatchEvent(new Event('offline'));
+    expect(seen).toHaveLength(0);
+
     window.dispatchEvent(new Event('online'));
     off();
-
     expect(seen).toHaveLength(1);
-    expect(seen[0]?.wasOffline).toBe(true);
   });
 
   it('installs ONE set of DOM listeners for many subscribers and removes them with the last one', () => {

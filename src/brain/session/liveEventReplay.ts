@@ -1,5 +1,6 @@
-import type { AskQuestion, BrainEvent, BrainGoalState } from '../events.js';
+import type { BrainEvent, BrainGoalState } from '../events.js';
 import type { BrainMessageView } from '../messageView.js';
+import type { BrainStreamControl } from '../../shared/wireContract.js';
 
 /** A bounded snapshot of events emitted during the currently unsettled run. The durable transcript
  *  stays in SQLite; this journal only bridges the gap before PI's terminal `agent_end` persists the
@@ -24,18 +25,9 @@ export interface LiveEventTransportSnapshot extends LiveEventSnapshot {
   truncated?: true;
 }
 
-/** Authoritative control state of the tapped conversation, read on the same event-loop tick as the
- *  journal. The journal alone cannot answer either question: it is cleared at settle, bounded, and
- *  deliberately holds no terminal event across an internal retry — so "is a turn running" and "is a
- *  question parked" are read from the live session and the elicitation registry instead of guessed
- *  from the tail. Every field is explicit (never omitted-means-unchanged) so a client can CLEAR what
- *  it hydrated earlier, which is what a set-only hydration could never do. */
-interface BrainStreamControl {
-  /** A turn is in flight right now — PI streaming, or a delegated child still working. */
-  streaming: boolean;
-  /** The question parked for this conversation, `null` when none is. */
-  pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null;
-}
+/** {@link BrainStreamControl} is defined in the shared wire contract: the web reads exactly this shape off
+ *  the snapshot frame, and it is the one contract that decides whether the Stop button and the question
+ *  card are live, so it must not exist twice. */
 
 /** First frame on an opt-in snapshot SSE stream. `history` is the durable clean transcript; `events`
  *  is the current run's not-yet-durable tail. Replacing the client view from this frame makes repeated

@@ -2,6 +2,7 @@ import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-
 import { isContextOverflow } from '@earendil-works/pi-ai';
 import { submittedPlan, toolCommand, toolDetail, toolDisplay, toolOutputView } from './messageView.js';
 import type { ToolOutputView } from './messageView.js';
+import type { AskQuestion } from '../shared/wireContract.js';
 import type { ProcessInfo } from './processRegistry.js';
 import { extractReason } from './toolReason.js';
 
@@ -242,13 +243,15 @@ export async function runCompaction(session: AgentSession, customInstruction?: s
  *  `preview` is optional monospace content (an ASCII mockup, a code snippet, a diagram) that lets the user
  *  SEE what the option means: when any option in a single-select question carries one, the picker switches
  *  to a side-by-side layout showing the focused option's preview beside the list. Surfaces without a
- *  side-by-side view (Discord, WhatsApp) simply ignore it. */
-interface AskOption { label: string; description?: string; preview?: string }
-/** A single multiple-choice question the agent poses via `AskUserQuestion`. `header` is a short chip
- *  label (≤30 chars); `multiSelect` allows more than one pick. `custom` says whether a free-text "Other"
- *  escape is offered — absent means true (older events predate the flag), so clients must treat only an
- *  explicit `false` as "options only". */
-export interface AskQuestion { question: string; header: string; multiSelect: boolean; custom?: boolean; options: AskOption[] }
+ *  side-by-side view (Discord, WhatsApp) simply ignore it.
+ *
+ *  On a question: `header` is a short chip label (≤30 chars); `multiSelect` allows more than one pick.
+ *  `custom` says whether a free-text "Other" escape is offered — absent means true (older events predate
+ *  the flag), so clients must treat only an explicit `false` as "options only".
+ *
+ *  Both shapes live in the shared wire contract and are re-exported here: the web needs the very same
+ *  declaration, and this was a hand-copied duplicate until now. */
+export type { AskQuestion };
 /** The user's answer to one question: the picked option label(s) plus an optional free-text "Other". */
 export interface AskAnswer { header: string; selected: string[]; other?: string }
 

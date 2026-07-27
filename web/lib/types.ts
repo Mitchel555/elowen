@@ -99,8 +99,11 @@ export interface BrainSearchHit { sessionId: string; sessionTitle: string; role:
  *  imported (type-only, so nothing bundles) rather than re-declared — the web mirror can no longer drift
  *  from what the daemon serves over GET /brain/messages. `BrainMessage` is the web's name for the
  *  daemon's `BrainMessageView`. */
-import type { ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef } from '../../src/shared/wireContract.js';
-export type { ToolOutputView, BrainWorkflowView, SlashCommandDef };
+import type {
+  ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef, AskQuestion, BrainStreamControl,
+} from '../../src/shared/wireContract.js';
+// `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
+export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion };
 export type BrainMessage = BrainMessageView;
 
 /** One backwards page of chat history (lazy-load). `nextBefore` is the cursor for the next older page —
@@ -118,11 +121,11 @@ export interface BrainStreamSnapshotFrame {
   /** The session actually tapped — differs from the requested one after an idle rollover the dead stream
    *  never saw. */
   sessionId?: string;
-  /** The daemon's authoritative control state at snapshot time (mirror of `BrainStreamControl`). The tail
-   *  is transient — cleared at settle, bounded, and terminal-less across an internal retry — so this, not
-   *  the tail's shape, decides whether a turn is running and whether a question is parked. Both fields are
-   *  explicit, so hydrating from this frame CLEARS what the daemon no longer has. */
-  control?: { streaming: boolean; pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null };
+  /** The daemon's authoritative control state at snapshot time. The tail is transient — cleared at settle,
+   *  bounded, and terminal-less across an internal retry — so this, not the tail's shape, decides whether a
+   *  turn is running and whether a question is parked. Both fields are explicit, so hydrating from this
+   *  frame CLEARS what the daemon no longer has. The shape comes from the shared wire contract. */
+  control?: BrainStreamControl;
   /** The conversation's durable goal at snapshot time. It is independent of the transient run journal
    *  (cleared at settle), so this — explicit `null` included — is what lets a reconnecting client learn a
    *  goal it never saw, or clear one that ended while it was away. Absent means an older daemon. */
@@ -133,10 +136,9 @@ export interface BrainStreamSnapshotFrame {
   nextBefore?: number | null;
 }
 
-/** AskUserQuestion wire shapes (mirror src/brain/events.ts). The `ask` SSE event carries `id` +
- *  `questions`; the client POSTs `answers` back to /brain/answer. */
-interface AskOption { label: string; description?: string; preview?: string }
-export interface AskQuestion { question: string; header: string; multiSelect: boolean; custom?: boolean; options: AskOption[] }
+/** `AskQuestion` comes from the shared wire contract (re-exported at the top of this file) rather than
+ *  being mirrored here. The `ask` SSE event carries `id` + `questions`; the client POSTs `answers` back to
+ *  /brain/answer, and that answer shape is web-side only. */
 export interface AskAnswer { header: string; selected: string[]; other?: string }
 
 /** ctx.emitCard display card (mirror src/brain/events.ts) — a live panel keyed by `id`. */

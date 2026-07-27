@@ -2,10 +2,9 @@
 
 /** One wake-up of the page: it became visible again, was restored from the bfcache, regained focus or
  *  came back online. `hiddenMs` is how long it had been hidden (0 when it never was — a bfcache restore
- *  reports no visibility transition at all), `wasOffline` whether the network had dropped meanwhile. */
+ *  reports no visibility transition at all). */
 export interface ReviveEvent {
   hiddenMs: number;
-  wasOffline: boolean;
 }
 
 /** A hide shorter than this, on a stream that still looks healthy, needs no recovery — anything longer may
@@ -21,16 +20,14 @@ const COALESCE_MS = 1_000;
 const listeners = new Set<ReviveListener>();
 let installed = false;
 let hiddenSince: number | null = null;
-let wasOffline = false;
 let lastPublishedAt = 0;
 
 function publish(): void {
   const now = Date.now();
   if (now - lastPublishedAt < COALESCE_MS) return;
   lastPublishedAt = now;
-  const event: ReviveEvent = { hiddenMs: hiddenSince === null ? 0 : Math.max(0, now - hiddenSince), wasOffline };
+  const event: ReviveEvent = { hiddenMs: hiddenSince === null ? 0 : Math.max(0, now - hiddenSince) };
   hiddenSince = null;
-  wasOffline = false;
   for (const listener of [...listeners]) listener(event);
 }
 
@@ -42,9 +39,10 @@ const onVisibilityChange = (): void => {
 // it always wakes — `persisted` is diagnostic, never a reason to stay asleep.
 const onPageShow = (): void => publish();
 const onFocus = (): void => publish();
-const onOnline = (): void => { wasOffline = true; publish(); };
-// Not a wake signal — it only records that the next wake follows a real network gap.
-const onOffline = (): void => { wasOffline = true; };
+// Regaining the network is a wake signal in its own right: a stream that died while the connection was
+// down will not recover on its own. Going OFFLINE is deliberately not listened for — there is nothing to
+// recover at that moment, and every consumer decides what to do purely from `hiddenMs`.
+const onOnline = (): void => publish();
 
 function install(): void {
   if (installed || typeof document === 'undefined') return;
@@ -53,7 +51,6 @@ function install(): void {
   window.addEventListener('pageshow', onPageShow);
   window.addEventListener('focus', onFocus);
   window.addEventListener('online', onOnline);
-  window.addEventListener('offline', onOffline);
 }
 
 function uninstall(): void {
@@ -63,9 +60,7 @@ function uninstall(): void {
   window.removeEventListener('pageshow', onPageShow);
   window.removeEventListener('focus', onFocus);
   window.removeEventListener('online', onOnline);
-  window.removeEventListener('offline', onOffline);
   hiddenSince = null;
-  wasOffline = false;
 }
 
 /** Subscribe to page wake-ups. The DOM listeners are installed ONCE for the whole app and torn down with

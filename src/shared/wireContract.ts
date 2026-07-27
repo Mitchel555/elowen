@@ -109,3 +109,26 @@ export interface SlashCommandDef {
   /** For plugin commands: the owning plugin's name (menu attribution + provenance). */
   plugin?: string;
 }
+
+/** One option of an `AskUserQuestion` choice, as it rides the `ask` SSE event. Referenced only through
+ *  `AskQuestion`, so it stays unexported — both former copies were file-local too. */
+interface AskOption { label: string; description?: string; preview?: string }
+/** One question of a parked `AskUserQuestion`. Clients POST the picked labels back to `/brain/answer`. */
+export interface AskQuestion { question: string; header: string; multiSelect: boolean; custom?: boolean; options: AskOption[] }
+
+/** Authoritative control state of the tapped conversation, carried on the snapshot frame and read on the
+ *  same event-loop tick as the run journal. The journal alone cannot answer either question: it is cleared
+ *  at settle, bounded, and deliberately holds no terminal event across an internal retry — so "is a turn
+ *  running" and "is a question parked" come from the live session and the elicitation registry instead of
+ *  being guessed from the tail's shape.
+ *
+ *  Every field is EXPLICIT: omitted-means-unchanged is what let a client keep showing a question the daemon
+ *  had already settled, because a set-only hydration can never clear anything. Defined here so the daemon's
+ *  snapshot and the web's reader cannot drift on the one contract that decides whether the Stop button and
+ *  the question card are live. */
+export interface BrainStreamControl {
+  /** A turn is in flight right now — PI streaming, or a delegated child still working. */
+  streaming: boolean;
+  /** The question parked for this conversation, `null` when none is. */
+  pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null;
+}
