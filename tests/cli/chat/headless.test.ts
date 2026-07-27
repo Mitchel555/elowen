@@ -47,6 +47,7 @@ function fakeClient(goalRow: GoalView | null = null): { client: never; calls: st
   let sink: ((e: BrainEvent) => void) | undefined;
   const push = (...es: BrainEvent[]): void => { for (const e of es) sink?.(e); };
   const client = {
+    bindLifetime() { /* no-op: this fixture never exercises the deadline race */ },
     async start(o: { session?: string }) { calls.push(`start:${JSON.stringify(o)}`); return { sessionId: o.session ?? 'sess-1' }; },
     async setModel(s: { provider?: string; model?: string }) { calls.push(`setModel:${s.provider ?? ''}/${s.model ?? ''}`); return { model: s.model ?? 'default' }; },
     async setThinkingLevel(l: string) { calls.push(`think:${l}`); return { thinkingLevel: l }; },
@@ -58,7 +59,9 @@ function fakeClient(goalRow: GoalView | null = null): { client: never; calls: st
       if (signal.aborted) return;
       await new Promise<void>((r) => signal.addEventListener('abort', () => r(), { once: true }));
     },
-    async send(text: string, mode: string) { calls.push(`send:${mode}:${text}`); push({ type: 'step', step: 1, maxSteps: 10 }, { type: 'text', delta: 'hello ' }, { type: 'text', delta: 'world' }, { type: 'idle' }); },
+    // The daemon always echoes the accepted turn as a `user` event before streaming the reply — headless
+    // gates its own output/completion on that echo (own-turn attribution), so a realistic fixture emits it.
+    async send(text: string, mode: string) { calls.push(`send:${mode}:${text}`); push({ type: 'user', text }, { type: 'step', step: 1, maxSteps: 10 }, { type: 'text', delta: 'hello ' }, { type: 'text', delta: 'world' }, { type: 'idle' }); },
     async compact() { calls.push('compact'); return { message: 'compacted 3 turns', usage: null, compacted: true }; },
     async status() { calls.push('status'); return { model: 'm', title: 't' } as never; },
     async skills() { calls.push('skills'); return []; },
@@ -88,11 +91,13 @@ describe('cli/chat/headless.runHeadless', () => {
 
   it('waits for idle when HTTP admission resolves before the first SSE event', async () => {
     const client = {
+      bindLifetime() {},
       async start() { return { sessionId: 'sess-1' }; },
       async stream(onFrame: (frame: BrainEvent) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
         onOpen?.();
         await new Promise((resolve) => setTimeout(resolve, 400));
         if (!signal.aborted) {
+          onFrame({ type: 'user', text: 'delayed' });
           onFrame({ type: 'text', delta: 'delayed answer' });
           onFrame({ type: 'idle' });
         }
@@ -109,6 +114,7 @@ describe('cli/chat/headless.runHeadless', () => {
 
   it('fails an admission rejection even after prior stream activity', async () => {
     const client = {
+      bindLifetime() {},
       async start() { return { sessionId: 'sess-1' }; },
       async stream(onFrame: (frame: BrainEvent) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
         onOpen?.();
@@ -126,10 +132,97 @@ describe('cli/chat/headless.runHeadless', () => {
     expect(err.join('')).toContain('new prompt was not admitted');
   });
 
+  it('does not finish on an already-running conversation\'s idle, and never leaks its tail, before this invocation\'s own prompt is echoed', async () => {
+    const calls: string[] = [];
+    const client = {
+      bindLifetime() {},
+      async start() { return { sessionId: 'sess-1' }; },
+      async stream(onFrame: (frame: BrainEvent) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
+        onOpen?.();
+        // A turn that was ALREADY running when we attached: its non-terminal tail arrives first...
+        onFrame({ type: 'step', step: 1, maxSteps: 5 });
+        onFrame({ type: 'text', delta: 'old partial answer' });
+        // ...then it settles, live, BEFORE this invocation's own prompt has even been echoed back.
+        onFrame({ type: 'idle' });
+        // Only now does OUR prompt start.
+        onFrame({ type: 'user', text: 'new question' });
+        onFrame({ type: 'text', delta: 'fresh answer' });
+        onFrame({ type: 'idle' });
+        if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      },
+      async send(text: string, mode: string) { calls.push(`send:${mode}:${text}`); },
+    };
+    const { io: sink, out } = io();
+    const code = await runHeadless('http://x', {}, ['new question'], { client: client as never, io: sink });
+    const printed = out.join('');
+
+    expect(code).toBe(0);
+    expect(calls).toEqual(['send:build:new question']);
+    expect(printed).not.toContain('old partial answer');
+    expect(printed).toContain('fresh answer');
+  });
+
+  it('awaits the server-side abort (bounded) before finishing an unanswered ask, so the process cannot exit before the session lock is released', async () => {
+    let abortResolved = false;
+    let resolveAbort!: () => void;
+    const abortPromise = new Promise<void>((r) => { resolveAbort = r; });
+    const client = {
+      bindLifetime() {},
+      async start() { return { sessionId: 'sess-1' }; },
+      async stream(onFrame: (frame: BrainEvent) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
+        onOpen?.();
+        onFrame({ type: 'user', text: 'do it' });
+        onFrame({ type: 'ask', id: 'q1', questions: [{ question: 'which file?', header: 'h', multiSelect: false, options: [] }] });
+        if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      },
+      async send() {},
+      async abort() { await abortPromise; abortResolved = true; },
+    };
+    const { io: sink } = io();
+    const promise = runHeadless('http://x', {}, ['do it'], { client: client as never, io: sink });
+    // Let the ask handler's microtasks run: the abort call must be in flight but not yet resolved —
+    // proving the caller waits for it rather than firing it and moving on in the same tick.
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(abortResolved).toBe(false);
+    resolveAbort();
+    const code = await promise;
+    expect(code).toBe(5);
+    expect(abortResolved).toBe(true);
+  });
+
+  it('bounds --list by --timeout even when the daemon never answers (the deadline is created before the first request)', async () => {
+    let boundSignal: AbortSignal | undefined;
+    const client = {
+      bindLifetime(signal: AbortSignal) { boundSignal = signal; },
+      async sessions(): Promise<never> {
+        return new Promise((_resolve, reject) => { boundSignal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }); });
+      },
+    };
+    const { io: sink, err } = io();
+    const code = await runHeadless('http://x', {}, ['--list', '--timeout', '0.05'], { client: client as never, io: sink });
+    expect(code).toBe(124);
+    expect(err.join('')).toContain('timeout after');
+  });
+
+  it('bounds session start by --timeout too, not just the stream, so a hung daemon cannot hang the whole command', async () => {
+    let boundSignal: AbortSignal | undefined;
+    const client = {
+      bindLifetime(signal: AbortSignal) { boundSignal = signal; },
+      async start(): Promise<never> {
+        return new Promise((_resolve, reject) => { boundSignal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }); });
+      },
+    };
+    const { io: sink, err } = io();
+    const code = await runHeadless('http://x', {}, ['hello', '--timeout', '0.05'], { client: client as never, io: sink });
+    expect(code).toBe(124);
+    expect(err.join('')).toContain('timeout after');
+  });
+
   it('recovers a reconnect snapshot tail without reprinting durable history or prior live text', async () => {
     const calls: string[] = [];
     let snapshotRequested: boolean | undefined;
     const client = {
+      bindLifetime() {},
       async start() { return { sessionId: 'sess-1' }; },
       async stream(
         onFrame: (frame: BrainEvent | { type: 'snapshot'; cursor: number; history: { id?: string; role: string; text: string }[]; events: BrainEvent[] }) => void,
@@ -191,13 +284,16 @@ describe('cli/chat/headless.runHeadless', () => {
       { id: 'new-ok', role: 'assistant', text: 'OK' },
     ];
     const client = {
+      bindLifetime() {},
       async start() { return { sessionId: 'sess-1' }; },
       async history() { return settled; },
       async stream(onFrame: (frame: unknown) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
         onFrame({ type: 'snapshot', cursor: 1, run: 0, history: initial, events: [] });
         onOpen?.();
         await Promise.resolve();
-        onFrame({ type: 'snapshot', cursor: 2, run: 1, history: settled, events: [{ type: 'idle' }] });
+        // A `user` echo for THIS invocation's prompt ('answer') must precede idle — own-turn attribution
+        // gates on it, same as the real daemon.
+        onFrame({ type: 'snapshot', cursor: 2, run: 1, history: settled, events: [{ type: 'user', text: 'answer' }, { type: 'idle' }] });
         if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener('abort', resolve, { once: true }));
       },
       async send() {},
@@ -217,6 +313,7 @@ describe('cli/chat/headless.runHeadless', () => {
     const one = [{ id: 'a-one', role: 'assistant', text: 'one' }];
     const two = [...one, { id: 'a-two', role: 'assistant', text: 'two' }];
     const client = {
+      bindLifetime() {},
       async start() { return { sessionId: 'sess-1' }; },
       async history() { return ++historyReads === 1 ? one : two; },
       async stream(onFrame: (frame: unknown) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
@@ -256,6 +353,7 @@ describe('cli/chat/headless.runHeadless', () => {
   it('recovers a truncated reconnect from settled durable history before exiting', async () => {
     const history = [{ id: 'a-recovered', role: 'assistant', text: 'full reply recovered from SQLite' }];
     const client = {
+      bindLifetime() {},
       async start() { return { sessionId: 'sess-1' }; },
       async history() { return history; },
       async stream(onFrame: (frame: unknown) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
@@ -263,6 +361,8 @@ describe('cli/chat/headless.runHeadless', () => {
         onOpen?.();
         await Promise.resolve();
         onFrame({ type: 'snapshot', cursor: 999, run: 1, truncated: true, history: [], events: [] });
+        // Own-turn attribution gates on the `user` echo for this invocation's prompt ('recover').
+        onFrame({ type: 'user', text: 'recover' });
         onFrame({ type: 'idle' });
         if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener('abort', resolve, { once: true }));
       },
@@ -362,6 +462,7 @@ describe('cli/chat/headless.runHeadless', () => {
     };
     let sink!: (event: BrainEvent) => void;
     const client = {
+      bindLifetime() {},
       async start() { return { sessionId: 'sess-1' }; },
       async stream(onFrame: (frame: BrainEvent) => void, signal: AbortSignal, _backoff: number, onOpen?: () => void) {
         sink = onFrame;

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readState, writeState, clearState, isAlive, isTrackedService, status, stop, start, type RunState } from '../../src/cli/launcher.js';
+import { readState, writeState, clearState, isAlive, isTrackedService, status, stop, start, type RunState, type IsTracked } from '../../src/cli/launcher.js';
 import type { spawn as nodeSpawn } from 'node:child_process';
 
 let home: string;
@@ -78,35 +78,70 @@ describe('cli/launcher.status', () => {
   });
 });
 
+// Two pids no test machine will ever actually have running, so `isAlive()` reads false for them without
+// depending on real OS state — `stop`'s wait loop then hinges purely on the injected fetch (port) signal.
+const deadPids: RunState = { daemon: { pid: 2147483646, port: 4400 }, web: { pid: 2147483645, port: 4500 }, version: '1.1.1', startedAt: '2026-06-22T00:00:00Z' };
+
 describe('cli/launcher.stop', () => {
-  it('signals each tracked pid it confirms is ours and clears the run file', async () => {
-    writeState(env, sample);
+  it('signals each tracked pid it confirms is ours, waits for its port to go silent, then clears the run file', async () => {
+    writeState(env, deadPids);
     const killed: number[] = [];
-    await stop(env, (pid) => { killed.push(pid); }, () => true);
-    expect(killed.sort((a, b) => a - b)).toEqual([111, 222]);
+    let calls = 0;
+    // "still answering" on the first probe of each target, silent from then on — proves stop() actually
+    // waits for the port to go quiet instead of clearing state right after the SIGTERM.
+    const fetchFn = (async () => { calls++; return calls <= 2 ? new Response('ok', { status: 200 }) : new Response('', { status: 503 }); }) as unknown as typeof fetch;
+    await stop(env, { kill: (pid) => killed.push(pid), isTracked: () => true, fetch: fetchFn, pollMs: 1, attempts: 5 });
+    expect(killed.sort((a, b) => a - b)).toEqual([deadPids.web.pid, deadPids.daemon.pid].sort((a, b) => a - b));
     expect(readState(env)).toBeNull();
   });
-  it('never signals a recycled pid the identity check disowns, but still clears the run file', async () => {
-    writeState(env, sample); // daemon 111 (ours), web 222 (recycled → disowned)
+  it('never signals a recycled pid the identity check disowns, but still clears the run file once the tracked one is gone', async () => {
+    writeState(env, deadPids); // daemon tracked; web recycled → disowned
     const killed: number[] = [];
-    await stop(env, (pid) => { killed.push(pid); }, (pid) => pid === 111);
-    expect(killed).toEqual([111]);
+    const fetchFn = (async () => new Response('', { status: 503 })) as unknown as typeof fetch; // nothing answers
+    await stop(env, { kill: (pid) => killed.push(pid), isTracked: (pid) => pid === deadPids.daemon.pid, fetch: fetchFn, pollMs: 1, attempts: 3 });
+    expect(killed).toEqual([deadPids.daemon.pid]);
     expect(readState(env)).toBeNull();
   });
   it('is a no-op when nothing is running', async () => {
     const killed: number[] = [];
-    await stop(env, (pid) => killed.push(pid));
+    await stop(env, { kill: (pid) => killed.push(pid) });
     expect(killed).toEqual([]);
+  });
+  it('leaves the run file in place and throws when a tracked service never stops answering', async () => {
+    writeState(env, deadPids);
+    const fetchFn = (async () => new Response('ok', { status: 200 })) as unknown as typeof fetch; // never goes silent
+    await expect(stop(env, { isTracked: () => true, fetch: fetchFn, pollMs: 1, attempts: 3 }))
+      .rejects.toThrow(/did not stop/);
+    expect(readState(env)).not.toBeNull();
   });
 });
 
 describe('cli/launcher.start', () => {
   const fakeSpawn = (() => ({ pid: 4321, unref() { /* detached */ } })) as unknown as typeof nodeSpawn;
 
-  it('records run state and resolves when the daemon answers /health', async () => {
-    const fetchFn = (async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
-    const s = await start(env, { version: '9.9.9', spawn: fakeSpawn, fetch: fetchFn, pollMs: 1, attempts: 3 });
+  /** A spawn+fetch pair where a port only answers healthy once something has actually been "launched" on
+   *  it (tracked by the port env var `launch()` passes the child). A blanket-healthy fetch would make the
+   *  new "is something else already on this port" pre-flight check misfire before anything was spawned. */
+  function trackedHealthMock(pid = 4321): { spawn: typeof nodeSpawn; fetch: typeof fetch } {
+    const launchedPorts = new Set<number>();
+    const spawn = ((_cmd: unknown, _args: unknown, opts?: { env?: Record<string, string | undefined> }) => {
+      const port = Number(opts?.env?.ELOWEN_PORT ?? opts?.env?.PORT);
+      if (Number.isFinite(port)) launchedPorts.add(port);
+      return { pid, unref() { /* detached */ } };
+    }) as unknown as typeof nodeSpawn;
+    const fetch = (async (url: string | URL) => {
+      const m = /:(\d+)/.exec(String(url));
+      const port = m ? Number(m[1]) : NaN;
+      return launchedPorts.has(port) ? new Response('ok', { status: 200 }) : new Response('', { status: 503 });
+    }) as unknown as typeof fetch;
+    return { spawn, fetch };
+  }
+
+  it('records run state and resolves once BOTH the daemon and the web answer healthy', async () => {
+    const { spawn, fetch: fetchFn } = trackedHealthMock();
+    const s = await start(env, { version: '9.9.9', spawn, fetch: fetchFn, pollMs: 1, attempts: 5 });
     expect(s.daemon.pid).toBe(4321);
+    expect(s.web.pid).toBe(4321);
     expect(readState(env)).toEqual(s);
   });
 
@@ -127,9 +162,36 @@ describe('cli/launcher.start', () => {
 
   it('re-spawns instead of adopting a stale run.json whose pids the identity check disowns', async () => {
     writeState(env, sample); // pids 111/222 are stale after a reboot that recycled them
-    const fetchFn = (async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
-    const s = await start(env, { version: '9.9.9', spawn: fakeSpawn, fetch: fetchFn, pollMs: 1, attempts: 3, isTracked: () => false });
+    const { spawn, fetch: fetchFn } = trackedHealthMock();
+    const s = await start(env, { version: '9.9.9', spawn, fetch: fetchFn, pollMs: 1, attempts: 5, isTracked: () => false });
     expect(s.daemon.pid).toBe(4321); // freshly spawned, not the recycled 111
     expect(s.web.pid).toBe(4321);
+  });
+
+  it('refuses to spawn a second daemon when nothing is tracked but the port already answers healthy', async () => {
+    // No run.json at all (nothing tracked) yet the daemon port already answers — some other, untracked
+    // process owns it (systemd, or a start() that raced past this one's lock).
+    const fetchFn = (async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
+    await expect(start(env, { version: '9.9.9', spawn: fakeSpawn, fetch: fetchFn, pollMs: 1, attempts: 3 }))
+      .rejects.toThrow(/refusing to spawn a second one/);
+  });
+
+  it('serialises concurrent start() calls: a second racing invocation adopts the first instead of spawning again', async () => {
+    const { spawn: baseSpawn, fetch: fetchFn } = trackedHealthMock();
+    let spawnCount = 0;
+    const spawn = ((...args: Parameters<typeof nodeSpawn>) => {
+      spawnCount++;
+      return (baseSpawn as unknown as (...a: unknown[]) => ReturnType<typeof nodeSpawn>)(...args);
+    }) as unknown as typeof nodeSpawn;
+    // Without the lock both calls would read an empty run.json before either had written one and BOTH
+    // would decide to spawn (spawnCount 4, two daemons + two webs colliding on the same ports).
+    const isTracked: IsTracked = (pid) => pid === 4321;
+    const [a, b] = await Promise.all([
+      start(env, { version: '9.9.9', spawn, fetch: fetchFn, pollMs: 1, attempts: 5, isTracked, lockPollMs: 1, lockAttempts: 200 }),
+      start(env, { version: '9.9.9', spawn, fetch: fetchFn, pollMs: 1, attempts: 5, isTracked, lockPollMs: 1, lockAttempts: 200 }),
+    ]);
+    expect(spawnCount).toBe(2); // one daemon + one web — the second call adopted instead of spawning again
+    expect(a.daemon.pid).toBe(b.daemon.pid);
+    expect(a.web.pid).toBe(b.web.pid);
   });
 });

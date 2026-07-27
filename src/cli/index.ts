@@ -9,6 +9,7 @@ import { defaultLifecycleDeps, runLifecycle, runApiCommand } from './commands.js
 import { callElowenApi } from '../shared/apiClient.js';
 import { menu } from './menu.js';
 import { interactiveLogin, launchChat } from './chat/launch.js';
+import { urlHealthy } from './launcher.js';
 
 const BASE = (process.env.ELOWEN_URL) ?? 'http://localhost:4400';
 
@@ -103,10 +104,12 @@ export function needsDaemon(cmd: string | undefined): boolean {
 
 async function ensureDaemon() {
   if ((process.env.ELOWEN_AUTOSTART) === '0') return;
-  try { await fetch(`${BASE}/health`); return; } catch { /* down — start daemon */ }
+  // `urlHealthy` requires an `ok` response — a bare non-throwing fetch previously read a 500 as healthy —
+  // and bounds each probe so a half-open connection can't block an ordinary command.
+  if (await urlHealthy(`${BASE}/health`)) return;
   const entry = join(dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'index.js');
   spawn(process.execPath, [entry], { detached: true, stdio: 'ignore' }).unref();
-  for (let i = 0; i < 50; i++) { try { await fetch(`${BASE}/health`); return; } catch { /* not healthy yet — retry */ await new Promise(r => setTimeout(r, 100)); } }
+  for (let i = 0; i < 50; i++) { if (await urlHealthy(`${BASE}/health`)) return; await new Promise(r => setTimeout(r, 100)); }
   throw new Error('elowen daemon did not become healthy');
 }
 

@@ -80,7 +80,29 @@ export function parseHeadlessArgs(args: string[]): HeadlessOpts {
 export interface HeadlessIo { stdout: (s: string) => void; stderr: (s: string) => void }
 const dim = (s: string): string => `[2m${s}[0m`;
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** Delay that resolves early when `signal` aborts — goal polling uses this so an overall --timeout (or
+ *  any other finish() path) doesn't add up to a full poll interval of extra latency on top of its own
+ *  deadline. */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Wait for `p` to settle, but never longer than `ms` — gives a best-effort cleanup call (the server-side
+ *  turn abort) a bounded chance to land before the caller moves on (and, for `elowen run`, exits the
+ *  process) instead of either blocking forever or being abandoned mid-flight. */
+function raceTimeout(p: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => { if (!done) { done = true; resolve(); } };
+    p.then(finish, finish);
+    setTimeout(finish, ms);
+  });
+}
 
 /** A reconnect snapshot is a complete replacement for an interactive view, but headless output has
  * already been written to a terminal and cannot be replaced. Keep a server-equivalent replay tail plus
@@ -304,15 +326,35 @@ export async function runHeadless(
   }
   const c = client;
 
+  // The whole-command deadline: created and bound to the client BEFORE the first request, so `--list`,
+  // session start and every REST call race the same clock a hung turn would — not created only after
+  // sessions()/start()/setModel() and the stream open, which let a wedged daemon hang past --timeout.
+  // `ctrl` doubles as the SSE stream's own abort signal below.
+  const ctrl = new AbortController();
+  c.bindLifetime(ctrl.signal);
+  let exit = 0, settled = false, activity = false;
+  let resolveDone: () => void = () => {};
+  const doneP = new Promise<void>((r) => { resolveDone = r; });
+  const finish = (code: number): void => { if (settled) return; settled = true; exit = code; resolveDone(); ctrl.abort(); };
+  const timer = setTimeout(() => {
+    if (o.json) io.stdout(`${JSON.stringify({ type: 'timeout', seconds: Math.round(o.timeoutMs / 1000) })}\n`);
+    else io.stderr(`\n[timeout after ${Math.round(o.timeoutMs / 1000)}s]\n`);
+    finish(124);
+  }, o.timeoutMs);
+
   // `--list`: just print the conversations (id · title · model · updated) and exit — the ids feed
   // `--session <id>`. Needs no started session.
   if (o.list) {
     try {
       const rows = await c.sessions();
-      if (!rows.length) io.stdout('(no conversations yet)\n');
-      for (const r of rows) io.stdout(`${r.active ? '* ' : '  '}${r.id}\t${r.title || '(untitled)'}\t${r.model}\t${r.updated_at}\n`);
-      return 0;
-    } catch (e) { io.stderr(`list failed: ${errMsg(e)}\n`); return 1; }
+      if (!settled) {
+        if (!rows.length) io.stdout('(no conversations yet)\n');
+        for (const r of rows) io.stdout(`${r.active ? '* ' : '  '}${r.id}\t${r.title || '(untitled)'}\t${r.model}\t${r.updated_at}\n`);
+        finish(0);
+      }
+    } catch (e) { if (!settled) { io.stderr(`list failed: ${errMsg(e)}\n`); finish(1); } }
+    clearTimeout(timer);
+    return exit;
   }
 
   // Continuation model (matches the TUI): by default the server resolves this DIRECTORY's conversation
@@ -326,7 +368,12 @@ export async function runHeadless(
     const startOpts = o.session ? { session: o.session } : o.fresh ? { fresh: true } : {};
     ({ sessionId } = await c.start(startOpts));
     if (o.model || o.provider) { const r = await c.setModel({ model: o.model, provider: o.provider }); if (o.verbose) io.stderr(dim(`[model] ${r.model}\n`)); }
-  } catch (e) { io.stderr(`start failed: ${errMsg(e)}\n`); return 1; }
+  } catch (e) {
+    if (!settled) { io.stderr(`start failed: ${errMsg(e)}\n`); finish(1); }
+    clearTimeout(timer);
+    return exit;
+  }
+  if (settled) { clearTimeout(timer); return exit; } // the deadline fired mid-start
   io.stderr(dim(`[session ${sessionId}] — continue with \`elowen run -c "<next>"\` (or --new to start fresh)\n`));
   if (o.json) io.stdout(`${JSON.stringify({ type: 'session', id: sessionId })}\n`);
 
@@ -337,12 +384,13 @@ export async function runHeadless(
   const goalText = o.goal ?? (goalArg && !['pause', 'resume', 'clear', 'status', 'show'].includes(goalArg) ? goalArg : undefined);
   const isGoalRun = !!goalText;
 
-  const ctrl = new AbortController();
-  let exit = 0, settled = false, activity = false;
-  let resolveDone: () => void = () => {};
-  const doneP = new Promise<void>((r) => { resolveDone = r; });
-  const finish = (code: number): void => { if (settled) return; settled = true; exit = code; resolveDone(); ctrl.abort(); };
   const emit = (e: BrainEvent): void => io.stdout(`${JSON.stringify(e)}\n`);
+  // Once this invocation sends its own turn, gate the stream on the `user` echo that names it: any event
+  // arriving before that echo belongs to a conversation that was already running when we attached — its
+  // non-terminal tail, or even its own idle — and must not leak into this command's output, set
+  // `activity`, or finish it early. Stays undefined outside a plain-turn dispatch (goal runs, read-only
+  // slash commands) — nothing to wait for there.
+  let awaitingOwnTurn: string | undefined;
   let lastStreamedGoal = '';
   const goalFingerprint = (goal: GoalView | null): string => goal == null ? 'null' : [
     goal.session_id, goal.status, goal.goal, goal.turns_used, goal.turn_budget, goal.last_verdict,
@@ -367,6 +415,10 @@ export async function runHeadless(
   };
 
   const onEvent = (e: BrainEvent): void => {
+    // The attribution boundary itself is resolved per-FRAME in onFrame below (a reconnect snapshot can
+    // bundle a durable-history repair together with its tail's `user` echo, and both must clear together)
+    // — here it only needs to hold the gate closed until that boundary is crossed.
+    if (awaitingOwnTurn !== undefined) return;
     if (e.type === 'goal') lastStreamedGoal = goalFingerprint(e.goal);
     if (o.json) emit(e);
     switch (e.type) {
@@ -380,7 +432,10 @@ export async function runHeadless(
         if (!o.json) io.stderr(`\n[needs input] ${e.questions.map((q) => q.question).join(' | ')}\n`);
         // A plain turn can't proceed without an answer — abort it server-side (releases the session lock /
         // cancels the parked elicitation) instead of leaving it hanging until the elicitation timeout.
-        if (!isGoalRun) { void c.abort().catch(() => { /* best-effort */ }); finish(5); }
+        // `elowen run` exits the process right after this call returns, so await the abort (bounded) —
+        // firing it and finishing in the same tick could let the process exit before the daemon released
+        // the lock.
+        if (!isGoalRun) { void raceTimeout(c.abort().catch(() => { /* best-effort */ }), 5000).then(() => finish(5)); }
         break;
       case 'error': if (!o.json) io.stderr(`\n[error] ${e.message}\n`); finish(1); break;
       case 'idle':
@@ -397,6 +452,14 @@ export async function runHeadless(
   snapshots = new HeadlessSnapshotReconciler(onEvent);
   let firstSnapshot = true;
   const onFrame = (frame: BrainStreamFrame): void => {
+    // Attribution boundary: a `user` event carrying this invocation's own sent text is the only reliable
+    // marker separating "the conversation's state before we attached" from "this invocation's own run".
+    // Resolve it for the WHOLE frame before any of its content reaches the reconciler, so a durable-
+    // history repair bundled into the same reconnect snapshot as that echo isn't mistaken for stale tail.
+    if (awaitingOwnTurn !== undefined) {
+      const events = frame.type === 'snapshot' ? frame.events : [frame];
+      if (events.some((event) => event.type === 'user' && event.text === awaitingOwnTurn)) awaitingOwnTurn = undefined;
+    }
     if (frame.type === 'snapshot') {
       snapshots.snapshot(frame, firstSnapshot);
       firstSnapshot = false;
@@ -417,7 +480,7 @@ export async function runHeadless(
     while (!settled) {
       let g: GoalView | null = null;
       try { g = await c.goal(); errors = 0; }
-      catch (e) { if (++errors >= 3) { io.stderr(`\ncan't read goal status: ${errMsg(e)}\n`); finish(1); return; } await sleep(1500); continue; }
+      catch (e) { if (++errors >= 3) { io.stderr(`\ncan't read goal status: ${errMsg(e)}\n`); finish(1); return; } await abortableSleep(1500, ctrl.signal); continue; }
       if (g) seen = true;
       // The goal vanished after we'd seen it — cleared, or the user switched conversations (goal status
       // reads the ACTIVE session). Stop rather than spin to the timeout.
@@ -434,7 +497,7 @@ export async function runHeadless(
         finish(code);
         return;
       }
-      await sleep(1500);
+      await abortableSleep(1500, ctrl.signal);
     }
   }
 
@@ -447,6 +510,7 @@ export async function runHeadless(
   // run's explicit --timeout as the bounded no-event failure path. Treating POST success as completion
   // made a normal >300ms model start exit 0 without printing its answer.
   const fireTurn = (text: string, mode: 'build' | 'plan' | 'workflow'): void => {
+    awaitingOwnTurn = text; // gate output/activity/idle-completion until the server echoes THIS prompt
     void c.send(text, mode).then(
       () => { /* accepted; the stream owns completion */ },
       // With admission-only POST semantics, every rejection means THIS prompt was not accepted. Stream
@@ -550,11 +614,6 @@ export async function runHeadless(
   const streamP = c.stream(onFrame, ctrl.signal, 1000, () => void dispatch(), undefined, true)
     .catch((e) => { if (!settled) { io.stderr(`stream error: ${errMsg(e)}\n`); finish(1); } });
 
-  const timer = setTimeout(() => {
-    if (o.json) io.stdout(`${JSON.stringify({ type: 'timeout', seconds: Math.round(o.timeoutMs / 1000) })}\n`);
-    else io.stderr(`\n[timeout after ${Math.round(o.timeoutMs / 1000)}s]\n`);
-    finish(124);
-  }, o.timeoutMs);
   await doneP;
   clearTimeout(timer);
   clearTimeout(connectTimer);

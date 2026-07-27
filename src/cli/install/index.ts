@@ -15,6 +15,7 @@ import { INSTALL_INFO_PATH, serializeInstallInfo, type InstallInfo } from '../in
 import { must, aptInstall, step } from '../provision/exec.js';
 import { type Deployment, isIpAddress, publicUrl, localhostDeploy, ipDeploy, chooseDeployment, provisionProxy } from '../provision/deployment.js';
 import { beginInstaller } from '../ui/installer.js';
+import { urlHealthy } from '../launcher.js';
 
 const DAEMON_PORT = Number((process.env.ELOWEN_PORT) ?? 4400);
 const WEB_PORT = Number((process.env.ELOWEN_WEB_PORT) ?? 4500);
@@ -58,10 +59,12 @@ function bail(v: unknown): asserts v is string {
   if (p.isCancel(v)) { p.cancel('Installation cancelled.'); process.exit(1); }
 }
 
-/** Poll the daemon's /setup endpoint until it answers (services just came up) or we give up. */
+/** Poll the daemon's /setup endpoint until it answers (services just came up) or we give up. Each probe
+ *  is bounded (`urlHealthy`, shared with the launcher and `ensureDaemon`) so a half-open connection can't
+ *  stall a single attempt for longer than its own timeout. */
 async function waitForDaemon(tries = 40): Promise<boolean> {
   for (let i = 0; i < tries; i++) {
-    try { if ((await fetch(`${base}/setup`)).ok) return true; } catch { /* not up yet */ }
+    if (await urlHealthy(`${base}/setup`)) return true;
     await new Promise((res) => setTimeout(res, 500));
   }
   return false;
