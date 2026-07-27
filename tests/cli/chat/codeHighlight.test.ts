@@ -65,10 +65,18 @@ describe('highlightLine', () => {
     expect(tokens).not.toBeNull();
     expect(tokens!.map((t) => t.text).join('')).toBe('const answer = 42 // hi');
     expect(tokens!.every((t) => /^38;2;\d+;\d+;\d+$/.test(t.fg))).toBe(true);
+    // A grammar that did not really register tokenizes the line as ONE plaintext span: the joined text and
+    // the colours still look right, so the old `find(...)!` dereference died with an opaque
+    // "cannot read properties of undefined" instead of naming the problem. Assert the split first, and put
+    // the tokens in the message — a future failure here has to be diagnosable from CI output alone.
+    const describeTokens = JSON.stringify(tokens!.map((t) => t.text));
+    expect(tokens!.length, `expected a tokenized line, got ${describeTokens}`).toBeGreaterThan(1);
+    const keyword = tokens!.find((t) => t.text === 'const');
+    const comment = tokens!.find((t) => t.text.includes('//'));
+    expect(keyword, `no 'const' keyword token in ${describeTokens}`).toBeDefined();
+    expect(comment, `no comment token in ${describeTokens}`).toBeDefined();
     // keyword vs comment differ in Monokai.
-    const keyword = tokens!.find((t) => t.text === 'const')!;
-    const comment = tokens!.find((t) => t.text.includes('//'))!;
-    expect(keyword.fg).not.toBe(comment.fg);
+    expect(keyword!.fg).not.toBe(comment!.fg);
   });
 
   it('serves repeat renders from the cache with identical output', async () => {
