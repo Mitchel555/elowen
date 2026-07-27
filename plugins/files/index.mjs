@@ -56,6 +56,8 @@ function addLineNumbers(text, startLine) {
 // applyEditsToNormalizedContent / stripBom / line-ending helpers. These are a faithful port of that logic
 // (node_modules/@earendil-works/pi-coding-agent/dist/core/tools/edit-diff.js) so our own defineTool wrapper
 // keeps the ctx.assertPathAllowed guard and details shape while gaining the same matching semantics.
+// Being a frozen copy of code that moves upstream, its behaviour is pinned by the characterisation tests in
+// tests/plugins/filesPorts.test.ts — when a PI upgrade breaks them, reconcile the port deliberately.
 
 function detectLineEnding(content) {
   const crlf = content.indexOf('\r\n');
@@ -156,7 +158,7 @@ function findAllOccurrences(haystack, needle) {
 }
 /** Plan a fuzzy-tolerant edit: exact match first, then a normalized-space match; preserve BOM/CRLF. Returns
  *  { content, newContent, after, count } (both LF, no BOM, for diffing) or { error } for the caller to surface. */
-function planEdit(rawBefore, oldTextRaw, newTextRaw, replaceAll) {
+export function planEdit(rawBefore, oldTextRaw, newTextRaw, replaceAll) {
   const { bom, text } = stripBom(rawBefore);
   const ending = detectLineEnding(text);
   const content = normalizeToLF(text);
@@ -205,7 +207,8 @@ function unifiedPatch(path, before, after) {
 // prefix-only sniff would misclassify a real text file as an image, drop into the image branch, fail to
 // resize, and return an "[Image omitted]" stub instead of the file's actual text — silent data loss on a
 // normal read. So BMP validates its 26-byte header, PNG its 8-byte signature + IHDR + non-animated, and
-// JPEG rejects the unsupported JPEG-LS (0xf7) variant, exactly as PI does.
+// JPEG rejects the unsupported JPEG-LS (0xf7) variant, exactly as PI does. Frozen copy, same as the edit
+// core above: its behaviour is pinned by tests/plugins/filesPorts.test.ts.
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 function startsWithBytes(buf, bytes) {
   if (buf.length < bytes.length) return false;
@@ -261,7 +264,7 @@ function isBmp(buf) {
   }
   return colorPlanes === 1 && [1, 4, 8, 16, 24, 32].includes(bitsPerPixel);
 }
-function detectImageMime(buf) {
+export function detectImageMime(buf) {
   if (startsWithBytes(buf, [0xff, 0xd8, 0xff])) return buf[3] === 0xf7 ? null : 'image/jpeg';
   if (startsWithBytes(buf, PNG_SIGNATURE)) return isPng(buf) && !isAnimatedPng(buf) ? 'image/png' : null;
   // Require the full 6-byte GIF signature incl. version (PI sniffs only "GIF") — the 3-byte prefix alone
