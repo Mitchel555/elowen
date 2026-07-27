@@ -6,7 +6,7 @@ import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
-import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainProject, BrainStatus, BrainUsage, McpServerStatus, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
+import type { AskAnswer, AskQuestion, BrainCard, BrainModelOption, BrainProject, BrainStatus, BrainUsage, BrainWorkMode, McpServerStatus, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
 import { fromHistory, prependHistory, reduce, upsertCard, type ChatTurn, type TranscriptEvent } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
@@ -24,6 +24,14 @@ import {
 interface Attachment { name: string; kind: 'image' | 'text'; mimeType: string; data: string; preview?: string }
 
 const THOUGHTS_VALUES = ['show', 'hide'] as const;
+
+/** The `kind:'mode'` commands, in one place — the `/plan`, `/build`, `/workflow` slash names ARE the mode
+ *  values, so this is what narrows a command name to a BrainWorkMode without a cast. */
+const WORK_MODES: readonly BrainWorkMode[] = ['build', 'plan', 'workflow'];
+
+/** What approving a submitted plan sends, verbatim from the CLI's plan follow-up (src/cli/chat/flows.ts)
+ *  so both surfaces hand the model the same sentence. Model-facing, hence not translated. */
+const IMPLEMENT_PLAN_PROMPT = 'Implement the plan you proposed above.';
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -134,6 +142,24 @@ export interface BrainChatValue {
    *  reappear the moment it is switched back on. Persisted per browser. */
   showThoughts: boolean;
   setShowThoughts: (v: boolean) => void;
+  /** The work mode every send is stamped with (`/plan`, `/build`, `/workflow`). Session-scoped and kept in
+   *  MEMORY only — a reload starts in 'build', exactly like a fresh CLI process, so the two surfaces can
+   *  never disagree about which mode a conversation is in. */
+  workMode: BrainWorkMode;
+  setWorkMode: (m: BrainWorkMode) => void;
+  /** Approve a submitted plan: switch to build mode and send the CLI's implement prompt. Without it a web
+   *  user who entered plan mode would have no way to act on the plan they just got. */
+  implementPlan: () => void;
+  /** The `/rename` dialog's open state (the surface renders the modal; the controller owns the write). */
+  renameOpen: boolean;
+  closeRename: () => void;
+  /** Rename the bound conversation and refresh the conversation list. */
+  renameSession: (title: string) => Promise<void>;
+  /** The surface-filtered command catalog (`GET /brain/commands`) — the single source every menu reads. */
+  commands: SlashCommandDef[];
+  /** Execute a catalog command exactly as the composer's slash menu does. Exposed so a second entry point
+   *  (the telemetry mascot's command field) dispatches through THIS path instead of a parallel copy. */
+  runSlash: (cmd: SlashCommandDef) => void;
   slash: {
     items: SlashItem[];
     open: boolean;
@@ -201,6 +227,10 @@ function useBrainChatController(): BrainChatValue {
   const [modelsError, setModelsError] = useState(false);
   const [currentModel, setCurrentModel] = useState('');
   const [focusNonce, setFocusNonce] = useState(0);
+  // Work mode + the `/rename` dialog: plain in-memory state. The daemon holds no mode (every send stamps
+  // its own), so persisting it here would make a reloaded tab claim a mode the CLI never has.
+  const [workMode, setWorkMode] = useState<BrainWorkMode>('build');
+  const [renameOpen, setRenameOpen] = useState(false);
   // Lives on the controller (mounted once) rather than the surface, so the choice survives the dock's
   // Chat↔Terminál toggle and every route change, exactly like the transcript itself.
   const [thoughts, setThoughts] = usePersistentState<'show' | 'hide'>('elowen.chat.thoughts', 'show', THOUGHTS_VALUES);
@@ -472,7 +502,7 @@ function useBrainChatController(): BrainChatValue {
     // turn) for both an immediate run and a queued delivery. `shown` rides as the clean display. The
     // binding lands the turn in THIS controller's conversation regardless of the server's active pointer.
     // If the daemon rejects the request, restore this draft unless the user already started a newer one.
-    try { await elowenClient.brainSend(text, images, shown, binding()); }
+    try { await elowenClient.brainSend(text, images, shown, binding(), workMode); }
     catch {
       setInput((current) => current || submittedInput);
       setAttachments((current) => current.length ? current : submittedAttachments);
@@ -553,6 +583,27 @@ function useBrainChatController(): BrainChatValue {
       toast(`${t.brainChat.modelSwitched} ${model}`, 'ok');
     } catch (e) { toast((e as Error).message ?? 'error', 'error'); }
   };
+  // Switch the mode every following send is stamped with (the CLI's /plan|/build|/workflow, whose mode is
+  // likewise client state). Nothing is sent here — the mode takes effect on the NEXT turn.
+  const runMode = (mode: BrainWorkMode): void => {
+    setWorkMode(mode);
+    toast(`${t.brainChat.modeSwitched} ${t.brainChat.workMode[mode]}`, 'ok');
+  };
+  const implementPlan = (): void => {
+    setWorkMode('build');
+    void elowenClient.brainSend(IMPLEMENT_PLAN_PROMPT, undefined, undefined, binding(), 'build')
+      .catch(() => toast(t.brainChat.sendError, 'error'));
+  };
+  const renameSession = async (title: string): Promise<void> => {
+    setRenameOpen(false);
+    const next = title.trim();
+    const id = boundSessionRef.current ?? activeSessionId;
+    if (!next || !id) return;
+    try {
+      await elowenClient.brainRenameSession(id, next);
+      await qc.invalidateQueries({ queryKey: ['brain-sessions'] });
+    } catch { toast(t.chat.renameError, 'error'); }
+  };
   const runSlash = async (cmd: SlashCommandDef): Promise<void> => {
     if (cmd.name === 'model') { setInput(''); setModelSlashOpen(true); void loadModels(); return; }
     setInput('');
@@ -572,6 +623,11 @@ function useBrainChatController(): BrainChatValue {
       }
       // Inspect loaded skills — list the invocable /skill:name commands (PI expands them on send).
       if (cmd.name === 'skills') { const sk = await elowenClient.pluginSkills(); toast(sk.length ? sk.map((s) => `/skill:${s.name}`).join('  ') : t.skills.empty, 'ok'); return; }
+      if (cmd.kind === 'mode') {
+        const mode = WORK_MODES.find((m) => m === cmd.name);
+        if (mode) { runMode(mode); return; }
+      }
+      if (cmd.name === 'rename') { setRenameOpen(true); return; }
       // A prompt macro usually wants arguments — picking it pre-fills the composer (`/review `) so the
       // user types them and submits; the submit path expands the template (args or not).
       if (cmd.kind === 'prompt') { setInput(`/${cmd.name} `); return; }
@@ -660,6 +716,9 @@ function useBrainChatController(): BrainChatValue {
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
     showThoughts: thoughts === 'show',
     setShowThoughts: (v) => setThoughts(v ? 'show' : 'hide'),
+    workMode, setWorkMode: runMode, implementPlan,
+    renameOpen, closeRename: () => setRenameOpen(false), renameSession,
+    commands, runSlash: (cmd) => void runSlash(cmd),
     slash: { items: slashItems, open: slashItems.length > 0, modelOptsOpen: modelSlashOpen, clearModelOpts: () => setModelSlashOpen(false) },
     sessions,
   };

@@ -11,6 +11,7 @@ const server = setupServer(
   http.patch('*/api/missions/m1', async ({ request }) => { await record(request); return HttpResponse.json({ id: 'm1', state: 'paused' }); }),
   http.delete('*/api/brain/queue/:id', async ({ request }) => { await record(request); return HttpResponse.json({ removed: true }); }),
   http.patch('*/api/brain/sessions/:id', async ({ request, params }) => { await record(request); return HttpResponse.json({ id: params['id'], title: 'Renamed' }); }),
+  http.post('*/api/brain/send', async ({ request }) => { await record(request); return HttpResponse.json({ ok: true }, { status: 202 }); }),
 );
 beforeAll(() => server.listen()); afterAll(() => server.close());
 
@@ -37,5 +38,11 @@ describe('elowenClient mutations', () => {
     const r = await elowenClient.brainRenameSession('brain-9', 'New title');
     expect(r).toMatchObject({ id: 'brain-9', title: 'Renamed' });
     expect(calls.at(-1)).toMatchObject({ url: '/api/brain/sessions/brain-9', method: 'PATCH', body: { title: 'New title' } });
+  });
+  it('brainSend stamps the work mode on the turn (and omits it when none is given)', async () => {
+    await elowenClient.brainSend('outline it', undefined, undefined, { session: 'brain-9' }, 'plan');
+    expect(calls.at(-1)).toMatchObject({ url: '/api/brain/send', method: 'POST', body: { text: 'outline it', session: 'brain-9', mode: 'plan' } });
+    await elowenClient.brainSend('hi');
+    expect((calls.at(-1)?.body as Record<string, unknown>)['mode']).toBeUndefined();
   });
 });

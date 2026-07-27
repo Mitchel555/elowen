@@ -2,13 +2,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Wrench, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, PlayCircle } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
 import { useMobile } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
-import type { BrainCard } from '../../lib/types';
+import type { BrainCard, BrainWorkMode } from '../../lib/types';
 import { collectSubagents, groupToolItems, type ChatTurn, type SessionEventItem, type ToolItem } from '../../lib/transcript';
 import { MorePill } from '../../components/ui/MorePill';
+import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
+import { Button } from '../../components/ui/Button';
+import { Input } from '../../components/ui/Input';
 import { AskQuestionCard } from './AskQuestionCard';
 import { ProcessPanel } from './ProcessPanel';
 import { AgentsTable } from './AgentsTable';
@@ -361,6 +364,57 @@ function ThoughtsToggle({ full, on, onToggle }: { full?: boolean; on: boolean; o
   );
 }
 
+/** Which work mode the next send is stamped with. Rendered only OUTSIDE build mode: build is the default
+ *  every conversation starts in, so a permanent "Build" chip would be noise — while plan/workflow change
+ *  what the agent may do and must never be a hidden switch. */
+function WorkModePill({ mode, full }: { mode: BrainWorkMode; full?: boolean }) {
+  const { t } = useTranslation();
+  if (mode === 'build') return null;
+  return (
+    <span
+      data-testid="chat-work-mode"
+      title={t.brainChat.workModeLabel}
+      className={`shrink-0 rounded-md border border-accent/40 bg-accent/10 px-1.5 font-medium uppercase tracking-wide text-accent ${full ? 'py-0.5 text-tiny' : 'py-px text-[0.625rem]'}`}
+    >
+      <span className="sr-only">{t.brainChat.workModeLabel}: </span>{t.brainChat.workMode[mode]}
+    </span>
+  );
+}
+
+/** The `/rename` dialog: the conversation's title prefilled, committed with Enter or the save button. The
+ *  web twin of the CLI's rename prompt — the history rail renames inline, this renames the OPEN chat. */
+function RenameDialog({ current, onClose, onSubmit }: { current: string; onClose: () => void; onSubmit: (title: string) => void }) {
+  const { t } = useTranslation();
+  const [title, setTitle] = useState(current);
+  const commit = () => { if (title.trim()) onSubmit(title); };
+  return (
+    <Modal title={t.brainChat.renameTitle} onClose={onClose} size="sm" icon={Pencil}>
+      <ModalBody>
+        <Input
+          autoFocus
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+          aria-label={t.chat.renamePlaceholder}
+          placeholder={t.chat.renamePlaceholder}
+        />
+      </ModalBody>
+      <ModalFooter>
+        <Button variant="ghost" onClick={onClose}>{t.common.cancel}</Button>
+        <Button variant="accent" disabled={!title.trim()} onClick={commit}>{t.common.save}</Button>
+      </ModalFooter>
+    </Modal>
+  );
+}
+
+/** True when the newest turn ends with a plan the model submitted through `ExitPlanMode` — the point at
+ *  which plan mode is waiting on the user, exactly like the CLI's plan follow-up. */
+function awaitsPlanDecision(turns: ChatTurn[]): boolean {
+  const last = turns[turns.length - 1];
+  if (!last || last.role === 'you' || last.role === 'divider' || last.role === 'event') return false;
+  return last.segments.some((seg) => seg.kind === 'tools' && seg.items.some((item) => item.plan));
+}
+
 /** The presentational brain chat surface, driven entirely by the shared controller (BrainChatProvider)
  *  read from context. It owns NO network or session state: only pure view affordances (the picker-open
  *  toggle, the slash keyboard cursor, DOM refs + autoscroll) live here, so unmounting it (Chat↔Terminál
@@ -378,6 +432,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     usage, lineCfg, currentModel, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
     ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
+    workMode, implementPlan, renameOpen, closeRename, renameSession,
   } = c;
 
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -551,6 +606,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             <span className="truncate">{active?.title || t.brainChat.newChat}</span>
             <ChevronDown size={14} className="shrink-0 text-text-muted" aria-hidden />
           </button>
+          <WorkModePill mode={workMode} />
           <ModelPicker variant="compact" />
           <ThoughtsToggle on={showThoughts} onToggle={() => setShowThoughts(!showThoughts)} />
           <button
@@ -580,6 +636,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             </button>
           ) : null}
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{active?.title || t.brainChat.newChat}</span>
+          <WorkModePill mode={workMode} full />
           <ModelPicker variant="full" />
           <ThoughtsToggle full on={showThoughts} onToggle={() => setShowThoughts(!showThoughts)} />
           {onOpenTelemetry ? (
@@ -680,6 +737,22 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
         ) : null}
         {statsOpen ? (
           <StatsModal onClose={() => setStatsOpen(false)} />
+        ) : null}
+        {/* Plan mode's decision point: the model submitted a plan and the turn settled. Without this the
+            web could enter plan mode but never act on the result — the CLI raises the same choice in its
+            plan follow-up modal. Refining needs no button: another message keeps the mode as it is. */}
+        {workMode === 'plan' && !busy && !readOnly && awaitsPlanDecision(turns) ? (
+          <div data-testid="chat-plan-decision" className="flex flex-wrap items-center gap-2 rounded-md border border-accent/30 bg-accent/5 px-2.5 py-2 text-tiny text-text-muted">
+            <span className="min-w-0 flex-1">{t.brainChat.planDecision}</span>
+            <button
+              type="button"
+              onClick={implementPlan}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 py-1 text-accent transition-colors hover:bg-accent/25"
+            >
+              <PlayCircle size={12} aria-hidden />
+              {t.brainChat.planImplement}
+            </button>
+          </div>
         ) : null}
         {ask ? (
           <AskQuestionCard
@@ -885,6 +958,13 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
       </div>
       )}
       </div>
+      {renameOpen ? (
+        <RenameDialog
+          current={active?.title ?? ''}
+          onClose={closeRename}
+          onSubmit={(title) => void renameSession(title)}
+        />
+      ) : null}
     </div>
   );
 }

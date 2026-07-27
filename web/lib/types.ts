@@ -83,6 +83,9 @@ export interface BrainModelOption {
   fastAvailable?: boolean;
   default?: boolean;
 }
+/** The work mode a turn is sent in (mirror of the daemon's `mode` on POST /brain/send). Session-scoped
+ *  client state on every surface: the client stamps it per send, the daemon keeps none. */
+export type BrainWorkMode = 'build' | 'plan' | 'workflow';
 /** One brain conversation in the session picker (web chat + CLI). */
 export interface BrainSessionInfo { id: string; title: string; model: string; updated_at: string; running: boolean; active: boolean }
 /** A row in the admin session-management panel (all brain sessions the operator anchors). */

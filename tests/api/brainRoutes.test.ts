@@ -621,6 +621,13 @@ describe('brain routes', () => {
     expect(whatsapp.commands.map((c) => c.name)).not.toContain('rename');
   });
 
+  it('publishes the work modes and rename to the web surface', async () => {
+    const { app, amyTok } = setup();
+    const web = await (await app.request('/brain/commands?surface=web', auth(amyTok))).json() as { commands: { name: string; kind: string }[] };
+    expect(web.commands.map((c) => c.name)).toEqual(expect.arrayContaining(['plan', 'build', 'workflow', 'rename']));
+    expect(web.commands.find((c) => c.name === 'plan')?.kind).toBe('mode');
+  });
+
   it('returns no OAuth usage when no auth storage is configured', async () => {
     const { app, amyTok } = setup();
     const res = await app.request('/brain/rate-limits?session=brain-2', auth(amyTok));

@@ -22,9 +22,12 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   { name: 'subgoal', description: 'Add or remove persistent-goal subgoals', kind: 'action', surfaces: ['cli'] },
   { name: 'tools', description: 'Inspect active plugin tools and ownership', kind: 'picker', surfaces: ['cli'] },
   { name: 'compact', description: 'Summarize the conversation to free up context (add text to steer what to keep)', kind: 'action' },
-  { name: 'plan', description: 'Plan mode — think through the approach before editing', kind: 'mode', surfaces: ['cli'] },
-  { name: 'build', description: 'Build mode — implement changes with tools', kind: 'mode', surfaces: ['cli'] },
-  { name: 'workflow', description: 'Workflow mode — orchestrate the task as a DAG of sub-agents', kind: 'mode', surfaces: ['cli'] },
+  // CLI + web dock: both keep the chosen mode in their own session state and stamp it on every send
+  // (`mode` on POST /brain/send), so there is no server-side mode to switch. The chat platforms have no
+  // place to show which mode a channel is in, so they stay out.
+  { name: 'plan', description: 'Plan mode — think through the approach before editing', kind: 'mode', surfaces: ['cli', 'web'] },
+  { name: 'build', description: 'Build mode — implement changes with tools', kind: 'mode', surfaces: ['cli', 'web'] },
+  { name: 'workflow', description: 'Workflow mode — orchestrate the task as a DAG of sub-agents', kind: 'mode', surfaces: ['cli', 'web'] },
   // CLI-local like /goal: the TUI calls POST /brain/yolo itself. Session-scoped — the persisted
   // default is edited in web Account → Elowen AI (or PATCH /auth/me/permissions).
   { name: 'yolo', description: 'YOLO — auto-approve tool asks for this session ("on"/"off" or toggle)', kind: 'action', surfaces: ['cli'] },
@@ -67,7 +70,9 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   // CLI-only conversation management (the other surfaces manage conversations through their own UI).
   { name: 'sessions', description: 'Pick a conversation', kind: 'picker', surfaces: ['cli'] },
   { name: 'resume', description: 'Resume a conversation', kind: 'picker', surfaces: ['cli'] },
-  { name: 'rename', description: 'Rename this conversation', kind: 'picker', surfaces: ['cli'] },
+  // Also on the web dock: it renders its own rename dialog and PATCHes /brain/sessions/:id (the same
+  // metadata endpoint the history rail's rename uses).
+  { name: 'rename', description: 'Rename this conversation', kind: 'picker', surfaces: ['cli', 'web'] },
   { name: 'delete', description: 'Delete a conversation', kind: 'picker', surfaces: ['cli'] },
   { name: 'quit', description: 'Exit', kind: 'action', surfaces: ['cli'] },
 ];

@@ -16,11 +16,17 @@ describe('slash command registry', () => {
   });
 
   it('scopes the CLI conversation pickers to the CLI surface only', () => {
-    for (const n of ['sessions', 'resume', 'rename', 'delete', 'quit']) {
+    for (const n of ['sessions', 'resume', 'delete', 'quit']) {
       expect(commandsFor('cli', true).some((c) => c.name === n), `cli ${n}`).toBe(true);
       expect(commandsFor('discord', true).some((c) => c.name === n), `discord ${n}`).toBe(false);
       expect(commandsFor('web', true).some((c) => c.name === n), `web ${n}`).toBe(false);
     }
+  });
+
+  it('publishes /rename to the web dock (it has its own rename dialog) but not to the chat platforms', () => {
+    expect(commandsFor('cli', true).some((c) => c.name === 'rename')).toBe(true);
+    expect(commandsFor('web', true).some((c) => c.name === 'rename')).toBe(true);
+    expect(commandsFor('discord', true).some((c) => c.name === 'rename')).toBe(false);
   });
 
   it('publishes stop/status/compact to every surface', () => {
@@ -44,12 +50,18 @@ describe('slash command registry', () => {
     expect(commandsFor('web', true).some((c) => c.name === 'reasoning')).toBe(false);
   });
 
-  it('scopes local work modes to the CLI surface', () => {
-    for (const n of ['plan', 'build', 'yolo']) {
+  it('publishes the work modes to the CLI and the web dock (both stamp the mode per send)', () => {
+    for (const n of ['plan', 'build', 'workflow']) {
       expect(commandsFor('cli', true).some((c) => c.name === n), `cli ${n}`).toBe(true);
-      expect(commandsFor('web', true).some((c) => c.name === n), `web ${n}`).toBe(false);
+      expect(commandsFor('web', true).find((c) => c.name === n)?.kind, `web ${n}`).toBe('mode');
       expect(commandsFor('discord', true).some((c) => c.name === n), `discord ${n}`).toBe(false);
     }
+  });
+
+  it('keeps /yolo CLI-local (the TUI calls POST /brain/yolo itself)', () => {
+    expect(commandsFor('cli', true).some((c) => c.name === 'yolo')).toBe(true);
+    expect(commandsFor('web', true).some((c) => c.name === 'yolo')).toBe(false);
+    expect(commandsFor('discord', true).some((c) => c.name === 'yolo')).toBe(false);
   });
 
   it('every command has a non-empty English description', () => {
