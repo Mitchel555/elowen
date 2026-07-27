@@ -4,11 +4,11 @@
 // because only an admin session can create jobs in the first place.
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { runtimeFooter } from '../_shared/format.mjs';
+import { readJsonSafe, writeJsonAtomic } from '../_shared/atomicJson.mjs';
 
 // `exec` runs the command through the PLATFORM default shell (/bin/sh -c on POSIX, cmd.exe /d /s /c on
 // Windows), so a job's check collector works cross-platform — hardcoding /bin/sh broke every cron on
@@ -24,6 +24,10 @@ const CHECK_MAX_BUFFER = 1024 * 1024; // 1 MB of stdout is plenty of "what's new
 const DEFAULT_CHECK_OUTPUT_CHARS = 32_000;
 const DEFAULT_CRON_TURN_ATTEMPTS = 2; // one retry on a request-time failure (a transient relay/gateway/network blip)
 const DEFAULT_CRON_RETRY_BACKOFF_MS = 3_000; // brief pause before the retry so the transient condition can clear
+// How many undelivered results may wait for a retry at once. A delivery sink that is down for good (a
+// revoked bot token, a deleted channel) must not grow this file forever — past the cap, the OLDEST
+// pending delivery is dropped (and logged) to make room for the next one.
+const MAX_PENDING_DELIVERIES = 50;
 // The per-turn idle rollover forwarded to the host as access.sessionIdleMs. It is OPT-IN, not defaulted:
 // leaving the config key unset means the job's channel session rolls over under the host's own shared
 // default (SESSION_IDLE_ROLLOVER_MS, Discord's 30 min) — the same as every other channel — so an
@@ -373,8 +377,9 @@ class CronAdapter {
   // multiplying every cron echo into dozens of Discord messages.
   // `timezone` is a LIVE getter, not a captured string: the operator can change the zone in Settings and
   // the very next tick must schedule against it, without a plugin reload.
-  constructor(store, logger, deliver, config = {}, timezone = systemZone) {
-    this.store = store; this.log = logger; this.deliver = deliver; this.handler = null; this.running = false;
+  constructor(store, deliveryStore, logger, deliver, config = {}, timezone = systemZone) {
+    this.store = store; this.deliveryStore = deliveryStore; this.log = logger; this.deliver = deliver;
+    this.handler = null; this.running = false;
     this.timezone = timezone;
     // Scheduler limits, resolved once from plugin config (see orca-plugin.json's "Scheduler" section) and
     // clamped to sane bounds — unset config reproduces the previous hardcoded defaults exactly.
@@ -402,6 +407,9 @@ class CronAdapter {
     if (!this.handler || this.running) return;
     this.running = true;
     try {
+    // Retry any result a previous tick prepared but failed to deliver — a re-send only, never a re-run
+    // of the (expensive, possibly side-effecting) model turn that produced it.
+    await this.flushPendingDeliveries();
     const now = Date.now();
     const tz = this.timezone();
     for (const job of this.store.all()) {
@@ -514,27 +522,91 @@ class CronAdapter {
         // (Discord splits on line boundaries), so a long report — e.g. a 60-item debtor list —
         // arrives complete across several messages instead of being clipped mid-list.
         const body = `${header}${String(reply)}${footer ? `\n\n${footer}` : ''}`;
-        await this.deliver(body, job.notifyChannelId).catch(() => {});
+        await this.deliverOrQueue(job, body);
       }
     }
     } finally {
       this.running = false;
     }
   }
+
+  /** Persist the prepared payload as a PENDING delivery before attempting to send it — so a delivery
+   *  failure never loses a result the model already produced (and, for a one-shot job, already paid the
+   *  turn for). The pending record survives independently of the job: a one-shot's own row is gone by the
+   *  time this runs (consumed before the turn, see the tick loop), so the record here is the only place
+   *  left holding the result until it is actually delivered. */
+  async deliverOrQueue(job, body) {
+    const entry = {
+      id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      jobId: job.id, jobName: job.name, channelId: job.notifyChannelId, body, createdAt: new Date().toISOString(),
+    };
+    this.deliveryStore.add(entry);
+    await this.attemptDelivery(entry);
+  }
+
+  /** Send one pending delivery. On success it is removed from the store; on failure it is LOGGED and left
+   *  in place for the next tick's {@link flushPendingDeliveries} — never silently dropped. */
+  async attemptDelivery(entry) {
+    try {
+      await this.deliver(entry.body, entry.channelId);
+      this.deliveryStore.remove(entry.id);
+    } catch (e) {
+      this.log.error(`cron delivery failed for job ${entry.jobId} (${entry.jobName}) — will retry next tick: ${e?.message ?? e}`);
+    }
+  }
+
+  /** Re-attempt every delivery still pending from an earlier tick, oldest first. Each is a plain re-send
+   *  of the ALREADY-PRODUCED result — it never touches the model or the job's schedule. */
+  async flushPendingDeliveries() {
+    for (const entry of this.deliveryStore.all()) await this.attemptDelivery(entry);
+  }
 }
 
 class JobStore {
-  constructor(file) { this.file = file; }
+  constructor(file, logger) { this.file = file; this.log = logger; }
   all() {
-    try { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf-8')) : []; }
-    catch { return []; } // corrupted file → treat as empty, next write repairs it
+    return readJsonSafe(this.file, [], (e) =>
+      this.log?.error?.(`cron: corrupt jobs file ${this.file} — treating as empty: ${e?.message ?? e}`));
   }
-  save(jobs) { writeFileSync(this.file, JSON.stringify(jobs, null, 2)); }
+  save(jobs) {
+    try { writeJsonAtomic(this.file, jobs); }
+    catch (e) { this.log?.error?.(`cron: failed to persist ${this.file}: ${e?.message ?? e}`); throw e; }
+  }
   patch(id, fields) { this.save(this.all().map((j) => (j.id === id ? { ...j, ...fields } : j))); }
 }
 
+/** Results a tick prepared to deliver but could not send yet — a separate file from jobs.json because a
+ *  one-shot job's own record is already gone (consumed before it ran) by the time delivery is attempted,
+ *  so the pending record here is the only surviving copy of that result until it lands. */
+class DeliveryStore {
+  constructor(file, logger) { this.file = file; this.log = logger; }
+  all() {
+    return readJsonSafe(this.file, [], (e) =>
+      this.log?.error?.(`cron: corrupt pending-deliveries file ${this.file} — treating as empty: ${e?.message ?? e}`));
+  }
+  save(entries) {
+    try { writeJsonAtomic(this.file, entries); }
+    catch (e) { this.log?.error?.(`cron: failed to persist ${this.file}: ${e?.message ?? e}`); throw e; }
+  }
+  add(entry) {
+    const entries = this.all();
+    entries.push(entry);
+    while (entries.length > MAX_PENDING_DELIVERIES) {
+      const dropped = entries.shift();
+      this.log?.error?.(`cron: pending delivery queue full — dropping oldest undelivered result for job ${dropped.jobId} (${dropped.jobName})`);
+    }
+    this.save(entries);
+  }
+  remove(id) {
+    const entries = this.all();
+    const next = entries.filter((e) => e.id !== id);
+    if (next.length !== entries.length) this.save(next);
+  }
+}
+
 export function register(ctx) {
-  const store = new JobStore(join(ctx.dataDir(), 'jobs.json'));
+  const store = new JobStore(join(ctx.dataDir(), 'jobs.json'), ctx.logger);
+  const deliveryStore = new DeliveryStore(join(ctx.dataDir(), 'pending-deliveries.json'), ctx.logger);
   const adminOnly = () => { if (!ctx.isAdminSession()) throw new Error('cron jobs can only be managed from an admin session'); };
 
   ctx.registerTool(defineTool({
@@ -652,6 +724,6 @@ export function register(ctx) {
       .map((j) => j.originSessionId),
   });
 
-  ctx.registerPlatform(new CronAdapter(store, ctx.logger, ctx.notify, ctx.config, () => ctx.timezone()));
+  ctx.registerPlatform(new CronAdapter(store, deliveryStore, ctx.logger, ctx.notify, ctx.config, () => ctx.timezone()));
   ctx.logger.info('cron tools + scheduler registered');
 }
