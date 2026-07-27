@@ -11,7 +11,7 @@ import type { BrainLimits } from '../../lib/types';
 /** Fallback for seeding the Limits form before the daemon's config arrives (it always sends real values). */
 export const BRAIN_LIMIT_DEFAULTS: BrainLimits = {
   toolOutputMaxLines: 80, toolOutputMaxChars: 30000, elicitationTimeoutMs: 300000,
-  memoryRecallCount: 6, memoryRecallChars: 1500, goalTurnBudget: 8, goalMaxTurns: 64, channelSessionCap: 32,
+  memoryRecallCount: 6, memoryRecallChars: 6000, goalTurnBudget: 24, goalMaxTurns: 64, channelSessionCap: 32,
   delegateContextChars: 20000,
 };
 
@@ -38,8 +38,8 @@ const BRAIN_LIMIT_FIELDS: BrainLimitField[] = [
   { key: 'toolOutputMaxChars', kind: 'size', min: 15000, max: 45000, step: 1000, icon: Type },
   { key: 'elicitationTimeoutMs', kind: 'duration', min: 30000, max: 3600000, step: 30000, icon: Timer },
   { key: 'memoryRecallCount', kind: 'count', min: 3, max: 9, step: 1, icon: Brain },
-  { key: 'memoryRecallChars', kind: 'size', min: 750, max: 2250, step: 100, icon: ListChecks },
-  { key: 'goalTurnBudget', kind: 'count', min: 4, max: 12, step: 1, icon: Target },
+  { key: 'memoryRecallChars', kind: 'size', min: 3000, max: 9000, step: 500, icon: ListChecks },
+  { key: 'goalTurnBudget', kind: 'count', min: 4, max: 500, step: 1, icon: Target },
   { key: 'goalMaxTurns', kind: 'count', min: 8, max: 500, step: 1, icon: Repeat },
   { key: 'channelSessionCap', kind: 'count', min: 4, max: 256, step: 1, icon: MessagesSquare },
   { key: 'delegateContextChars', kind: 'size', min: 10000, max: 26000, step: 1000, icon: Share2 },

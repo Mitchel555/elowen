@@ -202,8 +202,11 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   toolOutputMaxChars: 30_000,
   elicitationTimeoutMs: 300_000,
   memoryRecallCount: 6,
-  memoryRecallChars: 1500,
-  goalTurnBudget: 8,
+  // ~1500 tokens. Spread over memoryRecallCount hits that is ~1000 chars per memory, enough for one to
+  // arrive whole; the previous 1500 total left ~250 each and cut most of them off mid-sentence.
+  memoryRecallChars: 6000,
+  // A goal worth starting autonomously routinely needs tens of turns — see goalMaxTurns (its ceiling).
+  goalTurnBudget: 24,
   goalMaxTurns: 64,
   channelSessionCap: 32,
   delegateContextChars: 20_000,
@@ -222,16 +225,17 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   toolOutputMaxChars: band('toolOutputMaxChars'),
   memoryRecallCount: band('memoryRecallCount'),
   memoryRecallChars: band('memoryRecallChars'),
-  goalTurnBudget: band('goalTurnBudget'),
   // Ceiling capped below the ±50% rule (which would give 30 000): packDelegatedPromptAppend re-trims
   // anything above MAX_PROMPT_TOTAL_CHARS (32 000, brain/delegatedScope.ts:33), and that total is
   // fair-shared with the child's role prompt — so a higher ceiling here would just be trimmed off again.
   delegateContextChars: band('delegateContextChars', 26_000),
-  // Deliberately exempt from the ±50% rule: for these three the wide range is load-bearing, not a
-  // tuning margin. The 1 hour elicitation ceiling was requested by the instance owner (a question may
-  // legitimately wait out a working session), a YOLO run may need far more turns than the default
-  // safety ceiling, and a busy channel may hold many more live sessions than a quiet one.
+  // Deliberately exempt from the ±50% rule: for these four the wide range is load-bearing, not a tuning
+  // margin. The 1 hour elicitation ceiling was requested by the instance owner (a question may
+  // legitimately wait out a working session), a busy channel may hold many more live sessions than a
+  // quiet one, and the two goal knobs are one family — a per-goal budget that could not approach its own
+  // ceiling would make the ceiling unreachable, so both span the same range.
   elicitationTimeoutMs: [30_000, 3_600_000],
+  goalTurnBudget: [4, 500],
   goalMaxTurns: [8, 500],
   channelSessionCap: [4, 256],
 };
