@@ -94,6 +94,53 @@ The chat dock is available across the product, and `/chat` expands the same conv
 
 Long conversations load lazily — opening one fetches the most recent messages and older ones load as you scroll up, with your reading position preserved; streaming never yanks you back to the newest message. See [Brain & Chat](brain-chat) for conversation behavior.
 
+### Telemetry rail
+
+`/chat` carries the same live telemetry rail as the [CLI](cli): a quiet companion column beside the transcript rather than a dashboard that asks for attention. An owl mascot tops it and mirrors the agent — breathing while a turn runs, settling when it does not — so the rail reads as inhabited. Sections appear only when they have something to report; an idle rail stays nearly empty.
+
+| Section | Shows |
+| --- | --- |
+| Context | A fill meter for the context window, plus tokens used and running cost. |
+| Goal | The active goal, its turn budget, and subgoal tally. |
+| Limits | Subscription usage windows and plan type. |
+| Workflows | Running workflows; click one to open its graph. |
+| Agents | Live sub-agents, with a drill-in to each one's work. |
+| Processes | Background shell processes, each opening a live output modal. |
+| Project | The working directory and current branch. |
+| MCP / LSP | Connected MCP servers and whether the language server is active. |
+
+Drag the rail's inner edge to widen it (your width is remembered per device), and use the header button to hide or show it. On a phone the rail becomes a right-hand drawer opened from the same button, so it never squeezes the conversation.
+
+The owl is also a door: clicking it opens an orbital command field — a ring of the slash commands worth reaching for mid-conversation, such as plan, build, workflow, compact, rename, new, and model. It is a second door onto the composer's `/` menu, not a separate implementation; see [Slash Commands](slash-commands).
+
+> The command field opens as an overlay, not inside the rail — an orbit needs more width than even the widest rail provides.
+
+### Work modes
+
+The web chat supports the same plan, build, and workflow modes as the [CLI](cli). Switch with the `/plan`, `/build`, and `/workflow` commands or from the owl's command field. Build is the default every conversation starts in, so the header shows a mode pill only while you are in plan or workflow mode — a mode that changes what the agent may do is never a hidden switch.
+
+- **Rename** — `/rename` opens a dialog with the conversation title prefilled; commit with Enter.
+- **Leaving plan mode** — when the agent submits a plan, a decision bar appears under the turn. Approve it to implement the plan, which returns you to build mode, or send another message to keep refining.
+
+### Workflow graph
+
+A running workflow listed in the telemetry rail opens as a visual graph. Waves become columns and dependencies become curves; each node carries its status by both glyph and border, so state never rests on colour alone.
+
+| Status | Glyph |
+| --- | --- |
+| Pending | ○ |
+| Running | ● |
+| Done | ✓ |
+| Error | ✗ |
+
+Select a node to see its vitals in a dock under the graph — status, model, tokens, elapsed time, dependencies, and its result or error. Arrow keys move the selection between nodes. The graph reads the live snapshot, so an open view tracks the workflow as its nodes run. On a phone the same data renders as a wave-grouped list, because a hand-sized web of boxes is unreadable.
+
+### Reasoning output
+
+A brain icon in the chat header toggles whether the model's reasoning (thinking) appears in the transcript. Each reasoning block is collapsible, shows how long the model thought, stays open while it streams, and folds itself away once the turn settles.
+
+> The toggle is a display switch only. The daemon keeps streaming reasoning either way, so hidden thoughts remain in the transcript and reappear the moment you turn the switch back on. Your choice is remembered per device.
+
 ## Projects and editor
 
 Projects define the repositories Elowen may work in. From a project you can review Git state, commits, changed files, and related work. Opening a commit or file from a table keeps it in a bounded modal or drawer so the original workspace remains visible.
