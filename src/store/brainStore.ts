@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { renameSync, rmSync } from 'node:fs';
+import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import type { Db } from './db.js';
 import { extractText } from '../brain/messageView.js';
 import { dbTsToIso } from '../shared/time.js';
@@ -576,7 +576,23 @@ export class BrainStore {
    *  proposed a plan simply has no file, which is not an error worth failing a delete over. */
   private removePlanFile(sessionId: string): void {
     try { rmSync(planFilePath(process.env, sessionId), { force: true }); }
-    catch (e) { logger('brain-store').warn(`failed to remove plan file for ${sessionId}`, e); }
+    catch (e) {
+      logger('brain-store').warn(`failed to remove plan file for ${sessionId}`, e);
+      this.blankPlanFile(sessionId);
+    }
+  }
+
+  /** Last resort when a plan file can be neither removed nor moved: empty it where it lies.
+   *
+   *  Channel ids are deterministic and get REUSED, so a plan left behind is not merely orphaned — it is
+   *  re-injected into the prompt of the next conversation minted onto that id, which would hand someone
+   *  else's plan to a fresh session. `readPlan` treats an empty file as "no plan", so blanking it removes
+   *  the only harm the leftover can do. Deliberately not a tombstone or a retry queue: the failure needs
+   *  the file to be undeletable but still writable, and losing a plan we were discarding anyway costs
+   *  nothing. If even this fails there is nothing further to try, and the warning is the record. */
+  private blankPlanFile(sessionId: string): void {
+    try { writeFileSync(planFilePath(process.env, sessionId), ''); }
+    catch (e) { logger('brain-store').warn(`failed to blank plan file for ${sessionId}`, e); }
   }
 
   /** Re-key a session — its row, messages and goal — to a new id, atomically (a crash mid-move would
@@ -617,6 +633,10 @@ export class BrainStore {
     catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
         logger('brain-store').warn(`failed to move plan file ${oldId} → ${newId}`, e);
+        // The move failed, so the plan is still sitting under the id this rollover just freed for a new
+        // conversation. Blank it rather than leave it there to be read as that conversation's own plan:
+        // the archived transcript loses its plan, which is the lesser of the two outcomes.
+        this.blankPlanFile(oldId);
       }
     }
   }
