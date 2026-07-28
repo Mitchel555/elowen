@@ -48,6 +48,17 @@ describe('PATCH /auth/me — self-service profile', () => {
     const { app, bobTok } = setup();
     expect((await app.request('/auth/me', patch(bobTok, { default_exec: 'bogus/model' }))).status).toBe(400);
   });
+
+  // This route used to re-implement the exec rule instead of asking isExecAllowedForUser, and the copy
+  // had drifted: it applied the global allow-list to `elowen:` brain execs. Those are bounded by the
+  // configured brain PROVIDERS, not by allowedExecs — so a model the brain picker offered could not be
+  // saved as the default here. Only the per-user list may narrow it.
+  it('accepts a brain exec that the global allow-list does not list', async () => {
+    const { app, bobTok } = setup();
+    const res = await app.request('/auth/me', patch(bobTok, { default_exec: 'elowen:anthropic/claude-sonnet-5' }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ default_exec: 'elowen:anthropic/claude-sonnet-5' });
+  });
 });
 
 describe('POST /auth/me/password — self-service password change', () => {

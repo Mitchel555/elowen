@@ -59,10 +59,14 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
     const u = c.get('user');
     const b = await parseBody(c, profilePatchSchema);
     if (typeof b.default_exec === 'string' && b.default_exec) {
-      // The preferred default must be one the user is actually allowed to run.
-      const globalOk = d.config.get().allowedExecs.includes(b.default_exec);
-      const personalOk = u.allowed_execs.length === 0 || u.allowed_execs.includes(b.default_exec);
-      if (!globalOk || !personalOk) return c.json({ error: 'exec not allowed' }, 400);
+      // The preferred default must be one the user is actually allowed to run — asked through the SHARED
+      // rule, not a second copy of it. The copy that used to live here had drifted from
+      // isExecAllowedForUser in two ways: it had no admin bypass, and it applied the global allow-list to
+      // `elowen:` brain execs, which are bounded by the configured providers instead. So a model the
+      // brain picker offered could not be saved as the default here.
+      if (!isExecAllowedForUser(u, d.config.get().allowedExecs, b.default_exec)) {
+        return c.json({ error: 'exec not allowed' }, 400);
+      }
     }
     return c.json(users.setProfile(u.id, { name: b.name, email: b.email, default_exec: b.default_exec }));
   });
