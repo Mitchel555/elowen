@@ -417,7 +417,7 @@ describe('subagent plugin', () => {
     expect(reg.platforms.map((p) => p.name)).toEqual(['subagent']);
     expect(reg.tools.map((t) => t.name).sort()).toEqual([
       'Delegate', 'DelegateContinue', 'DelegateList', 'DelegateModels', 'DelegateRead', 'DelegateResult', 'DelegateStatus', 'DelegateStop',
-      'WorkflowAddNodes', 'WorkflowResume', 'WorkflowStart', 'WorkflowStatus',
+      'WorkflowAddNodes', 'WorkflowResume', 'WorkflowStart', 'WorkflowStatus', 'WorkflowStop',
     ]);
     const delegate = reg.tools.find((t) => t.name === 'Delegate')!;
 

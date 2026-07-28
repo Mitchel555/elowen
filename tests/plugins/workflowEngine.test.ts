@@ -63,9 +63,12 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
   };
   /** Mutable so a test can call a tool AS one of the workflow's own node sessions. */
   const sessionId = { current: 'brain-parent' };
+  /** The node child sessions the engine asked the host to abort — the stand-in for the real abort tree. */
+  const stoppedSessions: string[] = [];
   const ctx = {
     registerTool: (def: Tool) => { tools.set(def.name, def); },
     registerControl: (name: string, control: WorkflowControl) => { controls.set(name, control); },
+    stopSubagent: async (id: string) => { stoppedSessions.push(id); return { stopped: true }; },
     logger: { info() {}, warn() {} },
     currentSessionId: () => sessionId.current,
     currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
@@ -85,7 +88,7 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
   registerWorkflow(ctx, () => run, helpers);
   /** Everything the node can read, as one string — the chunks are a transport detail, not the content. */
   const contextOf = (task: string) => (contexts.get(task) ?? []).join('\n\n');
-  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, runs };
+  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, runs, stoppedSessions };
 }
 
 describe('workflow engine', () => {
@@ -598,13 +601,16 @@ describe('workflow background + detach', () => {
   /** A harness whose single node parks until `release()` and then returns done — so a workflow can be
    *  observed while still running (to detach it) and after it finishes (to see delivery). Captures the
    *  durable completions the engine emits and the registered control. */
+  interface Hook { name: string; run(payload: unknown): unknown }
   function bgHarness() {
     const tools = new Map<string, Tool>();
     const controls = new Map<string, Ctrl>();
+    const hooks: Hook[] = [];
     const completions: Completion[] = [];
-    const snapshots: { status: string; background?: boolean }[] = [];
+    const snapshots: { id: string; status: string; background?: boolean }[] = [];
     const launched: string[] = [];
     const finished: string[] = [];
+    const stoppedSessions: string[] = [];
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const run = async (_s: unknown, task: string, onEvent: (e: unknown) => void) => {
@@ -617,12 +623,14 @@ describe('workflow background + detach', () => {
     const ctx = {
       registerTool: (def: Tool) => { tools.set(def.name, def); },
       registerControl: (name: string, control: Ctrl) => { controls.set(name, control); },
+      registerHook: (hook: Hook) => { hooks.push(hook); },
+      stopSubagent: async (id: string) => { stoppedSessions.push(id); return { stopped: true }; },
       logger: { info() {}, warn() {} },
       currentSessionId: () => 'brain-parent',
       currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
       currentAccess: () => ({ toolPolicy: undefined }),
       currentModel: () => ({ provider: 'p', model: 'm' }),
-      workflowEmitter: () => (u: { status: string; background?: boolean }) => { snapshots.push(u); },
+      workflowEmitter: () => (u: (typeof snapshots)[number]) => { snapshots.push(u); },
       workflowCompletionEmitter: () => (c: Completion) => { completions.push(c); },
       listModels: async () => [],
       toolNames: () => ['Read'],
@@ -632,7 +640,7 @@ describe('workflow background + detach', () => {
       principalOf: (id: { elowenUserId?: number } | null) => (id?.elowenUserId ? `elowen:${id.elowenUserId}` : null),
       delegateContextChunks,
     });
-    return { tools, controls, completions, launched, finished, release, snapshots };
+    return { tools, controls, hooks, completions, launched, finished, release, snapshots, stoppedSessions };
   }
 
   it('background=true returns a handle immediately and delivers the summary when the DAG finishes', async () => {
@@ -712,6 +720,128 @@ describe('workflow background + detach', () => {
     expect(controls.get('workflow')!.detachForeground({ sessionId: 'brain-parent', principal: 'elowen:1' })).toEqual({ detached: 0 });
     release();
     await new Promise((r) => setTimeout(r, 5));
+  });
+
+  // A background workflow is spared by every abort of its origin (that is the whole promise of Ctrl+B), so
+  // WITHOUT an explicit stop there is no way to end one early at all — it keeps spawning nodes and burning
+  // tokens until the DAG runs out. This is that lever.
+  it('WorkflowStop ends a background workflow the abort seam deliberately spares', async () => {
+    const { tools, controls, completions, snapshots, stoppedSessions, release } = bgHarness();
+    await tools.get('WorkflowStart')!.execute('stop1', { background: true, nodes: [{ id: 'a', task: 'a' }] });
+    await new Promise((r) => setTimeout(r, 5));
+    const wfId = snapshots[0]!.id;
+    // Esc-Esc does not reach it — the exact gap WorkflowStop closes.
+    expect(controls.get('workflow')!.cancelForSession({ sessionId: 'brain-parent' })).toEqual({ cancelled: 0 });
+
+    const res = await tools.get('WorkflowStop')!.execute('stop1-stop', { workflowId: wfId });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(res.details).toMatchObject({ workflowId: wfId, status: 'cancelled', stopped: 1 });
+    expect(stoppedSessions).toEqual(['s-a']); // the running node's child session was aborted, not left behind
+    expect(snapshots.at(-1)!.status).toBe('cancelled');
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({ toolCallId: 'stop1', status: 'cancelled' });
+
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(completions).toHaveLength(1); // the aborted node settling later delivers nothing more
+  });
+
+  it('WorkflowStop halts the engine, so a node freed by a settling dependency never launches', async () => {
+    const { tools, snapshots, launched, release } = bgHarness();
+    await tools.get('WorkflowStart')!.execute('stop2', {
+      background: true, nodes: [{ id: 'a', task: 'a' }, { id: 'b', task: 'b', deps: ['a'] }],
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(launched).toEqual(['a']);
+
+    await tools.get('WorkflowStop')!.execute('stop2-stop', { workflowId: snapshots[0]!.id });
+    release(); // a settles AFTER the stop — without the engine halt, b would spawn here
+    await new Promise((r) => setTimeout(r, 5));
+    expect(launched).toEqual(['a']);
+  });
+
+  // A plugin reload builds a fresh closure with an empty workflow map, so anything left running here
+  // becomes unreachable: no cancel seam, no status/resume/stop, and a durable row stuck on `running`.
+  it('a plugin reload settles an unfinished background workflow instead of orphaning it', async () => {
+    const { tools, hooks, snapshots, completions, launched, release } = bgHarness();
+    await tools.get('WorkflowStart')!.execute('rel1', {
+      background: true, nodes: [{ id: 'a', task: 'a' }, { id: 'b', task: 'b', deps: ['a'] }],
+    });
+    await new Promise((r) => setTimeout(r, 5));
+
+    const hook = hooks.find((h) => h.name === 'plugin.reload.before')!;
+    expect(hook).toBeDefined();
+    hook.run({});
+    await new Promise((r) => setTimeout(r, 5));
+    expect(snapshots.at(-1)!.status).toBe('cancelled');
+    expect(completions[0]).toMatchObject({ toolCallId: 'rel1', status: 'cancelled' });
+
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(launched).toEqual(['a']); // nothing spawned into the registry that is being torn down
+  });
+});
+
+describe('WorkflowStop guards', () => {
+  it('refuses an unknown workflow and reports nothing to stop once it has finished', async () => {
+    const { tools, snapshots } = harness();
+    const unknown = await tools.get('WorkflowStop')!.execute('st0', { workflowId: 'wf-does-not-exist' });
+    expect(unknown.content[0]!.text).toMatch(/^Error: no workflow/);
+
+    await tools.get('WorkflowStart')!.execute('st1', { nodes: [{ id: 'a', task: 'a' }] });
+    const done = await tools.get('WorkflowStop')!.execute('st1-stop', { workflowId: snapshots[0]!.id });
+    expect(done.content[0]!.text).toMatch(/^Nothing to stop/);
+  });
+
+  // Same rule as WorkflowResume: a node is authorized to EXTEND its workflow, never to tear down the run
+  // it and its siblings live in.
+  it('refuses a stop from one of the workflow\'s own node sessions', async () => {
+    const { tools, snapshots, sessionId, stoppedSessions } = harness();
+    let releaseA!: () => void;
+    gate = { task: 'a', promise: new Promise<void>((r) => { releaseA = r; }) };
+    const startP = tools.get('WorkflowStart')!.execute('st2', { nodes: [{ id: 'a', task: 'a' }] });
+    await new Promise((r) => setTimeout(r, 5));
+
+    sessionId.current = 's-a'; // the child session running node a
+    const res = await tools.get('WorkflowStop')!.execute('st2-stop', { workflowId: snapshots[0]!.id });
+    expect(res.content[0]!.text).toMatch(/^Error: no workflow/);
+    expect(res.content[0]!.text).toMatch(/only be stopped from the conversation that started it/);
+    expect(stoppedSessions).toEqual([]);
+
+    sessionId.current = 'brain-parent';
+    releaseA();
+    await startP;
+  });
+
+  // Stop must leave the run RESUMABLE: a node it aborted mid-work owns a session, so the retry belongs
+  // back in that conversation, while a node the stop prevented from launching has nothing to carry over.
+  it('a stopped node resumes in its own session, and one that never launched starts clean', async () => {
+    const { tools, snapshots, runs, stoppedSessions } = harness();
+    let releaseA!: () => void;
+    gate = { task: 'a', promise: new Promise<void>((r) => { releaseA = r; }) };
+    const startP = tools.get('WorkflowStart')!.execute('sr1', {
+      nodes: [{ id: 'a', task: 'a' }, { id: 'b', task: 'b', deps: ['a'] }],
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const wfId = snapshots[0]!.id;
+
+    const stopped = await tools.get('WorkflowStop')!.execute('sr1-stop', { workflowId: wfId });
+    expect(stopped.details).toMatchObject({ status: 'cancelled', stopped: 1 });
+    expect(stoppedSessions).toEqual(['s-a']);
+    releaseA();
+    gate = null; // the retry must not park again
+    expect((await startP).content[0]!.text).toMatch(/status: cancelled/);
+    await new Promise((r) => setTimeout(r, 5));
+    const firstA = runs.find((r) => r.task === 'a')!;
+
+    const resumed = await tools.get('WorkflowResume')!.execute('sr1-resume', { workflowId: wfId });
+    expect(resumed.content[0]!.text).toMatch(/status: done/);
+    const retryA = runs.filter((r) => r.task === 'a')[1]!;
+    expect(retryA.channelId).toBe(firstA.channelId);
+    expect(retryA.fullTask).toContain('continue from where you stopped');
+    const runB = runs.find((r) => r.task === 'b')!;
+    expect(runB.channelId).not.toBe(firstA.channelId);
+    expect(runB.fullTask).toBe('b');
   });
 });
 

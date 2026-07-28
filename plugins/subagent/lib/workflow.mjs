@@ -412,6 +412,21 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     );
   };
 
+  /** Settle a workflow as cancelled — the one place a run is stopped from the outside, shared by the
+   *  abort seam, the reload teardown and WorkflowStop. Marking it finished BEFORE anything else is what
+   *  stops the engine: `tick` bails on `finished`, so a node settling afterwards cannot launch the next
+   *  one. The snapshot publishes the terminal status (the durable row stops claiming the DAG is running)
+   *  and `resolveDone` releases whoever waits on it — a blocking WorkflowStart returns the cancelled
+   *  summary, a background one delivers it through its durable sink. Node children are NOT touched here;
+   *  each caller decides whether it owns their teardown. */
+  const cancelWorkflow = (wf) => {
+    wf.status = 'cancelled';
+    wf.finished = true;
+    wf.finishedAt = Date.now();
+    snapshot(wf);
+    wf.resolveDone?.();
+  };
+
   /** The abort seam core calls when a parent turn is torn down (Esc-Esc, /stop, queue interrupt). The
    *  abort tree kills the node children that are RUNNING; this stops the engine from launching the rest
    *  — without it, every node whose deps had already finished would spawn a fresh child AFTER the abort,
@@ -426,12 +441,8 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     let cancelled = 0;
     for (const wf of workflows.values()) {
       if (wf.finished || wf.background || wf.originSessionId !== sessionId) continue;
-      wf.status = 'cancelled';
-      wf.finished = true;
-      wf.finishedAt = Date.now();
+      cancelWorkflow(wf);
       cancelled += 1;
-      snapshot(wf);
-      wf.resolveDone?.();
     }
     return { cancelled };
   };
@@ -456,6 +467,22 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   ctx.registerControl('workflow', {
     cancelForSession: ({ sessionId }) => cancelForSession(sessionId),
     detachForeground: ({ sessionId, principal }) => detachForeground(sessionId, principal),
+  });
+
+  /** A plugin reload replaces THIS closure: the fresh instance registers its own empty `workflows` map,
+   *  so anything still held here becomes unreachable — cancelForSession can no longer stop it, and
+   *  WorkflowStatus/Resume/Stop can no longer see it. The runtime state cannot simply be handed over: the
+   *  turn emitters, the host `run` handler and the whole platform adapter behind it are torn down with the
+   *  old registry, so a workflow that kept ticking would launch fresh nodes nothing can reach or abort, and
+   *  its durable row would claim `running` for ever. Make the boundary terminal instead — including
+   *  BACKGROUND workflows, which normally outlive an abort: sparing one here would only orphan it. */
+  ctx.registerHook?.({
+    name: 'plugin.reload.before',
+    run: () => {
+      for (const wf of workflows.values()) {
+        if (!wf.finished) cancelWorkflow(wf);
+      }
+    },
   });
 
   ctx.registerTool(defineTool({
@@ -642,5 +669,53 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     },
   }));
 
-  ctx.logger.info('workflow tools registered (start/add_nodes/status)');
+  ctx.registerTool(defineTool({
+    name: 'WorkflowStop', label: 'Stop a workflow',
+    description: 'Stop a workflow that is still running — the only way to end a BACKGROUND one early. A '
+      + 'background workflow (background=true, or a Ctrl+B detach) deliberately survives every abort of the '
+      + 'conversation that started it, so Esc-Esc does not reach it; call this when the user asks to stop it, '
+      + 'when it is working on something no longer wanted, or when a node is stuck. The engine stops '
+      + 'launching further nodes and the node sub-agents still running are aborted. Nodes that already '
+      + 'finished keep their results, so WorkflowResume can pick the workflow back up while it is still held '
+      + 'in memory. Resolves "nothing to stop" rather than erroring when it has already finished.',
+    parameters: Type.Object({
+      workflowId: Type.String({ description: 'The id of the running workflow (from WorkflowStart / WorkflowStatus).' }),
+    }),
+    execute: async (_id, p) => {
+      const wf = authWorkflow(p.workflowId);
+      // Origin-only, exactly like WorkflowResume: `authWorkflow` also accepts one of the workflow's own
+      // node sessions (right for self-expansion), but a node must not be able to tear down the run it and
+      // its siblings live in.
+      if (!wf || ctx.currentSessionId() !== wf.originSessionId) {
+        return ok(`Error: no workflow ${p.workflowId} you can stop — it may have finished too long ago, been evicted from memory, or belong to another conversation. A workflow can only be stopped from the conversation that started it.`);
+      }
+      if (wf.finished) return ok(`Nothing to stop — workflow ${wf.id} already finished (${wf.status}).`);
+      const running = [];
+      for (const node of wf.nodes) {
+        const s = wf.state.get(node.id);
+        if (s?.status === 'running' && s.sessionId) running.push({ id: node.id, sessionId: s.sessionId });
+      }
+      // Stop the ENGINE before the children, or it relaunches the next ready node the moment an aborted
+      // one settles — the same order the host's own delegated teardown uses.
+      cancelWorkflow(wf);
+      let stopped = 0;
+      for (const node of running) {
+        try {
+          const res = await ctx.stopSubagent?.(node.sessionId);
+          if (res?.stopped) stopped += 1;
+        } catch (e) {
+          // The DAG is already stopped; a child that cannot be aborted (already settled, unwired host) is
+          // reported in the count, not raised as a failure of the stop itself.
+          ctx.logger.warn(`workflow ${wf.id}: node "${node.id}" could not be aborted: ${errorText(e)}`);
+        }
+      }
+      return ok(
+        `Stopped workflow ${wf.id}. ${stopped} of ${running.length} running node(s) aborted; `
+        + 'finished nodes keep their results, so WorkflowResume can still pick it up.',
+        { workflowId: wf.id, status: 'cancelled', stopped },
+      );
+    },
+  }));
+
+  ctx.logger.info('workflow tools registered (start/resume/stop/add_nodes/status)');
 }
