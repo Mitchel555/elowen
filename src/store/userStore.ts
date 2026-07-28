@@ -123,7 +123,16 @@ export class UserStore {
   delete(id: number): void {
     // One transaction so a mid-way failure can't leave orphan tokens/assignments (consistent with
     // ProjectStore.remove and TaskStore.delete). The schema has no FK cascade, so order is explicit.
+    //
+    // `users.id` is a plain SQLite rowid, not AUTOINCREMENT (schema.sql:56-57), so deleting the
+    // highest-numbered user and creating a new one typically REUSES that exact id. Without nulling
+    // `created_by` here, the new account would silently inherit the old tasks' prompt attribution
+    // (prompts/owner.ts) and the old missions' replan/notification ownership — data belonging to a
+    // person who no longer has the account. Nulling is correct even independent of id reuse: a
+    // `created_by` pointing at a user that no longer exists is already a dangling reference.
     this.db.transaction(() => {
+      this.db.prepare('UPDATE tasks SET created_by = NULL WHERE created_by = ?').run(id);
+      this.db.prepare('UPDATE missions SET created_by = NULL WHERE created_by = ?').run(id);
       this.db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').run(id);
       this.db.prepare('DELETE FROM brain_terminals WHERE user_id = ?').run(id); // no orphan terminal bindings (their tokens went with auth_tokens above)
       this.db.prepare('DELETE FROM user_projects WHERE user_id = ?').run(id); // no orphan assignments
