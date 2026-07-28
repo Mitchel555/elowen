@@ -248,7 +248,7 @@ export class BrainService {
       // apart from a failed attempt and still deliver errors through its notify fallback.
       originSend: async (userId, sessionId, text, onEvent) => {
         const row = this.d.store.getSession(sessionId);
-        if (!row || row.user_id !== userId || isNonUserSession(sessionId)) return null;
+        if (!isOwnedUserSession(row, userId, sessionId)) return null;
         await this.send({ userId, text, mode: 'build', session: sessionId });
         onEvent?.({ type: 'session', sessionId });
         return lastAssistantText(this.d.store, sessionId);

@@ -8,7 +8,7 @@ import { DEFAULT_AUTO_COMPACT_PCT } from '../session/liveBrain.js';
 import type { LiveBrain, SpawnOpts } from '../session/liveBrain.js';
 import { rolloverDue } from '../session/idleRollover.js';
 import { decideVisionHop } from '../visionFallback.js';
-import { defaultUserSessionId, freshUserSessionId, isNonUserSession, isChannelSession, channelIdOf } from '../sessionId.js';
+import { defaultUserSessionId, freshUserSessionId, isNonUserSession, isOwnedUserSession, isChannelSession, channelIdOf } from '../sessionId.js';
 import type { BrainDeps } from '../brainDeps.js';
 import type { ClientAttachments } from './attachments.js';
 import type { GoalLoopService } from './goalLoop.js';
@@ -80,7 +80,7 @@ export class ConversationLifecycle {
    *  channel/task session (mirrors the /brain/subagent/send validation). Returns the id or throws. */
   ownedUserSession(userId: number, sessionId: string): string {
     const row = this.d.store.getSession(sessionId);
-    if (!row || row.user_id !== userId || isNonUserSession(sessionId)) throw new Error('unknown session');
+    if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
     return sessionId;
   }
 
