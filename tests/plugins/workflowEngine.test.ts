@@ -24,7 +24,14 @@ interface WorkflowControl { cancelForSession(input: { sessionId: string }): { ca
  *  child ("Error: interrupted") once released — the cancel test's stand-in for the host's abort tree. */
 let gate: { task: string; promise: Promise<void> } | null = null;
 
-function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {}) {
+function harness(opts: {
+  toolPolicyAllow?: string[]; contextChars?: number;
+  /** Park listModels so a test can cancel INSIDE buildNodeAccess, the first startup race. */
+  modelsGate?: Promise<void>;
+  /** Emit the child's `session` only after the gate — the host's real ordering, where the delegated call is
+   *  registered before the first await but the id surfaces much later. This is the second startup race. */
+  lateSession?: boolean;
+} = {}) {
   gate = null;
   const tools = new Map<string, Tool>();
   const controls = new Map<string, WorkflowControl>();
@@ -46,10 +53,14 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
     launched.push(task);
     runs.push({ task, channelId: source.channelId ?? '', fullTask, ...(source.access?.sessionIdleMs !== undefined ? { sessionIdleMs: source.access.sessionIdleMs } : {}) });
     contexts.set(task, source.access?.context ?? []);
-    onEvent({ type: 'session', sessionId: `s-${task}` });
+    if (!opts.lateSession) onEvent({ type: 'session', sessionId: `s-${task}` });
     onEvent({ type: 'tool', name: 'Read' });
     onEvent({ type: 'idle', usage: { totalTokens: 100 } });
-    if (gate && task === gate.task) { await gate.promise; return 'Error: interrupted'; }
+    if (gate && task === gate.task) {
+      await gate.promise;
+      if (opts.lateSession) onEvent({ type: 'session', sessionId: `s-${task}` });
+      return 'Error: interrupted';
+    }
     if (task.includes('FAIL_ONCE')) {
       const n = (attempts.get(task) ?? 0) + 1;
       attempts.set(task, n);
@@ -75,7 +86,13 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
     currentAccess: () => ({ toolPolicy: opts.toolPolicyAllow ? { allow: opts.toolPolicyAllow } : undefined }),
     currentModel: () => ({ provider: 'p', model: 'm' }),
     workflowEmitter: () => (u: (typeof snapshots)[number]) => { snapshots.push(u); },
-    listModels: async () => [],
+    // The gated variant must also RESOLVE the model: returning [] makes buildNodeAccess throw
+    // "model is not available" before it ever reaches the fence being tested.
+    listModels: async () => {
+      if (!opts.modelsGate) return [];
+      await opts.modelsGate;
+      return [{ provider: 'p', model: 'm' }];
+    },
     toolNames: () => ['Read', 'Write', 'Bash'],
     delegateContextChars: () => opts.contextChars ?? undefined,
   };
@@ -912,6 +929,47 @@ describe('WorkflowResume', () => {
     // Far past the host cutoff, and JSON-safe (Infinity would serialize to null on any round-trip).
     expect(idle).toBeGreaterThan(30 * 60 * 1000);
     expect(Number.isFinite(idle)).toBe(true);
+  });
+
+  it('does not spawn a node that was cancelled while its access was still being built', async () => {
+    // buildNodeAccess awaits listModels, which for an explicit model is a live request. Cancelling inside
+    // that window used to leave a stale continuation that still called run() — spawning a child after the
+    // stop was announced, with no engine left to reach or abort it. That is the orphan cancellation exists
+    // to prevent, so the fence has to sit AFTER the await, not only before it.
+    let openModels!: () => void;
+    const modelsGate = new Promise<void>((r) => { openModels = r; });
+    const { tools, snapshots, launched } = harness({ modelsGate });
+    void tools.get('WorkflowStart')!.execute('c1', {
+      nodes: [{ id: 'a', task: 'a', model: 'p/m' }],
+      background: true,
+    });
+    while (!snapshots.length) await new Promise((r) => setTimeout(r, 0));
+    const wfId = snapshots[0]!.id;
+
+    await tools.get('WorkflowStop')!.execute('c1-stop', { workflowId: wfId });
+    openModels();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(launched).toEqual([]); // the node never reached run()
+  });
+
+  it('stops a child whose session id only surfaced after the workflow was cancelled', async () => {
+    // The host registers the delegated call before its first await but emits `session` only after the lock
+    // and the spawn. A child launching in that gap has no id yet, so WorkflowStop's sweep — which can only
+    // collect ids it knows — misses it, and the late event used to arrive with nothing left to act on.
+    const { tools, snapshots, stoppedSessions } = harness({ lateSession: true });
+    let release!: () => void;
+    gate = { task: 'a', promise: new Promise<void>((r) => { release = r; }) }; // after harness — it resets gate
+    void tools.get('WorkflowStart')!.execute('c2', { nodes: [{ id: 'a', task: 'a' }], background: true });
+    await new Promise((r) => setTimeout(r, 0));
+    const wfId = snapshots[0]!.id;
+
+    await tools.get('WorkflowStop')!.execute('c2-stop', { workflowId: wfId });
+    expect(stoppedSessions).toEqual([]); // nothing to sweep yet — the id does not exist
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(stoppedSessions).toContain('s-a'); // the late id is stopped on arrival instead
   });
 
   it('reports nothing to resume once every node has already finished', async () => {

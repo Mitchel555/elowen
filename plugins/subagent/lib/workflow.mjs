@@ -279,12 +279,25 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     const ns = wf.state.get(node.id);
     ns.startedAt = ns.startedAt ?? Date.now();
     const onEvent = (e) => {
-      if (e.type === 'session' && e.sessionId) { ns.sessionId = e.sessionId; wf.childSessions.add(e.sessionId); snapshot(wf); }
+      if (e.type === 'session' && e.sessionId) {
+        ns.sessionId = e.sessionId; wf.childSessions.add(e.sessionId);
+        // The host registers a delegated call BEFORE its first await but only emits `session` after the
+        // lock and the spawn, so a child that was already launching when the run was cancelled surfaces its
+        // id only now — too late for the sweep in WorkflowStop/reload, which can only see ids it has. Stop
+        // it here instead, or it would keep running tools and burning tokens after an announced stop.
+        if (wf.finished) void ctx.stopSubagent?.(e.sessionId);
+        snapshot(wf);
+      }
       else if (e.type === 'tool' && e.name) { ns.tools += 1; ns.detail = e.detail ? `${e.name} ${e.detail}` : e.name; ns.seconds = Math.round((Date.now() - ns.startedAt) / 1000); snapshot(wf); }
       else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { ns.tokens = e.usage.totalTokens; ns.seconds = Math.round((Date.now() - ns.startedAt) / 1000); snapshot(wf); }
     };
     try {
       const access = await buildNodeAccess(wf, node);
+      // buildNodeAccess is an async boundary that can take a while — with an explicit model it may wait on
+      // a live /models request — and WorkflowStop or a plugin reload can settle the run inside that window.
+      // Without this fence the stale continuation would still spawn a child, one nobody can reach or abort:
+      // the very orphan the cancellation exists to prevent.
+      if (wf.finished) { ns.status = 'error'; ns.error = 'cancelled before the node started'; return; }
       // The EFFECTIVE model, not the node's override. `node.model` is only set when the caller named a
       // different one, so a node that inherits — the common case — would otherwise report nothing at all,
       // which is exactly when you most want to see what is actually running.
