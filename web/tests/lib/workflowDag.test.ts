@@ -87,6 +87,21 @@ describe('layoutDag', () => {
     expect(edge?.d.endsWith(`${target?.x} ${(target?.y ?? 0) + DAG_NODE_H / 2}`)).toBe(true);
   });
 
+  it('routes edges entering one column on separate vertical tracks', () => {
+    // Three deps converging on one node: the crossings only read as a flow if each vertical run has its
+    // own track. Sharing one x is what made the web graph a tangle where the CLI's canvas stayed legible.
+    const layout = layoutDag([node('a'), node('b'), node('c'), node('x', ['a', 'b', 'c'])]);
+    const verticalTrack = (d: string): number | null => {
+      // In an orthogonal run the horizontal leg ends at the track, so the first L's x IS the track.
+      const first = /L(-?\d+(?:\.\d+)?) /.exec(d);
+      return first?.[1] !== undefined ? Number(first[1]) : null;
+    };
+    const bent = layout.edges.map((e) => e.d).filter((d) => d.includes('Q'));
+    expect(bent.length).toBeGreaterThanOrEqual(2);
+    const tracks = bent.map(verticalTrack);
+    expect(new Set(tracks).size).toBe(tracks.length);
+  });
+
   it('sizes the canvas around every node it placed', () => {
     const layout = layoutDag([node('a'), node('b', ['a']), node('c', ['a'])]);
     for (const placed of layout.nodes) {
