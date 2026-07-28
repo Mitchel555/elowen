@@ -442,6 +442,22 @@ export class BrainDelegationStore {
     return out;
   }
 
+  /** Every parent session holding a sub-agent run or workflow row still marked `running`. Read ONCE at
+   *  daemon boot, where such a row is by definition a restart orphan — the in-memory registrations that
+   *  drove it died with the process. Deliberately not scoped to a user: the boot reconcile must reach the
+   *  channel and task sessions no owner `start()` ever visits. The `json_valid` guard is load-bearing —
+   *  `json_extract` THROWS on a malformed row, which would fail the query for every other session too. */
+  runningDelegationParentSessionIds(): string[] {
+    const rows = this.db.prepare(
+      `SELECT DISTINCT parent_session_id AS id FROM brain_subagent_runs
+        WHERE json_valid(state) AND json_extract(state, '$.status') = 'running'
+       UNION
+       SELECT DISTINCT parent_session_id AS id FROM brain_workflows
+        WHERE json_valid(state) AND json_extract(state, '$.status') = 'running'`
+    ).all() as { id: string }[];
+    return rows.map((row) => row.id);
+  }
+
   /** Persist a terminal child result before any attempt to wake the parent. Stable result/tool ids make
    * duplicate plugin callbacks idempotent; the durable direct-child relation is revalidated here. */
   enqueueSubagentResult(parentSessionId: string, raw: unknown): boolean {
@@ -527,8 +543,13 @@ export class BrainDelegationStore {
        AND parent_session_id = ? ORDER BY created_at, rowid`
     ).all(parentSessionId) as Record<string, unknown>[];
     return rows.flatMap((row): BrainSubagentResult[] => {
-      let payload: Record<string, unknown>;
-      try { payload = JSON.parse(String(row.payload)) as Record<string, unknown>; } catch { return []; }
+      // `null` and bare scalars are valid JSON, so parsing is not enough: reading `payload.result` off a
+      // `null` throws and kills the WHOLE drain, leaving every pending result of this parent undelivered
+      // over one bad row. Only an object payload is usable; anything else drops just its own row.
+      let parsed: unknown;
+      try { parsed = JSON.parse(String(row.payload)); } catch { return []; }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+      const payload = parsed as Record<string, unknown>;
       // A workflow row has no child session and a whole-DAG summary body, so it is read directly rather
       // than through the sub-agent validator (which requires a non-empty child sessionId).
       if (row.kind === 'workflow') {

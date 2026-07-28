@@ -909,6 +909,10 @@ export async function buildApp(opts: BuildOpts) {
     // Restart zombies on the brain side: goals still marked 'active' whose in-memory continuation timers
     // died with the process. Pause them so nothing falsely claims to be running (the user /goal resumes).
     try { brain?.reconcileGoalsOnBoot(); } catch (e) { log.error('reconcileGoalsOnBoot failed', e); }
+    // Same on the delegation side: sub-agent runs and workflow DAGs still marked 'running' whose in-memory
+    // children died with the process. Synchronous and BEFORE startPlatforms, so no channel turn — and no
+    // client connecting the moment the port opens — can observe (or act on) a phantom running delegation.
+    try { brain?.reconcileDelegationsOnBoot(); } catch (e) { log.error('reconcileDelegationsOnBoot failed', e); }
     // One-shot: reap chat terminals + tokens orphaned while the daemon was down (tmux died / conversation
     // deleted), and kill stray `elowen-chat-*` panes with no binding. Periodic sweep is scheduled below.
     void brainTerminal?.sweep().catch((e) => log.error('brain terminal sweep failed', e));

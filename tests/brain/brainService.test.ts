@@ -3904,7 +3904,7 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     expect(d.session.sendCustomMessage).toHaveBeenCalled();
   });
 
-  it('reconcile terminalizes a foreground orphan and surfaces it in history without a hidden delivery turn', async () => {
+  it('boot reconcile terminalizes a foreground orphan and surfaces it in history without a hidden delivery turn', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
     const { sessionId } = await svc.start(1);
@@ -3915,16 +3915,51 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     });
     d.store.upsertSubagentRun(sessionId, { id: 'delegate-fg', sessionId: 'brain-ch-subagent-fg', status: 'running', task: 'inspect', tools: 1, seconds: 5 });
 
-    // A restart is a NEW service over the same store — that, not a second start() on the live one, is what
-    // drops the in-memory registrations and makes the running row a dead orphan.
+    // A restart is a NEW service over the same store — that, not a start() on the live one, is what drops
+    // the in-memory registrations and makes the running row a dead orphan.
     const restarted = new BrainService(d as never);
-    await restarted.start(1);
+    restarted.reconcileDelegationsOnBoot();
 
     expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-fg')?.status).toBe('error');
     expect(d.store.pendingSubagentResults(sessionId)).toEqual([]);
     expect(d.session.sendCustomMessage).not.toHaveBeenCalled();
     expect(restarted.history(1).flatMap((turn) => turn.segments ?? [])
       .some((segment) => segment.kind === 'tool' && segment.sub?.status === 'error')).toBe(true);
+  });
+
+  it('boot reconcile terminalizes a workflow on a channel session no owner start() ever opens', async () => {
+    // The lazy per-session sweep hung off start(), which a channel/task session never reaches — its row
+    // stayed 'running' in the DB forever and only a display transform hid it, so the phantom came back the
+    // moment the origin went live again. A boot reconcile repairs the row itself.
+    const d = fakeDeps();
+    d.store.createSession({ id: 'brain-ch-discord-general', userId: 1, model: 'm' });
+    d.store.upsertWorkflowRun('brain-ch-discord-general', {
+      id: 'wf-1', toolCallId: 'call-wf', title: 'ship it', status: 'running',
+      nodes: [{ id: 'n1', task: 'build', status: 'running', deps: [] }],
+    });
+
+    new BrainService(d as never).reconcileDelegationsOnBoot();
+
+    const stored = d.store.getWorkflowRuns('brain-ch-discord-general')[0];
+    expect(stored?.status).toBe('cancelled');
+    expect(stored?.nodes[0]?.status).toBe('error');
+  });
+
+  it('boot reconcile survives a corrupt delegation row and still repairs every other session', async () => {
+    // The scan reads status straight out of the stored JSON. Without the json_valid guard one unparseable
+    // row would throw inside SQLite and abort the whole boot reconcile, leaving every other phantom behind.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: 'brain-ch-subagent-corrupt', userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.createSession({ id: 'brain-ch-subagent-orphan', userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.upsertSubagentRun(sessionId, { id: 'delegate-corrupt', sessionId: 'brain-ch-subagent-corrupt', status: 'running', task: 'a', tools: 1, seconds: 1 });
+    d.store.upsertSubagentRun(sessionId, { id: 'delegate-orphan', sessionId: 'brain-ch-subagent-orphan', status: 'running', task: 'b', tools: 1, seconds: 1 });
+    d.db.prepare("UPDATE brain_subagent_runs SET state = 'not json' WHERE tool_call_id = 'delegate-corrupt'").run();
+
+    new BrainService(d as never).reconcileDelegationsOnBoot();
+
+    expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-orphan')?.status).toBe('error');
   });
 
   it('leaves a running delegation alone when a client merely reconnects', async () => {
@@ -3944,7 +3979,24 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     expect(d.session.sendCustomMessage).not.toHaveBeenCalled();
   });
 
-  it('reconcile delivers a synthetic restart result only for an autoDeliver orphan', async () => {
+  it('leaves a live delegation alone on the FIRST start() of a session revived by send()', async () => {
+    // A session can come alive without start(): a bound CLI send, or a cron wake-up's originSend. Its
+    // delegation then registers, and the user opens the web chat — the first start() of that session in
+    // this process. The lazy sweep read exactly that as a restart and killed live work.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    d.store.createSession({ id: 'brain-1', userId: 1, model: 'm' });
+    d.store.createSession({ id: 'brain-ch-subagent-live', userId: 1, model: 'm', parentSessionId: 'brain-1' });
+    await svc.send({ userId: 1, text: 'go and do the long job', session: 'brain-1' });
+    d.store.upsertSubagentRun('brain-1', { id: 'delegate-live', sessionId: 'brain-ch-subagent-live', status: 'running', task: 'long job', tools: 1, seconds: 5, background: true, autoDeliver: true });
+
+    await svc.start(1);
+
+    expect(d.store.getSubagentRuns('brain-1').find((r) => r.toolCallId === 'delegate-live')?.status).toBe('running');
+    expect(d.store.pendingSubagentResults('brain-1')).toEqual([]);
+  });
+
+  it('boot reconcile enqueues a synthetic restart result only for an autoDeliver orphan, delivered on next open', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
     const { sessionId } = await svc.start(1);
@@ -3952,14 +4004,20 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     d.store.upsertSubagentRun(sessionId, { id: 'delegate-auto', sessionId: 'brain-ch-subagent-auto', status: 'running', task: 'watch', tools: 1, seconds: 3, background: true, autoDeliver: true });
 
     const restarted = new BrainService(d as never);
-    await restarted.start(1);
+    restarted.reconcileDelegationsOnBoot();
 
     expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-auto')?.status).toBe('error');
+    // Boot only makes it durable — draining here would respawn every orphaned conversation at startup.
+    expect(d.store.pendingSubagentResults(sessionId)).toHaveLength(1);
+    expect(d.session.sendCustomMessage).not.toHaveBeenCalled();
+
+    await restarted.start(1);
+
     await vi.waitFor(() => expect(d.session.sendCustomMessage).toHaveBeenCalled());
     await vi.waitFor(() => expect(d.store.pendingSubagentResults(sessionId)).toEqual([]));
   });
 
-  it('reconcile terminalizes a background non-autoDeliver orphan without a synthetic result', async () => {
+  it('boot reconcile terminalizes a background non-autoDeliver orphan without a synthetic result', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
     const { sessionId } = await svc.start(1);
@@ -3967,7 +4025,7 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     d.store.upsertSubagentRun(sessionId, { id: 'delegate-bg', sessionId: 'brain-ch-subagent-bg', status: 'running', task: 'build', tools: 1, seconds: 2, background: true });
 
     const restarted = new BrainService(d as never);
-    await restarted.start(1);
+    restarted.reconcileDelegationsOnBoot();
 
     expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-bg')?.status).toBe('error');
     expect(d.store.pendingSubagentResults(sessionId)).toEqual([]);

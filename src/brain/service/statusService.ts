@@ -125,18 +125,18 @@ export class BrainStatusService {
   constructor(private d: StatusServiceDeps) {}
 
   private subagentRuns(sessionId: string) {
-    // Display invariant: a durable row still marked 'running' but with no LIVE child registration is a
-    // restart orphan (the daemon dropped every in-memory child on boot). Hide it until start()'s reconcile
-    // terminalizes it — otherwise the history would show a phantom spinner for a child that is already dead.
+    // Restart orphans are repaired durably at boot (BrainService.reconcileDelegationsOnBoot), so this is
+    // NOT that fix — it is the read-time fallback for a row that goes stale WITHIN a process run: a child
+    // whose live registration is already gone while its terminal upsert has not landed. Hiding it keeps a
+    // dead child from rendering a phantom running spinner in the meantime.
     const active = new Set(this.d.sessions.childrenOf(sessionId));
     return this.d.store.getSubagentRuns(sessionId)
       .filter((run) => run.status !== 'running' || active.has(run.sessionId));
   }
 
-  /** The conversation's durable DAGs. Same restart-orphan concern as subagentRuns, but a TRANSFORM rather
-   *  than a filter: a workflow row is the only thing that renders its transcript marker, so hiding it
-   *  would lose the record of what ran — it is terminalized instead. This also covers what the boot sweep
-   *  cannot reach: channel/task sessions and the read-only history view.
+  /** The conversation's durable DAGs. Same read-time fallback as subagentRuns, but a TRANSFORM rather than
+   *  a filter: a workflow row is the only thing that renders its transcript marker, so hiding it would lose
+   *  the record of what ran — it is terminalized for display instead.
    *
    *  Keyed on the ORIGIN's liveness, not childrenOf: a genuinely running workflow has real windows with
    *  zero live children (between one node ending and tick() launching the next), which a children-based

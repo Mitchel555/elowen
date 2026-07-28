@@ -71,9 +71,6 @@ export class BrainService {
    *  locks (PI sessions are single-conversation — concurrent prompt()/spawn calls on one session id
    *  queue up instead of corrupting turn state). */
   private sessions = new LiveSessionRegistry<LiveBrain>();
-  /** Sessions whose post-restart orphan sweep has already run in THIS process — see start(). Deliberately
-   *  per-process state with no persistence: a restart is exactly the event that must let the sweep run again. */
-  private orphanSweptSessions = new Set<string>();
   /** Shared session assembly (store row + rehydrate + resource loader + PI session) — the same
    *  factory the elowen-exec brain workers use. */
   private factory: BrainSessionFactory;
@@ -291,6 +288,48 @@ export class BrainService {
   /** One-shot boot sweep for restart-zombie goals — see GoalLoopService.reconcileGoalsOnBoot. */
   reconcileGoalsOnBoot(): void {
     this.goals.reconcileGoalsOnBoot();
+  }
+
+  /** The delegation twin of {@link reconcileGoalsOnBoot}: every durable sub-agent/workflow row the DB still
+   *  marks `running` at boot is a zombie, because the in-memory child registrations died with the process.
+   *  Terminalize them ONCE, HERE. Boot is the only moment the blanket rule is sound — no live delegation can
+   *  exist yet. The same sweep run lazily from start() cannot tell an orphan from a healthy delegation whose
+   *  registration it simply cannot see, and killed live work from the outside on every client reconnect.
+   *  Sweeping globally also repairs the state for good instead of hiding it per read, and reaches the
+   *  channel/task sessions an owner start() never visits.
+   *
+   *  Only an autoDeliver child ever promised automatic delivery, so only it gets a synthetic "interrupted by
+   *  daemon restart" result — enqueued durably, NOT delivered here: draining would respawn every orphaned
+   *  conversation at boot. start() and the post-turn hook drain the inbox when the conversation is next used. */
+  reconcileDelegationsOnBoot(): void {
+    for (const sessionId of this.d.store.runningDelegationParentSessionIds()) {
+      for (const run of this.d.store.getSubagentRuns(sessionId)) {
+        if (run.status !== 'running') continue;
+        // Preserve the detail + ORIGINAL flags — never fabricate background/autoDeliver.
+        const terminal = {
+          id: run.toolCallId, sessionId: run.sessionId, status: 'error' as const, task: run.task,
+          ...(run.detail !== undefined ? { detail: run.detail } : {}),
+          tools: run.tools, tokens: run.tokens, seconds: run.seconds, model: run.model,
+          ...(run.background === true ? { background: true } : {}),
+          ...(run.autoDeliver === true ? { autoDeliver: true } : {}),
+        };
+        if (!this.d.store.upsertSubagentRun(sessionId, terminal)) continue;
+        if (run.autoDeliver !== true) continue;
+        this.d.store.enqueueSubagentResult(sessionId, {
+          id: syntheticRestartResultId(sessionId, run.toolCallId), toolCallId: run.toolCallId,
+          sessionId: run.sessionId, status: 'error', task: run.task,
+          error: 'sub-agent interrupted by daemon restart', tools: run.tools, tokens: run.tokens,
+          seconds: run.seconds, model: run.model,
+        });
+      }
+      // Same restart concern for workflows, minus the delivery half: WorkflowStart BLOCKS, so a restart
+      // killed the tool call and its whole turn — there is no result anyone is still waiting on, and no
+      // completion inbox to weave into. The row only has to stop claiming the DAG is still running.
+      for (const run of this.d.store.getWorkflowRuns(sessionId)) {
+        if (run.status !== 'running') continue;
+        this.d.store.upsertWorkflowRun(sessionId, terminalizeWorkflow(run));
+      }
+    }
   }
 
   /** The model id the CURRENT config resolves to (readiness), or null — see BrainStatusService. */
@@ -1096,50 +1135,9 @@ export class BrainService {
   /** Start (or resume) a conversation — see ConversationLifecycle.start. */
   async start(userId: number, opts?: { provider?: string; model?: string; session?: string; fresh?: boolean; cwd?: string; clientId?: string; clientGeneration?: number }): Promise<{ sessionId: string }> {
     const started = await this.lifecycle.start(userId, opts);
-    // The sweep below reads "running row with no live child" as "orphan of a daemon restart". That is only
-    // true on the FIRST start of a session in this process: a restart is what drops the in-memory child
-    // registrations. On any later start — every web chat open calls this — the very same shape means a
-    // perfectly healthy delegation whose registration this call simply cannot see yet, and terminalizing it
-    // kills live work from the outside. Running it once per session per process keeps the restart cleanup
-    // (a fresh process has an empty set) without letting a reconnect masquerade as one.
-    if (this.orphanSweptSessions.has(started.sessionId)) {
-      void this.turnRunner.drainPendingSubagentResults(userId, started.sessionId);
-      return started;
-    }
-    this.orphanSweptSessions.add(started.sessionId);
-    const activeChildren = new Set(this.sessions.childrenOf(started.sessionId));
-    for (const run of this.d.store.getSubagentRuns(started.sessionId)) {
-      // A daemon restart drops every in-memory child registration, so ANY still-'running' row without a
-      // live child is a dead orphan (foreground, background and autoDeliver alike). Terminalize each so the
-      // history stops showing a phantom running spinner — preserving its detail + ORIGINAL flags (never
-      // fabricate background/autoDeliver). Only an autoDeliver child ever promised automatic delivery, so
-      // only it gets the synthetic "interrupted by daemon restart" result woven into the parent's context;
-      // foreground/manual-background orphans just terminalize (the user sees the error row in history).
-      if (run.status !== 'running' || activeChildren.has(run.sessionId)) continue;
-      const terminal = {
-        id: run.toolCallId, sessionId: run.sessionId, status: 'error' as const, task: run.task,
-        ...(run.detail !== undefined ? { detail: run.detail } : {}),
-        tools: run.tools, tokens: run.tokens, seconds: run.seconds, model: run.model,
-        ...(run.background === true ? { background: true } : {}),
-        ...(run.autoDeliver === true ? { autoDeliver: true } : {}),
-      };
-      if (!this.d.store.upsertSubagentRun(started.sessionId, terminal)) continue;
-      if (run.autoDeliver !== true) continue;
-      this.turnRunner.acceptSubagentCompletion(started.sessionId, userId, {
-        id: syntheticRestartResultId(started.sessionId, run.toolCallId), toolCallId: run.toolCallId,
-        sessionId: run.sessionId, status: 'error', task: run.task,
-        error: 'sub-agent interrupted by daemon restart', tools: run.tools, tokens: run.tokens,
-        seconds: run.seconds, model: run.model,
-      });
-    }
-    // Same restart concern for workflows, minus the delivery half: WorkflowStart BLOCKS, so a restart
-    // killed the tool call and its whole turn — there is no result anyone is still waiting on, and no
-    // completion inbox to weave into. The row only has to stop claiming the DAG is still running.
-    for (const run of this.d.store.getWorkflowRuns(started.sessionId)) {
-      if (run.status !== 'running') continue;
-      if (run.nodes.some((node) => node.sessionId && activeChildren.has(node.sessionId))) continue;
-      this.d.store.upsertWorkflowRun(started.sessionId, terminalizeWorkflow(run));
-    }
+    // Drain only — never sweep. Opening a conversation says nothing about whether its still-'running'
+    // delegation rows are orphans (see reconcileDelegationsOnBoot); the inbox may hold a background child's
+    // result, or a restart orphan's synthetic one that boot enqueued but deliberately left undelivered.
     void this.turnRunner.drainPendingSubagentResults(userId, started.sessionId);
     return started;
   }

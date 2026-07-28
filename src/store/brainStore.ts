@@ -435,6 +435,12 @@ export class BrainStore {
     return this.delegation.getWorkflowRuns(parentSessionId);
   }
 
+  /** Parent sessions with a durable delegation row still marked `running` (the boot reconcile's input) —
+   *  see {@link BrainDelegationStore.runningDelegationParentSessionIds}. */
+  runningDelegationParentSessionIds(): string[] {
+    return this.delegation.runningDelegationParentSessionIds();
+  }
+
   /** Append a display-only session-event marker (model/mode/rename/reasoning change). Insertion order
    *  (rowid) is the timeline; the marker never touches brain_messages, so it stays out of model context. */
   appendSessionEvent(sessionId: string, kind: SessionEventKind, detail: string): BrainSessionEvent {
