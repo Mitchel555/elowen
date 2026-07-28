@@ -28,12 +28,20 @@ const DEFAULT_CRON_RETRY_BACKOFF_MS = 3_000; // brief pause before the retry so 
 // revoked bot token, a deleted channel) must not grow this file forever — past the cap, the OLDEST
 // pending delivery is dropped (and logged) to make room for the next one.
 const MAX_PENDING_DELIVERIES = 50;
+// How long an adapter generation owns a pending delivery it is sending (see DeliveryStore.claim). The
+// lease EXPIRES because the holder can die mid-send — a daemon crash would otherwise leave the result
+// claimed forever and never delivered. It is deliberately long relative to a send: re-delivering after a
+// falsely expired lease is exactly the duplicate the claim exists to prevent.
+const DELIVERY_LEASE_MS = 5 * 60_000;
 // The per-turn idle rollover forwarded to the host as access.sessionIdleMs. It is OPT-IN, not defaulted:
 // leaving the config key unset means the job's channel session rolls over under the host's own shared
 // default (SESSION_IDLE_ROLLOVER_MS, Discord's 30 min) — the same as every other channel — so an
 // existing recurring job never silently loses its cross-run context after an upgrade. See resolveSessionIdleMs.
 const SESSION_IDLE_MIN_MS = 60_000; // an explicit value is clamped UP to a 1-min floor; there is no upper clamp
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Identifier for a job, a pending delivery or an adapter generation — short, sortable-ish, collision-free
+ *  enough for records that live in one small JSON file. */
+const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 /** Read a number config field, falling back to `def` when unset/invalid, then clamp to [min, max]. */
 const clampConfig = (value, def, min, max) => Math.min(Math.max(Number(value) || def, min), max);
@@ -383,6 +391,9 @@ class CronAdapter {
     // Set by disconnect(): this adapter generation has been torn down (a plugin reload) and must not
     // start any further work — see disconnect() and the tick loop.
     this.stopped = false;
+    // Identifies THIS adapter generation as the holder of a pending-delivery lease, so a generation only
+    // ever releases a lease it still owns — see attemptDelivery and DeliveryStore.claim.
+    this.deliveryOwner = newId();
     this.timezone = timezone;
     // Scheduler limits, resolved once from plugin config (see orca-plugin.json's "Scheduler" section) and
     // clamped to sane bounds — unset config reproduces the previous hardcoded defaults exactly.
@@ -571,21 +582,26 @@ class CronAdapter {
    *  left holding the result until it is actually delivered. */
   async deliverOrQueue(job, body) {
     const entry = {
-      id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      id: newId(),
       jobId: job.id, jobName: job.name, channelId: job.notifyChannelId, body, createdAt: new Date().toISOString(),
     };
     this.deliveryStore.add(entry);
     await this.attemptDelivery(entry);
   }
 
-  /** Send one pending delivery. On success it is removed from the store; on failure it is LOGGED and left
-   *  in place for the next tick's {@link flushPendingDeliveries} — never silently dropped. */
+  /** Send one pending delivery, after claiming it so no other adapter generation sends the same result
+   *  while this send is in flight (see DeliveryStore.claim). On success it is removed from the store; on
+   *  failure the lease is released and it is LOGGED, left in place for the next tick's
+   *  {@link flushPendingDeliveries} — never silently dropped. */
   async attemptDelivery(entry) {
+    const claimed = this.deliveryStore.claim(entry.id, this.deliveryOwner, Date.now());
+    if (!claimed) return; // another generation is delivering it right now
     try {
-      await this.deliver(entry.body, entry.channelId);
-      this.deliveryStore.remove(entry.id);
+      await this.deliver(claimed.body, claimed.channelId);
+      this.deliveryStore.remove(claimed.id);
     } catch (e) {
-      this.log.error(`cron delivery failed for job ${entry.jobId} (${entry.jobName}) — will retry next tick: ${e?.message ?? e}`);
+      this.deliveryStore.release(claimed.id, this.deliveryOwner);
+      this.log.error(`cron delivery failed for job ${claimed.jobId} (${claimed.jobName}) — will retry next tick: ${e?.message ?? e}`);
     }
   }
 
@@ -661,6 +677,34 @@ class DeliveryStore {
     const next = entries.filter((e) => e.id !== id);
     if (next.length !== entries.length) this.save(next);
   }
+  /** Take exclusive ownership of entry `id` for `owner` and return the claimed record, or null when it is
+   *  gone or another owner holds an unexpired lease.
+   *
+   *  A pending delivery must be claimed before it is sent, for the same reason a due job is claimed before
+   *  it is run (see CronAdapter.claimDueJob): this file is shared with any other adapter generation, and a
+   *  plugin reload leaves the old one parked inside a slow deliver() with the entry still queued — the
+   *  replacement's flush would pick it up and send the very same result a second time. Read-check-write is
+   *  synchronous here, so the two can never both win the entry. */
+  claim(id, owner, now) {
+    const entries = this.all();
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) return null;
+    if (entry.leaseOwner && entry.leaseOwner !== owner && Number(entry.leaseUntil) > now) return null;
+    const claimed = { ...entry, leaseOwner: owner, leaseUntil: now + DELIVERY_LEASE_MS };
+    this.save(entries.map((e) => (e.id === id ? claimed : e)));
+    return claimed;
+  }
+  /** Drop `owner`'s lease so the next tick can retry the entry immediately instead of waiting the lease
+   *  out. A lease that has since been taken over by another owner is left alone. */
+  release(id, owner) {
+    const entries = this.all();
+    const entry = entries.find((e) => e.id === id);
+    if (!entry || entry.leaseOwner !== owner) return;
+    const free = { ...entry };
+    delete free.leaseOwner;
+    delete free.leaseUntil;
+    this.save(entries.map((e) => (e.id === id ? free : e)));
+  }
 }
 
 export function register(ctx) {
@@ -692,7 +736,7 @@ export function register(ctx) {
         adminOnly();
         if (!parseSchedule(p.schedule)) return ok('Error: invalid schedule — use "every 15m", "every 2h", "daily 07:30", "weekly sun 20:00", or a 5-field cron expression like "0 9 * * 1-5".');
         const jobs = store.all();
-        const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+        const id = newId();
         // "provider/model" → {provider, model}; a bare or malformed value is ignored (server default runs).
         const slash = typeof p.model === 'string' ? p.model.indexOf('/') : -1;
         const model = slash > 0 ? { provider: p.model.slice(0, slash), model: p.model.slice(slash + 1) } : undefined;
@@ -723,7 +767,7 @@ export function register(ctx) {
         const runAt = parseOneShot(p.when, Date.now(), ctx.timezone());
         if (!runAt) return ok('Error: invalid time — use "in 30s", "in 20m", "in 2h" or "at 18:30".');
         const jobs = store.all();
-        const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+        const id = newId();
         // A wake-up scheduled from a USER conversation records its origin: at fire time the host runs
         // the prompt as a bound send into that conversation, so the reply lands where it was asked for.
         // Channel/cron-originated schedules (session id `brain-ch-…`/`brain-task-…`, or no session at

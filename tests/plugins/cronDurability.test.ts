@@ -95,6 +95,28 @@ describe('cron delivery durability (Tier 1 #6)', () => {
     expect(delivered[0]).toContain('wake-up done');
   });
 
+  // The claim that stops two adapter generations from sending the same result must not become a permanent
+  // hold: a generation can die mid-send (daemon crash, kill), and its entry would then sit claimed forever.
+  it('retries a delivery whose claim has expired, but leaves one still held by a live owner', async () => {
+    const dataRoot = freshDataRoot();
+    mkdirSync(join(dataRoot, 'cronjob'), { recursive: true });
+    writeJobs(dataRoot, []);
+    const now = Date.now();
+    writeFileSync(pendingFile(dataRoot), JSON.stringify([
+      { id: 'stale', jobId: 'j1', jobName: 'crashed', body: 'orphaned result', createdAt: new Date(now - 600_000).toISOString(), leaseOwner: 'dead-generation', leaseUntil: now - 60_000 },
+      { id: 'busy', jobId: 'j2', jobName: 'in flight', body: 'someone else is sending this', createdAt: new Date(now).toISOString(), leaseOwner: 'live-generation', leaseUntil: now + 300_000 },
+    ]));
+    const delivered: string[] = [];
+    const { adapter } = await loadCron(dataRoot, async (t: string) => { delivered.push(t); });
+    adapter.listen(async () => 'unused');
+
+    await adapter.tick(); // nothing due — this tick only flushes the queue
+
+    expect(delivered).toEqual(['orphaned result']); // the abandoned result is recovered, the held one is not
+    const pending = JSON.parse(readFileSync(pendingFile(dataRoot), 'utf-8')) as { id: string }[];
+    expect(pending.map((e) => e.id)).toEqual(['busy']);
+  });
+
   it('the pending-delivery queue is bounded — the oldest entry is dropped, not accumulated forever', async () => {
     const dataRoot = freshDataRoot();
     mkdirSync(join(dataRoot, 'cronjob'), { recursive: true });

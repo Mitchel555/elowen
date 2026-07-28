@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import type { SessionSource } from '../../src/plugins/api.js';
@@ -100,5 +100,72 @@ describe('cron scheduler across a plugin reload', () => {
     expect(calls.filter((c) => c.endsWith('job-r1'))).toEqual(['old:job-r1']);
     expect(calls.filter((c) => c.endsWith('job-r2'))).toEqual(['new:job-r2']);
     expect(delivered).toHaveLength(2);
+  });
+
+  // The result is queued BEFORE it is sent (so a failed send never loses it), which leaves it visible to
+  // the reloaded generation's flush for the whole duration of a slow deliver() — without a lease the user
+  // reads the same report twice.
+  it('does not send a queued result twice when the reloaded generation flushes mid-delivery', async () => {
+    const dataRoot = freshDataRoot();
+    mkdirSync(join(dataRoot, 'cronjob'), { recursive: true });
+    const lastRun = new Date(Date.now() - 10 * 60_000).toISOString();
+    writeFileSync(join(dataRoot, 'cronjob/jobs.json'), JSON.stringify([
+      { id: 'r1', name: 'report', schedule: 'every 5m', prompt: 'do it', lastRun, createdAt: lastRun },
+    ]));
+
+    // The sink records every attempt and parks on the first one — a Discord push that has not returned yet.
+    const attempts: string[] = [];
+    let release: () => void = () => {};
+    let arrived: () => void = () => {};
+    const parked = new Promise<void>((r) => { release = r; });
+    const inFlight = new Promise<void>((r) => { arrived = r; });
+    const notify = async (text: string) => {
+      attempts.push(text);
+      if (attempts.length === 1) { arrived(); await parked; }
+    };
+
+    const oldAdapter = await loadCron(dataRoot, notify);
+    oldAdapter.listen(async () => 'the report');
+    const oldTick = oldAdapter.tick();
+    await inFlight; // parked inside deliver(), with the result still queued on disk
+    oldAdapter.disconnect(); // the host tears this generation down and builds a fresh one
+
+    const newAdapter = await loadCron(dataRoot, notify);
+    newAdapter.listen(async () => 'the report');
+    await newAdapter.tick(); // its flush sees the queued entry — and must leave it to its in-flight owner
+
+    release();
+    await oldTick;
+
+    expect(attempts).toHaveLength(1); // exactly one send, not two
+    expect(attempts[0]).toContain('the report');
+    expect(JSON.parse(readFileSync(join(dataRoot, 'cronjob/pending-deliveries.json'), 'utf-8'))).toEqual([]);
+  });
+
+  // The claim protects an IN-FLIGHT send, so a send that already failed must free it right away: waiting
+  // the lease out would leave a produced result undelivered for minutes after the reload that follows.
+  it('hands a failed delivery to the next generation immediately, not once the claim expires', async () => {
+    const dataRoot = freshDataRoot();
+    mkdirSync(join(dataRoot, 'cronjob'), { recursive: true });
+    const lastRun = new Date(Date.now() - 10 * 60_000).toISOString();
+    writeFileSync(join(dataRoot, 'cronjob/jobs.json'), JSON.stringify([
+      { id: 'r1', name: 'report', schedule: 'every 5m', prompt: 'do it', lastRun, createdAt: lastRun },
+    ]));
+    let sinkDown = true;
+    const delivered: string[] = [];
+    const notify = async (t: string) => { if (sinkDown) throw new Error('discord 500'); delivered.push(t); };
+
+    const oldAdapter = await loadCron(dataRoot, notify);
+    oldAdapter.listen(async () => 'the report');
+    await oldAdapter.tick(); // produces the result, fails to send it, and is then torn down
+    oldAdapter.disconnect();
+
+    sinkDown = false;
+    const newAdapter = await loadCron(dataRoot, notify);
+    newAdapter.listen(async () => 'the report');
+    await newAdapter.tick();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('the report');
   });
 });
