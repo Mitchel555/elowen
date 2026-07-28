@@ -11,8 +11,8 @@ export const DAG_NODE_W = 184;
  *  that is RUNNING or SELECTED earns a full card carrying its live activity and vitals, everything else
  *  collapses to a single titled row. Uniform boxes are what made the web graph read as a flat grid — with
  *  24 nodes, 24 identical rectangles say nothing about where the work actually is. */
-export const DAG_NODE_H = 66;
-export const DAG_NODE_H_COMPACT = 28;
+const DAG_NODE_H = 66;
+const DAG_NODE_H_COMPACT = 28;
 const COLUMN_GAP = 72;
 const ROW_GAP = 14;
 const PADDING = 16;

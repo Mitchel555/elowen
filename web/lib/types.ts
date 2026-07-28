@@ -210,18 +210,7 @@ export interface ConfigPatch {
   /** Wholesale brain provider list; an entry may carry `apiKey` to (re)set that provider's secret. */
   brain?: { providers?: (Omit<BrainProvider, 'apiKeySet'> & { apiKey?: string })[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
 }
-interface MissionTask { id: string; title: string; status: TaskStatus; type: string; parent_id: string | null; labels?: string[]; outcome?: TaskOutcome | null }
-interface MissionProgress { total: number; open: number; inProgress: number; blocked: number; closed: number; cancelled: number }
-interface MissionDeps { taskId: string; dependsOnId: string }
 interface MissionPrInfo { branch: string; prNumber: number | null; prUrl: string | null; prState: string | null; fixRounds: number; lastFeedback: string | null }
-export interface MissionDetail {
-  mission: Mission;
-  epic: MissionTask | null;
-  tasks: MissionTask[];
-  deps: MissionDeps[];
-  progress: MissionProgress;
-  pr?: MissionPrInfo | null;
-}
 export interface User { id: number; username: string; created_at: string; is_admin: boolean; allowed_execs: string[]; disabled_tools: string[]; name: string; email: string; avatar: string; default_exec: string; advisor_exec: string; advisor_autostart: boolean }
 export interface UserPatch { is_admin?: boolean; allowed_execs?: string[]; disabled_tools?: string[] }
 export interface ProfilePatch { name?: string; email?: string; default_exec?: string }
@@ -502,7 +491,7 @@ interface GitStatus { branch: string; ahead: number; behind: number; dirty: numb
 interface GitBranch { name: string; current: boolean }
 interface GitCommit { hash: string; subject: string; author: string; relative: string }
 export interface ProjectGit { isRepo: boolean; status: GitStatus | null; branches: GitBranch[]; commits: GitCommit[] }
-export interface CommitFileChange { path: string; added: number; deleted: number }
+interface CommitFileChange { path: string; added: number; deleted: number }
 export interface CommitLogEntry { hash: string; subject: string; author: string; timestamp: number; files: CommitFileChange[] }
 /** A handoff note one agent left for later agents on the same mission. */
 export interface Note { id: number; scope: string; target: string; author: string; body: string; created_at: string }
