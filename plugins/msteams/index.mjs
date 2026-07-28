@@ -9,7 +9,7 @@ import { MsTeamsAdapter } from './lib/adapter.mjs';
 import { registerTools } from './lib/tools.mjs';
 
 export { matchesId, senderIds, senderIsAdmin, displayNameOf } from './lib/ids.mjs';
-export { splitContent, buildReplyContext, footerLine, CHUNK } from './lib/format.mjs';
+export { splitContent, footerLine, CHUNK } from './lib/format.mjs';
 export { makeTokenVerifier } from './lib/auth.mjs';
 export { ConnectorClient } from './lib/connector.mjs';
 

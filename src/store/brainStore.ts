@@ -211,10 +211,15 @@ export class BrainStore {
 
   /** Cumulative token total per session (summed from each stored assistant message's usage) for the
    *  session-management panel. One grouped query — no N+1. Sessions with no usage-bearing messages
-   *  come back 0. Persisted messages only, so a mid-turn session reads slightly stale (acceptable). */
+   *  come back 0. Persisted messages only, so a mid-turn session reads slightly stale (acceptable).
+   *  The `json_valid` guard is load-bearing: `json_extract` THROWS on a malformed `content` row (one
+   *  corrupt message would otherwise fail this query for the WHOLE user), so a bad row is isolated —
+   *  contributes 0 — instead of crashing every session's total. NULL (no message, via the LEFT JOIN)
+   *  also fails `json_valid` and falls to the same 0 branch, so the join's "session with no messages"
+   *  case is unaffected. */
   tokenTotals(userId: number): Record<string, number> {
     const rows = this.db.prepare(
-      `SELECT s.id AS id, COALESCE(SUM(json_extract(m.content, '$.usage.totalTokens')), 0) AS tokens
+      `SELECT s.id AS id, COALESCE(SUM(CASE WHEN json_valid(m.content) THEN json_extract(m.content, '$.usage.totalTokens') ELSE 0 END), 0) AS tokens
          FROM brain_sessions s LEFT JOIN brain_messages m ON m.session_id = s.id
         WHERE s.user_id = ? GROUP BY s.id`
     ).all(userId) as { id: string; tokens: number }[];

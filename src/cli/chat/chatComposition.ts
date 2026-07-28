@@ -1231,7 +1231,6 @@ export function createChatComposition(
      *  resolved leader sequence — one dispatcher so both paths share guards and behavior. */
     const dispatchAction = (action: KeybindAction): void => {
       switch (action) {
-        case 'leader': return; // the leader only prefixes — it is never an action of its own
         case 'quit': actions.quit(); return;
         // No telemetry panel on the start screen — a toggle there would silently pre-hide it for later.
         case 'telemetry_toggle': {

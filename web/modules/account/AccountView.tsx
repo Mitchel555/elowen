@@ -164,15 +164,18 @@ export function AccountView() {
   const [pushOn, setPushOn] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
 
+  // Seed the form once from the first /auth/me load only — a later refetch (e.g. the autosave's own
+  // invalidation) must not overwrite whatever the user has since typed, even if it resolves after
+  // a newer edit was already made. Local state stays the source of truth once seeded.
   const [formSeeded, setFormSeeded] = useState(false);
   useEffect(() => {
-    if (me.data?.user) {
+    if (me.data?.user && !formSeeded) {
       setName(me.data.user.name);
       setEmail(me.data.user.email);
       setDefaultExec(me.data.user.default_exec);
       setFormSeeded(true);
     }
-  }, [me.data]);
+  }, [me.data, formSeeded]);
 
   // Auto-persist the profile shortly after any change — no Save button.
   const profileSave = useAutoSaveStatus([name, email, defaultExec], async () => {

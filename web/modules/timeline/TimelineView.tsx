@@ -54,7 +54,7 @@ function taskIdOf(p: { type: string; target: string }): string | null {
   return p.type === 'task' || p.type === 'review' ? p.target : null;
 }
 
-export interface Display { label: string; projectId: number | null }
+interface Display { label: string; projectId: number | null }
 
 /** Resolve an event's raw target into a human label + the project it belongs to, so the timeline
  *  reads "Refactor the parser" / "Juno" instead of "elowen-ab12cd34" / "elowen-Juno":

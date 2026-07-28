@@ -734,9 +734,18 @@ function useBrainChatController(): BrainChatValue {
   };
   const removeAttachment = (index: number): void => setAttachments((cur) => cur.filter((_, j) => j !== index));
 
+  // Optimistic remove: the item leaves the list immediately, but on failure it is still queued
+  // server-side, so put it back where it was rather than leaving the UI claiming it was removed.
+  // A later 'queue' snapshot still wins wholesale — it replaces whatever this restored.
   const onQueueRemove = (id: string): void => {
+    const index = queued.findIndex((x) => x.id === id);
+    if (index < 0) return;
+    const removed = queued[index];
     setQueued((cur) => cur.filter((x) => x.id !== id));
-    void elowenClient.brainQueueRemove(id, boundSessionRef.current).catch(() => undefined);
+    void elowenClient.brainQueueRemove(id, boundSessionRef.current).catch(() => {
+      setQueued((cur) => (cur.some((x) => x.id === id) ? cur : [...cur.slice(0, index), removed, ...cur.slice(index)]));
+      toast(t.brainChat.queueRemoveError, 'error');
+    });
   };
   // Awaited by AskQuestionCard: the question is only removed from the UI once the server actually
   // accepted the answer. On failure the agent is STILL waiting server-side, so the question must stay
