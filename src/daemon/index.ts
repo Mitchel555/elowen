@@ -18,8 +18,26 @@ process.env.PI_CACHE_RETENTION ??= 'long';
 // A long-running daemon must survive a stray rejection/exception from one of its many fire-and-forget
 // loops (deriver/scheduler/janitor/reconcile/relay). Node's default would exit the process and drop
 // every live mission's orchestrator; log and keep running instead.
-process.on('unhandledRejection', (e) => log.error('unhandledRejection', e));
-process.on('uncaughtException', (e) => log.error('uncaughtException', e));
+// stdout/stderr can break under the daemon while it is still running: a piped parent (the e2e harness,
+// a `| head`, a detached shell) goes away and every later write raises EPIPE. That error surfaces as an
+// uncaughtException, the handler below LOGS it, logging writes to the console again, and the next EPIPE
+// re-enters the handler — an unbounded loop that also appends every iteration to the day's log file. It
+// really happened: two e2e runs left a 30 GB daemon-<date>.log each and filled the disk. The CLI already
+// guards this (src/cli/index.ts); a service must not exit on it, so swallow it instead — the write is
+// already lost and the file sink still has the record.
+const onStreamError = (e: NodeJS.ErrnoException): void => {
+  if (e.code !== 'EPIPE') log.error('stdio stream error', e);
+};
+process.stdout.on('error', onStreamError);
+process.stderr.on('error', onStreamError);
+
+// A long-running daemon must survive a stray rejection/exception from one of its many fire-and-forget
+// loops (deriver/scheduler/janitor/reconcile/relay). Node's default would exit the process and drop
+// every live mission's orchestrator; log and keep running instead. EPIPE is excluded for the reason
+// above: logging it is what feeds the loop.
+const isEpipe = (e: unknown): boolean => (e as NodeJS.ErrnoException | null)?.code === 'EPIPE';
+process.on('unhandledRejection', (e) => { if (!isEpipe(e)) log.error('unhandledRejection', e); });
+process.on('uncaughtException', (e) => { if (!isEpipe(e)) log.error('uncaughtException', e); });
 
 // Runtime env. Bound to locals so control-flow narrowing works in the guards below.
 const relayUrl = process.env.ELOWEN_RELAY_URL;
