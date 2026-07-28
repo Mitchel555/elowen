@@ -58,10 +58,10 @@
     },
     {
       "key": "streaming",
-      "label": "Live streaming replies",
+      "label": "Live progress trace",
       "type": "boolean",
       "default": true,
-      "hint": "Edit the reply in place as it streams (tool calls + text). Off = one message at the end."
+      "hint": "Show the agent's tool trace in a message edited in place while it works. The answer itself always arrives as one message at the end. Off = only the final answer."
     },
     {
       "key": "reactions",

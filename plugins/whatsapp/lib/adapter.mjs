@@ -365,7 +365,7 @@ export class WhatsAppAdapter {
       if (reactions && !isSteered(reply)) void this.react(m.key, '✅').catch(() => {});
     } catch (e) {
       clearInterval(typing);
-      stream?.abandon(); // the stall-hint timer must not edit the dead progress bubble after the error reply
+      if (stream) await stream.fail(e?.message ?? e); // settle live tools before the error reply lands below them
       void this.sock.sendPresenceUpdate('paused', chatJid).catch(() => {});
       if (reactions) void this.react(m.key, '❌').catch(() => {});
       await this.sendText(chatJid, this.msg.error(e?.message ?? e), m).catch(() => {});

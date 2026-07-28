@@ -11,6 +11,7 @@
 //   - style       the render style handed to ./liveTrace.mjs, extended with subtext(s) and italic(s) for
 //                 the progress bubble's dim lines (Discord `-# …` / `_…_`; plain-text Telegram → identity).
 //   - CHUNK/splitContent  the surface's message-size limit and its code-fence-aware splitter.
+//   - editThrottleMs      the edit rate the surface tolerates (WhatsApp is stricter than the default).
 //   - postWithImages      the final-answer image strategy — genuinely different per surface (Discord
 //                 uploads ride the first text chunk; Telegram photos precede the text) → stays per-plugin.
 //   - footerLine          the runtime footer (Discord subtext `-# …` vs Telegram `— …`) → stays per-plugin.
@@ -18,7 +19,7 @@ import { extractImageRefs, stripThinking } from './format.mjs';
 import { resolveDisplaySettings } from './display.mjs';
 import { makeTextHelpers, outputFailed, makeOutputSummary, diffSummary, makeFoldedCalls, makeToolLinesFor, makeCardLines } from './liveTrace.mjs';
 
-const EDIT_THROTTLE_MS = 1200; // matched across surfaces — stay under Discord's ~5 edits / 5 s and Telegram's edit rate
+const DEFAULT_EDIT_THROTTLE_MS = 1200; // stays under Discord's ~5 edits / 5 s and Telegram's edit rate
 /** How long a turn may go with no VISIBLE progress (a new tool call / card) before the `Step N / MAX`
  *  counter surfaces as a "still working" reassurance. Below this it stays hidden; any fresh tool/card
  *  resets the clock and drops it again. Tuned short enough that a slow step never reads as a stuck agent. */
@@ -27,7 +28,7 @@ const DIVIDER = '┈┈┈┈┈┈┈┈┈┈'; // separates the tool trace fr
 
 /** Build the live-message classes for one surface. Returns the `LiveMessage` class the plugin re-exports;
  *  `EditableMessage`/`StreamingAnswer` stay internal. */
-export function createLiveMessage({ transport, style, CHUNK, splitContent, postWithImages, footerLine }) {
+export function createLiveMessage({ transport, style, CHUNK, splitContent, postWithImages, footerLine, editThrottleMs = DEFAULT_EDIT_THROTTLE_MS }) {
   const { compactLine, safeTail } = makeTextHelpers(style);
   const outputSummary = makeOutputSummary({ compactLine, safeTail });
   const foldedCalls = makeFoldedCalls(compactLine);
@@ -78,11 +79,11 @@ export function createLiveMessage({ transport, style, CHUNK, splitContent, postW
     flush() {
       if (this.closed) return Promise.resolve();
       const elapsed = Date.now() - this.lastEdit;
-      if (!this.finalizing && elapsed < EDIT_THROTTLE_MS) {
+      if (!this.finalizing && elapsed < editThrottleMs) {
         // Inside the throttle window: arm a SINGLE trailing flush so the latest content always lands ~throttle
         // later, even if no further update arrives (coalesces a burst into one edit at the window's end).
         if (!this.timer) {
-          this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, EDIT_THROTTLE_MS - elapsed);
+          this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, editThrottleMs - elapsed);
           if (typeof this.timer.unref === 'function') this.timer.unref();
         }
         return Promise.resolve();
