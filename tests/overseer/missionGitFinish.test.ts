@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { openDb } from '../../src/store/db.js';
 import { TaskStore } from '../../src/store/taskStore.js';
@@ -190,5 +190,26 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then echo '{"number":8,"url":"https://g
     expect(res.state).toBe('opened'); // NOT 'ready'
     // The fix commit reached the remote branch.
     expect(git(remote, 'log', '--oneline', 'elowen/demo-epic').trim()).toContain('fix round');
+  });
+});
+
+describe('MissionGit worktree placement', () => {
+  // The mission id is `m-${epicId}` and an epic id can be client-supplied, so it reaches this path as
+  // untrusted input. Unsanitized it escapes the worktree root — and since cleanup runs
+  // `git worktree remove --force` on whatever it finds there, an escape is a delete primitive, not just
+  // a stray directory. The API schema rejects such an id too; this covers the inner layer, which has to
+  // hold for any id that reaches the engine by another route.
+  it('keeps a traversal-shaped epic id inside the worktree root', async () => {
+    const { missionGit, prs, tasks, project } = build({ prAutoOpen: false, verify: 'true' });
+    const evilId = '../../../../tmp/elowen-escape-probe';
+    tasks.create({ id: evilId, project_id: project.id, title: 'Traversal probe', type: 'epic' });
+
+    await missionGit.onEngage(`m-${evilId}`, evilId);
+
+    const rec = prs.get(`m-${evilId}`);
+    expect(rec, 'the mission should still be provisioned, just somewhere safe').toBeTruthy();
+    const root = resolve(join(base, '.elowen-worktrees'));
+    expect(resolve(rec!.worktree).startsWith(`${root}/`)).toBe(true);
+    expect(rec!.worktree).not.toContain('..');
   });
 });

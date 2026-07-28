@@ -5,7 +5,11 @@ export const createTaskSchema = z.object({
   title: z.string(),
   type: z.string().optional(),
   priority: z.string().optional(),
-  id: z.string().optional(),
+  // A client-supplied id ends up in a filesystem path (the mission worktree is named after it), so it is
+  // bounded to the shape shortId already generates. The path itself is sanitized too — this is the outer
+  // of the two layers, and it is the one that keeps a traversal attempt out of the database in the first
+  // place. Dots are allowed for project prefixes that carry them, but `..` never is.
+  id: z.string().regex(/^[a-zA-Z0-9._-]+$/).refine((v) => !v.includes('..'), 'must not contain ".."').optional(),
   description: z.string().optional(),
   scheduled_at: z.string().nullable().optional(),
   autostart: z.number().optional(),

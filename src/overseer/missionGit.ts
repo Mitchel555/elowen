@@ -70,7 +70,12 @@ export class MissionGit {
     if (!project) { log.warn(`PR mode: no project for mission ${missionId} — skipping worktree`); return; }
     const slug = sanitize(project.slug);
     const branch = `elowen/${slug}-${sanitize(epicId)}`;
-    const dir = join(dirname(project.path), '.elowen-worktrees', `${slug}-${missionId}`);
+    // `missionId` is `m-${epicId}` and the epic id can be client-chosen, so it is sanitized before it
+    // becomes a path segment: an id carrying `../` would otherwise escape .elowen-worktrees entirely,
+    // and the cleanup path removes this directory with `git worktree remove --force`. sanitize() is a
+    // no-op for generated ids (shortId emits only [a-z0-9-]), so existing layouts are unaffected — and
+    // provisioned worktrees are read back from the `prs` row, never recomputed from the id.
+    const dir = join(dirname(project.path), '.elowen-worktrees', `${slug}-${sanitize(missionId)}`);
     try {
       const base = await detectBaseBranch(project.path, this.d.config.get().autopilot.prBaseBranch);
       await createMissionWorktree(project.path, branch, base, dir);
