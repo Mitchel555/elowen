@@ -77,6 +77,18 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
     move(direction);
   };
 
+  // The node box has room for exactly one line under the id, so it carries the node's VITALS — what the
+  // CLI puts there. The task text is the wrong thing to truncate into it: every node in a workflow tends
+  // to start with the same boilerplate, so the visible prefix is identical across boxes and says nothing
+  // about the one you are looking at. A node with no vitals yet (pending) falls back to its live detail.
+  const nodeVitals = (node: WorkflowNode): string => {
+    const vitals = [
+      node.tokens !== undefined ? `${formatTokens(node.tokens)} ${t.agents.tokens.toLowerCase()}` : '',
+      node.seconds !== undefined ? `${node.seconds}s` : '',
+    ].filter(Boolean);
+    return vitals.length > 0 ? vitals.join(' · ') : (node.detail || node.task);
+  };
+
   const nodeButton = (node: WorkflowNode, className: string, style?: React.CSSProperties) => (
     <button
       key={node.id}
@@ -94,7 +106,7 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
         <span aria-hidden className={`wf-dag__pulse shrink-0 text-tiny ${GLYPH_TONE[node.status]}`}>{NODE_GLYPH[node.status]}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-tiny">{node.id}</span>
       </span>
-      <span className="truncate text-tiny text-text-muted">{node.detail || node.task}</span>
+      <span className="truncate text-tiny text-text-muted">{nodeVitals(node)}</span>
     </button>
   );
 
@@ -133,7 +145,11 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
         className="min-h-0 flex-1 overflow-auto p-4"
         onKeyDown={onKeyDown}
       >
-        <div className="relative" style={{ width: layout.width, height: layout.height }}>
+        {/* The graph is centred in whatever space the modal has rather than pinned to the top-left: a DAG
+            is usually far smaller than the dialog, and left alone it reads as an accident in a large empty
+            panel. min-w/min-h-full keeps the centring from shrinking the scroll area when it IS larger. */}
+        <div className="flex min-h-full min-w-full items-center justify-center">
+          <div className="relative shrink-0" style={{ width: layout.width, height: layout.height }}>
           <svg
             aria-hidden
             className="wf-dag__edges"
@@ -141,10 +157,26 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
             height={layout.height}
             viewBox={`0 0 ${layout.width} ${layout.height}`}
           >
+            {/* Dependencies are directed, so they are drawn as arrows. Without a head, a wave-to-wave
+                curve reads as an undirected thread and the eye cannot tell which node feeds which. */}
+            <defs>
+              <marker
+                id="wf-dag-arrowhead"
+                viewBox="0 0 8 8"
+                refX="7.5"
+                refY="4"
+                markerWidth="5"
+                markerHeight="5"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0.5 L8 4 L0 7.5 Z" className="wf-dag__arrowhead" />
+              </marker>
+            </defs>
             {layout.edges.map((edge) => (
               <path
                 key={`${edge.from}->${edge.to}`}
                 d={edge.d}
+                markerEnd="url(#wf-dag-arrowhead)"
                 className={`wf-dag__edge${nodes.find((n) => n.id === edge.to)?.status === 'running' ? ' wf-dag__edge--live' : ''}`}
               />
             ))}
@@ -155,6 +187,7 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
               ? nodeButton(node, 'absolute py-1.5', { left: placed.x, top: placed.y, width: DAG_NODE_W, height: DAG_NODE_H })
               : null;
           })}
+          </div>
         </div>
       </div>
     );

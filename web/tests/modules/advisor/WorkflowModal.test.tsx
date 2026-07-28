@@ -94,8 +94,12 @@ describe('workflow DAG modal', () => {
 
     expect(screen.getByTestId('workflow-dag-graph')).toBeInTheDocument();
     for (const node of NODES) expect(screen.getByTestId(`workflow-node-${node.id}`)).toBeInTheDocument();
-    // One curve per real dependency — the DAG's edges, not just its boxes.
-    expect(screen.getByTestId('workflow-dag-graph').querySelectorAll('path')).toHaveLength(2);
+    // One curve per real dependency — the DAG's edges, not just its boxes. Scoped to the edge class
+    // rather than every <path>, so the arrowhead marker's own path is not counted as a dependency.
+    const edges = screen.getByTestId('workflow-dag-graph').querySelectorAll('path.wf-dag__edge');
+    expect(edges).toHaveLength(2);
+    // A dependency is directed, so every edge has to carry the arrowhead that says which way it runs.
+    for (const edge of edges) expect(edge.getAttribute('marker-end')).toBe('url(#wf-dag-arrowhead)');
   });
 
   it('closes on Escape', async () => {
