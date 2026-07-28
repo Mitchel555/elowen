@@ -50,6 +50,13 @@ const depIntro = (truncatedIds) => 'Results from the nodes this one depends on f
     ? `\n\nThese were truncated to fit and you are NOT seeing them in full: ${truncatedIds.join(', ')}. `
       + 'Say so in your output rather than treating what you received as the complete result.'
     : '');
+/** Whether two `ctx.currentAccess()` boundaries are the same one. The host bakes the boundary into a
+ *  delegated child's IMMUTABLE persisted scope and lets that child run again only under an exact match, so
+ *  a resume that re-captures a narrowed boundary can no longer re-enter the sessions it minted. Both sides
+ *  are built by the same host accessor, so a plain structural compare is exact enough; anything it reads as
+ *  a change costs only session continuity (see WorkflowResume), while a missed change would fail the node
+ *  inside the host with `delegated access unavailable`. */
+const sameParentAccess = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 // Some models (seen: Qwen max preview) double-escape non-ASCII in tool-call JSON, so the parsed title
 // still carries literal backslash-u sequences ("Docs \u2014 write" instead of "Docs — write"). The title
 // is pure display, so decoding is always what the model meant; surrogate pairs recombine naturally.
@@ -355,6 +362,10 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       lines.push('', `[${n.id}] ${s.status.toUpperCase()}${n.deps.length ? ` (after ${n.deps.join(', ')})` : ''}`);
       if (s.status === 'done') lines.push(s.result || '(no output)');
       else if (s.status === 'error') lines.push(`Error: ${s.error}`);
+      // A node the cancellation caught mid-run is NOT a node that never ran: it may already have edited
+      // files or run commands, and a resume puts it back to work over that partial state. Reporting it as
+      // "did not run" is what would make someone resume, or redo the work by hand, without checking.
+      else if (s.status === 'running') lines.push('(interrupted while running — it may have already made partial changes)');
       else lines.push(wf.status === 'cancelled' ? '(did not run — the workflow was cancelled)' : '(did not run — a dependency failed)');
     }
     return lines.join('\n');
@@ -368,14 +379,16 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     wf.status = 'running';
     snapshot(wf);
     return new Promise((resolve) => { wf.resolveDone = resolve; tick(wf); }).then(() => {
-      // A cancel settles the status itself — the late arithmetic here must not repaint it as done/error
-      // when the aborted node children eventually error out.
+      // A cancel OWNS its own terminalization: cancelWorkflow already settled the status, stamped
+      // finishedAt and published the terminal snapshot before releasing this wait. Re-running it here would
+      // re-stamp the finish time and broadcast/persist a second terminal snapshot for one cancellation —
+      // once per running workflow on a plugin reload. Only summarize.
       if (wf.status !== 'cancelled') {
         wf.status = [...wf.state.values()].some((s) => s.status === 'error') ? 'error' : 'done';
+        wf.finished = true;
+        wf.finishedAt = Date.now();
+        snapshot(wf);
       }
-      wf.finished = true;
-      wf.finishedAt = Date.now();
-      snapshot(wf);
       return summarize(wf);
     });
   };
@@ -604,6 +617,18 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       if (!wf.finished) return ok(`Error: workflow ${wf.id} is still running; there is nothing to resume yet.`);
       const unfinished = wf.nodes.filter((n) => wf.state.get(n.id).status !== 'done');
       if (!unfinished.length) return ok(`Error: every node in workflow ${wf.id} already finished; there is nothing to resume.`);
+      // The access boundary this resume will run under. It is re-captured (rather than replayed from the
+      // start) because it may since have been narrowed — a project revoked, tools disabled, permissions
+      // tightened, the conversation put in plan/read-only mode — and replaying the old one would execute
+      // authority the caller no longer holds, which is exactly what delegated continuation refuses to do
+      // elsewhere.
+      const access = ctx.currentAccess();
+      // A node's child session is pinned to the boundary it was minted under and the host demands an EXACT
+      // match to respawn it, so any change to the boundary — not only a narrowing — makes the old channel
+      // unusable: the respawn is refused with `delegated access unavailable` and the resume dies inside the
+      // node rather than here. Start those nodes in a FRESH channel instead — the run continues, at the
+      // honest cost of the earlier session's transcript, which they repeat rather than build on.
+      const scopeChanged = !sameParentAccess(wf.parentAccess, access);
       // Reset the run-scoped fields, but carry the channel id of a node that ACTUALLY RAN across: that is
       // what lets it resume inside its own session instead of repeating work it already did. A node holds a
       // session only once it started, so a PENDING one (never launched, or skipped because a dependency
@@ -611,7 +636,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       for (const n of unfinished) {
         const prev = wf.state.get(n.id);
         const next = freshNodeState();
-        if (prev?.sessionId && prev.channelId) { next.channelId = prev.channelId; next.resumed = true; }
+        if (!scopeChanged && prev?.sessionId && prev.channelId) { next.channelId = prev.channelId; next.resumed = true; }
         wf.state.set(n.id, next);
       }
       if (typeof p.background === 'boolean') wf.background = p.background;
@@ -621,18 +646,21 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       // the ones captured at the original Start are bound to a turn that is long over.
       wf.emit = ctx.workflowEmitter();
       wf.emitCompletion = ctx.workflowCompletionEmitter?.() ?? undefined;
-      // Re-capture the access boundary too. The stored one was taken when the workflow STARTED and may
-      // since have been narrowed — a project revoked, tools disabled, permissions tightened, the
-      // conversation put in plan/read-only mode. Replaying it would let a resume execute authority the
-      // caller no longer holds, which is exactly what delegated continuation refuses to do elsewhere.
-      wf.parentAccess = ctx.currentAccess();
+      wf.parentAccess = access;
       const completion = runToCompletion(wf).catch((e) => {
         wf.status = 'error';
         wf.finished = true;
         wf.finishedAt = Date.now();
         return `Error: workflow failed: ${errorText(e)}`;
       });
-      return driveResult(wf, completion, wf.background === true);
+      const res = await driveResult(wf, completion, wf.background === true);
+      if (!scopeChanged) return res;
+      return ok(
+        'Note: your access boundary has changed since this workflow started, so the unfinished nodes could '
+        + 'not re-enter the sessions they ran in before — they started clean under your current access and '
+        + `repeated any work they had already done.\n\n${res.content[0].text}`,
+        res.details,
+      );
     },
   }));
 

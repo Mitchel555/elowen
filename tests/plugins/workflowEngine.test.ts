@@ -74,6 +74,11 @@ function harness(opts: {
   };
   /** Mutable so a test can call a tool AS one of the workflow's own node sessions. */
   const sessionId = { current: 'brain-parent' };
+  /** Mutable so a test can narrow the caller's access boundary between a start and a resume, the way an
+   *  operator revoking a project or disabling tools does to a real conversation. */
+  const access: { current: { toolPolicy?: { allow?: string[] } } } = {
+    current: { toolPolicy: opts.toolPolicyAllow ? { allow: opts.toolPolicyAllow } : undefined },
+  };
   /** The node child sessions the engine asked the host to abort — the stand-in for the real abort tree. */
   const stoppedSessions: string[] = [];
   const ctx = {
@@ -83,7 +88,7 @@ function harness(opts: {
     logger: { info() {}, warn() {} },
     currentSessionId: () => sessionId.current,
     currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
-    currentAccess: () => ({ toolPolicy: opts.toolPolicyAllow ? { allow: opts.toolPolicyAllow } : undefined }),
+    currentAccess: () => access.current,
     currentModel: () => ({ provider: 'p', model: 'm' }),
     workflowEmitter: () => (u: (typeof snapshots)[number]) => { snapshots.push(u); },
     // The gated variant must also RESOLVE the model: returning [] makes buildNodeAccess throw
@@ -105,7 +110,7 @@ function harness(opts: {
   registerWorkflow(ctx, () => run, helpers);
   /** Everything the node can read, as one string — the chunks are a transport detail, not the content. */
   const contextOf = (task: string) => (contexts.get(task) ?? []).join('\n\n');
-  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, runs, stoppedSessions };
+  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, access, runs, stoppedSessions };
 }
 
 describe('workflow engine', () => {
@@ -531,8 +536,40 @@ describe('workflow engine', () => {
     expect(text).toMatch(/status: cancelled/);
     expect(text).toMatch(/workflow was cancelled/);
     expect(snapshots.at(-1)!.status).toBe('cancelled');
+    // ONE cancellation, one terminal snapshot. The cancel settles the run and publishes it; the wait it
+    // releases used to re-stamp finishedAt and publish the very same terminal state again — a duplicate
+    // durable write and broadcast, once per running workflow on a plugin reload.
+    expect(snapshots.filter((s) => s.status === 'cancelled' && s.nodes.some((n) => n.status === 'running')))
+      .toHaveLength(1);
     // A different session's abort cancels nothing here.
     expect(controls.get('workflow')!.cancelForSession({ sessionId: 'someone-else' })).toEqual({ cancelled: 0 });
+  });
+
+  // A cancelled summary used to report EVERY unfinished node as "did not run", including the one the
+  // cancellation caught mid-work. That node may already have edited files or run commands, and
+  // WorkflowResume puts it straight back over that partial state — so the summary has to separate a node
+  // that never started from one that started and was stopped.
+  it('separates a node interrupted mid-run from one that never started, in a cancelled summary', async () => {
+    const { tools, controls } = harness();
+    let releaseRoot!: () => void;
+    gate = { task: 'root', promise: new Promise<void>((r) => { releaseRoot = r; }) };
+    const startP = tools.get('WorkflowStart')!.execute('t-cancel-partial', {
+      nodes: [
+        { id: 'root', task: 'root' },
+        { id: 'leaf', task: 'leaf', deps: ['root'] },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 5)); // root launches and parks on the gate
+    controls.get('workflow')!.cancelForSession({ sessionId: 'brain-parent' });
+    releaseRoot();
+    const text = (await startP).content[0]!.text;
+    await new Promise((r) => setTimeout(r, 5)); // let the aborted root settle
+
+    const rootBlock = text.slice(text.indexOf('[root]'), text.indexOf('[leaf]'));
+    expect(rootBlock).toContain('partial changes');
+    expect(rootBlock).not.toContain('did not run');
+    // leaf never launched, so it genuinely did nothing.
+    expect(text.slice(text.indexOf('[leaf]'))).toContain('did not run');
   });
 
   it('rejects an invalid DAG without launching anything', async () => {
@@ -909,6 +946,29 @@ describe('WorkflowResume', () => {
     const runB = runs.find((r) => r.task === 'b')!;
     expect(runB.channelId).not.toBe(firstA.channelId);
     expect(runB.fullTask).toBe('b');
+  });
+
+  // A resume re-captures the CURRENT access boundary, but a node's child session is pinned to the boundary
+  // it was minted under: the host refuses to re-enter a persisted child under a narrowed scope
+  // ("delegated access unavailable"). Carrying the channel across therefore killed the resume deep inside
+  // the node, after it had already been announced as continuing. It has to start clean instead — and say so.
+  it('starts an unfinished node in a fresh channel when the access boundary was narrowed since the start', async () => {
+    const { tools, snapshots, runs, access } = harness();
+    await tools.get('WorkflowStart')!.execute('r-scope', { nodes: [{ id: 'a', task: 'a FAIL_ONCE' }] });
+    const wfId = snapshots[0]!.id;
+    const firstA = runs.find((r) => r.task === 'a FAIL_ONCE')!;
+
+    // The operator narrows what this conversation may delegate.
+    access.current = { toolPolicy: { allow: ['Read'] } };
+    const resumed = await tools.get('WorkflowResume')!.execute('r-scope-resume', { workflowId: wfId });
+
+    const retryA = runs.filter((r) => r.task === 'a FAIL_ONCE')[1]!;
+    expect(retryA.channelId).not.toBe(firstA.channelId);
+    // No resume note either: the fresh conversation holds none of the earlier work to continue from.
+    expect(retryA.fullTask).toBe('a FAIL_ONCE');
+    const text = resumed.content[0]!.text;
+    expect(text).toMatch(/access boundary has changed/);
+    expect(text).toMatch(/status: done/); // the run still completes, it just repeats that node's work
   });
 
   it('pins the node transcript, without which resuming into its session is silently pointless', async () => {
