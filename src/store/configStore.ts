@@ -221,13 +221,16 @@ const band = (key: keyof BrainLimits, maxOverride?: number): [min: number, max: 
 };
 
 const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> = {
-  // The three ceilings below are raised past the ±50% rule at the instance owner's request: the rule
+  // The four ceilings below are raised past the ±50% rule at the instance owner's request: the rule
   // sizes a tuning margin around a sensible default, but these are the knobs an operator reaches for
   // when a single tool result or a recalled memory genuinely needs more room than the default allows.
   // In the editor's own unit (4 chars per token) that is ~20k tokens of tool output and ~5k of recall.
   toolOutputMaxLines: band('toolOutputMaxLines', 200),
   toolOutputMaxChars: band('toolOutputMaxChars', 80_000),
-  memoryRecallCount: band('memoryRecallCount'),
+  // memoryRecallChars is the budget these hits SHARE, so raising the count alone makes each hit smaller:
+  // at the 6000-char default, 20 memories leave ~300 chars each and most get cut mid-sentence. An
+  // operator who wants many memories wants the char budget raised with it — hence both ceilings.
+  memoryRecallCount: band('memoryRecallCount', 20),
   memoryRecallChars: band('memoryRecallChars', 20_000),
   // Raised past the ±50% rule at the owner's request to ~20k tokens. The ceiling is bounded by
   // MAX_PROMPT_TOTAL_CHARS (brain/delegatedScope.ts), the budget packDelegatedPromptAppend fair-shares
