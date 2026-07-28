@@ -223,8 +223,16 @@ describe('workflow engine', () => {
     ]);
     expect((await start.execute('task', { nodesFile: missingTask })).content[0]?.text)
       .toBe(`Error: workflow file "${missingTask}": node 3 ("web-settings"): missing required field "task"; add a complete, non-empty string "task" to this node.`);
+
+    // A reusable file carries the run's options too, so a mistyped one has to be named as precisely as a
+    // mistyped node — otherwise the only clue is an option that silently did nothing.
+    const badOption = workflowFile({ title: 42, nodes: [{ id: 'a', task: 'a' }] });
+    expect((await start.execute('option', { nodesFile: badOption })).content[0]?.text)
+      .toBe(`Error: workflow file "${badOption}" field "title" must be a string. Fix or remove that field, then call WorkflowStart again.`);
     expect(launched).toEqual([]);
   });
+
+
 
   it('runs a linear DAG in dependency order and returns every node result', async () => {
     const { tools, launched } = harness();
@@ -826,6 +834,22 @@ describe('workflow background + detach', () => {
     expect(completions).toHaveLength(1);
     expect(completions[0]).toMatchObject({ toolCallId: 'bg1', status: 'done' });
     expect(completions[0]!.result).toContain('done:a');
+  });
+
+  it('takes background from the file when no argument overrides it', async () => {
+    const { tools, completions, release } = bgHarness();
+    // The precedence test always overrides the file's value, so on its own it cannot tell a file option that
+    // WORKS from one that is read and then dropped. Here the file is the only source: a foreground run would
+    // block and return the summary, so the handle is the proof it was honoured.
+    const res = await tools.get('WorkflowStart')!.execute('bg-file', {
+      nodesFile: workflowFile({ background: true, nodes: [{ id: 'a', task: 'a' }] }),
+    });
+
+    expect(res.details).toMatchObject({ status: 'running' });
+    expect(res.content[0]!.text).toMatch(/Started background workflow/);
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(completions).toHaveLength(1);
   });
 
   it('Ctrl+B detach resolves the parent wait without aborting the running node, then delivers', async () => {
