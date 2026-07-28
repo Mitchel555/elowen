@@ -707,6 +707,29 @@ export function register(ctx) {
     },
   }));
 
+  ctx.registerTool(defineTool({
+    name: 'DelegateStop', label: 'Stop a sub-agent',
+    description: 'Stop a DIRECT sub-agent from DelegateList that is running away, looping, or is simply no '
+      + 'longer needed — without touching the parent conversation or any sibling. Stopping one also tears '
+      + 'down whatever IT itself delegated, so a foreground DelegateContinue call stuck waiting on a stuck '
+      + 'grandchild comes down together with it in one call; there is no way to reach past a direct child '
+      + 'to kill only a deeper descendant. A background sub-agent keeps running and its result stays '
+      + 'available until it is actually stopped — this is the only way to end one early other than waiting '
+      + 'it out. Resolves "nothing to stop" rather than erroring when the child already finished.',
+    parameters: Type.Object({
+      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+    }),
+    execute: async (_id, p) => {
+      if (!ctx.stopSubagent) return ok('Error: stopping a sub-agent is not wired up on this server.');
+      try {
+        const { stopped } = await ctx.stopSubagent(String(p.id ?? '').trim());
+        return ok(stopped ? 'Stopped.' : 'Nothing to stop — that sub-agent already finished (or never started).');
+      } catch (e) {
+        return ok(`Error: ${errorText(e)}`);
+      }
+    },
+  }));
+
   // Workflow tools reuse the SAME captured `run` handler and the delegate access primitives, so a
   // workflow node spawns exactly like a delegation (never Orca). `run` is captured lazily on connect;
   // the engine reads it through the getter at execute time.

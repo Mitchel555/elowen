@@ -26,14 +26,18 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
   let continued: { parent: string; child: string; text: string }[];
   let readResult: string | Error;
   let reply: string | Error;
+  let stopped: { parent: string; child: string }[];
+  let stopResult: { stopped: boolean } | Error;
 
   beforeEach(async () => {
     byParent = new Map();
     asked = [];
     read = [];
     continued = [];
+    stopped = [];
     readResult = 'the stored final answer';
     reply = 'the sub-agent answered';
+    stopResult = { stopped: true };
     reg = await loadPlugins({
       dirs: [join(repoRoot, 'plugins')], enabled: ['subagent'], logger: log,
       delegatedChildren: {
@@ -47,6 +51,11 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
           continued.push({ parent, child: childSessionId, text });
           if (reply instanceof Error) throw reply;
           return reply;
+        },
+        stop: async (parent, childSessionId) => {
+          stopped.push({ parent, child: childSessionId });
+          if (stopResult instanceof Error) throw stopResult;
+          return stopResult;
         },
       },
     });
@@ -199,6 +208,40 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       const res = await call('DelegateContinue', { id: 'brain-ch-subagent-x', message: '   ' }, 'brain-1');
       expect(res.content[0]!.text).toMatch(/^Error: /);
       expect(continued).toEqual([]);
+    });
+  });
+
+  describe('DelegateStop', () => {
+    it('stops that child and reports success', async () => {
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-sub-dlg-abc' }, 'brain-1');
+      expect(stopped).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-sub-dlg-abc' }]);
+      expect(res.content[0]!.text).toBe('Stopped.');
+    });
+
+    it('anchors the stop on the CURRENT conversation, never on a caller-supplied parent', async () => {
+      await call('DelegateStop', { id: 'brain-ch-subagent-x' }, 'brain-2');
+      expect(stopped[0]!.parent).toBe('brain-2');
+    });
+
+    it('reports a child that already finished as nothing to stop, not an error', async () => {
+      stopResult = { stopped: false };
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-x' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Nothing to stop/);
+    });
+
+    // A refusal (foreign child, unknown id) has to come back as a readable result the agent can act on,
+    // not as a thrown tool failure — same contract as DelegateRead/DelegateContinue.
+    it('reports a host refusal as an actionable error instead of throwing', async () => {
+      stopResult = new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-someone-elses' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/unknown sub-agent/);
+    });
+
+    it('refuses outside a conversation turn rather than falling back to another parent', async () => {
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-x' });
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(stopped).toEqual([]);
     });
   });
 });

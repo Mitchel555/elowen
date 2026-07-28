@@ -13,6 +13,7 @@
       "DelegateList",
       "DelegateRead",
       "DelegateContinue",
+      "DelegateStop",
       "WorkflowStart",
       "WorkflowAddNodes",
       "WorkflowStatus"
@@ -29,6 +30,7 @@
     "DelegateList": "\ud83d\udccb",
     "DelegateRead": "\ud83d\udcd6",
     "DelegateContinue": "\u2709\ufe0f",
+    "DelegateStop": "\ud83d\uded1",
     "WorkflowStart": "\ud83d\udd00",
     "WorkflowAddNodes": "\u2795",
     "WorkflowStatus": "\ud83d\udcca"

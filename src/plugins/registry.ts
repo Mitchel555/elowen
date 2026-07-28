@@ -354,6 +354,13 @@ export class PluginRegistry {
         }
         return delegatedChildren.continue(parentSessionId, sessionId, text, currentAccess());
       },
+      stopSubagent: (sessionId) => {
+        const parentSessionId = currentSessionId();
+        if (!parentSessionId || !delegatedChildren) {
+          return Promise.reject(new Error('stopping a sub-agent is only available inside a conversation turn'));
+        }
+        return delegatedChildren.stop(parentSessionId, sessionId);
+      },
       currentWorkDir,
       // Reads the turn-bound elicitor off the same AsyncLocalStorage as currentIdentity — no dependency
       // to thread through contextFor. Throws outside an interactive turn (worker/cron sessions wire none).

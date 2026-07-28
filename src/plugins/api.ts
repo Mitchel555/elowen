@@ -21,6 +21,7 @@ export interface DelegatedChildBridge {
     text: string,
     access: { admin: boolean; projectIds: number[]; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean },
   ): Promise<string>;
+  stop(parentSessionId: string, childSessionId: string): Promise<{ stopped: boolean }>;
 }
 
 /** A skill contributed by a plugin. Reuses pi's file-backed `Skill` (name/description/filePath…), so it
@@ -479,6 +480,14 @@ export interface PluginContext {
    *  conversation itself holds. A continuation replays the child's ORIGINAL immutable boundary, narrowed
    *  by the caller's current denies — it can never widen access. */
   continueSubagent(sessionId: string, text: string): Promise<string>;
+  /** Stop a DIRECT sub-agent listed by {@link subagentRuns} — a runaway or no-longer-needed one — without
+   *  touching its parent or siblings. The host anchors the lookup to the current turn's session, exactly
+   *  like {@link readSubagent}; the plugin supplies only the child id and cannot widen the parent scope.
+   *  Stopping a child also tears down whatever it itself delegated (the same recursive teardown a platform
+   *  `/stop` does), so a foreground-blocked middle agent and the grandchild it is stuck on come down
+   *  together. Resolves `{stopped: false}` rather than throwing when the child already finished or never
+   *  started — there is nothing to stop, which is not an error. Throws for an unknown/foreign child. */
+  stopSubagent(sessionId: string): Promise<{ stopped: boolean }>;
   /** The current turn's resolved working directory (the project the CLI was launched in, a channel's
    *  policy root, the daemon's primary project as fallback) — plugins that persist per-PROJECT state
    *  (e.g. a todo checklist) key on this alongside the identity. Undefined outside a prompt turn. */

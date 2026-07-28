@@ -646,6 +646,9 @@ export async function buildApp(opts: BuildOpts) {
         continue: (parentSessionId, childSessionId, text, access) => brain
           ? brain.continueSubagent(parentSessionId, childSessionId, text, access)
           : Promise.reject(new Error('the brain is not available on this deployment')),
+        stop: (parentSessionId, childSessionId) => brain
+          ? brain.stopSubagent(parentSessionId, childSessionId)
+          : Promise.reject(new Error('the brain is not available on this deployment')),
       },
       // ONE answer to "what time is it for this operator", read from the single place they configure it
       // (Settings → Plugins → runtime-context → Timezone) and shared with every plugin that reasons about

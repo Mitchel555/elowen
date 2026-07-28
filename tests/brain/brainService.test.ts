@@ -4998,3 +4998,61 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
     });
   });
 });
+
+// Regression (2026-07-28): a runaway sub-agent could only be stopped by tearing down the WHOLE delegation
+// tree (Esc on the owner conversation) or restarting the daemon — there was no way to end one specific
+// child without collateral damage. `abortTree`'s existing recursive teardown already does the right thing
+// for one channel session; this is just the missing entry point onto it, guarded by the same parent-owns-
+// child check as readSubagent/continueSubagent.
+describe('BrainService.stopSubagent (targeted teardown of one runaway or finished child)', () => {
+  async function seed(child = 'brain-ch-subagent-sub-stop-1') {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId });
+    const abort = vi.fn(async () => undefined);
+    (svc as unknown as { channelService: { abort: unknown } }).channelService.abort = abort;
+    const sessions = (svc as unknown as {
+      sessions: { setChildRunning(parent: string, child: string, running: boolean): void };
+    }).sessions;
+    return { d, svc, sessionId, child, abort, sessions };
+  }
+
+  it('tears down a still-running child via the channel abort tree', async () => {
+    const { svc, sessionId, child, abort, sessions } = await seed();
+    sessions.setChildRunning(sessionId, child, true);
+
+    await expect(svc.stopSubagent(sessionId, child)).resolves.toEqual({ stopped: true });
+    // channelIdOf strips the `brain-ch-` prefix — the same id abortTree's own channel lookup expects.
+    expect(abort).toHaveBeenCalledWith('subagent-sub-stop-1');
+  });
+
+  it('reports nothing to stop for a child that already finished, without calling abort', async () => {
+    const { svc, sessionId, child, abort } = await seed();
+    // Never marked running — the default for a completed (or never-started) delegation.
+
+    await expect(svc.stopSubagent(sessionId, child)).resolves.toEqual({ stopped: false });
+    expect(abort).not.toHaveBeenCalled();
+  });
+
+  it('refuses a sub-agent belonging to a different conversation', async () => {
+    const { d, svc, sessionId, abort } = await seed();
+    d.store.createSession({ id: 'brain-1-sibling-stop', userId: 1, model: 'm' });
+    d.store.createSession({ id: 'brain-ch-subagent-sub-other-stop', userId: 1, model: 'm', parentSessionId: 'brain-1-sibling-stop' });
+
+    await expect(svc.stopSubagent(sessionId, 'brain-ch-subagent-sub-other-stop'))
+      .rejects.toThrow(/unknown sub-agent for this conversation/);
+    expect(abort).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown id and a session that is not a sub-agent at all', async () => {
+    const { d, svc, sessionId, abort } = await seed();
+    d.store.createSession({ id: 'brain-ch-discord-stop', userId: 1, model: 'm', parentSessionId: sessionId });
+
+    await expect(svc.stopSubagent(sessionId, 'brain-ch-subagent-nope-stop'))
+      .rejects.toThrow(/unknown sub-agent for this conversation/);
+    await expect(svc.stopSubagent(sessionId, 'brain-ch-discord-stop'))
+      .rejects.toThrow(/unknown sub-agent for this conversation/);
+    expect(abort).not.toHaveBeenCalled();
+  });
+});

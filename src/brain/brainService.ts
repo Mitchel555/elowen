@@ -1187,6 +1187,23 @@ export class BrainService {
     return text;
   }
 
+  /** Stop a runaway or no-longer-needed DIRECT sub-agent — the targeted counterpart of the whole-tree
+   *  teardown `/stop` already does. Same ownership guard as {@link readSubagent}: the child must belong to
+   *  THIS conversation, so a sibling's or another account's sub-agent is not addressable, and stopping one
+   *  never reaches past it — `ChannelSessionService.abort` recurses into whatever that child itself
+   *  delegated, exactly like a platform `/stop`, so the whole stuck branch (a foreground-blocked middle
+   *  agent together with the grandchild it is blocked on) comes down together. `{stopped: false}` for a
+   *  child that already finished (or never started) is not an error — there is simply nothing to stop. */
+  async stopSubagent(parentSessionId: string, childSessionId: string): Promise<{ stopped: boolean }> {
+    const row = this.d.store.getSession(childSessionId);
+    if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
+      throw new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+    }
+    if (!this.sessions.isActiveChild(childSessionId)) return { stopped: false };
+    await this.channelService.abort(channelIdOf(childSessionId));
+    return { stopped: true };
+  }
+
   /** A delegating TURN continuing one of its own sub-agents: the child picks its transcript back up
    *  (rehydrated from SQLite) and answers this follow-up, whose reply is returned to the caller — the
    *  agent-facing counterpart of the owner's drill-in `sendToSubagent`, which streams to a human instead.
