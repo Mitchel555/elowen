@@ -53,11 +53,13 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
     const bulk = /BULK:(\d+)/.exec(task);
     return bulk ? `done:${task}:${'x'.repeat(Number(bulk[1]))}:CONCLUSION` : `done:${task}`;
   };
+  /** Mutable so a test can call a tool AS one of the workflow's own node sessions. */
+  const sessionId = { current: 'brain-parent' };
   const ctx = {
     registerTool: (def: Tool) => { tools.set(def.name, def); },
     registerControl: (name: string, control: WorkflowControl) => { controls.set(name, control); },
     logger: { info() {}, warn() {} },
-    currentSessionId: () => 'brain-parent',
+    currentSessionId: () => sessionId.current,
     currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
     currentAccess: () => ({ toolPolicy: opts.toolPolicyAllow ? { allow: opts.toolPolicyAllow } : undefined }),
     currentModel: () => ({ provider: 'p', model: 'm' }),
@@ -75,7 +77,7 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
   registerWorkflow(ctx, () => run, helpers);
   /** Everything the node can read, as one string — the chunks are a transport detail, not the content. */
   const contextOf = (task: string) => (contexts.get(task) ?? []).join('\n\n');
-  return { tools, controls, snapshots, launched, contexts, contextOf };
+  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId };
 }
 
 describe('workflow engine', () => {
@@ -749,6 +751,22 @@ describe('WorkflowResume', () => {
     expect(res.content[0]!.text).toMatch(/^Error: workflow .* still running/);
     releaseA();
     await startP;
+  });
+
+  // A node session is authorized for WorkflowAddNodes (self-expansion runs under the boundary the child
+  // already holds), but resume relaunches nodes under the workflow's PARENT access — so a node given a
+  // narrow toolset must not be able to resume siblings and reach work it cannot perform itself.
+  it('refuses a resume from one of the workflow\'s own node sessions', async () => {
+    const { tools, snapshots, sessionId } = harness();
+    await tools.get('WorkflowStart')!.execute('sec1', {
+      nodes: [{ id: 'a', task: 'a' }, { id: 'b', task: 'b FAIL', deps: ['a'] }],
+    });
+    const wfId = snapshots[0]!.id;
+
+    sessionId.current = 's-a'; // the child session that ran node a
+    const res = await tools.get('WorkflowResume')!.execute('sec1-resume', { workflowId: wfId });
+    expect(res.content[0]!.text).toMatch(/^Error: no workflow/);
+    expect(res.content[0]!.text).toMatch(/only be resumed from the conversation that started it/);
   });
 
   it('refuses an unknown workflow id, or one belonging to another conversation', async () => {

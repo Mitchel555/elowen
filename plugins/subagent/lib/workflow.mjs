@@ -538,7 +538,14 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     }),
     execute: async (_id, p) => {
       const wf = authWorkflow(p.workflowId);
-      if (!wf) return ok(`Error: no workflow ${p.workflowId} you can resume — it may have finished too long ago, been evicted from memory, or belong to another conversation.`);
+      // `authWorkflow` also accepts one of the workflow's OWN node sessions. That is right for
+      // WorkflowAddNodes — self-expansion runs under the boundary the child already holds — but wrong
+      // here: resume relaunches nodes under the workflow's PARENT access, so a node deliberately given a
+      // narrow toolset could use it to run sibling work it may not perform itself. Resume is the origin's
+      // to call.
+      if (!wf || ctx.currentSessionId() !== wf.originSessionId) {
+        return ok(`Error: no workflow ${p.workflowId} you can resume — it may have finished too long ago, been evicted from memory, or belong to another conversation. A workflow can only be resumed from the conversation that started it.`);
+      }
       if (!wf.finished) return ok(`Error: workflow ${wf.id} is still running; there is nothing to resume yet.`);
       const unfinished = wf.nodes.filter((n) => wf.state.get(n.id).status !== 'done');
       if (!unfinished.length) return ok(`Error: every node in workflow ${wf.id} already finished; there is nothing to resume.`);
@@ -550,6 +557,11 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       // the ones captured at the original Start are bound to a turn that is long over.
       wf.emit = ctx.workflowEmitter();
       wf.emitCompletion = ctx.workflowCompletionEmitter?.() ?? undefined;
+      // Re-capture the access boundary too. The stored one was taken when the workflow STARTED and may
+      // since have been narrowed — a project revoked, tools disabled, permissions tightened, the
+      // conversation put in plan/read-only mode. Replaying it would let a resume execute authority the
+      // caller no longer holds, which is exactly what delegated continuation refuses to do elsewhere.
+      wf.parentAccess = ctx.currentAccess();
       const completion = runToCompletion(wf).catch((e) => {
         wf.status = 'error';
         wf.finished = true;
