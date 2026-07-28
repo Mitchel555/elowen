@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ToastProvider } from '../../../components/ui/Toast';
 import { createWrapper } from '../../test-utils';
 import { en } from '../../../lib/i18n/dictionaries/en';
@@ -11,11 +11,26 @@ const CONFIG = { brain: { providers: [], agentName: 'Elowen', maxSteps: 20 } };
 // The daemon's /brain/oauth/status returns the full supported type set (OAUTH_BUILTIN); the rendered
 // account rows are derived from these keys, so the mock mirrors the endpoint faithfully.
 const OAUTH = { 'oauth-anthropic': true, 'oauth-openai-codex': false, 'oauth-github-copilot': false, 'oauth-kimi': false };
+const oauthRefetch = vi.fn();
+const rateLimitsRefetch = vi.fn();
+
+// The connect dialog polls /brain/oauth/flow; the poll promise is resolved by hand so a test can land an
+// answer at a chosen moment (notably after the dialog was cancelled). Hoisted because the elowenClient
+// factory runs before this module's body, via the queries import chain.
+const oauthFlowMocks = vi.hoisted(() => {
+  const pending: { resolve: ((flow: { id: string; status: string }) => void) | null } = { resolve: null };
+  return {
+    pending,
+    start: vi.fn(() => Promise.resolve({ id: 'flow-1', status: 'action-required', authUrl: 'https://auth.example/device' })),
+    flow: vi.fn(() => new Promise<{ id: string; status: string }>((resolve) => { pending.resolve = resolve; })),
+  };
+});
 
 vi.mock('../../../lib/queries', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useConfig: () => ({ data: CONFIG }),
-  useBrainOauthStatus: () => ({ data: OAUTH, refetch: vi.fn() }),
+  useBrainOauthStatus: () => ({ data: OAUTH, refetch: oauthRefetch }),
+  useBrainRateLimitsAll: () => ({ data: undefined, refetch: rateLimitsRefetch }),
 }));
 vi.mock('../../../lib/mutations', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -27,7 +42,12 @@ vi.mock('../../../lib/elowenClient', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
-    elowenClient: { ...(actual.elowenClient as object), brainOauthCatalog: vi.fn(() => Promise.resolve({ models: ['claude-opus', 'claude-sonnet'] })) },
+    elowenClient: {
+      ...(actual.elowenClient as object),
+      brainOauthCatalog: vi.fn(() => Promise.resolve({ models: ['claude-opus', 'claude-sonnet'] })),
+      brainOauthStart: oauthFlowMocks.start,
+      brainOauthFlow: oauthFlowMocks.flow,
+    },
   };
 });
 
@@ -35,7 +55,12 @@ import { BrainSection, modelPickerItems } from '../../../modules/settings/BrainS
 
 const renderSection = () => render(<ToastProvider><BrainSection /></ToastProvider>, { wrapper: createWrapper().wrapper });
 
-beforeEach(() => { saveProviders.mockClear(); disconnect.mockClear(); updateConfig.mockClear(); });
+beforeEach(() => {
+  saveProviders.mockClear(); disconnect.mockClear(); updateConfig.mockClear();
+  oauthRefetch.mockClear(); rateLimitsRefetch.mockClear();
+  oauthFlowMocks.start.mockClear(); oauthFlowMocks.flow.mockClear(); oauthFlowMocks.pending.resolve = null;
+});
+afterEach(() => { vi.useRealTimers(); });
 
 describe('BrainSection — OAuth account model picker', () => {
   it('provides shared settings groups for the page-owned settings document', () => {
@@ -78,6 +103,25 @@ describe('BrainSection — OAuth account model picker', () => {
     expect(items.filter((i) => i.id === 'claude-opus')).toEqual([expect.objectContaining({ group: '' })]);
     // A live but unselected model is still offered.
     expect(items.some((i) => i.id === 'claude-sonnet')).toBe(true);
+  });
+
+  it('ignores a connect poll that resolves after the dialog was cancelled', async () => {
+    // Regression: cancelling only cleared the interval, so a poll already in flight still settled the
+    // flow — the cancelled account was reported connected (success toast + usage refetch) seconds later.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderSection();
+    fireEvent.click(screen.getAllByRole('button', { name: en.brain.connect })[0]);
+    await waitFor(() => expect(screen.getByText(en.brain.connectTitle)).toBeInTheDocument());
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(oauthFlowMocks.flow).toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: en.common.cancel }));
+    await act(async () => { oauthFlowMocks.pending.resolve!({ id: 'flow-1', status: 'success' }); });
+
+    expect(rateLimitsRefetch).not.toHaveBeenCalled();
+    expect(screen.queryByText(en.brain.connectedToast)).toBeNull();
+    expect(screen.getByText(en.brain.connectFailed)).toBeInTheDocument();
   });
 
   it('confirms before disconnecting an OAuth account', () => {

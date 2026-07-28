@@ -52,17 +52,22 @@ function OAuthConnectDialog({ flow: initial, onDone }: { flow: OAuthFlowState; o
   const done = useRef(false);
 
   useEffect(() => {
+    // A poll already in flight resolves after the dialog is torn down. Clearing the interval does not
+    // reach it, so that late answer used to settle a flow the user had already cancelled — reporting
+    // the account as connected. The generation flag drops any answer from a retired effect run.
+    let cancelled = false;
     const timer = setInterval(() => {
       void elowenClient.brainOauthFlow(flow.id).then((f) => {
+        if (cancelled || done.current) return;
         setFlow(f);
-        if ((f.status === 'success' || f.status === 'error') && !done.current) {
+        if (f.status === 'success' || f.status === 'error') {
           done.current = true;
           clearInterval(timer);
           onDone(f.status === 'success');
         }
       }).catch(() => {});
     }, 1500);
-    return () => clearInterval(timer);
+    return () => { cancelled = true; clearInterval(timer); };
   }, [flow.id, onDone]);
 
   return (
