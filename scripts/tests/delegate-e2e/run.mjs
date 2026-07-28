@@ -18,6 +18,9 @@
 // No bare sleeps on the turn: every wait is on a stream frame with a hard deadline. Full cleanup in finally.
 // Run with: node scripts/tests/delegate-e2e/run.mjs
 
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { startScriptedModelServer } from './model-server.mjs';
 import { spawnRealDaemon } from '../brain-e2e/spawn-daemon.mjs';
 
@@ -208,15 +211,22 @@ async function scenarioWorkflow() {
   const NODE_PROMPT_SNIPPET = 'one node of a workflow'; // host-injected distinct workflow-node system prompt
   const PARENT_SEND = 'Please run the gather-then-write workflow.';
 
+  // WorkflowStart reads its nodes from a FILE, so the scripted parent writes one first — the same two steps
+  // a real agent takes. The suite's daemon bootstraps an ADMIN, whose access carries no repo roots to be
+  // confined to, so a temp path resolves; a project-scoped session would have to write inside its own repo.
+  const nodesDir = mkdtempSync(join(tmpdir(), 'elowen-delegate-e2e-'));
+  const nodesFile = join(nodesDir, 'gather-write.json');
+  writeFileSync(nodesFile, JSON.stringify({
+    title: 'E2E gather-write',
+    nodes: [
+      { id: 'gather', task: `Gather the inputs and report them. Task marker: ${NODE_A_MARKER}.` },
+      { id: 'write', task: `Write the summary from the gathered inputs. Task marker: ${NODE_B_MARKER}.`, deps: ['gather'] },
+    ],
+  }), 'utf-8');
+
   const model = await startScriptedModelServer({
     toolName: 'WorkflowStart',
-    toolArgs: JSON.stringify({
-      title: 'E2E gather-write',
-      nodes: [
-        { id: 'gather', task: `Gather the inputs and report them. Task marker: ${NODE_A_MARKER}.` },
-        { id: 'write', task: `Write the summary from the gathered inputs. Task marker: ${NODE_B_MARKER}.`, deps: ['gather'] },
-      ],
-    }),
+    toolArgs: JSON.stringify({ nodesFile }),
     parentFirstText: 'Running the workflow. ',
     parentFinalText: `Workflow done: ${NODE_A_ANSWER} then ${NODE_B_ANSWER}.`,
     children: [
@@ -270,6 +280,7 @@ async function scenarioWorkflow() {
   } finally {
     if (daemon) await daemon.stop();
     await model.close();
+    rmSync(nodesDir, { recursive: true, force: true });
   }
 }
 

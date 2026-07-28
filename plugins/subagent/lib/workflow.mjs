@@ -5,6 +5,7 @@
 // parent's clients as `workflow` events on every state change. It does NOT emit `subagent` events, so a
 // workflow node never doubles up in the flat sub-agent panel.
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { validateWorkflowNodes, mergeWorkflowNodes, readyNodeIds } from './dag.mjs';
@@ -62,8 +63,53 @@ const sameParentAccess = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(
 // is pure display, so decoding is always what the model meant; surrogate pairs recombine naturally.
 const decodeUnicodeEscapes = (s) =>
   (s.includes('\\u') ? s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))) : s);
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+const nodeLabel = (raw, index) => {
+  const id = isRecord(raw) && typeof raw.id === 'string' ? raw.id.trim() : '';
+  return `node ${index + 1}${id ? ` ("${id}")` : ''}`;
+};
 
-// The node-declaration shape shared by WorkflowStart and WorkflowAddNodes.
+/** Add file location to node-validation errors without creating a second set of node rules. The DAG
+ *  validator remains the only authority that accepts or rejects nodes; this only turns its first failure
+ *  into a location and repair instruction the caller can act on in the source file. */
+const actionableNodeError = (rawNodes, error) => {
+  if (error === 'a workflow needs at least one node') {
+    return 'field "nodes" is empty; add at least one node object with required fields "id" and "task"';
+  }
+  if (error === 'each node must be an object') {
+    const index = rawNodes.findIndex((node) => !isRecord(node));
+    return `${nodeLabel(rawNodes[index], index)}: must be an object with required fields "id" and "task"; replace this value with a node object`;
+  }
+  if (error === 'each node needs a non-empty string id') {
+    const index = rawNodes.findIndex((node) => !isRecord(node)
+      || typeof node.id !== 'string' || !node.id.trim());
+    const raw = rawNodes[index];
+    const issue = isRecord(raw) && !hasOwn(raw, 'id')
+      ? 'missing required field "id"'
+      : 'field "id" must be a non-empty string';
+    return `${nodeLabel(raw, index)}: ${issue}; add a unique non-empty string "id" to this node`;
+  }
+  for (let index = 0; index < rawNodes.length; index += 1) {
+    const raw = rawNodes[index];
+    if (!isRecord(raw) || typeof raw.id !== 'string') continue;
+    const id = raw.id.trim();
+    if (error === `node "${id}" needs a non-empty task`) {
+      const issue = !hasOwn(raw, 'task')
+        ? 'missing required field "task"'
+        : 'field "task" must be a non-empty string';
+      return `${nodeLabel(raw, index)}: ${issue}; add a complete, non-empty string "task" to this node`;
+    }
+    if (error.startsWith(`node "${id}" `)) {
+      return `${nodeLabel(raw, index)}: ${error.slice(`node "${id}" `.length)}; fix this node in the workflow file`;
+    }
+  }
+  return `${error}; fix the workflow definition in the file`;
+};
+
+// The node-declaration shape WorkflowAddNodes takes inline. WorkflowStart reads the same shape out of its
+// JSON file, where it is validated by validateWorkflowNodes rather than by this schema — one set of rules,
+// two ways in.
 const NODE_SHAPE = Type.Object({
   id: Type.String({ description: 'Short unique id for this node (referenced by other nodes\' deps).' }),
   task: Type.String({ description: 'The complete, self-contained instruction for this node\'s sub-agent — it cannot see the conversation.' }),
@@ -514,25 +560,54 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   ctx.registerTool(defineTool({
     name: 'WorkflowStart', label: 'Run a workflow',
     description: [
-      'Run a DAG of sub-agents: you declare nodes (each a self-contained task) and their dependencies, and the engine executes them as dependencies clear — independent nodes run in parallel, dependents wait for what they need. Each node is a fresh sub-agent that inherits your access; it cannot see this conversation, so every task must be complete and standalone.',
-      'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. For a set of fully independent tasks, plain parallel delegate calls are simpler.',
-      'A node is given the results of the nodes it depends on as context, so a later task can refer to "your dependency results" instead of repeating the work or being told it twice.',
-      'By default the call BLOCKS and returns a summary of every node\'s result once the whole workflow finishes. Set background=true to return a handle immediately and have the summary delivered to you in a NEW turn when the DAG finishes — do other work meanwhile, then end your turn. A node whose dependency failed is reported as skipped. Give each node a short unique id and list its dependency ids in deps. Use read_only/tools/model per node exactly as with delegate — you can only ever narrow your own access.',
-      'If the result names failed or skipped nodes and the workflow is still held in memory (same daemon, not too long ago), use WorkflowResume instead of starting over — it re-runs only what did not finish and leaves every already-done node exactly as it is.',
+      'Run a DAG of sub-agents whose complete definition lives in a JSON file. Before calling this tool, use Write to create the file inside an accessible repository, then pass its path as nodesFile. Do not pass nodes inline.',
+      'The file may contain either a JSON array of node objects, or an object shaped as { title?, context?, nodes: [...], background? }. Explicit title, context, or background tool arguments override the corresponding values from the file, so one file can be reused as a template.',
+      'Each node requires a short unique string id and a complete self-contained string task. Optional fields are deps (node ids that must finish first), model, read_only, tools, and subagent_type. At least one node must have no deps. Each node is a fresh sub-agent that cannot see this conversation; put everything it needs in task or shared context.',
+      'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. Independent nodes run in parallel, and a dependent receives its dependencies\' results as context. For fully independent tasks, plain parallel delegate calls are simpler.',
+      'By default the call BLOCKS and returns every node\'s result. Set background=true (in the file or as an explicit argument) to return a handle immediately and receive the summary in a NEW turn. A node whose dependency failed is reported as skipped.',
+      'If the result names failed or skipped nodes and the workflow is still held in memory, use WorkflowResume instead of starting over — it re-runs only unfinished nodes and leaves every completed node unchanged.',
     ].join(' '),
     parameters: Type.Object({
-      title: Type.Optional(Type.String({ description: 'Human label for the workflow, shown in the CLI panel: AT MOST 4 WORDS, in the user\'s language, no trailing punctuation (the UI appends an ellipsis).' })),
-      context: Type.Optional(Type.String({ description: 'Background shared by ALL nodes (added to each node\'s cache-friendly system prefix) — findings, conventions, ids they would otherwise re-derive.' })),
-      nodes: Type.Array(NODE_SHAPE, { description: 'The workflow nodes. At least one must have no deps (a root).' }),
-      background: Type.Optional(Type.Boolean({ description: 'Start asynchronously and return a handle immediately; the summary is delivered to you in a NEW turn when the workflow finishes. Omit or false to wait for the result.' })),
+      nodesFile: Type.String({ description: 'Path to the JSON workflow definition. First create it with Write inside an accessible repository; pass either a node array or { title?, context?, nodes, background? }.' }),
+      title: Type.Optional(Type.String({ description: 'Override the file\'s title. Human label shown in the CLI panel: AT MOST 4 WORDS, in the user\'s language, no trailing punctuation (the UI appends an ellipsis).' })),
+      context: Type.Optional(Type.String({ description: 'Override the file\'s context. Background shared by ALL nodes (added to each node\'s cache-friendly system prefix).' })),
+      background: Type.Optional(Type.Boolean({ description: 'Override the file\'s background setting. True starts asynchronously and delivers the summary in a NEW turn; false blocks until completion.' })),
     }),
     execute: async (toolCallId, p) => {
       if (!getRun()) return ok('Error: workflows are not wired up on this server.');
       const originSessionId = ctx.currentSessionId();
       const originPrincipal = principalOf(ctx.currentIdentity());
       if (!originSessionId || !originPrincipal) return ok('Error: workflows run only inside an authenticated conversation.');
-      const { nodes, error } = validateWorkflowNodes(p.nodes);
-      if (error) return ok(`Error: ${error}`);
+      let source;
+      try {
+        const path = ctx.assertPathAllowed(p.nodesFile);
+        source = JSON.parse(readFileSync(path, 'utf8'));
+      } catch (e) {
+        const message = errorText(e);
+        if (e instanceof SyntaxError) {
+          return ok(`Error: workflow file "${p.nodesFile}" contains invalid JSON (${message}). Fix the JSON syntax in the file, then call WorkflowStart again.`);
+        }
+        return ok(`Error: cannot read workflow file "${p.nodesFile}": ${message}. Create or correct the file inside an accessible repository, then call WorkflowStart again.`);
+      }
+      let rawNodes;
+      let fileOptions = {};
+      if (Array.isArray(source)) rawNodes = source;
+      else if (isRecord(source) && Array.isArray(source.nodes)) {
+        rawNodes = source.nodes;
+        fileOptions = source;
+      } else {
+        return ok(`Error: workflow file "${p.nodesFile}" must contain a JSON array of nodes or an object with a "nodes" array. Rewrite the file in one of those two forms, then call WorkflowStart again.`);
+      }
+      for (const [field, type] of [['title', 'string'], ['context', 'string'], ['background', 'boolean']]) {
+        if (fileOptions[field] !== undefined && typeof fileOptions[field] !== type) {
+          return ok(`Error: workflow file "${p.nodesFile}" field "${field}" must be a ${type}. Fix or remove that field, then call WorkflowStart again.`);
+        }
+      }
+      const { nodes, error } = validateWorkflowNodes(rawNodes);
+      if (error) return ok(`Error: workflow file "${p.nodesFile}": ${actionableNodeError(rawNodes, error)}.`);
+      const title = p.title !== undefined ? p.title : fileOptions.title;
+      const context = p.context !== undefined ? p.context : fileOptions.context;
+      const background = p.background !== undefined ? p.background : fileOptions.background;
       pruneWorkflows();
       // Only UNFINISHED workflows compete for the slot — a finished one sitting in memory for retention
       // is not "running" and must never block a new start (that was the bug: 16 quickly-finished
@@ -547,7 +622,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         // THIS call — the origin's WorkflowStart. Every snapshot names it, so the host can persist the
         // DAG against the transcript row this call produced (mirrors delegate's `toolCallId`).
         toolCallId,
-        title: typeof p.title === 'string' ? decodeUnicodeEscapes(p.title.trim()).slice(0, 200) || undefined : undefined,
+        title: typeof title === 'string' ? decodeUnicodeEscapes(title.trim()).slice(0, 200) || undefined : undefined,
         status: 'running',
         nodes,
         state: new Map(nodes.map((n) => [n.id, freshNodeState()])),
@@ -557,7 +632,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         // the SAME project the workflow was launched in, never the daemon's `/`.
         parentCwd: ctx.currentWorkDir?.(),
         emit: ctx.workflowEmitter(),
-        sharedContext: typeof p.context === 'string' && p.context.trim() ? p.context.trim() : undefined,
+        sharedContext: typeof context === 'string' && context.trim() ? context.trim() : undefined,
         originSessionId,
         originPrincipal,
         childSessions: new Set(),
@@ -565,7 +640,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         finishedAt: undefined,
         resolveDone: undefined,
         // A detach (Ctrl+B) or explicit background flips this on; foreground and background share ONE run.
-        background: p.background === true,
+        background: background === true,
         emitCompletion,
         resolveDetached: undefined,
       };
@@ -581,7 +656,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
 
       // Foreground blocks on the DAG but lets Ctrl+B detach the wait; background returns the handle right
       // away — driveResult is the shared tail WorkflowResume reuses so both behave identically.
-      return driveResult(wf, completion, p.background === true);
+      return driveResult(wf, completion, background === true);
     },
   }));
 

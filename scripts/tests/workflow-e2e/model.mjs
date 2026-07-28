@@ -20,6 +20,21 @@
 // runner fails loudly.
 
 import { createServer } from 'node:http';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/** WorkflowStart reads its node definitions from a FILE, so the scripted parent writes one before calling
+ *  the tool — the same two steps a real agent takes. The suite's daemon bootstraps an ADMIN, whose access
+ *  carries no repo roots to be confined to, so a temp path resolves; a project-scoped session would have to
+ *  write inside its own repository (see assertPathAllowed). */
+const nodesDir = mkdtempSync(join(tmpdir(), 'elowen-wf-e2e-'));
+let nodesFileSeq = 0;
+const nodesFile = (nodes) => {
+  const path = join(nodesDir, `nodes-${nodesFileSeq += 1}.json`);
+  writeFileSync(path, JSON.stringify(nodes), 'utf-8');
+  return path;
+};
 
 /** The host-injected role prompt every delegated child carries — a workflow node's prompt opens with the
  *  same words ('You are a focused sub-agent running one node of a workflow'), so this one substring tells
@@ -132,23 +147,23 @@ const PARENT_MODES = {
     ? say(`The diamond workflow finished. ${MARKERS.diamondDone}`)
     : callTool('WorkflowStart', {
       title: 'Diamond order',
-      nodes: [
+      nodesFile: nodesFile([
         { id: 'a', task: `Produce the seed value. Task marker: ${nodeTask('a')}.` },
         { id: 'b', task: `Analyse the left branch. Task marker: ${nodeTask('b')}.`, deps: ['a'] },
         { id: 'c', task: `Analyse the right branch. Task marker: ${nodeTask('c')}.`, deps: ['a'] },
         { id: 'd', task: `Combine both branches. Task marker: ${nodeTask('d')}.`, deps: ['b', 'c'] },
-      ],
+      ]),
     })),
   // C: a failing node must leave its dependent unrun, and the summary must name it.
   failing: ({ say, callTool, awaitingTool }) => (awaitingTool
     ? say(`The probe workflow stopped. ${MARKERS.failingDone}`)
     : callTool('WorkflowStart', {
       title: 'Probe retry',
-      nodes: [
+      nodesFile: nodesFile([
         { id: 'seed', task: `Collect the fixture. Task marker: ${nodeTask('seed')}.` },
         { id: 'probe', task: `Probe the fixture. Task marker: ${nodeTask('probe')}.`, deps: ['seed'] },
         { id: 'report', task: `Write up the probe. Task marker: ${nodeTask('report')}.`, deps: ['probe'] },
-      ],
+      ]),
     })),
   // D: resume the workflow the user just named. The id arrives in the user message because that is where a
   // real operator gets it from — the live workflow panel the runner is subscribed to (see run.mjs).
@@ -180,7 +195,7 @@ const PARENT_MODES = {
       : callTool('WorkflowStart', {
         title: 'Background solo',
         background: true,
-        nodes: [{ id: BG_NODE, task: `Run the standalone check. Task marker: ${nodeTask(BG_NODE)}.` }],
+        nodesFile: nodesFile([{ id: BG_NODE, task: `Run the standalone check. Task marker: ${nodeTask(BG_NODE)}.` }]),
       });
   },
   // F: delegate a child that never answers, find its session id, and stop it. Every step reads the tool
@@ -350,6 +365,9 @@ export async function startScriptedModel() {
     setMode: (m) => { mode = m; },
     // Teardown safety valve: any hanging child still held here is let go, so `close()` cannot block.
     releaseHangs: () => releaseHang(),
-    close: () => new Promise((resolve) => { releaseHang(); server.close(() => resolve()); }),
+    close: () => new Promise((resolve) => {
+      releaseHang();
+      server.close(() => { rmSync(nodesDir, { recursive: true, force: true }); resolve(); });
+    }),
   };
 }
