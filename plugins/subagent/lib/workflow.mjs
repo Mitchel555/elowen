@@ -75,7 +75,15 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
    *  restart, and its node child sessions persist on their own. */
   const workflows = new Map();
 
-  const freshNodeState = () => ({ status: 'pending', sessionId: '', tools: 0, detail: undefined, tokens: undefined, seconds: undefined, model: undefined, startedAt: undefined, result: undefined, error: undefined });
+  const freshNodeState = () => ({ status: 'pending', sessionId: '', channelId: '', resumed: false, tools: 0, detail: undefined, tokens: undefined, seconds: undefined, model: undefined, startedAt: undefined, result: undefined, error: undefined });
+
+  /** Appended to a node's task when a resume puts it back into the conversation it already worked in. It has
+   *  to read sensibly BOTH ways: the child session usually survives (the node reads its own prior work and
+   *  carries on), but if it was rolled over or lost the very same text still describes a clean start. That is
+   *  why resume never has to prove the session is alive — the instruction degrades on its own. */
+  const RESUME_NOTE = 'Note: an earlier attempt at this node was interrupted before it could finish. If this '
+    + 'conversation already holds work you did on this task, continue from where you stopped instead of '
+    + 'starting over — re-check anything you had not verified. If it holds nothing, just start from the top.';
 
   const statusMap = (wf) => {
     const map = {};
@@ -282,9 +290,13 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       // which is exactly when you most want to see what is actually running.
       ns.model = access.model ? `${access.model.provider}/${access.model.model}` : undefined;
       snapshot(wf);
-      const channelId = `wf-${wf.id}-${node.id}-${randomUUID()}`;
+      // A node's child session is keyed by this channel id (channelSessionId derives one from the other), so
+      // reusing the id on a resume drops the retry back into the SAME conversation — transcript intact,
+      // nothing to rehydrate. A first run mints a fresh one.
+      const channelId = ns.channelId || `wf-${wf.id}-${node.id}-${randomUUID()}`;
+      ns.channelId = channelId;
       const collectSource = { platform: 'subagent', userId: 'subagent', roleIds: [], channelId, access };
-      const raw = await getRun()(collectSource, node.task, onEvent);
+      const raw = await getRun()(collectSource, ns.resumed ? `${node.task}\n\n${RESUME_NOTE}` : node.task, onEvent);
       const reply = raw || '(the node returned nothing)';
       if (reply.startsWith('Error:')) { ns.status = 'error'; ns.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_RESULT_CHARS); }
       // The node's answer reaches the parent through `summarize` and its dependents through the blocks above:
@@ -526,7 +538,10 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       + 'failed or skipped nodes, or one you had to interrupt. Nodes that already finished (DONE) are left '
       + 'exactly as they are and are NOT re-run; their results still feed the nodes that depend on them, '
       + 'exactly as in the original run. Everything else (ERROR, or PENDING because a dependency failed) is '
-      + 'reset and retried. Behaves exactly like WorkflowStart otherwise — same blocking/background choice, '
+      + 'retried — and a node that had already STARTED resumes inside its own child session, so it still sees '
+      + 'the work it did before the interruption and is told to carry on from there rather than repeat it. A '
+      + 'node that never launched has no session to resume into and starts clean. '
+      + 'Behaves exactly like WorkflowStart otherwise — same blocking/background choice, '
       + 'same live snapshot, same final summary — because it IS the same run continuing.\n\n'
       + 'This only works while the workflow is still held in memory on this daemon: a workflow older than an '
       + 'hour, or evicted because too many others ran since, or from before a daemon restart, cannot be '
@@ -549,7 +564,16 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       if (!wf.finished) return ok(`Error: workflow ${wf.id} is still running; there is nothing to resume yet.`);
       const unfinished = wf.nodes.filter((n) => wf.state.get(n.id).status !== 'done');
       if (!unfinished.length) return ok(`Error: every node in workflow ${wf.id} already finished; there is nothing to resume.`);
-      for (const n of unfinished) wf.state.set(n.id, freshNodeState());
+      // Reset the run-scoped fields, but carry the channel id of a node that ACTUALLY RAN across: that is
+      // what lets it resume inside its own session instead of repeating work it already did. A node holds a
+      // session only once it started, so a PENDING one (never launched, or skipped because a dependency
+      // failed) keeps a clean slate and starts from nothing, exactly as before.
+      for (const n of unfinished) {
+        const prev = wf.state.get(n.id);
+        const next = freshNodeState();
+        if (prev?.sessionId && prev.channelId) { next.channelId = prev.channelId; next.resumed = true; }
+        wf.state.set(n.id, next);
+      }
       if (typeof p.background === 'boolean') wf.background = p.background;
       wf.finished = false;
       wf.finishedAt = undefined;

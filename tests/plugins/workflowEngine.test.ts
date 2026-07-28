@@ -35,8 +35,16 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
   // A resume test needs a node that fails its FIRST run and succeeds on retry — real recovery, not a
   // second guaranteed failure. FAIL_ONCE tracks attempts per exact task string.
   const attempts = new Map<string, number>();
-  const run = async (source: { access?: { context?: string[] } }, task: string, onEvent: (e: unknown) => void) => {
+  /** Every launch as the host saw it: which channel the node ran in, and the VERBATIM task it received.
+   *  A resume is only real if the channel id repeats — that is what puts the retry back in the same session. */
+  const runs: { task: string; channelId: string; fullTask: string }[] = [];
+  const run = async (source: { access?: { context?: string[] }; channelId?: string }, fullTask: string, onEvent: (e: unknown) => void) => {
+    // A resumed node is handed its task plus a trailing resume note. Everything keyed by identity here
+    // (launch order, session id, FAIL_ONCE attempts) must key on the TASK, or a retry would read as a
+    // different node and FAIL_ONCE would fail forever.
+    const task = fullTask.split('\n\nNote: an earlier attempt')[0]!;
     launched.push(task);
+    runs.push({ task, channelId: source.channelId ?? '', fullTask });
     contexts.set(task, source.access?.context ?? []);
     onEvent({ type: 'session', sessionId: `s-${task}` });
     onEvent({ type: 'tool', name: 'Read' });
@@ -77,7 +85,7 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
   registerWorkflow(ctx, () => run, helpers);
   /** Everything the node can read, as one string — the chunks are a transport detail, not the content. */
   const contextOf = (task: string) => (contexts.get(task) ?? []).join('\n\n');
-  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId };
+  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, runs };
 }
 
 describe('workflow engine', () => {
@@ -728,6 +736,32 @@ describe('WorkflowResume', () => {
     expect(text).toContain('done:c'); // c finally ran, freed once b succeeded on retry
     // a must NOT be relaunched; b FAIL_ONCE runs exactly twice (its original failure + the retry); c once.
     expect(launched).toEqual(['a', 'b FAIL_ONCE', 'b FAIL_ONCE', 'c']);
+  });
+
+  it('puts a failed node back into its own session, and starts a never-launched one clean', async () => {
+    const { tools, snapshots, runs } = harness();
+    await tools.get('WorkflowStart')!.execute('r5', {
+      nodes: [
+        { id: 'a', task: 'a FAIL_ONCE' },
+        { id: 'b', task: 'b', deps: ['a'] },
+      ],
+    });
+    const wfId = snapshots[0]!.id;
+    const firstA = runs.find((r) => r.task === 'a FAIL_ONCE')!;
+
+    await tools.get('WorkflowResume')!.execute('r5-resume', { workflowId: wfId });
+
+    // `a` ran and failed: it owns a session, so the retry reuses its channel — same conversation, its own
+    // earlier work still visible — and is told to carry on rather than redo everything.
+    const retryA = runs.filter((r) => r.task === 'a FAIL_ONCE')[1]!;
+    expect(retryA.channelId).toBe(firstA.channelId);
+    expect(retryA.fullTask).toContain('continue from where you stopped');
+
+    // `b` never launched (blocked by a's failure), so it has no session to resume into: fresh channel, and
+    // no resume note, which would be nonsense in an empty conversation.
+    const runB = runs.find((r) => r.task === 'b')!;
+    expect(runB.channelId).not.toBe(firstA.channelId);
+    expect(runB.fullTask).toBe('b');
   });
 
   it('reports nothing to resume once every node has already finished', async () => {
