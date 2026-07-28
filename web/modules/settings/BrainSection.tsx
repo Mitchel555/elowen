@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { BrainCircuit, Plus, Pencil, Trash2, KeyRound, Link2, Unlink, ExternalLink, Check, ListChecks, SlidersHorizontal, Gauge, EyeOff } from 'lucide-react';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
@@ -43,37 +43,47 @@ type Draft = { id: string; label: string; type: BrainProviderType; baseUrl: stri
 const emptyDraft = (): Draft => ({ id: '', label: '', type: 'openai', baseUrl: '', models: '', apiKey: '', api: '', temperature: '' });
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
 
+/** How a connect dialog ended. Cancelling is a deliberate user action, not a failure, so it stays
+ *  distinct from the flow reporting an error — otherwise closing the dialog raises an error toast. */
+type OAuthConnectResult = 'success' | 'error' | 'cancelled';
+
 /** Connect dialog: shows the provider's auth URL (+ device code), collects the pasted code when the
  *  flow asks for one, and polls the flow until it settles. */
-function OAuthConnectDialog({ flow: initial, onDone }: { flow: OAuthFlowState; onDone: (ok: boolean) => void }) {
+function OAuthConnectDialog({ flow: initial, onDone }: { flow: OAuthFlowState; onDone: (result: OAuthConnectResult) => void }) {
   const { t } = useTranslation();
   const [flow, setFlow] = useState(initial);
   const [code, setCode] = useState('');
-  const done = useRef(false);
+  const titleId = useId();
 
   useEffect(() => {
-    // A poll already in flight resolves after the dialog is torn down. Clearing the interval does not
+    // A poll already in flight resolves after the dialog is torn down. Clearing the timer does not
     // reach it, so that late answer used to settle a flow the user had already cancelled — reporting
     // the account as connected. The generation flag drops any answer from a retired effect run.
+    // The next poll is scheduled only once the previous one answered: on a fixed interval a slow poll
+    // is still in flight when the next fires, and its late answer would push the dialog back to a
+    // state the flow has already left.
     let cancelled = false;
-    const timer = setInterval(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = () => {
       void elowenClient.brainOauthFlow(flow.id).then((f) => {
-        if (cancelled || done.current) return;
+        if (cancelled) return;
         setFlow(f);
         if (f.status === 'success' || f.status === 'error') {
-          done.current = true;
-          clearInterval(timer);
-          onDone(f.status === 'success');
+          cancelled = true;
+          onDone(f.status);
+          return;
         }
-      }).catch(() => {});
-    }, 1500);
-    return () => { cancelled = true; clearInterval(timer); };
+        timer = setTimeout(poll, 1500);
+      }).catch(() => { if (!cancelled) timer = setTimeout(poll, 1500); });
+    };
+    timer = setTimeout(poll, 1500);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [flow.id, onDone]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <div className="flex w-full max-w-md flex-col gap-4 rounded-lg border border-border bg-surface p-5">
-        <span className="flex items-center gap-2 text-sm font-semibold text-text"><Link2 size={15} aria-hidden />{t.brain.connectTitle}</span>
+        <span id={titleId} className="flex items-center gap-2 text-sm font-semibold text-text"><Link2 size={15} aria-hidden />{t.brain.connectTitle}</span>
         {flow.authUrl ? (
           <a href={flow.authUrl} target="_blank" rel="noreferrer" className="flex items-center gap-2 break-all rounded-md border border-accent/40 bg-accent/10 p-3 text-xs text-accent hover:bg-accent/20">
             <ExternalLink size={14} className="shrink-0" aria-hidden />{flow.authUrl}
@@ -90,7 +100,7 @@ function OAuthConnectDialog({ flow: initial, onDone }: { flow: OAuthFlowState; o
           </form>
         ) : flow.status === 'action-required' ? <p className="text-xs italic text-text-muted">{t.brain.connectWaiting}</p> : null}
         <div className="flex justify-end">
-          <Button variant="ghost" onClick={() => onDone(false)}>{t.common.cancel}</Button>
+          <Button variant="ghost" onClick={() => onDone('cancelled')}>{t.common.cancel}</Button>
         </div>
       </div>
     </div>
@@ -150,6 +160,7 @@ function ProviderModal({ draft: initial, existingIds, onSave, onClose }: {
 }) {
   const { t } = useTranslation();
   const [d, setD] = useState(initial);
+  const titleId = useId();
   const isNew = !initial.id;
   const id = isNew ? slug(d.label) : d.id;
   const idTaken = isNew && existingIds.includes(id);
@@ -164,20 +175,24 @@ function ProviderModal({ draft: initial, existingIds, onSave, onClose }: {
   useEffect(() => {
     if (d.type !== 'openai' || !d.baseUrl.trim()) { setProbed(null); return; }
     setProbed('loading');
+    // Clearing the debounce timer does not reach a probe that already left: a slow answer for the
+    // previous endpoint can land after the current one and show a catalog belonging to a URL the
+    // operator has since edited away. The generation flag drops any answer from a retired effect run.
+    let cancelled = false;
     const timer = setTimeout(() => {
       void elowenClient.brainProviderProbe({ baseUrl: d.baseUrl.trim(), ...(d.apiKey.trim() ? { apiKey: d.apiKey.trim() } : {}), ...(isNew ? {} : { id: d.id }) })
-        .then((r) => setProbed(r.models.length > 0 ? r.models : null))
-        .catch(() => setProbed(null));
+        .then((r) => { if (!cancelled) setProbed(r.models.length > 0 ? r.models : null); })
+        .catch(() => { if (!cancelled) setProbed(null); });
     }, 600);
-    return () => clearTimeout(timer);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [d.type, d.baseUrl, d.apiKey, d.id, isNew]);
   const selectedModels = d.models.split('\n').map((m) => m.trim()).filter(Boolean);
   const [modelsOpen, setModelsOpen] = useState(false);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <div className="flex w-full max-w-lg flex-col gap-4 rounded-lg border border-border bg-surface p-5">
-        <span className="text-sm font-semibold text-text">{isNew ? t.brain.addProvider : t.brain.editProvider}</span>
+        <span id={titleId} className="text-sm font-semibold text-text">{isNew ? t.brain.addProvider : t.brain.editProvider}</span>
         <Field label={t.brain.providerLabel}>
           <Input value={d.label} onChange={(e) => setD({ ...d, label: e.target.value })} placeholder="CoreSynth Proxy" />
           {isNew && id ? <p className="mt-1 font-mono text-tiny text-text-muted">id: {id}{idTaken ? ` — ${t.brain.idTaken}` : ''}</p> : null}
@@ -556,12 +571,15 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
       {flow ? (
         <OAuthConnectDialog
           flow={flow}
-          onDone={(ok) => {
+          onDone={(result) => {
             setFlow(null);
             void oauth.refetch();
             // A fresh connect must surface the account's usage rail now, not on the next 20s poll tick.
-            if (ok) void rateLimits.refetch();
-            toast(ok ? t.brain.connectedToast : t.brain.connectFailed, ok ? undefined : 'error');
+            if (result === 'success') void rateLimits.refetch();
+            // Cancelling is what the operator asked for, so it gets no toast at all — only a flow that
+            // actually settled reports an outcome.
+            if (result === 'success') toast(t.brain.connectedToast);
+            else if (result === 'error') toast(t.brain.connectFailed, 'error');
           }}
         />
       ) : null}
