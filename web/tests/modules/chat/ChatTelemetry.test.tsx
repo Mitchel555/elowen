@@ -148,6 +148,39 @@ describe('chat telemetry panel', () => {
     expect(live).not.toContain('21%'); // genuinely replaced, not rendered alongside the stale figure
   });
 
+  // Usage has several writers: the ordered live stream, and REST snapshots that can land LATE. A slow
+  // /brain/status response sampled BEFORE a step frame must not commit afterwards and roll the rail back
+  // to a stale figure that nothing corrects until the next round-trip.
+  it('does not let a slow status snapshot overwrite a newer step frame', async () => {
+    let releaseStatus!: () => void;
+    const held = new Promise<void>((r) => { releaseStatus = r; });
+    let calls = 0;
+    server.use(http.get('*/api/brain/status', async () => {
+      calls += 1;
+      if (calls === 1) return HttpResponse.json(STATUS); // connect hydration must complete, or no stream exists
+      await held; // sampled now, delivered only after the step frame below
+      return HttpResponse.json(STATUS); // the OLD 21% figure
+    }));
+
+    setViewport(false);
+    renderChat(<ChatView />);
+    await screen.findByTestId('telemetry-context');
+
+    // A session-event triggers the snapshot refetch that will land late.
+    FakeES.instances[0]!.emit('session-event', { type: 'session-event', kind: 'cwd', detail: '/tmp' });
+
+    FakeES.instances[0]!.emit('step', {
+      type: 'step', step: 2, maxSteps: 25,
+      usage: { tokens: 120_000, contextWindow: 200_000, percent: 60, totalTokens: 130_000, cost: 3.5 },
+    });
+    await waitFor(() => expect(screen.getByTestId('telemetry-context').textContent).toContain('60%'));
+
+    releaseStatus();
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    // The late snapshot is discarded: the stream moved on while it was in flight.
+    expect(screen.getByTestId('telemetry-context').textContent).toContain('60%');
+  });
+
   it('ignores a step frame that carries no usage, leaving the last known numbers standing', async () => {
     setViewport(false);
     renderChat(<ChatView />);

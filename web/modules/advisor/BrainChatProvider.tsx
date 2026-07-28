@@ -224,7 +224,22 @@ function useBrainChatController(): BrainChatValue {
   const historyEpochRef = useRef(0);
   const [input, setInput] = useState('');
   const [ready, setReady] = useState(false);
-  const [usage, setUsage] = useState<BrainUsage | null>(null);
+  const [usage, setUsageState] = useState<BrainUsage | null>(null);
+  // Usage now has several writers: the live stream (`step`, `idle`) and a handful of REST snapshots
+  // (connect, a settled sub-agent, session-event, the stats modal). The stream is authoritative and
+  // ordered; a REST snapshot is a point-in-time read that can land LATE and undo it — the server samples
+  // it, then a newer step/idle arrives, then the slow response commits an older number that nothing
+  // corrects until the next round-trip. The connect `generation` guard does not catch this: these
+  // refetches keep the same generation, and a rollover deliberately does not bump it either.
+  // So stamp every stream write and let a REST write commit only if no stream write beat it — the same
+  // shape as historyEpochRef above, applied to usage.
+  const usageStampRef = useRef(0);
+  /** Commit a usage value from the LIVE STREAM — always wins, and fences any REST read still in flight. */
+  const setUsage = (u: BrainUsage | null): void => { usageStampRef.current += 1; setUsageState(u); };
+  /** Commit a usage value from a REST snapshot, but only if the stream has not moved since `stamp`. */
+  const setUsageIfFresh = (u: BrainUsage | null, stamp: number): void => {
+    if (stamp === usageStampRef.current) setUsageState(u);
+  };
   const [telemetry, setTelemetry] = useState<BrainTelemetry>(EMPTY_TELEMETRY);
   const [goal, setGoal] = useState<BrainGoal | null>(null);
   const [lineCfg, setLineCfg] = useState<StatuslineConfig | null>(null);
@@ -516,7 +531,8 @@ function useBrainChatController(): BrainChatValue {
       applyEvent({ type: 'subagent', ...s });
       // The child usage is persisted before its terminal progress event. Refresh the parent status now
       // so the session price includes delegated work immediately, not only after the next parent turn.
-      if (s.status !== 'running') void elowenClient.brainStatus(boundSessionRef.current).then((status) => { if (generation === genRef.current) setUsage(status.usage); }).catch(() => { /* best-effort */ });
+      // Fenced against the live stream: this read can settle after a newer step/idle and must not undo it.
+      if (s.status !== 'running') { const stamp = usageStampRef.current; void elowenClient.brainStatus(boundSessionRef.current).then((status) => { if (generation === genRef.current) setUsageIfFresh(status.usage, stamp); }).catch(() => { /* best-effort */ }); }
     });
     // Whole-DAG snapshot of a running workflow. Folded onto its WorkflowStart tool row (like `subagent`),
     // which is also what makes it durable — history carries the same attachment after a reload.
@@ -568,8 +584,9 @@ function useBrainChatController(): BrainChatValue {
     // reconnecting — this is exactly what keeps every attached client on one stream through a model switch.
     onFrame('session-event', () => {
       void loadHistory(genRef.current).catch(() => { /* transcript refetch is best-effort */ });
+      const stamp = usageStampRef.current; // usage is fenced against the stream; the rest is snapshot-only data
       void elowenClient.brainStatus(boundSessionRef.current)
-        .then((st) => { if (generation === genRef.current) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); } })
+        .then((st) => { if (generation === genRef.current) { setUsageIfFresh(st.usage, stamp); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); } })
         .catch(() => { /* status refresh is best-effort */ });
     });
     onFrame('diff', (e) => {
@@ -810,8 +827,9 @@ function useBrainChatController(): BrainChatValue {
       if (cmd.name === 'help') { toast(commands.map((c) => `/${c.name}`).join('  '), 'ok'); return; }
       if (cmd.name === 'stats') {
         setStatsOpen(true);
-        // Refresh usage data for the modal
-        void elowenClient.brainStatus(boundSessionRef.current).then((s) => { if (s) setUsage(s.usage); }).catch(() => undefined);
+        // Refresh usage data for the modal — fenced, so opening it mid-turn cannot roll the statusline
+        // back to a figure the stream has already moved past.
+        { const stamp = usageStampRef.current; void elowenClient.brainStatus(boundSessionRef.current).then((s) => { if (s) setUsageIfFresh(s.usage, stamp); }).catch(() => undefined); }
         return;
       }
       // Inspect loaded skills — list the invocable /skill:name commands (PI expands them on send).
