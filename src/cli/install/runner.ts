@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { writeFile, access } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 
 /** The single seam between `elowen install`'s logic and the real system. Every apt/systemctl/certbot
  *  call, every file write and every `command -v` goes through here, so the install modules are
@@ -13,7 +13,6 @@ export interface Runner {
   /** Absolute path of a command on PATH (optionally as another user), or null when absent. */
   which(cmd: string, asUser?: string): Promise<string | null>;
   writeFile(path: string, content: string): Promise<void>;
-  exists(path: string): Promise<boolean>;
 }
 
 export function realRunner(): Runner {
@@ -40,6 +39,5 @@ export function realRunner(): Runner {
       return r.code === 0 && out ? out : null;
     },
     writeFile: (path, content) => writeFile(path, content, 'utf8'),
-    exists: (path) => access(path).then(() => true, () => false),
   };
 }

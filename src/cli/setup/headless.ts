@@ -7,6 +7,7 @@ import { writeMarker } from './marker.js';
 import { webBaseUrl } from '../installInfo.js';
 import { getBrainProviders, keepProvider, putEmbeddedExec } from './steps/shared.js';
 import { realRunner } from '../install/runner.js';
+import { flagValue } from '../flags.js';
 import { provisionOllama } from '../provision/ollama.js';
 import { installTsServer, TS_SERVER_COMMAND, TS_SERVER_INSTALL_HINT } from './steps/lsp.js';
 import { commandExists } from '../../lsp/servers.js';
@@ -197,16 +198,6 @@ export interface HeadlessOpts {
   skipTest: boolean;
   /** `--lsp`: install the TypeScript language server (skipped when already present). */
   lsp: boolean;
-}
-
-/** The value following `--name`, or undefined. A following token that itself starts with `--` is treated
- *  as a MISSING value (not the value) — so a forgotten argument (`--admin-password --provider openai`)
- *  never silently becomes the literal `--provider`, it just reads as absent. */
-export function flagValue(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  if (i < 0 || i + 1 >= args.length) return undefined;
-  const v = args[i + 1]!;
-  return v.startsWith('--') ? undefined : v;
 }
 
 const MEMORY_MODES = ['reuse', 'openrouter', 'skip'] as const;

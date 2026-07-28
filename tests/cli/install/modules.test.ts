@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { AGENT_CLIS, detectAgentClis, installCommand } from '../../../src/cli/install/agentClis.js';
 import { preflight, preflightBlockers } from '../../../src/cli/install/preflight.js';
 import { currentUser, userHome, ensureServiceUser } from '../../../src/cli/install/serviceUser.js';
-import { ensureTerminalStreaming } from '../../../src/cli/install/index.js';
+import { ensureTerminalStreaming, planFromArgs } from '../../../src/cli/install/index.js';
 import { isIpAddress } from '../../../src/cli/provision/deployment.js';
 import type { Runner, ExecResult } from '../../../src/cli/install/runner.js';
 
@@ -11,7 +11,6 @@ function runner(over: Partial<Runner> = {}): Runner {
     exec: async (): Promise<ExecResult> => ({ code: 0, stdout: '', stderr: '' }),
     which: async () => null,
     writeFile: async () => {},
-    exists: async () => false,
     ...over,
   };
 }
@@ -109,7 +108,6 @@ describe('install/ensureTerminalStreaming', () => {
       exec: async (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: '', stderr: '' }; },
       which: async (cmd) => (present.includes(cmd) ? `/usr/bin/${cmd}` : null),
       writeFile: async () => {},
-      exists: async () => false,
     };
     return { r, calls };
   }
@@ -152,6 +150,35 @@ describe('install/isIpAddress (no Let’s Encrypt for IPs)', () => {
   });
   it('treats domain names as non-IP', () => {
     for (const d of ['elowen.example.com', 'example.com', 'my-host.dev']) expect(isIpAddress(d)).toBe(false);
+  });
+});
+
+describe('install/planFromArgs (unattended flags)', () => {
+  // getent finds nobody, so the plan always resolves mode=create — keeps these focused on parsing.
+  const noUsers = runner({ exec: async () => ({ code: 2, stdout: '', stderr: '' }) });
+
+  it('reads the flags it is given', async () => {
+    const plan = await planFromArgs(noUsers, ['--unattended', '--user', 'deploy', '--agents', 'claude,codex', '--admin-user', 'root', '--admin-pass', 'hunter2']);
+    expect(plan.user).toEqual({ mode: 'create', username: 'deploy' });
+    expect(plan.agents).toEqual(['claude', 'codex']);
+    expect(plan.admin?.username).toBe('root');
+    expect(plan.admin?.password).toBe('hunter2');
+  });
+
+  // A forgotten value used to be filled in with the NEXT flag: `--user --agents all` provisioned a
+  // service user literally named "--agents", and `--admin-user --admin-pass secret` created an admin
+  // called "--admin-pass" with the password as its name's value.
+  it('a flag with a forgotten value never swallows the next flag', async () => {
+    const plan = await planFromArgs(noUsers, ['--unattended', '--user', '--agents', 'all']);
+    expect(plan.user.username).toBe('elowen'); // the default, not "--agents"
+
+    const noAdmin = await planFromArgs(noUsers, ['--unattended', '--admin-user', '--admin-pass', 'secret']);
+    expect(noAdmin.admin).toBeNull(); // no username → no admin, rather than one named "--admin-pass"
+  });
+
+  it.skipIf(process.platform === 'darwin')('a forgotten --domain value falls back to localhost, not a domain named after a flag', async () => {
+    const plan = await planFromArgs(noUsers, ['--unattended', '--domain', '--no-tls']);
+    expect(plan.deploy.mode).toBe('localhost');
   });
 });
 

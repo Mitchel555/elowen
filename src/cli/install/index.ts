@@ -16,6 +16,7 @@ import { must, aptInstall, step } from '../provision/exec.js';
 import { type Deployment, isIpAddress, publicUrl, localhostDeploy, ipDeploy, chooseDeployment, provisionProxy } from '../provision/deployment.js';
 import { beginInstaller } from '../ui/installer.js';
 import { urlHealthy } from '../launcher.js';
+import { flagValue as flag } from '../flags.js';
 
 const DAEMON_PORT = Number((process.env.ELOWEN_PORT) ?? 4400);
 const WEB_PORT = Number((process.env.ELOWEN_WEB_PORT) ?? 4500);
@@ -28,7 +29,7 @@ const MAC = process.platform === 'darwin';
  *  or non-interactively (CLI flags). Collecting it up front keeps the two front-ends thin and lets the
  *  executor below stay prompt-free. `admin === null` means "don't create an admin" (e.g. re-run on a
  *  box that already has one). */
-interface InstallPlan {
+export interface InstallPlan {
   installTmux: boolean;
   user: ServiceUserChoice;
   agents: string[];
@@ -232,14 +233,9 @@ function agentCli(id: string) {
 
 // ── unattended front-end ─────────────────────────────────────────────────────
 
-function flag(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
-}
-
 /** Build a plan from CLI flags for `--unattended`. Resolves create-vs-existing from whether the user
  *  already exists, so the same command is idempotent across re-runs. */
-async function planFromArgs(r: Runner, args: string[]): Promise<InstallPlan> {
+export async function planFromArgs(r: Runner, args: string[]): Promise<InstallPlan> {
   const username = flag(args, '--user') ?? 'elowen';
   const exists = MAC ? true : (await userHome(r, username)) !== null;
 

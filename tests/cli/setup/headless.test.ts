@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
-import { parseFlags, resolveModel, flagValue, runHeadlessSetup } from '../../../src/cli/setup/headless.js';
+import { parseFlags, resolveModel, runHeadlessSetup } from '../../../src/cli/setup/headless.js';
 import { PREFERRED_DEFAULT } from '../../../src/brain/providers.js';
 import { RECOMMENDED_EMBEDDING_MODEL, OPENROUTER_BASE, OPENAI_BASE } from '../../../src/cli/setup/constants.js';
 import type { WizardCtx } from '../../../src/cli/setup/types.js';
@@ -51,10 +51,10 @@ describe('cli/setup/headless.parseFlags', () => {
   });
 
   it('a flag whose value is another flag reads as absent (never eats the next flag)', () => {
-    expect(flagValue(['--admin-password', '--provider', 'openai'], '--admin-password')).toBeUndefined();
-    expect(flagValue(['--admin-password', 'secret'], '--admin-password')).toBe('secret');
-    // …so a forgotten password value doesn't silently become "--provider"
+    // A forgotten password value must not silently become "--provider" (the shared reader's own
+    // semantics are covered in tests/cli/flags.test.ts).
     expect(parseFlags(['--admin-password', '--provider', 'openai'], {}).adminPassword).toBeUndefined();
+    expect(parseFlags(['--admin-password', 'secret'], {}).adminPassword).toBe('secret');
   });
 
   it('prefers a flag over the env var, falls back to env otherwise', () => {

@@ -10,6 +10,7 @@ import { callElowenApi } from '../shared/apiClient.js';
 import { menu } from './menu.js';
 import { interactiveLogin, launchChat } from './chat/launch.js';
 import { urlHealthy } from './launcher.js';
+import { flagValue as flag } from './flags.js';
 
 const BASE = (process.env.ELOWEN_URL) ?? 'http://localhost:4400';
 
@@ -113,16 +114,7 @@ async function ensureDaemon() {
   throw new Error('elowen daemon did not become healthy');
 }
 
-/** Read `--flag value` from an argv slice. Returns undefined when the flag is absent OR present without
- *  a value — a following token that is itself a flag (`--…`) is never swallowed as this flag's value
- *  (`--summary --outcome ok` must not set summary to "--outcome"). Pair with `has()` to tell "absent"
- *  apart from "present but valueless" when a value is required. */
-function flag(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  if (i < 0) return undefined;
-  const next = args[i + 1];
-  return next === undefined || next.startsWith('--') ? undefined : next;
-}
+/** Companion to the shared `flag()` reader: tells "absent" apart from "present but valueless". */
 function has(args: string[], name: string): boolean { return args.includes(name); }
 
 export async function run(argv: string[], c: ElowenClient, env: NodeJS.ProcessEnv): Promise<void> {

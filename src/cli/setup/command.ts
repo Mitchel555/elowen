@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import * as p from '../ui/prompts.js';
 import { defaultLifecycleDeps, runLifecycle } from '../commands.js';
 import { readInstallInfo } from '../installInfo.js';
+import { urlHealthy } from '../launcher.js';
 import { SERVICES, systemctl } from '../systemd.js';
 import { clearMarker, isOnboarded, readMarker } from './marker.js';
 import { runOnboarding } from './wizard.js';
@@ -97,13 +98,16 @@ function tmuxInstallHint(): string {
 }
 
 /** Bring the daemon up the right way for this box: nothing if it's already healthy, else systemctl on an
- *  `elowen install` box (never a second, port-conflicting detached daemon), otherwise the local lifecycle. */
+ *  `elowen install` box (never a second, port-conflicting detached daemon), otherwise the local lifecycle.
+ *  Readiness goes through the shared `urlHealthy` probe (same one the launcher, `ensureDaemon` and the
+ *  installer use): a bare non-throwing fetch read a wedged daemon's 500 as "up" and let the wizard run on
+ *  against it, and it had no timeout, so a half-open connection hung setup instead of failing it. */
 async function bringUp(base: string, env: NodeJS.ProcessEnv, version: string): Promise<void> {
-  try { await fetch(`${base}/health`); return; } catch { /* down — start it below */ }
+  if (await urlHealthy(`${base}/health`)) return;
   if (readInstallInfo()) {
     const r = await systemctl('start', ...SERVICES);
     if (r.code !== 0) throw new Error(`systemctl start failed (code ${r.code})`);
-    for (let i = 0; i < 50; i++) { try { await fetch(`${base}/health`); return; } catch { await sleep(100); } }
+    for (let i = 0; i < 50; i++) { if (await urlHealthy(`${base}/health`)) return; await sleep(100); }
     throw new Error('daemon did not become healthy');
   }
   await runLifecycle('up', env, defaultLifecycleDeps(version));
