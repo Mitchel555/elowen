@@ -121,6 +121,10 @@ const turnToolResults = (messages) => {
   return messages.slice(start).filter((m) => m?.role === 'tool').map(contentText);
 };
 
+/** When the scripted parent issued DelegateStop. Module-level because the parent script and the request
+ *  handler live in different scopes, and scenario F has to pair the two moments to prove causation. */
+const stopClock = { issuedAt: undefined };
+
 const PARENT_MODES = {
   // A: ordering + parallelism, B: dependency hand-off. One blocking WorkflowStart; the summary comes back as
   // the tool result the runner reads.
@@ -201,7 +205,10 @@ const PARENT_MODES = {
         : say(`Stop sequence complete. ${MARKERS.stopDone} ${lastTool.split('\n')[0]}`);
     }
     const sessionId = (/Session: (brain-ch-subagent-\S+)/.exec(lastTool) ?? [])[1];
-    if (sessionId) return callTool('DelegateStop', { id: sessionId });
+    // Stamp the moment the stop is ISSUED. Without it the suite can only observe that the hanging request
+    // ended somehow — which a provider timeout, a transport reset or the daemon teardown would also produce.
+    // The runner pairs this with the abort stamp to prove the stop is what ended it.
+    if (sessionId) { stopClock.issuedAt ??= Date.now(); return callTool('DelegateStop', { id: sessionId }); }
     // The child registers its session a moment after the job starts; poll a BOUNDED number of times rather
     // than stopping a job whose session id is still '(starting)'.
     return results.length < 12
@@ -222,7 +229,7 @@ export async function startScriptedModel() {
   /** node id -> one span per EXECUTION of that node, in order. The suite's evidence for parallelism and for
    *  resume selectivity; see the header. */
   const nodeRuns = new Map();
-  const hangs = { requests: 0, aborted: 0, released: 0 };
+  const hangs = { requests: 0, aborted: 0, released: 0, stopIssuedAt: undefined, abortedAt: undefined };
   let releaseHang = () => {};
   /** Resolve when the suite releases the hanging children — chained so one release frees every waiter. */
   const hangReleased = () => new Promise((resolve) => {
@@ -284,7 +291,7 @@ export async function startScriptedModel() {
         new Promise((resolve) => res.on('close', () => resolve('aborted'))),
       ]);
       hangs[settled] += 1;
-      if (settled === 'aborted') { res.end(); return; }
+      if (settled === 'aborted') { hangs.abortedAt ??= Date.now(); hangs.stopIssuedAt = stopClock.issuedAt; res.end(); return; }
       say('Released.');
       finish();
       return;

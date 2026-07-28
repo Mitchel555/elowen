@@ -344,15 +344,26 @@ async function main() {
     // only way to end one early other than waiting it out"), so this is the real user path, not a stand-in.
     const stopped = await turn('Delegate the stuck job in the background, then stop it.', 'stop');
     const stopResults = turnToolResults(stopped);
-    check('the child really started and hung (the model server is still holding its request)',
-      model.hangs.requests >= 1, JSON.stringify(model.hangs));
+    // EXACTLY one: `>= 1` would accept a retried/duplicated request where one attempt aborts while another
+    // hangs on, so the branch would not actually be torn down and teardown would clean up the survivor.
+    check('the child really started and hung, on exactly one model request',
+      model.hangs.requests === 1, JSON.stringify(model.hangs));
     check('DelegateStop reported stopping it — not "nothing to stop"',
       stopResults.some((t) => t.startsWith('Stopped.')),
       excerpt(stopResults.join(' | '), 600));
     // The decisive one. The child never answers on its own, so its request can only end by being torn down.
     // If DelegateStop were a no-op the request would still be hanging here and this count would be zero.
     check('…and the stop actually reached the child: its in-flight model request was aborted',
-      model.hangs.aborted >= 1 && model.hangs.released === 0, JSON.stringify(model.hangs));
+      model.hangs.aborted === model.hangs.requests && model.hangs.released === 0, JSON.stringify(model.hangs));
+    // Counting an abort is not the same as proving the STOP caused it: a provider timeout, a transport
+    // reset or the daemon teardown all close that socket too. Pin it down in time — the abort must land
+    // AFTER the stop was issued and promptly, well inside any timeout that could have produced it anyway.
+    // A no-op DelegateStop plus an independent timeout would pass the count but fail this.
+    const stopToAbortMs = (model.hangs.abortedAt ?? 0) - (model.hangs.stopIssuedAt ?? 0);
+    check('…and it was the stop that ended it: the abort landed just after DelegateStop was issued',
+      Number.isFinite(stopToAbortMs) && !!model.hangs.stopIssuedAt && !!model.hangs.abortedAt
+        && stopToAbortMs >= 0 && stopToAbortMs < 15_000,
+      `stop→abort ${stopToAbortMs}ms ${JSON.stringify(model.hangs)}`);
     check('the delegation ends up in a terminal ERROR state rather than still running',
       stopResults.some((t) => /Delegation job dlg-[0-9a-f-]+: ERROR/.test(t)),
       excerpt(stopResults.at(-1) ?? '(no tool result)', 400));
