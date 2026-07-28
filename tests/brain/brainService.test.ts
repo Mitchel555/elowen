@@ -2476,6 +2476,52 @@ describe('BrainService', () => {
     }
   });
 
+  // The case the test above MASKED: it called switchModel first, which routes through the store's
+  // "existing row" path and backfilled the provider. A conversation started explicitly on a model and
+  // never switched must carry the pair from creation, or its first respawn still loses the model.
+  it('carries the pair from session creation, without a switchModel to backfill it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elowen-model-new-'));
+    try {
+      const d = fakeDeps();
+      d.config = { providers: [{ id: 'relay', label: 'Relay', type: 'openai' as const, baseUrl: 'http://x/v1', models: ['m', 'other'], apiKey: 'k' }] };
+      const svc = new BrainService(d as never);
+
+      const started = await svc.start(1, { cwd: dir, provider: 'relay', model: 'other' });
+      expect(d.store.getSession(started.sessionId)?.provider).toBe('relay'); // written at INSERT, not only on update
+      await svc.send({ userId: 1, text: 'first' });
+      await svc.restart(1);
+
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('other');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The pin must not defeat the very save that changes the model: the settings page would report one
+  // model while the conversation kept running another.
+  it('drops the pin when the restart is because the model setting itself changed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elowen-model-reapply-'));
+    try {
+      const d = fakeDeps();
+      d.config = { providers: [{ id: 'relay', label: 'Relay', type: 'openai' as const, baseUrl: 'http://x/v1', models: ['m', 'other'], apiKey: 'k' }] };
+      const svc = new BrainService(d as never);
+
+      await svc.start(1, { cwd: dir });
+      await svc.send({ userId: 1, text: 'first' });
+      await svc.switchModel(1, { provider: 'relay', model: 'other' });
+
+      await svc.restart(1, { reapplyModelPreference: true });
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('m'); // back to preference
+
+      // …while an ordinary restart (plugin reload, personality change) still respects the pin.
+      await svc.switchModel(1, { provider: 'relay', model: 'other' });
+      await svc.restart(1);
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('other');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps project model preferences isolated, explicit starts winning and revoked picks falling back', async () => {
     const first = mkdtempSync(join(tmpdir(), 'elowen-model-project-a-'));
     const second = mkdtempSync(join(tmpdir(), 'elowen-model-project-b-'));

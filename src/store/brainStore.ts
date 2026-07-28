@@ -92,7 +92,13 @@ export class BrainStore {
    *  same owner: the relation is later traversed for billing, so accepting a foreign/missing parent
    *  would either leak another user's spend or silently lose the child's. Nested parents are valid. */
   createSession(input: {
-    id: string; userId: number; title?: string; model: string; parentSessionId?: string | null;
+    id: string; userId: number; title?: string; model: string;
+    /** CONFIG provider entry id the session starts on. Written HERE as well as in touchSession: without
+     *  it a brand-new conversation carries a model with no provider, and the pair-restore on respawn
+     *  (see ConversationLifecycle.ensureLive) skips it — so the very first respawn would still lose the
+     *  model, which is the bug that restore exists to prevent. */
+    provider?: string;
+    parentSessionId?: string | null;
     /** Immutable execution boundary for a newly-created delegated child. */
     delegatedAccess?: DelegatedExecutionScope;
   }): BrainSessionRow {
@@ -109,10 +115,11 @@ export class BrainStore {
         if (parent.user_id !== input.userId) throw new Error('parent brain session belongs to another user');
       }
       this.db.prepare(
-        `INSERT INTO brain_sessions (id, user_id, title, model, parent_session_id, delegated_access)
-         VALUES (@id, @user_id, @title, @model, @parent_session_id, @delegated_access)`
+        `INSERT INTO brain_sessions (id, user_id, title, model, provider, parent_session_id, delegated_access)
+         VALUES (@id, @user_id, @title, @model, @provider, @parent_session_id, @delegated_access)`
       ).run({
         id: input.id, user_id: input.userId, title: input.title ?? '', model: input.model,
+        provider: input.provider ?? '',
         parent_session_id: parentSessionId,
         delegated_access: delegatedAccess ? JSON.stringify(delegatedAccess) : null,
       });

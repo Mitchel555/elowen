@@ -216,7 +216,9 @@ export class BrainWorkerService {
     // The shared assembly (store row + rehydrate + resource loader + PI session + persistence
     // subscription) — identical to the chat brain's, so the two can never drift.
     const { session } = await this.factory.create({
-      sessionId, ownerUserId: input.ownerId ?? 0, runtime: this.d.runtime, model,
+      // providerId travels with the model: omitting it makes touchSession clear a previously stored
+      // entry id, leaving a model with no provider behind on every task-session respawn.
+      sessionId, ownerUserId: input.ownerId ?? 0, runtime: this.d.runtime, model, providerId: route.providerId,
       compactionFallbackModel: route.compactionFallback, cwd,
       systemPrompt, appendSystemPrompt: append, skills,
       tools: [closeTool, ...pluginTools],

@@ -1478,8 +1478,8 @@ export class BrainService {
   }
 
   /** Restart a user's live session so changed settings apply — see ConversationLifecycle.restart. */
-  async restart(userId: number): Promise<void> {
-    return this.lifecycle.restart(userId);
+  async restart(userId: number, opts: { reapplyModelPreference?: boolean } = {}): Promise<void> {
+    return this.lifecycle.restart(userId, opts);
   }
 
   /** A user saved their auto-compact settings: re-apply the threshold to every conversation of theirs that

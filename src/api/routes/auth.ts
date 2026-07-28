@@ -198,7 +198,13 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
     // turn retrying against a flaky model relay) would otherwise stall the PATCH for minutes and leave the
     // web "saving" indicator hung. Fire-and-forget with error logging; both re-apply paths are serialized
     // in the brain, so overlapping saves queue safely.
-    const reapply = patch.personalityBody !== undefined ? d.brain?.applyPersonalityChange(u.id) : d.brain?.restart(u.id);
+    // A conversation normally keeps the model it was running on across a respawn (see ensureLive). That
+    // pin must NOT survive the save that changes the model setting itself, or the page would report one
+    // model while the chat kept using another — so this restart says so explicitly.
+    const modelChanged = patch.model !== undefined || patch.modelProvider !== undefined;
+    const reapply = patch.personalityBody !== undefined
+      ? d.brain?.applyPersonalityChange(u.id)
+      : d.brain?.restart(u.id, { reapplyModelPreference: modelChanged });
     void Promise.resolve(reapply).catch((e) => console.warn(`cli-settings: live re-apply for user ${u.id} failed: ${e instanceof Error ? e.message : String(e)}`));
     return c.json({ ...d.userSettings.cliSettings(u.id), serverDefault: serverDefaultModel() });
   });

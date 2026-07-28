@@ -237,7 +237,7 @@ export class BrainSessionFactory {
     const existing = this.d.store.getSession(spec.sessionId);
     if (!existing) {
       this.d.store.createSession({
-        id: spec.sessionId, userId: spec.ownerUserId, model: spec.model.id,
+        id: spec.sessionId, userId: spec.ownerUserId, model: spec.model.id, provider: spec.providerId,
         parentSessionId: spec.parentSessionId, delegatedAccess: spec.delegatedAccess,
       });
     } else {

@@ -244,7 +244,7 @@ export class ConversationLifecycle {
    *  directory (validated, then stamped as the session's work_dir); `spawnCwd` is an internal carry-over
    *  (respawn keeping its previous workDir) that must NOT be stamped — a cwd-less web session stays
    *  cwd-less. Serialized per conversation: two concurrent spawns would leak one PI session. */
-  async ensureLive(userId: number, sessionId: string, o: { provider?: string; model?: string; clientCwd?: string; spawnCwd?: string; explicitResume?: boolean; fast?: boolean; thinkingLevel?: string | null } = {}): Promise<void> {
+  async ensureLive(userId: number, sessionId: string, o: { provider?: string; model?: string; clientCwd?: string; spawnCwd?: string; explicitResume?: boolean; fast?: boolean; thinkingLevel?: string | null; reapplyModelPreference?: boolean } = {}): Promise<void> {
     // A HEALTHY live conversation needs no spawn, so it must not queue on the session lock to find that
     // out: a running turn holds that lock for its full duration (turnRunner), which would leave a
     // relaunched CLI unable to resume into its own in-flight work until the turn ended or was aborted.
@@ -282,7 +282,10 @@ export class ConversationLifecycle {
       // Rows written before `provider` existed are simply skipped and heal on their next spawn.
       // Deliberately NOT applied to the vision model: `visionFallback` lives only in memory, so after a
       // restart the row still names a temporary hop and honouring it would make the hop permanent.
-      const storedRow = this.d.store.getSession(sessionId);
+      // `reapplyModelPreference` is set by a restart that exists BECAUSE the model setting changed —
+      // honouring the pin there would leave the user staring at a settings page reporting one model
+      // while the chat kept running another.
+      const storedRow = o.reapplyModelPreference ? undefined : this.d.store.getSession(sessionId);
       const storedModel = storedRow?.model;
       const storedProvider = storedRow?.provider;
       const stored = storedModel && storedProvider
@@ -575,7 +578,11 @@ export class ConversationLifecycle {
    *  No-op when not running. History survives — it rehydrates from SQLite on the fresh start. Respawns
    *  the SAME conversation in place (never a cwd re-resolution — this is a settings reload, not a
    *  client boot) and carries the previous workDir over without stamping it. */
-  async restart(userId: number): Promise<void> {
+  /** `reapplyModelPreference` — the caller changed the user's MODEL setting, so the conversation must
+   *  drop the model it was pinned to and re-resolve from preference. Every other restart (plugin
+   *  reload, personality change) deliberately leaves the pin alone: reloading a plugin is no reason to
+   *  move a conversation off the model its user picked. */
+  async restart(userId: number, opts: { reapplyModelPreference?: boolean } = {}): Promise<void> {
     const b = this.activeLive(userId);
     if (!b) return;
     const sessionId = b.sessionId;
@@ -599,7 +606,7 @@ export class ConversationLifecycle {
     this.d.goals.cancelGoalContinuation(sessionId);
     this.d.sessions.dispose(sessionId);
     try {
-      await this.ensureLive(userId, sessionId, { spawnCwd: prevWorkDir, fast: prevFast });
+      await this.ensureLive(userId, sessionId, { spawnCwd: prevWorkDir, fast: prevFast, reapplyModelPreference: opts.reapplyModelPreference });
     } catch (error) {
       this.d.goals.pauseForRespawnFailure(sessionId, error);
       throw error;
