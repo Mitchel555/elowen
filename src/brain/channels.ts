@@ -568,10 +568,13 @@ export class ChannelSessionService {
     // Fence before inspecting descendants. A fresh idle-child continuation must not register itself
     // after this snapshot and then get erased by clearChildren() without being aborted.
     this.d.registry.beginParentAbort(sessionId);
-    // Before tearing children down: a workflow ORIGINATING here (including a node's self-expansion)
-    // must stop launching nodes, or it respawns fresh children the moment an aborted one settles.
-    await this.d.cancelWorkflows?.(sessionId);
     try {
+      // Before tearing children down: a workflow ORIGINATING here (including a node's self-expansion)
+      // must stop launching nodes, or it respawns fresh children the moment an aborted one settles.
+      // INSIDE the try: this reaches into the plugin registry, and if that throws (a reload racing the
+      // abort) an outer position would leave the fence held forever — permanently marking the session as
+      // aborting, so every later delegation from it is refused until the daemon restarts.
+      await this.d.cancelWorkflows?.(sessionId);
       const ch = this.d.registry.channelGet(channelId);
       if (!ch) {
         if (this.d.registry.isActiveChild(sessionId)) this.d.registry.requestPendingAbort(sessionId);

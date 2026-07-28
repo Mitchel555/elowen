@@ -93,6 +93,20 @@ describe('ChannelSessionService.resetChannels', () => {
     expect(t.cancelWorkflows).toHaveBeenCalledWith(channelSessionId('c1'));
   });
 
+  // The fence marks the session as aborting and is released in a finally. Cancelling workflows reaches
+  // into the plugin registry, so it can throw (a reload racing an abort) — and a throw that escapes the
+  // fence would leave the session marked aborting for the rest of the daemon's life, refusing every
+  // later delegation from it.
+  it('releases the abort fence even when cancelling workflows throws', async () => {
+    const t = setup();
+    const brain = t.seedChannel('c1', 1);
+    t.cancelWorkflows.mockRejectedValueOnce(new Error('plugin registry reloading'));
+
+    await expect(t.svc.resetChannels('plugins reloaded')).rejects.toThrow('plugin registry reloading');
+
+    expect(t.registry.isParentAborting(brain.sessionId)).toBe(false);
+  });
+
   it('releases a channel parked on a question instead of leaving it to time out', async () => {
     const t = setup();
     const brain = t.seedChannel('c1', 1);
