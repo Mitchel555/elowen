@@ -35,24 +35,54 @@ class EditableMessage {
     this.jid = jid;
     this.key = null;
     this.content = '';
+    this.sent = null;    // what the chat last actually received — skip a redundant edit when unchanged
     this.lastEdit = 0;
-    this.pending = false;
+    this.timer = null;   // a self-rescheduled trailing flush, so the LAST update lands even with no further one
+    this.sending = null; // tail of the serialized send chain — a new send always waits for the prior one
+    this.closed = false;
   }
-  update(content) { this.content = content.slice(0, CHUNK); void this.flush(); }
-  async flush() {
-    if (this.closed) return; // finalized elsewhere — a straggler edit must not overwrite the final text
-    const now = Date.now();
-    if (now - this.lastEdit < EDIT_THROTTLE_MS) { this.pending = true; return; }
-    this.lastEdit = now;
+  update(content) { this.content = content; void this.flush(); }
+  /** Schedule a send of the latest content, honoring the throttle. Sends are SERIALIZED through `sending`
+   *  so the initial create completes (claiming `key`) before any later edit — a slow create can no longer
+   *  be raced into a second progress bubble. */
+  flush() {
+    if (this.closed) return Promise.resolve(); // finalized elsewhere — a straggler edit must not overwrite it
+    const elapsed = Date.now() - this.lastEdit;
+    if (elapsed < EDIT_THROTTLE_MS) {
+      // Inside the throttle window: arm a SINGLE trailing flush so the latest content still lands ~throttle
+      // later even if no further update arrives (a burst coalesces into one edit at the window's end).
+      if (!this.timer) {
+        this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, EDIT_THROTTLE_MS - elapsed);
+        if (typeof this.timer.unref === 'function') this.timer.unref();
+      }
+      return Promise.resolve();
+    }
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.sending = (this.sending ?? Promise.resolve()).then(() => this.drain());
+    return this.sending;
+  }
+  /** One serialized send: create the message the first time (claiming `key`), edit it thereafter. A failed
+   *  create leaves `sent` null so the next drain retries it. */
+  async drain() {
+    if (this.closed) return;
+    if (this.content === this.sent) return; // the chat already has the latest content
+    this.lastEdit = Date.now();
+    const content = this.content;
     try {
       if (!this.key) {
-        const s = await this.a.sock.sendMessage(this.jid, { text: this.content || '💭 …' });
+        const s = await this.a.sock.sendMessage(this.jid, { text: content || '💭 …' });
         this.key = s?.key ?? null;
+        if (this.key) this.sent = content;
       } else {
-        await this.a.sock.sendMessage(this.jid, { text: this.content, edit: this.key });
+        await this.a.sock.sendMessage(this.jid, { text: content, edit: this.key });
+        this.sent = content;
       }
     } catch { /* edit window closed / socket blip — the final message still goes out separately */ }
-    if (this.pending) { this.pending = false; setTimeout(() => void this.flush(), EDIT_THROTTLE_MS); }
+  }
+  /** Freeze the message: no further edit lands, and any armed trailing flush is cancelled. */
+  close() {
+    this.closed = true;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
   }
 }
 
@@ -102,7 +132,10 @@ export class LiveMessage {
     sections.push(...cards);
     if (!sections.length) return;
     this.progress ??= new EditableMessage(this.a, this.jid);
-    this.progress.update(sections.join('\n┈┈┈┈┈┈┈┈┈┈\n'));
+    const rendered = sections.join('\n┈┈┈┈┈┈┈┈┈┈\n');
+    // Preserve the newest/active tools and cards when a long turn exceeds WhatsApp's message limit —
+    // a head-first cut froze the bubble on the tools that already scrolled past.
+    this.progress.update(rendered.length > CHUNK ? `…\n${rendered.slice(-(CHUNK - 2))}` : rendered);
   }
   /** (Re)arm the stall hint: after STALL_HINT_MS of no visible tool progress, re-render so the step
    *  counter surfaces even during pure silence (one long-running tool emits no interim events). */
@@ -203,7 +236,7 @@ export class LiveMessage {
    *  so a straggler "⚙️ Step N" edit can't land after the ❌ + ⚠️ error reply already went out. */
   abandon() {
     clearTimeout(this.stallTimer);
-    if (this.progress) this.progress.closed = true;
+    if (this.progress) this.progress.close();
   }
   async finalize(reply) {
     clearTimeout(this.stallTimer);
@@ -214,7 +247,7 @@ export class LiveMessage {
       this.renderProgress();
       this.progress.lastEdit = 0; // bypass the throttle for the final settle
       await this.progress.flush();
-      this.progress.closed = true;
+      this.progress.close();
     }
     // Nothing happened here (mid-run steer into another turn) — don't post a placeholder.
     if (!reply && !this.text && !this.progress && !this.imageRefs.length) return;
