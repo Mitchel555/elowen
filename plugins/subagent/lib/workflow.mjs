@@ -367,6 +367,39 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     }
   };
 
+  /** Drive an already-launched `completion` (a `runToCompletion(wf)` promise) to its tool result exactly
+   *  like WorkflowStart does — shared with WorkflowResume so both surfaces behave identically. Either
+   *  blocks for it (letting a live Ctrl+B detach race it into the background) or, when background was
+   *  requested up front, returns the handle immediately and delivers the summary through the durable sink
+   *  once it lands. */
+  const driveResult = async (wf, completion, requestedBackground) => {
+    if (requestedBackground) {
+      // No durable sink on this surface (worker/cron) — block rather than silently drop the result.
+      if (!wf.emitCompletion) return ok(await completion);
+      void completion.then((summary) => deliverCompletion(wf, summary));
+      return ok(
+        `Started background workflow ${wf.id}.\n`
+          + 'Its result is delivered to you automatically in a NEW turn when it finishes — you do not have to '
+          + 'fetch it. Do any other useful work now, then end your turn. If there is nothing else to do, say so '
+          + 'briefly and end the turn: waiting inside this turn only delays the result.',
+        { workflowId: wf.id, status: 'running' },
+      );
+    }
+    const detached = new Promise((resolve) => { wf.resolveDetached = resolve; });
+    const winner = await Promise.race([
+      completion.then((summary) => ({ kind: 'done', summary })),
+      detached.then(() => ({ kind: 'detached' })),
+    ]);
+    if (winner.kind === 'done') return ok(winner.summary);
+    void completion.then((summary) => deliverCompletion(wf, summary));
+    return ok(
+      `The user moved this workflow to the background. It is still running as ${wf.id}; continue helping the `
+      + 'user now. Its result is delivered to you automatically in a new turn when it finishes, so once you have '
+      + 'nothing else to do, end your turn instead of waiting or polling for it.',
+      { workflowId: wf.id, status: 'running', detached: true },
+    );
+  };
+
   /** The abort seam core calls when a parent turn is torn down (Esc-Esc, /stop, queue interrupt). The
    *  abort tree kills the node children that are RUNNING; this stops the engine from launching the rest
    *  — without it, every node whose deps had already finished would spawn a fresh child AFTER the abort,
@@ -420,6 +453,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. For a set of fully independent tasks, plain parallel delegate calls are simpler.',
       'A node is given the results of the nodes it depends on as context, so a later task can refer to "your dependency results" instead of repeating the work or being told it twice.',
       'By default the call BLOCKS and returns a summary of every node\'s result once the whole workflow finishes. Set background=true to return a handle immediately and have the summary delivered to you in a NEW turn when the DAG finishes — do other work meanwhile, then end your turn. A node whose dependency failed is reported as skipped. Give each node a short unique id and list its dependency ids in deps. Use read_only/tools/model per node exactly as with delegate — you can only ever narrow your own access.',
+      'If the result names failed or skipped nodes and the workflow is still held in memory (same daemon, not too long ago), use WorkflowResume instead of starting over — it re-runs only what did not finish and leaves every already-done node exactly as it is.',
     ].join(' '),
     parameters: Type.Object({
       title: Type.Optional(Type.String({ description: 'Human label for the workflow, shown in the CLI panel: AT MOST 4 WORDS, in the user\'s language, no trailing punctuation (the UI appends an ellipsis).' })),
@@ -480,34 +514,49 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         return `Error: workflow failed: ${errorText(e)}`;
       });
 
-      if (p.background === true) {
-        // No durable sink on this surface (worker/cron) — block rather than silently drop the result.
-        if (!emitCompletion) return ok(await completion);
-        void completion.then((summary) => deliverCompletion(wf, summary));
-        return ok(
-          `Started background workflow ${wf.id}.\n`
-            + 'Its result is delivered to you automatically in a NEW turn when it finishes — you do not have to '
-            + 'fetch it. Do any other useful work now, then end your turn. If there is nothing else to do, say so '
-            + 'briefly and end the turn: waiting inside this turn only delays the result.',
-          { workflowId: wf.id, status: 'running' },
-        );
-      }
+      // Foreground blocks on the DAG but lets Ctrl+B detach the wait; background returns the handle right
+      // away — driveResult is the shared tail WorkflowResume reuses so both behave identically.
+      return driveResult(wf, completion, p.background === true);
+    },
+  }));
 
-      // Foreground: block on the DAG, but let Ctrl+B detach the wait — the run keeps going in the
-      // background and delivers its summary through the completion sink, exactly like explicit background.
-      const detached = new Promise((resolve) => { wf.resolveDetached = resolve; });
-      const winner = await Promise.race([
-        completion.then((summary) => ({ kind: 'done', summary })),
-        detached.then(() => ({ kind: 'detached' })),
-      ]);
-      if (winner.kind === 'done') return ok(winner.summary);
-      void completion.then((summary) => deliverCompletion(wf, summary));
-      return ok(
-        `The user moved this workflow to the background. It is still running as ${wf.id}; continue helping the `
-        + 'user now. Its result is delivered to you automatically in a new turn when it finishes, so once you have '
-        + 'nothing else to do, end your turn instead of waiting or polling for it.',
-        { workflowId: wf.id, status: 'running', detached: true },
-      );
+  ctx.registerTool(defineTool({
+    name: 'WorkflowResume', label: 'Resume a workflow',
+    description: 'Re-run only the UNFINISHED nodes of a workflow that already stopped — one whose result named '
+      + 'failed or skipped nodes, or one you had to interrupt. Nodes that already finished (DONE) are left '
+      + 'exactly as they are and are NOT re-run; their results still feed the nodes that depend on them, '
+      + 'exactly as in the original run. Everything else (ERROR, or PENDING because a dependency failed) is '
+      + 'reset and retried. Behaves exactly like WorkflowStart otherwise — same blocking/background choice, '
+      + 'same live snapshot, same final summary — because it IS the same run continuing.\n\n'
+      + 'This only works while the workflow is still held in memory on this daemon: a workflow older than an '
+      + 'hour, or evicted because too many others ran since, or from before a daemon restart, cannot be '
+      + 'resumed — start a fresh WorkflowStart instead, most likely against a worktree that already carries '
+      + 'the DONE nodes\' completed work.',
+    parameters: Type.Object({
+      workflowId: Type.String({ description: 'The id of the finished workflow to resume (from WorkflowStart / WorkflowStatus).' }),
+      background: Type.Optional(Type.Boolean({ description: 'Override whether the resumed run is foreground or background. Omit to keep whatever the original run was.' })),
+    }),
+    execute: async (_id, p) => {
+      const wf = authWorkflow(p.workflowId);
+      if (!wf) return ok(`Error: no workflow ${p.workflowId} you can resume — it may have finished too long ago, been evicted from memory, or belong to another conversation.`);
+      if (!wf.finished) return ok(`Error: workflow ${wf.id} is still running; there is nothing to resume yet.`);
+      const unfinished = wf.nodes.filter((n) => wf.state.get(n.id).status !== 'done');
+      if (!unfinished.length) return ok(`Error: every node in workflow ${wf.id} already finished; there is nothing to resume.`);
+      for (const n of unfinished) wf.state.set(n.id, freshNodeState());
+      if (typeof p.background === 'boolean') wf.background = p.background;
+      wf.finished = false;
+      wf.finishedAt = undefined;
+      // Re-capture BOTH turn-scoped emitters on THIS (resuming) turn, exactly like WorkflowStart does —
+      // the ones captured at the original Start are bound to a turn that is long over.
+      wf.emit = ctx.workflowEmitter();
+      wf.emitCompletion = ctx.workflowCompletionEmitter?.() ?? undefined;
+      const completion = runToCompletion(wf).catch((e) => {
+        wf.status = 'error';
+        wf.finished = true;
+        wf.finishedAt = Date.now();
+        return `Error: workflow failed: ${errorText(e)}`;
+      });
+      return driveResult(wf, completion, wf.background === true);
     },
   }));
 

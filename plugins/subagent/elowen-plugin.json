@@ -16,7 +16,8 @@
       "DelegateStop",
       "WorkflowStart",
       "WorkflowAddNodes",
-      "WorkflowStatus"
+      "WorkflowStatus",
+      "WorkflowResume"
     ],
     "platforms": [
       "subagent"
@@ -33,7 +34,8 @@
     "DelegateStop": "\ud83d\uded1",
     "WorkflowStart": "\ud83d\udd00",
     "WorkflowAddNodes": "\u2795",
-    "WorkflowStatus": "\ud83d\udcca"
+    "WorkflowStatus": "\ud83d\udcca",
+    "WorkflowResume": "\u25b6\ufe0f"
   },
   "planSafe": [
     "DelegateStatus",

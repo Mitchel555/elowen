@@ -32,6 +32,9 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
   const launched: string[] = [];
   /** The context chunks each node was actually handed, by task — what the child can see, not what we hoped. */
   const contexts = new Map<string, string[]>();
+  // A resume test needs a node that fails its FIRST run and succeeds on retry — real recovery, not a
+  // second guaranteed failure. FAIL_ONCE tracks attempts per exact task string.
+  const attempts = new Map<string, number>();
   const run = async (source: { access?: { context?: string[] } }, task: string, onEvent: (e: unknown) => void) => {
     launched.push(task);
     contexts.set(task, source.access?.context ?? []);
@@ -39,7 +42,11 @@ function harness(opts: { toolPolicyAllow?: string[]; contextChars?: number } = {
     onEvent({ type: 'tool', name: 'Read' });
     onEvent({ type: 'idle', usage: { totalTokens: 100 } });
     if (gate && task === gate.task) { await gate.promise; return 'Error: interrupted'; }
-    if (task.includes('FAIL')) return 'Error: boom';
+    if (task.includes('FAIL_ONCE')) {
+      const n = (attempts.get(task) ?? 0) + 1;
+      attempts.set(task, n);
+      if (n === 1) return 'Error: boom (will succeed on retry)';
+    } else if (task.includes('FAIL')) return 'Error: boom';
     // A node's own task is capped at 4 000 chars, so a report bigger than that cannot be echoed back from
     // it — `BULK:<n>` asks for a result of n chars instead, the way a real node returns far more than it
     // was asked. It ends in `:CONCLUSION`, so a test can tell whether the END of a report survived.
@@ -695,5 +702,58 @@ describe('workflow background + detach', () => {
     expect(controls.get('workflow')!.detachForeground({ sessionId: 'brain-parent', principal: 'elowen:1' })).toEqual({ detached: 0 });
     release();
     await new Promise((r) => setTimeout(r, 5));
+  });
+});
+
+describe('WorkflowResume', () => {
+  it('re-runs only the failed/pending nodes, leaves DONE nodes untouched, and frees their dependents', async () => {
+    const { tools, launched, snapshots } = harness();
+    const first = await tools.get('WorkflowStart')!.execute('r1', {
+      nodes: [
+        { id: 'a', task: 'a' },
+        { id: 'b', task: 'b FAIL_ONCE', deps: ['a'] },
+        { id: 'c', task: 'c', deps: ['b'] },
+      ],
+    });
+    expect(first.content[0]!.text).toMatch(/status: error/);
+    expect(launched).toEqual(['a', 'b FAIL_ONCE']); // c never ran — blocked by b's failure
+    const wfId = snapshots[0]!.id;
+
+    const resumed = await tools.get('WorkflowResume')!.execute('r1-resume', { workflowId: wfId });
+    const text = resumed.content[0]!.text;
+    expect(text).toMatch(/status: done/);
+    expect(text).toContain('done:a'); // a's original result, carried forward unchanged
+    expect(text).toContain('done:c'); // c finally ran, freed once b succeeded on retry
+    // a must NOT be relaunched; b FAIL_ONCE runs exactly twice (its original failure + the retry); c once.
+    expect(launched).toEqual(['a', 'b FAIL_ONCE', 'b FAIL_ONCE', 'c']);
+  });
+
+  it('reports nothing to resume once every node has already finished', async () => {
+    const { tools, snapshots } = harness();
+    await tools.get('WorkflowStart')!.execute('r2', { nodes: [{ id: 'a', task: 'a' }] });
+    const wfId = snapshots[0]!.id;
+
+    const res = await tools.get('WorkflowResume')!.execute('r2-resume', { workflowId: wfId });
+    expect(res.content[0]!.text).toMatch(/^Error: every node .* already finished/);
+  });
+
+  it('refuses to resume a workflow that is still running', async () => {
+    const { tools, snapshots } = harness();
+    let releaseA!: () => void;
+    gate = { task: 'a', promise: new Promise<void>((r) => { releaseA = r; }) };
+    const startP = tools.get('WorkflowStart')!.execute('r3', { nodes: [{ id: 'a', task: 'a' }] });
+    await new Promise((r) => setTimeout(r, 5));
+    const wfId = snapshots[0]!.id;
+
+    const res = await tools.get('WorkflowResume')!.execute('r3-resume', { workflowId: wfId });
+    expect(res.content[0]!.text).toMatch(/^Error: workflow .* still running/);
+    releaseA();
+    await startP;
+  });
+
+  it('refuses an unknown workflow id, or one belonging to another conversation', async () => {
+    const { tools } = harness();
+    const res = await tools.get('WorkflowResume')!.execute('r4-resume', { workflowId: 'wf-does-not-exist' });
+    expect(res.content[0]!.text).toMatch(/^Error: no workflow/);
   });
 });
