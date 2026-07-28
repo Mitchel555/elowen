@@ -380,6 +380,9 @@ class CronAdapter {
   constructor(store, deliveryStore, logger, deliver, config = {}, timezone = systemZone) {
     this.store = store; this.deliveryStore = deliveryStore; this.log = logger; this.deliver = deliver;
     this.handler = null; this.running = false;
+    // Set by disconnect(): this adapter generation has been torn down (a plugin reload) and must not
+    // start any further work — see disconnect() and the tick loop.
+    this.stopped = false;
     this.timezone = timezone;
     // Scheduler limits, resolved once from plugin config (see orca-plugin.json's "Scheduler" section) and
     // clamped to sane bounds — unset config reproduces the previous hardcoded defaults exactly.
@@ -397,14 +400,21 @@ class CronAdapter {
   async connect() {
     this.timer = setInterval(() => void this.tick().catch((e) => this.log.error(`tick failed: ${e?.message ?? e}`)), this.tickMs);
   }
-  disconnect() { clearInterval(this.timer); }
+  // Clearing the interval only stops FUTURE ticks — a tick already in flight is parked on a (slow) brain
+  // turn and would happily carry on running the rest of its due jobs long after the host replaced this
+  // adapter with a fresh one built from the reloaded registry. That orphan generation writes to the same
+  // jobs.json and delivers through the same sink as its replacement, so it is marked stopped here: the
+  // tick loop finishes delivering the result it already paid for, then abandons the remaining jobs to the
+  // live adapter. Synchronous on purpose — the host's stopAll() cannot await, and a reload must not block
+  // for the minutes an LLM turn can take.
+  disconnect() { this.stopped = true; clearInterval(this.timer); }
   async send() { /* cron has no outbound channel; results land in the job's conversation */ }
 
   async tick() {
     // One tick at a time. Jobs run sequentially and each is a (slow) LLM turn, so a due-cluster — e.g. the
     // morning batch of daily reports — can exceed the 30s interval; without this guard the next interval
     // overlaps, double-fires a job and hammers the relay with concurrent turns (a source of transient 400s).
-    if (!this.handler || this.running) return;
+    if (!this.handler || this.running || this.stopped) return;
     this.running = true;
     try {
     // Retry any result a previous tick prepared but failed to deliver — a re-send only, never a re-run
@@ -412,18 +422,14 @@ class CronAdapter {
     await this.flushPendingDeliveries();
     const now = Date.now();
     const tz = this.timezone();
-    for (const job of this.store.all()) {
-      const slot = dueSlot(job, now, tz);
-      if (slot === null) continue;
-      // One-shot (runAt) jobs are consumed at fire time: remove BEFORE the (long) turn so a daemon crash
-      // mid-run can't strand a zombie — a job left with lastRun set but never deleted would neither re-fire
-      // (isDue for runAt needs `!lastRun`) nor ever get cleaned up. Deletion IS the dedup, so at-most-once
-      // holds even if the turn crashes (a wake-up that starts running is spent — acceptable). Recurring
-      // jobs still stamp lastRun before running so a slow turn doesn't re-fire them next tick; they must
-      // fire again on their next natural slot. `lastSlot` records WHICH wall-clock slot that was, so the
-      // repeated hour of an autumn DST change cannot run the same 02:30 twice.
-      if (job.runAt) this.store.save(this.store.all().filter((j) => j.id !== job.id));
-      else this.store.patch(job.id, { lastRun: new Date(now).toISOString(), lastSlot: slot });
+    for (const snapshot of this.store.all()) {
+      // Torn down mid-tick (plugin reload): the job just delivered is settled, so hand the rest over to
+      // the adapter that replaced us instead of running them from a generation the host has dropped.
+      if (this.stopped) break;
+      // Cheap pre-filter on the snapshot — claiming re-reads the file, so only pay that for a due job.
+      if (dueSlot(snapshot, now, tz) === null) continue;
+      const job = this.claimDueJob(snapshot.id, now, tz);
+      if (!job) continue;
       // Cheap guard gate: if the job has a `check` command, run it FIRST (no LLM). Only spend a brain
       // turn when the guard surfaces fresh work — an "every 5m" poll that finds nothing costs a shell
       // exec, not a model call. The guard's output is fed into the turn so the brain acts on real data.
@@ -528,6 +534,34 @@ class CronAdapter {
     } finally {
       this.running = false;
     }
+  }
+
+  /** Take ownership of job `id`'s due slot and return the FRESH record to run, or null when it is no
+   *  longer due (another tick already claimed it), or gone.
+   *
+   *  The check is re-done against the CURRENT persisted state rather than the snapshot the tick started
+   *  from, because that snapshot goes stale the moment a job's turn is awaited: a torn-down adapter
+   *  generation parked on a slow turn — and the fresh one the host started in its place after a plugin
+   *  reload — read and stamp the same jobs.json, and the in-memory `running` guard only covers one of
+   *  them. Read-check-write runs synchronously here, so the two can never both win a slot and double-fire
+   *  the job.
+   *
+   *  One-shot (runAt) jobs are consumed by deletion BEFORE the (long) turn so a daemon crash mid-run can't
+   *  strand a zombie — a job left with lastRun set but never deleted would neither re-fire (isDue for
+   *  runAt needs `!lastRun`) nor ever get cleaned up. Deletion IS the dedup, so at-most-once holds even if
+   *  the turn crashes (a wake-up that starts running is spent — acceptable). Recurring jobs stamp lastRun
+   *  so a slow turn doesn't re-fire them next tick; they fire again on their next natural slot. `lastSlot`
+   *  records WHICH wall-clock slot that was, so the repeated hour of an autumn DST change cannot run the
+   *  same 02:30 twice. */
+  claimDueJob(id, now, tz) {
+    const jobs = this.store.all();
+    const job = jobs.find((j) => j.id === id);
+    if (!job) return null;
+    const slot = dueSlot(job, now, tz);
+    if (slot === null) return null;
+    if (job.runAt) this.store.save(jobs.filter((j) => j.id !== job.id));
+    else this.store.patch(job.id, { lastRun: new Date(now).toISOString(), lastSlot: slot });
+    return job;
   }
 
   /** Persist the prepared payload as a PENDING delivery before attempting to send it — so a delivery
