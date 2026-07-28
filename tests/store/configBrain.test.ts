@@ -90,13 +90,13 @@ describe('ConfigStore brain limits', () => {
     expect(cs.get().brain.limits.channelSessionCap).toBe(4);
   });
 
-  // The sub-agent context budget is the one knob whose ceiling is not the ±50% rule: packing re-trims
-  // anything above the delegated-scope prompt total (32 000 chars, shared with the child's role prompt),
-  // so a bigger number would buy the operator no extra context.
+  // The sub-agent context budget's ceiling is not the ±50% rule: packing re-trims anything above the
+  // delegated-scope prompt total, which is shared with the child's role prompt. Both were raised together
+  // (80 000 here against a 120 000 total) so the ceiling stays reachable rather than trimmed back off.
   it('caps the sub-agent context budget at what a packed delegated scope can carry', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     cs.update({ brain: { limits: { delegateContextChars: 500_000 } } });
-    expect(cs.get().brain.limits.delegateContextChars).toBe(26000);
+    expect(cs.get().brain.limits.delegateContextChars).toBe(80000);
     cs.update({ brain: { limits: { delegateContextChars: 10 } } });
     expect(cs.get().brain.limits.delegateContextChars).toBe(10000);
     cs.update({ brain: { limits: { delegateContextChars: 12_345 } } });

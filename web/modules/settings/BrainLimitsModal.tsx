@@ -42,7 +42,7 @@ const BRAIN_LIMIT_FIELDS: BrainLimitField[] = [
   { key: 'goalTurnBudget', kind: 'count', min: 4, max: 500, step: 1, icon: Target },
   { key: 'goalMaxTurns', kind: 'count', min: 8, max: 500, step: 1, icon: Repeat },
   { key: 'channelSessionCap', kind: 'count', min: 4, max: 256, step: 1, icon: MessagesSquare },
-  { key: 'delegateContextChars', kind: 'size', min: 10000, max: 26000, step: 1000, icon: Share2 },
+  { key: 'delegateContextChars', kind: 'size', min: 10000, max: 80000, step: 1000, icon: Share2 },
 ];
 
 const DISPLAY_DIVISORS: Record<BrainLimitKind, number> = {

@@ -193,16 +193,18 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
   // the 32 000-char total. The scope must still normalize (the child runs), and everything shortened has
   // to say so — a child silently missing half its role has no way to know.
   it('keeps role, context and channel fragment inside the scope budget, marking what it had to cut', async () => {
-    const context = Array.from({ length: 12 }, (_, i) => `block-${i}:${'c'.repeat(2_150)}`);
+    // Sized to overflow the scope budget on purpose — the point of this test is what happens when the
+    // sections together do NOT fit, so the load has to stay past the ceiling as that ceiling is raised.
+    const context = Array.from({ length: 12 }, (_, i) => `block-${i}:${'c'.repeat(6_000)}`);
     const sent = await runDelegateWith(
-      { prompt: `ROLE:${'r'.repeat(19_995)}`, context },
+      { prompt: `ROLE:${'r'.repeat(59_995)}`, context },
       `You are talking on Discord in #general.${'f'.repeat(400)}`,
     );
     const appends = sent.delegatedAccess?.promptAppend ?? [];
     expect(normalizeDelegatedExecutionScope(sent.delegatedAccess)).toBeDefined();
     expect(appends.length).toBeLessThanOrEqual(16);
     for (const chunk of appends) expect(chunk.length).toBeLessThanOrEqual(8_000);
-    expect(appends.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThanOrEqual(32_000);
+    expect(appends.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThanOrEqual(120_000);
     // The role still leads the appends, and the parent's context blocks all survive.
     expect(appends[0]).toContain('ROLE:');
     for (const block of context) expect(appends.join('\n')).toContain(block.slice(0, 20));

@@ -30,7 +30,11 @@ const MAX_TOOL_NAMES = 2_000;
 const MAX_TOOL_NAME_CHARS = 256;
 const MAX_PROMPT_CHUNKS = 16;
 const MAX_PROMPT_CHARS = 8_000;
-const MAX_PROMPT_TOTAL_CHARS = 32_000;
+// Shared budget for ALL system-prompt sections of a delegated child (role prompt + parent-supplied
+// context + shared-channel fragment), fair-shared between them by packDelegatedPromptAppend. Raised from
+// 32k so the operator-tunable delegateContextChars can actually reach its 80k ceiling instead of being
+// trimmed straight back off. Hard ceiling above this is MAX_PROMPT_CHUNKS * CHUNK_BODY_CHARS = 127 616.
+const MAX_PROMPT_TOTAL_CHARS = 120_000;
 const own = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
 
 function canonicalStrings(raw: unknown, maxItems: number, maxChars: number): string[] | undefined {

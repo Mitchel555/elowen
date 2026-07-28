@@ -229,10 +229,11 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   toolOutputMaxChars: band('toolOutputMaxChars', 80_000),
   memoryRecallCount: band('memoryRecallCount'),
   memoryRecallChars: band('memoryRecallChars', 20_000),
-  // Ceiling capped below the ±50% rule (which would give 30 000): packDelegatedPromptAppend re-trims
-  // anything above MAX_PROMPT_TOTAL_CHARS (32 000, brain/delegatedScope.ts:33), and that total is
-  // fair-shared with the child's role prompt — so a higher ceiling here would just be trimmed off again.
-  delegateContextChars: band('delegateContextChars', 26_000),
+  // Raised past the ±50% rule at the owner's request to ~20k tokens. The ceiling is bounded by
+  // MAX_PROMPT_TOTAL_CHARS (brain/delegatedScope.ts), the budget packDelegatedPromptAppend fair-shares
+  // with the child's role prompt — that budget was raised to 120 000 alongside this, so the value here
+  // is now reachable rather than trimmed straight back off.
+  delegateContextChars: band('delegateContextChars', 80_000),
   // Deliberately exempt from the ±50% rule: for these four the wide range is load-bearing, not a tuning
   // margin. The elicitation ceiling was raised to 6 hours by the instance owner — a question may
   // legitimately wait out a whole working day, not just a session. A busy channel may hold many more
