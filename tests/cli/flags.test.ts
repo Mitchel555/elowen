@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { flagValue } from '../../src/cli/flags.js';
+import { flagValue, requireFlagValues } from '../../src/cli/flags.js';
 
 describe('cli/flags.flagValue', () => {
   it('reads the token after the flag', () => {
@@ -23,6 +23,42 @@ describe('cli/flags.flagValue', () => {
   it('keeps a value that merely contains dashes', () => {
     expect(flagValue(['--domain', 'my-host.dev'], '--domain')).toBe('my-host.dev');
     expect(flagValue(['--llm-model', '-mini'], '--llm-model')).toBe('-mini');
+  });
+
+  // The swallow guard above makes `--admin-pass --secret` unreadable, so there has to be a form that can
+  // express a value starting with `--` at all.
+  it('reads the `--name=value` form, including a value that starts with --', () => {
+    expect(flagValue(['--admin-pass=--secret'], '--admin-pass')).toBe('--secret');
+    expect(flagValue(['--a', '1', '--user=deploy'], '--user')).toBe('deploy');
+    expect(flagValue(['--user=a=b'], '--user')).toBe('a=b');
+    expect(flagValue(['--user='], '--user')).toBe('');
+  });
+
+  it('does not confuse a longer flag that shares a prefix', () => {
+    expect(flagValue(['--admin-user=root'], '--admin')).toBeUndefined();
+    expect(flagValue(['--user-agent=curl'], '--user')).toBeUndefined();
+  });
+});
+
+describe('cli/flags.requireFlagValues', () => {
+  it('passes when every named flag is absent or carries a value', () => {
+    expect(() => requireFlagValues(['--user', 'deploy', '--no-tmux'], ['--user', '--domain'])).not.toThrow();
+    expect(() => requireFlagValues(['--user=deploy'], ['--user'])).not.toThrow();
+  });
+
+  it('throws for a flag written without a value, naming every offender', () => {
+    expect(() => requireFlagValues(['--user', '--agents', 'all'], ['--user', '--agents']))
+      .toThrow(/missing value for --user/);
+    expect(() => requireFlagValues(['--domain', '--user'], ['--user', '--domain']))
+      .toThrow(/missing value for --user, --domain/);
+  });
+
+  it('points at the `--flag=value` escape in the message', () => {
+    expect(() => requireFlagValues(['--admin-pass'], ['--admin-pass'])).toThrow(/--flag=value/);
+  });
+
+  it('ignores flags it was not asked about', () => {
+    expect(() => requireFlagValues(['--domain'], ['--user'])).not.toThrow();
   });
 });
 

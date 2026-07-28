@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import * as p from '../ui/prompts.js';
 import { defaultLifecycleDeps, runLifecycle } from '../commands.js';
 import { readInstallInfo } from '../installInfo.js';
-import { urlHealthy } from '../launcher.js';
+import { urlHealthy, waitHealthy } from '../launcher.js';
 import { SERVICES, systemctl } from '../systemd.js';
 import { clearMarker, isOnboarded, readMarker } from './marker.js';
 import { runOnboarding } from './wizard.js';
@@ -97,20 +97,32 @@ function tmuxInstallHint(): string {
   return 'install tmux with your system package manager';
 }
 
+/** How long setup waits for the daemon to answer after it has restarted it. */
+const READY_BUDGET_MS = 5000;
+
 /** Bring the daemon up the right way for this box: nothing if it's already healthy, else systemctl on an
  *  `elowen install` box (never a second, port-conflicting detached daemon), otherwise the local lifecycle.
  *  Readiness goes through the shared `urlHealthy` probe (same one the launcher, `ensureDaemon` and the
  *  installer use): a bare non-throwing fetch read a wedged daemon's 500 as "up" and let the wizard run on
- *  against it, and it had no timeout, so a half-open connection hung setup instead of failing it. */
+ *  against it, and it had no timeout, so a half-open connection hung setup instead of failing it.
+ *
+ *  Everything below this line runs only because the daemon did NOT answer healthily, so both paths must
+ *  be able to REPLACE a running-but-broken instance — merely asking for one to exist recovers nothing. */
 async function bringUp(base: string, env: NodeJS.ProcessEnv, version: string): Promise<void> {
   if (await urlHealthy(`${base}/health`)) return;
   if (readInstallInfo()) {
-    const r = await systemctl('start', ...SERVICES);
-    if (r.code !== 0) throw new Error(`systemctl start failed (code ${r.code})`);
-    for (let i = 0; i < 50; i++) { if (await urlHealthy(`${base}/health`)) return; await sleep(100); }
-    throw new Error('daemon did not become healthy');
+    // `restart`, not `start`: systemd considers a wedged unit active, so `start` is a no-op on the very
+    // state that got us here and setup would just wait out the budget. `restart` also starts a stopped unit.
+    const r = await systemctl('restart', ...SERVICES);
+    if (r.code !== 0) throw new Error(`systemctl restart failed (code ${r.code})`);
+    const [healthy] = await waitHealthy([`${base}/health`], { budgetMs: READY_BUDGET_MS });
+    if (!healthy) throw new Error(`daemon did not become healthy within ${READY_BUDGET_MS / 1000}s of a restart (journalctl -u elowen-daemon)`);
+    return;
   }
-  await runLifecycle('up', env, defaultLifecycleDeps(version));
+  // Locally-owned processes: `up` ADOPTS a tracked pid that is merely alive (birth identity is all it
+  // checks), so on its own it can never replace an unhealthy daemon. `down` first — a no-op when nothing
+  // is tracked — so `up` spawns a fresh pair instead of re-adopting the broken one.
+  const deps = defaultLifecycleDeps(version);
+  await runLifecycle('down', env, deps);
+  await runLifecycle('up', env, deps);
 }
-
-function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }

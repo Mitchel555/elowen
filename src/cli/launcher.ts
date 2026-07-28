@@ -71,8 +71,44 @@ export async function urlHealthy(url: string, fetchFn: typeof fetch = fetch, tim
   finally { clearTimeout(timer); }
 }
 
+const portUrl = (port: number, path: string): string => `http://127.0.0.1:${port}${path}`;
+
 async function portHealthy(fetchFn: typeof fetch, port: number, path: string): Promise<boolean> {
-  return urlHealthy(`http://127.0.0.1:${port}${path}`, fetchFn);
+  return urlHealthy(portUrl(port, path), fetchFn);
+}
+
+/** Options for `waitHealthy`. */
+export interface ReadinessOpts {
+  /** Wall-clock budget for the WHOLE wait, probes included. */
+  budgetMs: number;
+  /** Pause between polling rounds (clamped to what is left of the budget). */
+  pollMs?: number;
+  fetchFn?: typeof fetch;
+}
+
+/** Poll `urls` until every one answers 2xx or the budget runs out; returns each url's final health.
+ *  The single readiness wait shared by `start`, `elowen setup`, `ensureDaemon` and the installer.
+ *
+ *  `budgetMs` is a real deadline and each probe may spend only what is LEFT of it. Attempts × interval is
+ *  NOT a duration: every probe carries its own timeout, so a "5s" wait of 50×100ms could run for minutes
+ *  against a port that accepts connections and then stalls — exactly the wedged-service case these waits
+ *  exist for. Urls are probed in order and a later one only once every earlier one is healthy (the web
+ *  proxies the daemon, so polling it before the daemon answers is wasted budget). */
+export async function waitHealthy(urls: string[], opts: ReadinessOpts): Promise<boolean[]> {
+  const { budgetMs, pollMs = 100, fetchFn = fetch } = opts;
+  const deadline = Date.now() + budgetMs;
+  const left = (): number => deadline - Date.now();
+  const probes = urls.map((url) => ({ url, healthy: false }));
+  do {
+    for (const probe of probes) {
+      if (probe.healthy) continue;
+      probe.healthy = await urlHealthy(probe.url, fetchFn, Math.max(left(), 1));
+      if (!probe.healthy) break; // gate the rest behind it
+    }
+    if (probes.every((p) => p.healthy)) break;
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(left(), 0))));
+  } while (left() > 0);
+  return probes.map((p) => p.healthy);
 }
 
 /** Status of both services: a service is `running` when its tracked pid is alive, and `healthy` when
@@ -190,7 +226,7 @@ async function startLocked(env: NodeJS.ProcessEnv, deps: StartDeps): Promise<Run
   const fetchFn = deps.fetch ?? fetch;
   const now = deps.now ?? (() => new Date().toISOString());
   const pollMs = deps.pollMs ?? 200;
-  const attempts = deps.attempts ?? 100;
+  const attempts = deps.attempts ?? 100; // pollMs × attempts is the TOTAL readiness deadline
   // Ports are overridable (ELOWEN_PORT / ELOWEN_WEB_PORT) so a second instance — or a smoke test — can run
   // alongside an existing one. Defaults are the conventional 4400/4500.
   const daemonPort = Number((env.ELOWEN_PORT) ?? DAEMON_PORT);
@@ -223,12 +259,10 @@ async function startLocked(env: NodeJS.ProcessEnv, deps: StartDeps): Promise<Run
 
   // Wait for BOTH services to answer — a live daemon with a dead web must not report `elowen up` as a
   // success. The web proxies the daemon, so it's polled second within the same shared budget.
-  let daemonHealthy = false, webHealthy = false;
-  for (let i = 0; i < attempts && !(daemonHealthy && webHealthy); i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, pollMs));
-    if (!daemonHealthy) daemonHealthy = await portHealthy(fetchFn, daemonPort, '/health');
-    if (daemonHealthy && !webHealthy) webHealthy = await portHealthy(fetchFn, webPort, '/');
-  }
+  const budgetMs = attempts * pollMs;
+  const [daemonHealthy = false, webHealthy = false] = await waitHealthy(
+    [portUrl(daemonPort, '/health'), portUrl(webPort, '/')], { budgetMs, pollMs, fetchFn },
+  );
 
   // Record state even on failure so `elowen down`/`status` can see and clean up the spawned pids.
   const state: RunState = { daemon: { pid: daemonPid, port: daemonPort }, web: { pid: webPid, port: webPort }, version: deps.version, startedAt: now() };
@@ -236,7 +270,7 @@ async function startLocked(env: NodeJS.ProcessEnv, deps: StartDeps): Promise<Run
   // But never report success when a service never answered: a wedged or crash-looping daemon (or a web
   // that failed to boot behind a healthy daemon) would otherwise be written as "elowen is up". Surface it
   // so the operator knows to check the logs.
-  const budget = Math.round((attempts * pollMs) / 1000);
+  const budget = Math.round(budgetMs / 1000);
   if (!daemonHealthy) throw new Error(`elowen daemon did not become healthy on :${daemonPort} after ${budget}s — check the logs in ${logDir(env)}`);
   if (!webHealthy) throw new Error(`elowen web did not become healthy on :${webPort} after ${budget}s — check the logs in ${logDir(env)}`);
   return state;

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readState, writeState, clearState, isAlive, isTrackedService, status, stop, start, type RunState, type IsTracked } from '../../src/cli/launcher.js';
+import { readState, writeState, clearState, isAlive, isTrackedService, status, stop, start, waitHealthy, type RunState, type IsTracked } from '../../src/cli/launcher.js';
 import type { spawn as nodeSpawn } from 'node:child_process';
 
 let home: string;
@@ -75,6 +75,50 @@ describe('cli/launcher.status', () => {
     const s = await status(env, async () => { probed = true; return new Response('ok', { status: 200 }); }, () => false);
     expect(s.daemon).toMatchObject({ running: false, healthy: false });
     expect(probed).toBe(false);
+  });
+});
+
+describe('cli/launcher.waitHealthy', () => {
+  /** A port that accepts the connection and then never answers — the wedged-service case. It resolves
+   *  only when `urlHealthy` aborts it, so the request lasts exactly as long as the timeout it was given. */
+  function stallingFetch(): { fetch: typeof fetch; timeouts: number[] } {
+    const timeouts: number[] = [];
+    const started: number[] = [];
+    const fetchFn = ((_url: string | URL, init?: { signal?: AbortSignal }) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) { reject(new Error('urlHealthy must bound every probe')); return; }
+      const at = Date.now();
+      started.push(at);
+      signal.addEventListener('abort', () => { timeouts.push(Date.now() - at); reject(new Error('aborted')); });
+    })) as unknown as typeof fetch;
+    return { fetch: fetchFn, timeouts };
+  }
+
+  it('returns healthy as soon as every url answers', async () => {
+    const fetchFn = (async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
+    expect(await waitHealthy(['http://x/a', 'http://x/b'], { budgetMs: 1000, pollMs: 1, fetchFn })).toEqual([true, true]);
+  });
+
+  it('reports each url separately and never probes a later one before an earlier one is up', async () => {
+    const seen: string[] = [];
+    const fetchFn = (async (url: string | URL) => {
+      seen.push(String(url));
+      return new Response('', { status: 503 });
+    }) as unknown as typeof fetch;
+    expect(await waitHealthy(['http://x/a', 'http://x/b'], { budgetMs: 5, pollMs: 1, fetchFn })).toEqual([false, false]);
+    expect(seen.every((u) => u === 'http://x/a')).toBe(true); // the daemon never came up, so the web is never polled
+  });
+
+  // The whole point of the budget: 50 attempts × 100ms was never 5 seconds, because each attempt could
+  // spend its own 3s timeout on a half-open socket. A stalling port must not stretch the wait at all.
+  it('gives up within the TOTAL budget even when every probe stalls', async () => {
+    const { fetch: fetchFn, timeouts } = stallingFetch();
+    const at = Date.now();
+    expect(await waitHealthy(['http://x/a'], { budgetMs: 150, pollMs: 10, fetchFn })).toEqual([false]);
+    const elapsed = Date.now() - at;
+    expect(elapsed).toBeLessThan(1500); // a single un-clamped 3s probe would already blow this
+    expect(timeouts.length).toBeGreaterThan(0);
+    for (const t of timeouts) expect(t).toBeLessThan(1000); // each probe only got what was left of the budget
   });
 });
 
@@ -174,6 +218,33 @@ describe('cli/launcher.start', () => {
     const fetchFn = (async () => new Response('ok', { status: 200 })) as unknown as typeof fetch;
     await expect(start(env, { version: '9.9.9', spawn: fakeSpawn, fetch: fetchFn, pollMs: 1, attempts: 3 }))
       .rejects.toThrow(/refusing to spawn a second one/);
+  });
+
+  // Adoption is deliberate — `elowen up` must not spawn a second daemon next to a live one — but it also
+  // means `up` can never REPLACE a wedged service: it re-adopts the broken pid and then fails on the
+  // health budget. That is exactly why `elowen setup` has to take a locally-owned instance DOWN first,
+  // so pin both halves here rather than trusting a mocked lifecycle to prove recovery.
+  it('adopts a tracked pid that is alive but unhealthy, so `up` alone cannot recover it', async () => {
+    writeState(env, sample); // daemon 111, web 222 — alive per isTracked, but the port answers 500
+    let spawned = 0;
+    const spawn = ((...args: Parameters<typeof nodeSpawn>) => { spawned++; return (fakeSpawn as unknown as (...a: unknown[]) => ReturnType<typeof nodeSpawn>)(...args); }) as unknown as typeof nodeSpawn;
+    const wedged = (async () => new Response('boom', { status: 500 })) as unknown as typeof fetch;
+    await expect(start(env, { version: '9.9.9', spawn, fetch: wedged, pollMs: 1, attempts: 3, isTracked: () => true }))
+      .rejects.toThrow(/did not become healthy/);
+    expect(spawned).toBe(0);
+    expect(readState(env)?.daemon.pid).toBe(111); // still the wedged one
+  });
+
+  it('spawns a fresh pair once stop() has cleared the wedged instance — the down→up recovery', async () => {
+    writeState(env, deadPids);
+    const silent = (async () => new Response('', { status: 503 })) as unknown as typeof fetch;
+    await stop(env, { kill: () => { /* already gone */ }, isTracked: () => true, fetch: silent, pollMs: 1, attempts: 3 });
+    expect(readState(env)).toBeNull();
+
+    const { spawn, fetch: fetchFn } = trackedHealthMock();
+    const s = await start(env, { version: '9.9.9', spawn, fetch: fetchFn, pollMs: 1, attempts: 5 });
+    expect(s.daemon.pid).toBe(4321); // replaced, not re-adopted
+    expect(s.web.pid).toBe(4321);
   });
 
   it('serialises concurrent start() calls: a second racing invocation adopts the first instead of spawning again', async () => {

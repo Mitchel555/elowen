@@ -9,7 +9,7 @@ import { defaultLifecycleDeps, runLifecycle, runApiCommand } from './commands.js
 import { callElowenApi } from '../shared/apiClient.js';
 import { menu } from './menu.js';
 import { interactiveLogin, launchChat } from './chat/launch.js';
-import { urlHealthy } from './launcher.js';
+import { urlHealthy, waitHealthy } from './launcher.js';
 import { flagValue as flag } from './flags.js';
 
 const BASE = (process.env.ELOWEN_URL) ?? 'http://localhost:4400';
@@ -110,8 +110,9 @@ async function ensureDaemon() {
   if (await urlHealthy(`${BASE}/health`)) return;
   const entry = join(dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'index.js');
   spawn(process.execPath, [entry], { detached: true, stdio: 'ignore' }).unref();
-  for (let i = 0; i < 50; i++) { if (await urlHealthy(`${BASE}/health`)) return; await new Promise(r => setTimeout(r, 100)); }
-  throw new Error('elowen daemon did not become healthy');
+  // 5s TOTAL, not 50 probes that may each stall for their own timeout.
+  const [healthy] = await waitHealthy([`${BASE}/health`], { budgetMs: 5000 });
+  if (!healthy) throw new Error('elowen daemon did not become healthy');
 }
 
 /** Companion to the shared `flag()` reader: tells "absent" apart from "present but valueless". */

@@ -15,8 +15,8 @@ import { INSTALL_INFO_PATH, serializeInstallInfo, type InstallInfo } from '../in
 import { must, aptInstall, step } from '../provision/exec.js';
 import { type Deployment, isIpAddress, publicUrl, localhostDeploy, ipDeploy, chooseDeployment, provisionProxy } from '../provision/deployment.js';
 import { beginInstaller } from '../ui/installer.js';
-import { urlHealthy } from '../launcher.js';
-import { flagValue as flag } from '../flags.js';
+import { waitHealthy } from '../launcher.js';
+import { flagValue as flag, requireFlagValues } from '../flags.js';
 
 const DAEMON_PORT = Number((process.env.ELOWEN_PORT) ?? 4400);
 const WEB_PORT = Number((process.env.ELOWEN_WEB_PORT) ?? 4500);
@@ -60,15 +60,12 @@ function bail(v: unknown): asserts v is string {
   if (p.isCancel(v)) { p.cancel('Installation cancelled.'); process.exit(1); }
 }
 
-/** Poll the daemon's /setup endpoint until it answers (services just came up) or we give up. Each probe
- *  is bounded (`urlHealthy`, shared with the launcher and `ensureDaemon`) so a half-open connection can't
- *  stall a single attempt for longer than its own timeout. */
-async function waitForDaemon(tries = 40): Promise<boolean> {
-  for (let i = 0; i < tries; i++) {
-    if (await urlHealthy(`${base}/setup`)) return true;
-    await new Promise((res) => setTimeout(res, 500));
-  }
-  return false;
+/** Poll the daemon's /setup endpoint until it answers (services just came up) or the budget runs out.
+ *  Uses the shared readiness wait (launcher, `ensureDaemon`, `elowen setup`), so the 20s is a real
+ *  deadline rather than 40 attempts that may each stall for their own timeout. */
+async function waitForDaemon(budgetMs = 20_000): Promise<boolean> {
+  const [ready = false] = await waitHealthy([`${base}/setup`], { budgetMs, pollMs: 500 });
+  return ready;
 }
 
 /** End-to-end check: the admin can authenticate against the running daemon. */
@@ -233,9 +230,19 @@ function agentCli(id: string) {
 
 // ── unattended front-end ─────────────────────────────────────────────────────
 
+/** Every `elowen install` flag that carries a value. Listed so a valueless one dies in the parser rather
+ *  than provisioning a box from defaults nobody asked for. */
+const VALUE_FLAGS = [
+  '--user', '--agents', '--domain', '--ip', '--host', '--proxy', '--email',
+  '--admin-user', '--admin-pass', '--autopilot-cli', '--autopilot-model',
+  '--llm-url', '--llm-key', '--llm-model',
+] as const;
+
 /** Build a plan from CLI flags for `--unattended`. Resolves create-vs-existing from whether the user
- *  already exists, so the same command is idempotent across re-runs. */
+ *  already exists, so the same command is idempotent across re-runs. Throws on a malformed flag list:
+ *  nobody is watching an unattended install, so a typo must stop it, not reshape it. */
 export async function planFromArgs(r: Runner, args: string[]): Promise<InstallPlan> {
+  requireFlagValues(args, VALUE_FLAGS);
   const username = flag(args, '--user') ?? 'elowen';
   const exists = MAC ? true : (await userHome(r, username)) !== null;
 
@@ -246,6 +253,11 @@ export async function planFromArgs(r: Runner, args: string[]): Promise<InstallPl
 
   const adminUser = flag(args, '--admin-user');
   const adminPass = flag(args, '--admin-pass');
+  // Half a credential pair is a typo, not a decision to skip the admin: creating no account at all while
+  // reporting a successful install leaves a box nobody can sign in to.
+  if ((adminUser === undefined) !== (adminPass === undefined)) {
+    throw new Error('elowen install: --admin-user and --admin-pass must be given together (pass both to create the first admin, or neither to create it later)');
+  }
   // `--autopilot-cli <claude|opencode|codex>` runs autopilot through an agent CLI (no API key);
   // otherwise the --llm-* flags configure the hosted-API engine.
   const autopilotCli = flag(args, '--autopilot-cli');
@@ -272,7 +284,7 @@ export async function planFromArgs(r: Runner, args: string[]): Promise<InstallPl
  *  ⇒ domain+HTTPS; a `--domain` that is actually an IP is treated as direct port mode (Let's Encrypt
  *  can't certify an IP); nothing ⇒ localhost. */
 function deploymentFromArgs(args: string[]): Deployment {
-  const host = flag(args, '--host');
+  const host = flag(args, '--host') ?? flag(args, '--ip');
   const domain = flag(args, '--domain');
   if (args.includes('--localhost')) return localhostDeploy();
   if (host) return ipDeploy(host);
@@ -359,6 +371,9 @@ USAGE
   elowen install --unattended [options]
 
 OPTIONS
+  A flag that takes a value REQUIRES one: a bare \`--flag\` is a parse error, never a silent default.
+  Write \`--flag=value\` when the value itself starts with \`--\` (e.g. a password).
+
   --unattended                    run non-interactively from the flags below
   --user <name>                   service user that runs the agents          (Linux only; default: elowen)
   --agents <list>                 agent CLIs to install: all | none | claude,opencode,codex
@@ -368,11 +383,11 @@ OPTIONS
   --domain <host>                 serve on a domain behind a reverse proxy (+ Let's Encrypt HTTPS)
   --ip <addr> | --host <addr>     serve directly on the public IP and port (no proxy)
   --localhost                     bind to localhost only
-  --proxy <nginx|apache|none>     reverse proxy to configure for --domain
+  --proxy <nginx|apache>          reverse proxy to configure for --domain
   --email <addr>                  contact email for Let's Encrypt renewal notices
 
   First admin + autopilot:
-  --admin-user <name>             create the first admin account
+  --admin-user <name>             create the first admin account   (with --admin-pass; both or neither)
   --admin-pass <pass>             admin password
   --autopilot-cli <cli>           run autopilot through an agent CLI (claude|opencode|codex) — no API key
   --autopilot-model <spec>        model for --autopilot-cli opencode (e.g. anthropic/claude-sonnet-4-5)
