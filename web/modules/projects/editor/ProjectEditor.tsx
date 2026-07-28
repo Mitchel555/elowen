@@ -57,6 +57,10 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // Mirror of `drafts` for save callbacks: they run after a network round-trip, by which time the
+  // closure they were created in holds a stale copy.
+  const draftsRef = useRef(drafts);
+  useEffect(() => { draftsRef.current = drafts; }, [drafts]);
   const [dirtyPaths, setDirtyPaths] = useState<Set<string>>(new Set());
   // On mobile the file tree is hidden by default in fullscreen (it eats too much of the narrow
   // viewport); a toggle surfaces it as an overlay. On desktop the tree is always visible.
@@ -136,8 +140,19 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   const save = () => {
     if (selected == null) return;
     const path = selected;
-    write.mutate({ id: projectId, path, content: value }, {
-      onSuccess: () => { setDrafts((d) => { const n = { ...d }; delete n[path]; return n; }); setDirtyPaths((s) => { const n = new Set(s); n.delete(path); return n; }); toast(t.projects.fileSaved.replace('{path}', path)); },
+    const sent = value;
+    write.mutate({ id: projectId, path, content: sent }, {
+      onSuccess: () => {
+        // The user can keep typing while the write is in flight (Cmd+S doesn't block on it), and the
+        // draft is what the pane renders. Retire it only when it still holds exactly what we sent —
+        // otherwise clearing it would drop those newer keystrokes and fall back to the saved content.
+        const current = draftsRef.current[path];
+        if (current === undefined || current === sent) {
+          setDrafts((d) => { const n = { ...d }; delete n[path]; return n; });
+          setDirtyPaths((s) => { const n = new Set(s); n.delete(path); return n; });
+        }
+        toast(t.projects.fileSaved.replace('{path}', path));
+      },
       onError: (e) => toast(String(e), 'error'),
     });
   };

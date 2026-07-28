@@ -423,6 +423,11 @@ export function useAssignProject() {
 export function useWriteProjectFile() {
   const qc = useQueryClient();
   return useMutation({
+    // Saving is not gated on `isPending` (Cmd+S fires whenever), so two writes to the same file can
+    // be in flight at once. A shared scope makes react-query run them one after another: without it
+    // the slower, older request can settle last and put its stale content back into the cache — and
+    // onto disk. One scope for all file writes is enough; the editor only ever saves one at a time.
+    scope: { id: 'project-file-write' },
     mutationFn: (v: { id: number; path: string; content: string }) => elowenClient.writeProjectFile(v.id, v.path, v.content),
     onSuccess: (_r, v) => {
       // Update the file cache with what we just wrote before invalidating — the editor clears its local
