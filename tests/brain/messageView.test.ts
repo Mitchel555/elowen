@@ -186,6 +186,34 @@ describe('extractText strips leaked reasoning', () => {
   it('sanitizes a string-content message', () => {
     expect(extractText({ content: '<think>x</think>ok' })).toBe('ok');
   });
+  // Callers pass the raw result of JSON.parse on a stored row, and `null` / a bare scalar parse without
+  // error — reading `.content` off them must not throw, or one bad row takes a whole transcript down.
+  it('reads a non-object message as empty text instead of throwing', () => {
+    expect(extractText(null)).toBe('');
+    expect(extractText(undefined)).toBe('');
+    expect(extractText(42)).toBe('');
+    expect(extractText('plain')).toBe('');
+    expect(extractText([{ type: 'text', text: 'x' }])).toBe('');
+  });
+});
+
+describe('shapeBrainMessages: rows that parse but are not messages', () => {
+  // `null` and bare scalars are valid JSON, so the parse alone lets them through and every later
+  // `.content` read throws — which used to fail the ENTIRE transcript, not just the damaged row.
+  it('isolates a JSON null / scalar / array row and keeps the healthy rows around it', () => {
+    const rows = [
+      { id: 'a', role: 'user', content: JSON.stringify({ role: 'user', content: 'before' }) },
+      { id: 'null-user-row', role: 'user', content: 'null' },
+      { id: 'null-assistant-row', role: 'assistant', content: 'null' },
+      { id: 'number-row', role: 'assistant', content: '42' },
+      { id: 'array-row', role: 'assistant', content: '[{"type":"text","text":"nope"}]' },
+      { id: 'broken-row', role: 'assistant', content: '{"content": [' },
+      { id: 'z', role: 'assistant', content: JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: 'after' }] }) },
+    ];
+    const views = shapeBrainMessages(rows);
+    expect(views.map((v) => v.id)).toEqual(['a', 'z']);
+    expect(views[1]).toMatchObject({ role: 'assistant', text: 'after' });
+  });
 });
 
 describe('toolOutputView', () => {

@@ -2,6 +2,16 @@ import type { Db } from './db.js';
 import type { TokenUsage, CostSource } from '../integrations/usage/types.js';
 import { TASK_PREFIX } from '../brain/sessionId.js';
 
+// Read a numeric JSON field ONLY when it really holds a number. `json_extract` alone also yields a string
+// that merely looks numeric ("100"), which SQLite's SUM() silently coerces — whereas
+// {@link rollupDroppedUsage}, the JS side that re-folds these exact fields when a compaction drops the
+// rows, counts only real finite numbers. Without the type check the two disagree, so compacting a session
+// would CHANGE its historical totals. `absent` is 0 for the summed columns, but NULL for cost and ts: a
+// missing cost must stay "unavailable" rather than become a real $0, and an undated row is excluded by
+// `ts IS NOT NULL`.
+const numeric = (src: string, path: string, absent = '0'): string =>
+  `CASE WHEN json_type(${src}, '${path}') IN ('integer', 'real') THEN json_extract(${src}, '${path}') ELSE ${absent} END`;
+
 // Normalized usage rows shared by usageByDay + usageByModel. One row per LIVE assistant message (its
 // `$.usage`, attributed to the model it recorded in `$.model`) UNIONed with one row per per-model
 // compaction-rollup bucket (`$.usageRollup[]` fanned out with json_each — a divider with no rollup
@@ -19,43 +29,48 @@ import { TASK_PREFIX } from '../brain/sessionId.js';
 // contributes nothing. The rollup side needs the guard on the json_each ARGUMENT, not only in WHERE: the
 // table-valued function is evaluated per outer row, before the filter can exclude it — hence the nested
 // CASE (an inner condition is never evaluated when the outer one fails) plus the `array` type check, so a
-// `usageRollup` that is not an array of buckets, and a bucket element that is not JSON, are skipped too.
+// `usageRollup` that is not an array of buckets is skipped too.
+//
+// Validity is not enough, though: a row must also be the RIGHT SHAPE, not merely parseable. `json_type`
+// keeps a JSON scalar (a row that is just `null` or a number) out of the assistant side, and `je.type`
+// keeps a bucket element that is a scalar — including a DOUBLE-SERIALIZED bucket, a JSON string whose
+// text happens to be an object — out of the fan-out. Every numeric field goes through {@link numeric}.
 const USAGE_ROWS = `
   SELECT s.user_id AS user_id, s.id AS session_id,
          COALESCE(NULLIF(json_extract(m.content, '$.model'), ''), s.model) AS model,
-         json_extract(m.content, '$.timestamp') AS ts,
-         COALESCE(json_extract(m.content, '$.usage.input'), 0) AS input,
-         COALESCE(json_extract(m.content, '$.usage.output'), 0) AS output,
-         COALESCE(json_extract(m.content, '$.usage.cacheRead'), 0) AS cache_read,
-         COALESCE(json_extract(m.content, '$.usage.cacheWrite'), 0) AS cache_write,
-         COALESCE(json_extract(m.content, '$.usage.totalTokens'), 0) AS total,
-         COALESCE(json_extract(m.content, '$.usage.reasoning'), 0) AS reasoning,
-         COALESCE(json_extract(m.content, '$.durationMs'), 0) AS duration_ms,
-         CASE WHEN COALESCE(json_extract(m.content, '$.durationMs'), 0) > 0
-               AND COALESCE(json_extract(m.content, '$.usage.output'), 0) > 0
-              THEN json_extract(m.content, '$.usage.output') ELSE 0 END AS measured_output,
-         json_extract(m.content, '$.usage.cost.total') AS cost
+         ${numeric('m.content', '$.timestamp', 'NULL')} AS ts,
+         ${numeric('m.content', '$.usage.input')} AS input,
+         ${numeric('m.content', '$.usage.output')} AS output,
+         ${numeric('m.content', '$.usage.cacheRead')} AS cache_read,
+         ${numeric('m.content', '$.usage.cacheWrite')} AS cache_write,
+         ${numeric('m.content', '$.usage.totalTokens')} AS total,
+         ${numeric('m.content', '$.usage.reasoning')} AS reasoning,
+         ${numeric('m.content', '$.durationMs')} AS duration_ms,
+         CASE WHEN ${numeric('m.content', '$.durationMs')} > 0
+               AND ${numeric('m.content', '$.usage.output')} > 0
+              THEN ${numeric('m.content', '$.usage.output')} ELSE 0 END AS measured_output,
+         ${numeric('m.content', '$.usage.cost.total', 'NULL')} AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id
-   WHERE m.role = 'assistant' AND json_valid(m.content)
+   WHERE m.role = 'assistant' AND json_valid(m.content) AND json_type(m.content) = 'object'
   UNION ALL
   SELECT s.user_id AS user_id, s.id AS session_id,
          COALESCE(NULLIF(json_extract(je.value, '$.model'), ''), s.model) AS model,
-         json_extract(je.value, '$.at') AS ts,
-         COALESCE(json_extract(je.value, '$.input'), 0) AS input,
-         COALESCE(json_extract(je.value, '$.output'), 0) AS output,
-         COALESCE(json_extract(je.value, '$.cacheRead'), 0) AS cache_read,
-         COALESCE(json_extract(je.value, '$.cacheWrite'), 0) AS cache_write,
-         COALESCE(json_extract(je.value, '$.totalTokens'), 0) AS total,
-         COALESCE(json_extract(je.value, '$.reasoning'), 0) AS reasoning,
-         COALESCE(json_extract(je.value, '$.durationMs'), 0) AS duration_ms,
-         COALESCE(json_extract(je.value, '$.measuredOutput'), 0) AS measured_output,
-         json_extract(je.value, '$.cost.total') AS cost
+         ${numeric('je.value', '$.at', 'NULL')} AS ts,
+         ${numeric('je.value', '$.input')} AS input,
+         ${numeric('je.value', '$.output')} AS output,
+         ${numeric('je.value', '$.cacheRead')} AS cache_read,
+         ${numeric('je.value', '$.cacheWrite')} AS cache_write,
+         ${numeric('je.value', '$.totalTokens')} AS total,
+         ${numeric('je.value', '$.reasoning')} AS reasoning,
+         ${numeric('je.value', '$.durationMs')} AS duration_ms,
+         ${numeric('je.value', '$.measuredOutput')} AS measured_output,
+         ${numeric('je.value', '$.cost.total', 'NULL')} AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id,
          json_each(CASE WHEN json_valid(m.content)
                         THEN (CASE WHEN json_type(m.content, '$.usageRollup') = 'array'
                                    THEN json_extract(m.content, '$.usageRollup') END)
                    END) je
-   WHERE m.role = 'compaction' AND json_valid(je.value)`;
+   WHERE m.role = 'compaction' AND je.type = 'object'`;
 
 // A `brain-task-<id>` worker session is EXCLUDED from the brain aggregates ONLY when its spend is
 // already snapshotted in task_usage (merged separately by /usage/by-model & /usage/by-day) — excluding

@@ -325,9 +325,13 @@ export function stripInlineReasoning(text: string): string {
 
 /** Pull display text out of a stored message's content JSON. Content is either a plain string or an
  *  array of parts ({type:'text', text}); anything else yields an empty string. Inline reasoning tags are
- *  stripped here (single source) so no consumer — reply, curator, title — ever sees leaked chain-of-thought. */
+ *  stripped here (single source) so no consumer — reply, curator, title — ever sees leaked chain-of-thought.
+ *
+ *  `msg` is genuinely unknown: callers hand it straight from `JSON.parse` of a stored row, and `null` (a
+ *  row whose content is the literal `null`) parses fine. Reading `.content` off it would throw and take
+ *  the WHOLE transcript down, so the access is optional. */
 export function extractText(msg: unknown): string {
-  const content = (msg as { content?: unknown }).content;
+  const content = (msg as { content?: unknown } | null | undefined)?.content;
   if (typeof content === 'string') return stripInlineReasoning(content);
   if (Array.isArray(content)) {
     return stripInlineReasoning(content.map((p) => (p && typeof p === 'object' && 'text' in p ? String((p as { text: unknown }).text) : '')).join(''));
@@ -402,8 +406,15 @@ export function shapeBrainMessages(
       continue;
     }
     if (row.role !== 'user' && row.role !== 'assistant') continue;
+    // A stored row is only usable as a message when it parses to an OBJECT: `null` and bare scalars are
+    // valid JSON, so the parse alone would let them through and every `.content` read below would throw —
+    // taking the entire transcript down over one bad row. Anything else stays the empty message, which
+    // produces no view and is skipped.
     let msg: { content?: unknown } = {};
-    try { msg = JSON.parse(row.content) as { content?: unknown }; } catch { /* malformed row → skipped below */ }
+    try {
+      const parsed: unknown = JSON.parse(row.content);
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) msg = parsed;
+    } catch { /* malformed row → skipped below */ }
     if (row.role === 'user') {
       const text = extractText(msg);
       if (text.trim()) stamped.push({ at: row.created_at ?? '', view: { ...(row.id ? { id: row.id } : {}), role: 'user', text } });

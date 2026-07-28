@@ -3,6 +3,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb, type Db } from '../../src/store/db.js';
 import { BrainStore, SESSION_EVENT_KINDS, syntheticRestartResultId } from '../../src/store/brainStore.js';
+import { rollupDroppedUsage } from '../../src/store/brainUsageStore.js';
 import { planSlug } from '../../src/shared/planSlug.js';
 
 // The delivery path's tail truncation is a deliberate mirror of the subagent plugin's (neither side can
@@ -337,6 +338,31 @@ describe('BrainStore', () => {
       expect(pending.map((row) => row.kind).sort()).toEqual(['subagent', 'workflow']);
       expect(pending.find((row) => row.kind === 'subagent')).toMatchObject({ id: 'dlg-1', sessionId: 'child', result: 'clear' });
       expect(pending.find((row) => row.kind === 'workflow')).toMatchObject({ id: 'wf-1', sessionId: '', result: 'dag done' });
+    });
+
+    // `null` and bare scalars are valid JSON, so a payload that parses is not necessarily readable: the
+    // workflow branch reads `payload.result` directly, and one such row used to throw out of the whole
+    // drain — leaving every healthy pending result of that parent undelivered forever.
+    it('drops a payload that is not an object without killing the rest of the drain', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+      store.upsertSubagentRun('root', { id: 'dlg-call', sessionId: 'child', status: 'done', task: 'inspect', tools: 1, seconds: 1 });
+      expect(store.enqueueSubagentResult('root', {
+        id: 'dlg-1', toolCallId: 'dlg-call', sessionId: 'child', status: 'done', task: 'inspect', result: 'clear', tools: 1, seconds: 1,
+      })).toBe(true);
+      const corruptPayload = (resultId: string, payload: string) =>
+        db.prepare(
+          `INSERT INTO brain_subagent_results
+             (result_id, parent_session_id, tool_call_id, child_session_id, kind, workflow_id, status, task, payload)
+           VALUES (?, 'root', ?, '', 'workflow', ?, 'done', 'dag', ?)`
+        ).run(resultId, `wf-call-${resultId}`, resultId, payload);
+      corruptPayload('wf-null', 'null');
+      corruptPayload('wf-number', '7');
+      corruptPayload('wf-broken', '{oops');
+
+      const pending = store.pendingSubagentResults('root');
+      expect(pending.map((row) => row.id)).toEqual(['dlg-1']);
+      expect(pending[0]).toMatchObject({ result: 'clear' });
     });
   });
 
@@ -987,6 +1013,41 @@ describe('BrainStore', () => {
       raw('null-divider', 'brain-a', 'compaction', 'null');
       expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
       expect(store.tokenTotals(1)['brain-a']).toBe(100);
+    });
+
+    // Validity is not the same as the right TYPE. SQLite coerces a numeric-looking STRING in SUM(), while
+    // rollupDroppedUsage() (which re-folds these very fields when a compaction drops the rows) counts only
+    // real numbers — so an untyped read makes a session's historical totals CHANGE when it is compacted.
+    it('ignores usage fields that are strings rather than numbers, so compaction cannot move the totals', () => {
+      raw('numeric-string', 'brain-a', 'assistant', JSON.stringify({
+        role: 'assistant', model: 'claude-opus-4-8', timestamp: Date.parse('2026-01-10T00:00:00Z'),
+        usage: { totalTokens: '500', output: '400', cost: { total: '9.9' } }, durationMs: '1000',
+      }));
+      raw('word-string', 'brain-a', 'assistant', JSON.stringify({
+        role: 'assistant', model: 'claude-opus-4-8', timestamp: Date.parse('2026-01-10T00:00:00Z'),
+        usage: { totalTokens: 'lots' },
+      }));
+      const [row] = store.usageByModel(1);
+      expect(row!.usage.total).toBe(100);
+      expect(row!.usage.output).toBe(2);
+      expect(row!.usage.costUsd).toBeCloseTo(0.1); // the "9.9" string never reaches the sum
+      expect(row!.usage.outputTps).toBeNull();     // nor does a stringly-typed duration fake a speed
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+      // What the SQL counts must be exactly what a compaction of the same rows would carry forward.
+      expect(rollupDroppedUsage(store.getMessages('brain-a'))!.reduce((s, b) => s + b.totalTokens, 0)).toBe(100);
+    });
+
+    it('ignores a rollup bucket that is a scalar or a double-serialized object', () => {
+      const bucket = { model: 'claude-opus-4-8', totalTokens: 500, at: Date.parse('2026-01-10T00:00:00Z') };
+      // A bucket stored as a JSON STRING containing an object: `json_valid` says yes, `json_extract` reads
+      // right through it, so it used to be counted twice-serialized.
+      raw('serialized-bucket', 'brain-a', 'compaction', JSON.stringify({ role: 'compactionSummary', usageRollup: [JSON.stringify(bucket)] }));
+      raw('number-bucket', 'brain-a', 'compaction', JSON.stringify({ role: 'compactionSummary', usageRollup: [42] }));
+      raw('string-field-bucket', 'brain-a', 'compaction', JSON.stringify({
+        role: 'compactionSummary', usageRollup: [{ ...bucket, totalTokens: '500' }],
+      }));
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
     });
 
     it('keeps descendantUsage summing the healthy rows of the tree', () => {
