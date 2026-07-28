@@ -3,6 +3,7 @@ import { Activity, useCallback, useState, useEffect, useRef, type ReactNode } fr
 import { UserCog, Mail, Cpu, Upload, ShieldCheck, User as UserIcon, KeyRound, ZoomIn, Bell, Sparkles, AtSign, Brain, MessageCircle, SquareTerminal } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { ElowenApiError } from '../../lib/elowenClient';
+import type { ProfilePatch } from '../../lib/types';
 import { useMe, useConfig, useMyCliSettings, useBrainModels } from '../../lib/queries';
 import { useUpdateMe, useUploadAvatar, useChangePassword, useSaveMyCliSettings } from '../../lib/mutations';
 import { allModels } from '../../lib/execPresets';
@@ -164,28 +165,47 @@ export function AccountView() {
   const [pushOn, setPushOn] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
 
-  // Seed the form once from the first /auth/me load only — a later refetch (e.g. the autosave's own
-  // invalidation) must not overwrite whatever the user has since typed, even if it resolves after
-  // a newer edit was already made. Local state stays the source of truth once seeded.
-  const [formSeeded, setFormSeeded] = useState(false);
+  // What /auth/me last reported for each profile field. It is both the dirty marker and the diff base:
+  // a field still equal to its baseline is untouched, so it keeps following the server, while a field
+  // the user has changed holds their text — a later refetch (e.g. the autosave's own invalidation) must
+  // never type over an edit in progress. Tracking it per field, not per form, is what keeps a value
+  // changed elsewhere (another window, another device) from being written back from this form's stale
+  // copy when the user saves an unrelated field. The id resets the whole form when the identity changes.
+  const [profileBase, setProfileBase] = useState<{ id: number; name: string; email: string; default_exec: string } | null>(null);
   useEffect(() => {
-    if (me.data?.user && !formSeeded) {
-      setName(me.data.user.name);
-      setEmail(me.data.user.email);
-      setDefaultExec(me.data.user.default_exec);
-      setFormSeeded(true);
+    const user = me.data?.user;
+    if (!user) return;
+    const server = { id: user.id, name: user.name, email: user.email, default_exec: user.default_exec };
+    if (profileBase && profileBase.id === server.id) {
+      if (profileBase.name === server.name && profileBase.email === server.email && profileBase.default_exec === server.default_exec) return;
+      setName((cur) => (cur === profileBase.name ? server.name : cur));
+      setEmail((cur) => (cur === profileBase.email ? server.email : cur));
+      setDefaultExec((cur) => (cur === profileBase.default_exec ? server.default_exec : cur));
+    } else {
+      setName(server.name);
+      setEmail(server.email);
+      setDefaultExec(server.default_exec);
     }
-  }, [me.data, formSeeded]);
+    setProfileBase(server);
+  }, [me.data, profileBase]);
 
-  // Auto-persist the profile shortly after any change — no Save button.
+  // Auto-persist the profile shortly after any change — no Save button. Only the changed fields go out;
+  // `savable` holds the save entirely when nothing differs, so adopting a server-side change does not
+  // bounce it straight back as a write.
+  const profilePatch: ProfilePatch = {};
+  if (profileBase) {
+    if (name.trim() !== profileBase.name) profilePatch.name = name.trim();
+    if (email.trim() !== profileBase.email) profilePatch.email = email.trim();
+    if (defaultExec !== profileBase.default_exec) profilePatch.default_exec = defaultExec;
+  }
   const profileSave = useAutoSaveStatus([name, email, defaultExec], async () => {
     try {
-      await updateMe.mutateAsync({ name: name.trim(), email: email.trim(), default_exec: defaultExec });
+      await updateMe.mutateAsync(profilePatch);
     } catch (error) {
       toast(t.account.saveError, 'error');
       throw error;
     }
-  }, { ready: formSeeded });
+  }, { ready: profileBase !== null, savable: Object.keys(profilePatch).length > 0 });
 
   // Seed the Elowen-AI default once cliSettings load; thereafter local state is the source of truth.
   useEffect(() => {

@@ -161,6 +161,38 @@ describe('AccountView', () => {
     await waitFor(() => expect(patches).toBe(2), { timeout: 3000 });
   });
 
+  it('saves only the edited field, so a change made elsewhere survives', async () => {
+    // Another window renames the user while this form is being used to edit the e-mail. The autosave
+    // must not carry its stale copy of the name back to the server.
+    const stored = { name: 'Bob', email: 'bob@example.com' };
+    let patched: Record<string, unknown> | null = null;
+    server.use(
+      http.get('*/api/auth/me', () => HttpResponse.json({ user: meUser(stored) })),
+      http.patch('*/api/auth/me', async ({ request }) => {
+        patched = await request.json() as Record<string, unknown>;
+        if (typeof patched.name === 'string') stored.name = patched.name;
+        if (typeof patched.email === 'string') stored.email = patched.email;
+        return HttpResponse.json(meUser(stored));
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: [], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    const emailInput = await screen.findByDisplayValue('bob@example.com');
+    stored.name = 'Bob Renamed Elsewhere'; // the external change, made before this form's save goes out
+    fireEvent.change(emailInput, { target: { value: 'new@example.com' } });
+
+    await waitFor(() => expect(patched).not.toBeNull(), { timeout: 3000 });
+    expect(patched).toEqual({ email: 'new@example.com' });
+    expect(stored.name).toBe('Bob Renamed Elsewhere');
+    // The untouched field keeps following /auth/me, so the refetch shows the external name — while the
+    // edited field still holds what was typed here.
+    expect(await screen.findByDisplayValue('Bob Renamed Elsewhere')).toBeInTheDocument();
+    expect(emailInput).toHaveValue('new@example.com');
+  });
+
   it('shows a retryable error instead of an infinite skeleton when /auth/me fails', async () => {
     let attempts = 0;
     server.use(
