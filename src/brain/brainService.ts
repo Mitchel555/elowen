@@ -71,6 +71,9 @@ export class BrainService {
    *  locks (PI sessions are single-conversation — concurrent prompt()/spawn calls on one session id
    *  queue up instead of corrupting turn state). */
   private sessions = new LiveSessionRegistry<LiveBrain>();
+  /** Sessions whose post-restart orphan sweep has already run in THIS process — see start(). Deliberately
+   *  per-process state with no persistence: a restart is exactly the event that must let the sweep run again. */
+  private orphanSweptSessions = new Set<string>();
   /** Shared session assembly (store row + rehydrate + resource loader + PI session) — the same
    *  factory the elowen-exec brain workers use. */
   private factory: BrainSessionFactory;
@@ -1093,6 +1096,17 @@ export class BrainService {
   /** Start (or resume) a conversation — see ConversationLifecycle.start. */
   async start(userId: number, opts?: { provider?: string; model?: string; session?: string; fresh?: boolean; cwd?: string; clientId?: string; clientGeneration?: number }): Promise<{ sessionId: string }> {
     const started = await this.lifecycle.start(userId, opts);
+    // The sweep below reads "running row with no live child" as "orphan of a daemon restart". That is only
+    // true on the FIRST start of a session in this process: a restart is what drops the in-memory child
+    // registrations. On any later start — every web chat open calls this — the very same shape means a
+    // perfectly healthy delegation whose registration this call simply cannot see yet, and terminalizing it
+    // kills live work from the outside. Running it once per session per process keeps the restart cleanup
+    // (a fresh process has an empty set) without letting a reconnect masquerade as one.
+    if (this.orphanSweptSessions.has(started.sessionId)) {
+      void this.turnRunner.drainPendingSubagentResults(userId, started.sessionId);
+      return started;
+    }
+    this.orphanSweptSessions.add(started.sessionId);
     const activeChildren = new Set(this.sessions.childrenOf(started.sessionId));
     for (const run of this.d.store.getSubagentRuns(started.sessionId)) {
       // A daemon restart drops every in-memory child registration, so ANY still-'running' row without a
