@@ -53,8 +53,12 @@ CREATE TABLE IF NOT EXISTS mission_pr (
   fix_rounds INTEGER NOT NULL DEFAULT 0, last_feedback TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL);
+-- `id` is AUTOINCREMENT, not a bare rowid: ownership columns (tasks.created_by, missions.created_by)
+-- reference it, and a plain rowid is REUSED after the highest-numbered user is deleted — the next
+-- account created would silently inherit the deleted user's attribution. AUTOINCREMENT keeps the
+-- counter monotonic in sqlite_sequence so an id is never handed out twice. See db.ts v7.
 CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),
   is_admin INTEGER NOT NULL DEFAULT 0,
   allowed_execs TEXT NOT NULL DEFAULT '',

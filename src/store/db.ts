@@ -138,7 +138,67 @@ export function openDb(path: string): Db {
   repairImageToolNames(db);
   widenSessionEventKinds(db);
   dropPersonalityTables(db);
+  makeUserIdsMonotonic(db);
   return db;
+}
+
+/** v7 — rebuild `users` with `id INTEGER PRIMARY KEY AUTOINCREMENT`.
+ *
+ *  Without AUTOINCREMENT the id is a bare rowid, which SQLite assigns as max(id)+1 — so deleting the
+ *  HIGHEST-numbered user frees that id and hands it to the next account created. Ownership columns
+ *  (`tasks.created_by`, `missions.created_by`) reference users by id, so the new account would inherit
+ *  the deleted user's task attribution and mission notifications. UserStore.delete now nulls those
+ *  columns, which fixes the data already written; this fixes the id reuse itself, so nothing added
+ *  later can walk into the same trap.
+ *
+ *  A table rebuild, because AUTOINCREMENT is part of the PRIMARY KEY declaration and SQLite cannot add
+ *  it with ALTER TABLE — the same reason v5 had to rebuild brain_session_events.
+ *
+ *  Every existing id is preserved as-is (the INSERT carries `id` explicitly), so every reference from
+ *  every other table stays valid — this renumbers nobody. SQLite sets sqlite_sequence to the largest
+ *  id inserted, so the counter resumes above the current maximum rather than restarting at 1.
+ *
+ *  Safe under `foreign_keys = ON` (set in openDb): the whole schema declares exactly one foreign key,
+ *  and it is memory_embeddings → memories. Nothing REFERENCES users, so dropping the old table cannot
+ *  cascade or be rejected.
+ *
+ *  Column list written out in full rather than `SELECT *` so a column added to schema.sql later fails
+ *  loudly here instead of being silently dropped on every migrating database. It runs AFTER the
+ *  addColumn block above, so a database that predates any of these columns already has them by now.
+ *
+ *  NUMBERED 7: versions 1-6 are all spent (see the runners above) — a migration numbered ≤6 would be
+ *  skipped in silence on exactly the databases that need it. */
+function makeUserIdsMonotonic(db: Db): void {
+  runOnce(db, 7, () => {
+    const alreadyMonotonic = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users' AND sql LIKE '%AUTOINCREMENT%'",
+    ).get();
+    if (alreadyMonotonic) return; // a database created fresh off the current schema.sql needs no rebuild
+    db.exec(`
+      CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        allowed_execs TEXT NOT NULL DEFAULT '',
+        disabled_tools TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        avatar TEXT NOT NULL DEFAULT '',
+        default_exec TEXT NOT NULL DEFAULT '',
+        advisor_exec TEXT NOT NULL DEFAULT '',
+        advisor_autostart INTEGER NOT NULL DEFAULT 1
+      );
+      INSERT INTO users_new (
+        id, username, password_hash, created_at, is_admin, allowed_execs, disabled_tools,
+        name, email, avatar, default_exec, advisor_exec, advisor_autostart
+      ) SELECT
+        id, username, password_hash, created_at, is_admin, allowed_execs, disabled_tools,
+        name, email, avatar, default_exec, advisor_exec, advisor_autostart
+      FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+    `);
+  });
 }
 
 /** v6 — drop the retired per-user/per-platform personality tables. The personality subsystem collapsed
