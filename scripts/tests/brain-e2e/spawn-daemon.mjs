@@ -138,9 +138,18 @@ export async function spawnRealDaemon(opts) {
     return token;
   };
 
+  // stop() only runs when the suite reaches its own teardown. A crash, an unhandled rejection or a
+  // Ctrl-C skips it and strands the whole data dir — including the daemon log, which is why two aborted
+  // runs could leave 30 GB each sitting in /tmp. This fires on the way out no matter how we leave.
+  const cleanupDataDir = () => {
+    try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  };
+  process.once('exit', cleanupDataDir);
+
   const stop = async () => {
     try { await kill(); } finally {
-      try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+      process.off('exit', cleanupDataDir);
+      cleanupDataDir();
     }
   };
 
