@@ -5,7 +5,7 @@ import { Modal } from '../../components/ui/Modal';
 import { useTranslation } from '../../lib/i18n';
 import { useMobileViewport } from '../../lib/useMobile';
 import { formatTokens } from '../../lib/format';
-import { DAG_NODE_H, DAG_NODE_W, layoutDag, stepDagSelection, workflowLabel, workflowProgress } from '../../lib/workflowDag';
+import { DAG_NODE_W, layoutDag, stepDagSelection, workflowLabel, workflowProgress } from '../../lib/workflowDag';
 import type { DagDirection } from '../../lib/workflowDag';
 import { useBrainChat } from './BrainChatProvider';
 import type { WorkflowState } from '../../lib/transcript';
@@ -48,7 +48,16 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
 
   const wf = workflows.find((w) => w.id === workflowId) ?? null;
   const nodes = useMemo(() => wf?.nodes ?? [], [wf]);
-  const layout = useMemo(() => layoutDag(nodes.map((n) => ({ id: n.id, deps: n.deps }))), [nodes]);
+  // Selection is resolved from the raw nodes first, because the layout itself depends on WHICH node is
+  // selected — a full card is taller than a row, so picking a different node reflows the graph.
+  const focusId = nodes.find((n) => n.id === pickedId)?.id
+    ?? nodes.find((n) => n.status === 'running')?.id
+    ?? nodes[0]?.id
+    ?? null;
+  const layout = useMemo(
+    () => layoutDag(nodes.map((n) => ({ id: n.id, deps: n.deps, full: n.status === 'running' || n.id === focusId }))),
+    [nodes, focusId],
+  );
 
   const statusLabel: Record<WorkflowNode['status'], string> = {
     pending: t.workflowModal.statusPending,
@@ -58,10 +67,7 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
   };
 
   // Nothing picked yet → open on the live work, which is what the user came to watch.
-  const selected = nodes.find((n) => n.id === pickedId)
-    ?? nodes.find((n) => n.status === 'running')
-    ?? nodes[0]
-    ?? null;
+  const selected = nodes.find((n) => n.id === focusId) ?? null;
 
   const move = (direction: DagDirection): void => {
     const next = stepDagSelection(layout, selected?.id ?? null, direction);
@@ -77,36 +83,43 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
     move(direction);
   };
 
-  // The node box has room for exactly one line under the id, so it carries the node's VITALS — what the
-  // CLI puts there. The task text is the wrong thing to truncate into it: every node in a workflow tends
-  // to start with the same boilerplate, so the visible prefix is identical across boxes and says nothing
-  // about the one you are looking at. A node with no vitals yet (pending) falls back to its live detail.
-  const nodeVitals = (node: WorkflowNode): string => {
-    const vitals = [
-      node.tokens !== undefined ? `${formatTokens(node.tokens)} ${t.agents.tokens.toLowerCase()}` : '',
-      node.seconds !== undefined ? `${node.seconds}s` : '',
-    ].filter(Boolean);
-    return vitals.length > 0 ? vitals.join(' · ') : (node.detail || node.task);
-  };
+  // The card's bottom line carries the node's VITALS, as the CLI's does. The task text deliberately does
+  // NOT belong here: every node of a workflow tends to open with the same boilerplate, so a truncated
+  // task renders as the same prefix in every box. The line above already shows the live activity.
+  const nodeVitals = (node: WorkflowNode): string => [
+    node.tokens !== undefined ? `${formatTokens(node.tokens)} ${t.agents.tokens.toLowerCase()}` : '',
+    node.seconds !== undefined ? `${node.seconds}s` : '',
+  ].filter(Boolean).join(' · ');
 
-  const nodeButton = (node: WorkflowNode, className: string, style?: React.CSSProperties) => (
+  /** A full node shows what the agent is doing right now plus its vitals; a compact one is just its name.
+   *  The split is the CLI's (workflowCanvas.ts:99) and it is what gives the graph a foreground: the eye
+   *  lands on the handful of cards that are live instead of scanning a grid of identical boxes. */
+  const nodeButton = (node: WorkflowNode, full: boolean, className: string, style?: React.CSSProperties) => (
     <button
       key={node.id}
       ref={(element) => { if (element) nodeRefs.current.set(node.id, element); else nodeRefs.current.delete(node.id); }}
       type="button"
       data-testid={`workflow-node-${node.id}`}
       data-status={node.status}
+      data-full={full ? 'true' : 'false'}
       aria-pressed={node.id === selected?.id}
       aria-label={`${node.id} — ${statusLabel[node.status]}`}
       onClick={() => setPickedId(node.id)}
       style={style}
-      className={`${className} flex flex-col justify-center gap-0.5 rounded-lg border bg-elevated px-2.5 text-left transition-colors ${NODE_TONE[node.status]} ${node.id === selected?.id ? 'ring-1 ring-accent' : ''}`}
+      className={`${className} flex flex-col justify-center rounded-lg border text-left transition-colors ${
+        full ? 'gap-0.5 bg-elevated px-2.5 py-1.5' : 'gap-0 border-transparent bg-transparent px-1.5 hover:border-border'
+      } ${full ? NODE_TONE[node.status] : 'text-text-muted'} ${node.id === selected?.id ? 'ring-1 ring-accent' : ''}`}
     >
       <span className="flex items-center gap-1.5">
         <span aria-hidden className={`wf-dag__pulse shrink-0 text-tiny ${GLYPH_TONE[node.status]}`}>{NODE_GLYPH[node.status]}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-tiny">{node.id}</span>
+        <span className={`min-w-0 flex-1 truncate font-mono text-tiny ${full ? '' : 'text-text'}`}>{node.id}</span>
       </span>
-      <span className="truncate text-tiny text-text-muted">{nodeVitals(node)}</span>
+      {full ? (
+        <>
+          <span className="truncate text-tiny text-accent">{node.detail || node.task}</span>
+          <span className="truncate text-tiny text-text-muted">{nodeVitals(node)}</span>
+        </>
+      ) : null}
     </button>
   );
 
@@ -129,7 +142,7 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
                       {t.workflowModal.wave.replace('{n}', String(placed.column + 1))}
                     </span>
                   ) : null}
-                  {nodeButton(node, 'min-h-[3rem] w-full py-1.5')}
+                  {nodeButton(node, true, 'min-h-[3rem] w-full py-1.5')}
                 </li>
               );
             })}
@@ -184,7 +197,7 @@ export function WorkflowModal({ workflowId, onClose }: { workflowId: string; onC
           {layout.nodes.map((placed) => {
             const node = nodes.find((n) => n.id === placed.id);
             return node
-              ? nodeButton(node, 'absolute py-1.5', { left: placed.x, top: placed.y, width: DAG_NODE_W, height: DAG_NODE_H })
+              ? nodeButton(node, placed.full, 'absolute', { left: placed.x, top: placed.y, width: DAG_NODE_W, height: placed.height })
               : null;
           })}
           </div>
