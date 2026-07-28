@@ -55,7 +55,6 @@ const json = (body: unknown, method = 'POST'): RequestInit => ({ method, headers
 
 export const elowenClient = {
   tasks: (projectId?: number) => req<Task[]>(projectId != null ? `/tasks?project_id=${projectId}` : '/tasks'),
-  ready: () => req<Task[]>('/tasks/ready'),
   sessions: () => req<SessionInfo[]>('/sessions'),
   missions: () => req<Mission[]>('/missions'),
   health: () => req<{ ok: boolean; version?: string }>('/health'),
