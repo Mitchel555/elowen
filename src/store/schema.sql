@@ -147,6 +147,12 @@ CREATE TABLE IF NOT EXISTS brain_sessions (
   user_id INTEGER NOT NULL,
   title TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
+  -- The CONFIG provider entry id the conversation last ran on (BrainProviderEntry.id, not the registry
+  -- provider name). Stored beside `model` because a model id alone is ambiguous: two configured entries
+  -- can expose the same id, and resolveBrainModelRoute falls back to providers[0] when no provider is
+  -- given — so a respawn restoring only the model could reach a different provider than the one the
+  -- conversation was actually running on. Empty on rows written before this column existed.
+  provider TEXT NOT NULL DEFAULT '',
   -- The client-reported working directory the conversation belongs to (validated realpath; empty =
   -- cwd-less, e.g. web-dock sessions). Drives the CLI's default-start resolution: a CLI launched in a
   -- directory resumes the most recent unattached conversation with a matching work_dir.

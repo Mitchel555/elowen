@@ -266,14 +266,33 @@ export class ConversationLifecycle {
         if (o.explicitResume) already.interactedAt = Date.now();
         return; // idempotent resume of a live conversation
       }
-      // Model selection: an explicit start option wins, then a Git-project pick, then the user's
-      // global override, then the configured default. Each persisted candidate is validated so a model
-      // revoked from the user's allow-list falls through rather than blocking the brain.
+      // Model selection: an explicit start option wins, then the model this conversation was ALREADY
+      // running on, then a Git-project pick, then the user's global override, then the configured
+      // default. Each persisted candidate is validated so a model revoked from the user's allow-list
+      // falls through rather than blocking the brain.
       const userCfg = this.d.userSettings?.(userId);
       const policy = this.d.policy?.(userId) ?? { allowedProjectIds: 'all' as const, allowedPaths: () => [] };
       const projectRoot = gitProjectRoot(policy, o.clientCwd ?? o.spawnCwd);
+      // A respawn is ROUTINE — the last client detaching, a settings save, a plugin reload, the idle
+      // reaper, a daemon restart all cause one — and each used to re-resolve the model from the global
+      // or project preference, silently overwriting an explicit `/model` pick with no session event to
+      // show for it. A conversation that has already been spoken in therefore keeps its own pair.
+      // Requires BOTH ids: a model alone does not identify a provider, and resolveBrainModelRoute falls
+      // back to providers[0] when none is given, which could restore the model against the wrong one.
+      // Rows written before `provider` existed are simply skipped and heal on their next spawn.
+      // Deliberately NOT applied to the vision model: `visionFallback` lives only in memory, so after a
+      // restart the row still names a temporary hop and honouring it would make the hop permanent.
+      const storedRow = this.d.store.getSession(sessionId);
+      const storedModel = storedRow?.model;
+      const storedProvider = storedRow?.provider;
+      const stored = storedModel && storedProvider
+        && storedModel !== userCfg?.visionModel
+        && this.d.store.lastMessageAt(sessionId) !== undefined
+        ? { provider: storedProvider, model: storedModel }
+        : undefined;
       const candidates = [
         { provider: o.provider, model: o.model },
+        stored,
         projectRoot ? this.d.projectModelPreference?.(userId, projectRoot) : undefined,
         { provider: userCfg?.modelProvider, model: userCfg?.model },
       ];

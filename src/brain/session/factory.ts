@@ -40,6 +40,10 @@ export interface SessionSpec {
   delegatedAccess?: DelegatedExecutionScope;
   runtime: ModelRuntime;
   model: Model<Api>;
+  /** The CONFIG provider entry id this session runs on (BrainProviderEntry.id, from the resolved route —
+   *  NOT `model.provider`, which is the registry name). Persisted beside the model so a respawn can
+   *  restore the exact pair the conversation was running on. */
+  providerId?: string;
   /** Distinct model (any provider) used deterministically for PI-owned compaction requests — the user's
    *  chosen compaction model or a provider's stable default. Undefined → compact on the session model. */
   compactionFallbackModel?: Model<Api>;
@@ -248,7 +252,7 @@ export class BrainSessionFactory {
       } else if (spec.delegatedAccess) {
         throw new Error('delegated access requires a parent session');
       }
-      this.d.store.touchSession(spec.sessionId, spec.model.id);
+      this.d.store.touchSession(spec.sessionId, spec.model.id, spec.providerId);
     }
     if (spec.title && !this.d.store.getSession(spec.sessionId)?.title) {
       this.d.store.setTitle(spec.sessionId, spec.title.slice(0, 60));

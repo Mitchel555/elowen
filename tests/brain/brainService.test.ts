@@ -2451,6 +2451,31 @@ describe('BrainService', () => {
     }
   });
 
+  // A respawn is routine (last client detaching, settings save, plugin reload, idle reaper, daemon
+  // restart). Each one used to re-resolve the model from the global/project preference, silently
+  // discarding an explicit /model pick — the conversation came back on a different model with nothing
+  // in the transcript to explain it. The directory deliberately has NO .git, so there is no project
+  // preference to lean on: the ONLY thing that can carry the pick is the session's own stored pair.
+  it('keeps the model a spoken-in conversation was running on across a respawn', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elowen-model-sticky-'));
+    try {
+      const d = fakeDeps();
+      d.config = { providers: [{ id: 'relay', label: 'Relay', type: 'openai' as const, baseUrl: 'http://x/v1', models: ['m', 'other'], apiKey: 'k' }] };
+      const svc = new BrainService(d as never);
+
+      const started = await svc.start(1, { cwd: dir });
+      await svc.send({ userId: 1, text: 'first' }); // only a spoken-in conversation keeps its model
+      await svc.switchModel(1, { provider: 'relay', model: 'other' });
+      await svc.restart(1);
+
+      // Without the stored pair this respawn re-resolves to the configured default 'm'.
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('other');
+      expect(d.store.getSession(started.sessionId)?.provider).toBe('relay'); // the pair, not just the model id
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps project model preferences isolated, explicit starts winning and revoked picks falling back', async () => {
     const first = mkdtempSync(join(tmpdir(), 'elowen-model-project-a-'));
     const second = mkdtempSync(join(tmpdir(), 'elowen-model-project-b-'));

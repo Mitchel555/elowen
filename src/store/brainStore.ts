@@ -25,7 +25,7 @@ export { syntheticRestartResultId } from './brainDelegationStore.js';
 export type { BrainWorkflowRun } from './brainDelegationStore.js';
 
 export interface BrainSessionRow {
-  id: string; user_id: number; title: string; model: string; work_dir: string; parent_session_id: string | null;
+  id: string; user_id: number; title: string; model: string; provider: string; work_dir: string; parent_session_id: string | null;
   delegated_access: string | null;
   created_at: string; updated_at: string;
 }
@@ -537,11 +537,16 @@ export class BrainStore {
     this.db.prepare("UPDATE brain_sessions SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, id);
   }
 
-  touchSession(id: string, model?: string): void {
+  /** Stamp the conversation as touched, optionally recording the provider+model it is now running on.
+   *  `provider` is the CONFIG entry id and is written alongside the model so a later respawn can restore
+   *  the exact pair — a model id on its own does not identify a provider. An omitted `provider` clears
+   *  the stored one rather than leaving a stale entry id pointing at a model it no longer goes with. */
+  touchSession(id: string, model?: string, provider?: string): void {
     if (model === undefined) {
       this.db.prepare("UPDATE brain_sessions SET updated_at = datetime('now') WHERE id = ?").run(id);
     } else {
-      this.db.prepare("UPDATE brain_sessions SET updated_at = datetime('now'), model = ? WHERE id = ?").run(model, id);
+      this.db.prepare("UPDATE brain_sessions SET updated_at = datetime('now'), model = ?, provider = ? WHERE id = ?")
+        .run(model, provider ?? '', id);
     }
   }
 

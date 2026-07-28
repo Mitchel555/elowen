@@ -204,7 +204,7 @@ export class LiveSessionSpawner {
     }));
     const { session, applyCompaction } = await this.d.factory.create({
       sessionId, ownerUserId, parentSessionId: opts.parentSessionId, delegatedAccess: opts.delegatedAccess,
-      runtime: this.d.runtime, model, compactionFallbackModel: route.compactionFallback, cwd,
+      runtime: this.d.runtime, model, providerId, compactionFallbackModel: route.compactionFallback, cwd,
       systemPrompt: persona, appendSystemPrompt: append, skills, promptTemplates,
       tools: allTools, toolSearch: toolSearchHandle, thinkingLevel: opts.thinkingLevel, requestProfile,
       autoCompact: opts.autoCompact, autoCompactAtPct,

@@ -97,6 +97,10 @@ export function openDb(path: string): Db {
   addColumn(db, 'memory_categories', 'icon', "TEXT NOT NULL DEFAULT ''");
   // Which model performed a memory mutation (curator/categorizer). Nullable — human/API events have none.
   addColumn(db, 'memory_events', 'model', 'TEXT');
+  // The provider entry a conversation last ran on, kept beside `model` so a respawn can restore the
+  // exact provider+model pair it was running. A model id alone is ambiguous (two entries can expose the
+  // same one), so an empty value here means "unknown" and the caller falls back to preference order.
+  addColumn(db, 'brain_sessions', 'provider', "TEXT NOT NULL DEFAULT ''");
   // Brain conversation ↔ working directory binding (per-client CLI sessions). Empty on migrated rows =
   // a cwd-less legacy/web session; stamped from the validated client-reported cwd on start/send.
   addColumn(db, 'brain_sessions', 'work_dir', "TEXT NOT NULL DEFAULT ''");
