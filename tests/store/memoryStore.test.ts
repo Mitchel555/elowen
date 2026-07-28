@@ -110,6 +110,34 @@ describe('MemoryStore', () => {
     expect(store.get(1, mine.id)).toBeDefined();
   });
 
+  it('purgeMany hard-deletes every owned id in the batch and skips foreign/missing ones', () => {
+    const mine1 = store.add(1, { body: 'mine 1' }, 'agent', '');
+    const mine2 = store.add(1, { body: 'mine 2' }, 'agent', '');
+    const theirs = store.add(2, { body: 'theirs' }, 'agent', '');
+
+    expect(store.purgeMany(1, [mine1.id, mine2.id, theirs.id, 99999], 'user:1', 'batch')).toBe(2);
+    expect(store.list(1, { status: 'all' })).toHaveLength(0);
+    expect(store.get(2, theirs.id)).toBeDefined();
+  });
+
+  it('purgeMany is atomic: a delete failing part-way through rolls the WHOLE batch back', () => {
+    const db = openDb(':memory:');
+    const s = new MemoryStore(db);
+    const first = s.add(1, { body: 'first' }, 'agent', '');
+    const boom = s.add(1, { body: 'boom' }, 'agent', '');
+    const last = s.add(1, { body: 'last' }, 'agent', '');
+    // Stands in for whatever can abort one delete mid-batch (a constraint, a locked DB): the SECOND id
+    // fails, so the first is already deleted-and-audited by the time the batch blows up.
+    db.exec("CREATE TRIGGER purge_boom BEFORE DELETE ON memories WHEN OLD.body = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END");
+
+    expect(() => s.purgeMany(1, [first.id, boom.id, last.id], 'user:1', 'batch')).toThrow(/boom/);
+    // A per-id loop commits each purge on its own, leaving the batch's prefix IRREVERSIBLY gone while the
+    // caller only sees an error. All three rows — and their audit trail — must survive intact instead.
+    const byId = (a: number, b: number) => a - b;
+    expect(s.list(1, { status: 'all' }).map((m) => m.id).sort(byId)).toEqual([first.id, boom.id, last.id].sort(byId));
+    expect(s.listEvents(1).some((e) => e.action === 'purge')).toBe(false);
+  });
+
   it('purgeDeleted hard-deletes ONLY soft-deleted rows and returns the count', () => {
     const active = store.add(1, { body: 'a' }, 'agent', '');
     const d1 = store.add(1, { body: 'd1' }, 'agent', '');

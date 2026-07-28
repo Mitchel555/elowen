@@ -12,6 +12,14 @@ import { TASK_PREFIX } from '../brain/sessionId.js';
 // `duration_ms` actually timed (see {@link UsageRollupBucket}) — the tok/s numerator, kept separate so
 // untimed history can never be read as measured. Purely static SQL (no user input) → safe to
 // interpolate. Callers add the user/window/day filters + GROUP BY.
+//
+// The `json_valid` guards are load-bearing: `json_extract` and `json_each` THROW on malformed JSON, so a
+// SINGLE corrupt `content` row (a truncated write, a hand-edited DB) would otherwise fail EVERY usage view
+// for that user instead of costing just its own numbers. A bad row is dropped from the rows CTE and
+// contributes nothing. The rollup side needs the guard on the json_each ARGUMENT, not only in WHERE: the
+// table-valued function is evaluated per outer row, before the filter can exclude it — hence the nested
+// CASE (an inner condition is never evaluated when the outer one fails) plus the `array` type check, so a
+// `usageRollup` that is not an array of buckets, and a bucket element that is not JSON, are skipped too.
 const USAGE_ROWS = `
   SELECT s.user_id AS user_id, s.id AS session_id,
          COALESCE(NULLIF(json_extract(m.content, '$.model'), ''), s.model) AS model,
@@ -28,7 +36,7 @@ const USAGE_ROWS = `
               THEN json_extract(m.content, '$.usage.output') ELSE 0 END AS measured_output,
          json_extract(m.content, '$.usage.cost.total') AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id
-   WHERE m.role = 'assistant'
+   WHERE m.role = 'assistant' AND json_valid(m.content)
   UNION ALL
   SELECT s.user_id AS user_id, s.id AS session_id,
          COALESCE(NULLIF(json_extract(je.value, '$.model'), ''), s.model) AS model,
@@ -43,8 +51,11 @@ const USAGE_ROWS = `
          COALESCE(json_extract(je.value, '$.measuredOutput'), 0) AS measured_output,
          json_extract(je.value, '$.cost.total') AS cost
     FROM brain_messages m JOIN brain_sessions s ON s.id = m.session_id,
-         json_each(json_extract(m.content, '$.usageRollup')) je
-   WHERE m.role = 'compaction'`;
+         json_each(CASE WHEN json_valid(m.content)
+                        THEN (CASE WHEN json_type(m.content, '$.usageRollup') = 'array'
+                                   THEN json_extract(m.content, '$.usageRollup') END)
+                   END) je
+   WHERE m.role = 'compaction' AND json_valid(je.value)`;
 
 // A `brain-task-<id>` worker session is EXCLUDED from the brain aggregates ONLY when its spend is
 // already snapshotted in task_usage (merged separately by /usage/by-model & /usage/by-day) — excluding

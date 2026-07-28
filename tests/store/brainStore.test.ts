@@ -945,6 +945,59 @@ describe('BrainStore', () => {
     });
   });
 
+  describe('corrupt message content', () => {
+    // appendMessage always stringifies, so only a hand-edited DB, a truncated restore or a partial write
+    // leaves a row like these. SQLite's json_extract/json_each THROW on malformed JSON, so without the
+    // json_valid guards ONE such row fails the whole aggregate and every session of that user loses its
+    // numbers — the bad row must contribute nothing instead.
+    const raw = (id: string, sessionId: string, role: string, content: string) =>
+      db.prepare('INSERT INTO brain_messages (id, session_id, parent_id, role, content) VALUES (?, ?, NULL, ?, ?)')
+        .run(id, sessionId, role, content);
+    const healthy = (id: string, sessionId: string, totalTokens: number, cost: number) =>
+      store.appendMessage({
+        id, sessionId, parentId: null, role: 'assistant',
+        content: {
+          role: 'assistant', model: 'claude-opus-4-8', timestamp: Date.parse('2026-01-10T00:00:00Z'),
+          usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens, cost: { total: cost } },
+        },
+      });
+
+    beforeEach(() => {
+      store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+      healthy('ok', 'brain-a', 100, 0.1);
+    });
+
+    it('isolates a malformed assistant row from usageByModel, usageByDay and tokenTotals', () => {
+      raw('bad', 'brain-a', 'assistant', '{"usage": {"totalTokens": 5');
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+      expect(store.tokenTotals(1)['brain-a']).toBe(100);
+    });
+
+    it('isolates a malformed compaction divider and a rollup that is not an array of buckets', () => {
+      raw('bad-divider', 'brain-a', 'compaction', '{"role": "compactionSummary", "usageRollup": [');
+      raw('scalar-rollup', 'brain-a', 'compaction', '{"role":"compactionSummary","usageRollup":"boom"}');
+      raw('scalar-bucket', 'brain-a', 'compaction', '{"role":"compactionSummary","usageRollup":["boom"]}');
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+    });
+
+    it('reads a JSON null row as carrying no usage rather than throwing', () => {
+      raw('null-row', 'brain-a', 'assistant', 'null');
+      raw('null-divider', 'brain-a', 'compaction', 'null');
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.tokenTotals(1)['brain-a']).toBe(100);
+    });
+
+    it('keeps descendantUsage summing the healthy rows of the tree', () => {
+      store.createSession({ id: 'child', userId: 1, model: 'claude-opus-4-8', parentSessionId: 'brain-a' });
+      healthy('child-ok', 'child', 40, 0.04);
+      raw('child-bad', 'child', 'assistant', '{"usage":');
+      raw('child-bad-divider', 'child', 'compaction', 'not json at all');
+      expect(store.descendantUsage('brain-a').totalTokens).toBe(40);
+    });
+  });
+
   describe('searchMessages', () => {
     const userMsg = (id: string, sessionId: string, text: string) =>
       store.appendMessage({ id, sessionId, parentId: null, role: 'user', content: { role: 'user', content: text } });
