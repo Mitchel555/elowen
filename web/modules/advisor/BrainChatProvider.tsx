@@ -249,6 +249,10 @@ function useBrainChatController(): BrainChatValue {
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [queued, setQueued] = useState<{ id: string; text: string }[]>([]);
+  // Bumped by every server-authoritative queue snapshot that arrives WITHOUT a generation change (the
+  // `queue` frame). An optimistic remove captures it and rolls back only while it still holds: a snapshot
+  // that landed since is newer truth than a failure now surfacing from an older request.
+  const queueEpochRef = useRef(0);
   const [readOnly, setReadOnly] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -563,6 +567,7 @@ function useBrainChatController(): BrainChatValue {
     // replace wholesale — the optimistic remove must never fight an incoming snapshot.
     onFrame('queue', (e) => {
       const { items } = JSON.parse((e as MessageEvent).data) as { items: { id: string; text: string }[] };
+      queueEpochRef.current++; // fences any optimistic remove still in flight against this newer truth
       setQueued(items);
     });
     // The daemon's authoritative render of the user's turn (every real send — immediate or a queued
@@ -735,15 +740,25 @@ function useBrainChatController(): BrainChatValue {
   const removeAttachment = (index: number): void => setAttachments((cur) => cur.filter((_, j) => j !== index));
 
   // Optimistic remove: the item leaves the list immediately, but on failure it is still queued
-  // server-side, so put it back where it was rather than leaving the UI claiming it was removed.
-  // A later 'queue' snapshot still wins wholesale — it replaces whatever this restored.
+  // server-side, so put it back where it was rather than leaving the UI claiming it was removed. The
+  // rollback is fenced, because a DELETE can fail long after the UI moved on and queue ids are POSITIONAL
+  // — the same id names a different message in another conversation.
   const onQueueRemove = (id: string): void => {
     const index = queued.findIndex((x) => x.id === id);
     if (index < 0) return;
     const removed = queued[index];
+    const generation = genRef.current;
+    const session = boundSessionRef.current;
+    const epoch = queueEpochRef.current;
     setQueued((cur) => cur.filter((x) => x.id !== id));
-    void elowenClient.brainQueueRemove(id, boundSessionRef.current).catch(() => {
-      setQueued((cur) => (cur.some((x) => x.id === id) ? cur : [...cur.slice(0, index), removed, ...cur.slice(index)]));
+    void elowenClient.brainQueueRemove(id, session).catch(() => {
+      // Another conversation is on screen (a switch bumped the generation, or an idle rollover rebound the
+      // session without one): restoring would plant a ghost chip pointing at a stranger's message, and the
+      // error concerns a queue the user is no longer looking at.
+      if (generation !== genRef.current || session !== boundSessionRef.current) return;
+      // A newer server snapshot already replaced the list — it is authoritative and it already carries this
+      // item if the server still holds it, so report the failure but leave the list alone.
+      if (epoch === queueEpochRef.current) setQueued((cur) => [...cur.slice(0, index), removed, ...cur.slice(index)]);
       toast(t.brainChat.queueRemoveError, 'error');
     });
   };

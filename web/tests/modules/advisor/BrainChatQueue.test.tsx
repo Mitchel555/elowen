@@ -116,6 +116,68 @@ describe('BrainChat pending queue', () => {
     await waitFor(() => expect(screen.queryByText('and the metrics')).toBeNull());
   });
 
+  /** A DELETE that hangs until the test releases it, then fails — the window where the UI moves on. */
+  function gateQueueRemove(): () => void {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.delete('*/api/brain/queue/:id', async ({ params }) => {
+      removed.push(String(params['id']));
+      await held;
+      return HttpResponse.json({ error: 'queue gone' }, { status: 500 });
+    }));
+    return release;
+  }
+
+  it('does not resurrect a queue item when the DELETE fails after a session switch', async () => {
+    const release = gateQueueRemove();
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
+    const es = FakeES.instances[0];
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'check the logs' }] }));
+    expect(await screen.findByText('check the logs')).toBeTruthy();
+
+    act(() => fireEvent.click(screen.getByRole('button', { name: /Remove from queue|Odebrat z fronty/i })));
+    await waitFor(() => expect(removed).toEqual(['q1']));
+
+    // Switch to another conversation whose queue has its OWN positional q1 — the id the failing DELETE names.
+    server.use(
+      http.post('*/api/brain/start', () => HttpResponse.json({ sessionId: 'brain-2' }, { status: 201 })),
+      http.get('*/api/brain/status', () => HttpResponse.json({ running: true, sessionId: 'brain-2', model: 'm', usage: null, statusline: null, cards: [], queued: [{ id: 'q1', text: 'other conversation item' }] })),
+    );
+    await act(async () => { openBrainSession('brain-2', true); });
+    expect(await screen.findByText('other conversation item')).toBeTruthy();
+
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 50)); });
+
+    // The late failure belongs to the previous conversation: no ghost chip, no toast about an invisible queue.
+    expect(screen.queryByText('check the logs')).toBeNull();
+    expect(screen.getByText('other conversation item')).toBeTruthy();
+    expect(screen.queryByText(/not removed|nepodařilo odebrat|nepodarilo odobrať/i)).toBeNull();
+  });
+
+  it('leaves a newer server queue snapshot alone when the DELETE fails afterwards', async () => {
+    const release = gateQueueRemove();
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
+    const es = FakeES.instances[0];
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'check the logs' }, { id: 'q2', text: 'and the metrics' }] }));
+    expect(await screen.findByText('check the logs')).toBeTruthy();
+
+    act(() => fireEvent.click(screen.getAllByRole('button', { name: /Remove from queue|Odebrat z fronty/i })[0]));
+    await waitFor(() => expect(removed).toEqual(['q1']));
+
+    // The server speaks after the request was sent but before it fails: this list is the authoritative truth.
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'drained and refilled' }] }));
+    expect(await screen.findByText('drained and refilled')).toBeTruthy();
+
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 50)); });
+
+    // The failure is reported, but the snapshot stands — no stale item spliced back into it.
+    expect(await screen.findByText(/not removed|nepodařilo odebrat|nepodarilo odobrať/i)).toBeTruthy();
+    expect(screen.queryByText('check the logs')).toBeNull();
+    expect(screen.getByText('drained and refilled')).toBeTruthy();
+  });
+
   it('folds a `user` delivery event into a you-turn bubble', async () => {
     renderChat();
     await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
