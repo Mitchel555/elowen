@@ -598,6 +598,17 @@ function useBrainChatController(): BrainChatValue {
       const { id, questions, kind } = JSON.parse((e as MessageEvent).data) as { id: string; questions: AskQuestion[]; kind?: 'approval' };
       setAsk({ id, questions, kind });
     });
+    // Every step boundary carries a fresh usage snapshot, so context fill, token totals and cost move
+    // DURING the turn instead of jumping once at the end. The daemon has always sent this (see the
+    // `step` event in brain/events.ts) and the CLI has always read it (chat/streamCoordinator.ts); the
+    // web client simply had no handler, so the frame arrived and was dropped and the statusline showed
+    // the PREVIOUS turn's numbers until idle landed.
+    onFrame('step', (e) => {
+      try {
+        const { usage: u } = JSON.parse((e as MessageEvent).data) as { usage?: BrainUsage };
+        if (u) setUsage(u);
+      } catch { /* step without payload — statusline just stays put */ }
+    });
     onFrame('idle', (e) => {
       setNotice(''); // turn settled → drop any transient runtime line
       // A parked question is NOT cleared here. Only the daemon knows whether one is still waiting, and it

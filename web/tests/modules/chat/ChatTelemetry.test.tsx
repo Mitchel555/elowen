@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 import { onUnhandledRequest } from '../../msw';
@@ -11,9 +11,16 @@ import { ChatView } from '../../../modules/chat/ChatView';
 
 class FakeES {
   static instances: FakeES[] = [];
+  private listeners = new Map<string, ((e: { data?: string }) => void)[]>();
   constructor(public url: string) { FakeES.instances.push(this); }
-  addEventListener() {}
+  addEventListener(type: string, fn: (e: { data?: string }) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
   close() {}
+  /** Push one SSE frame at the provider, so a test can assert what a MID-TURN event does to the rail. */
+  emit(type: string, data: unknown) {
+    act(() => { for (const fn of this.listeners.get(type) ?? []) fn({ data: JSON.stringify(data) }); });
+  }
 }
 
 /** The extended /brain/status payload: usage + project + LSP + MCP, all from the one poll. */
@@ -117,6 +124,40 @@ describe('chat telemetry panel', () => {
 
     // Subscription limits ride their own slower endpoint, not the hot status poll.
     await waitFor(() => expect(screen.getByTestId('telemetry-limits').textContent).toContain('64%'));
+  });
+
+  // Regression: the daemon emits a `step` frame carrying a fresh usage snapshot on every model
+  // round-trip, precisely so a client does not have to wait for `idle`. The web provider had no handler
+  // for it, so the frame was dropped and the rail (and the composer statusline, which reads the same
+  // state) showed the PREVIOUS turn's numbers for the whole turn. The CLI never had this problem.
+  it('refreshes context, tokens and cost mid-turn from a step frame, not only once the turn settles', async () => {
+    setViewport(false);
+    renderChat(<ChatView />);
+    const context = await screen.findByTestId('telemetry-context');
+    expect(context.textContent).toContain('21%'); // the opening numbers, from /brain/status
+
+    FakeES.instances[0]!.emit('step', {
+      type: 'step', step: 2, maxSteps: 25,
+      usage: { tokens: 120_000, contextWindow: 200_000, percent: 60, totalTokens: 130_000, cost: 3.5 },
+    });
+
+    await waitFor(() => expect(screen.getByTestId('telemetry-context').textContent).toContain('60%'));
+    const live = screen.getByTestId('telemetry-context').textContent ?? '';
+    expect(live).toContain('120k / 200k');
+    expect(live).toContain('$3.50');
+    expect(live).not.toContain('21%'); // genuinely replaced, not rendered alongside the stale figure
+  });
+
+  it('ignores a step frame that carries no usage, leaving the last known numbers standing', async () => {
+    setViewport(false);
+    renderChat(<ChatView />);
+    expect((await screen.findByTestId('telemetry-context')).textContent).toContain('21%');
+    // `usage` is optional on the event — a step without it must not blank the rail.
+    FakeES.instances[0]!.emit('step', { type: 'step', step: 3, maxSteps: 25 });
+    // Settle inside act: the rail's own background queries land during this wait, and React would
+    // otherwise warn about a state update escaping the test's control.
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.getByTestId('telemetry-context').textContent).toContain('21%');
   });
 
   it('drops sections the daemon does not report instead of showing blanks', async () => {
