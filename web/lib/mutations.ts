@@ -50,7 +50,6 @@ export function useDeleteMission() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks });
       qc.invalidateQueries({ queryKey: QUERY_KEYS.missions });
-      qc.invalidateQueries({ queryKey: ['mission'] });
     },
   });
 }
@@ -72,13 +71,13 @@ export function useResetUsage() {
 export function useCleanupAll() {
   const qc = useQueryClient();
   // cleanupAll disengages every mission, kills the elowen- sessions and wipes tasks + events. Invalidate
-  // exactly those caches (+ the mission detail and session signals derived from them) instead of a
-  // wildcard `invalidateQueries()` — config/system/users/usage don't change, so refetching them just
+  // exactly those caches (+ the session signals derived from them) instead of a wildcard
+  // `invalidateQueries()` — config/system/users/usage don't change, so refetching them just
   // re-hammers the daemon for no reason.
   return useMutation({
     mutationFn: () => elowenClient.cleanupAll(),
     onSuccess: () => {
-      for (const queryKey of [QUERY_KEYS.tasks, QUERY_KEYS.missions, ['mission'], QUERY_KEYS.sessions, QUERY_KEYS.sessionSignals, ['activity']]) {
+      for (const queryKey of [QUERY_KEYS.tasks, QUERY_KEYS.missions, QUERY_KEYS.sessions, QUERY_KEYS.sessionSignals, ['activity']]) {
         qc.invalidateQueries({ queryKey });
       }
     },
@@ -95,11 +94,8 @@ export function useInsertPhases() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (v: { epicId: string; body: InsertPhasesInput }) => elowenClient.insertPhases(v.epicId, v.body),
-    onSuccess: (_r, v) => {
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks });
-      // Invalidate only the affected epic's mission detail, not every open mission (the broad
-      // `['mission']` prefix would refetch all open detail views, including the stray null key).
-      qc.invalidateQueries({ queryKey: ['mission', v.epicId] });
       qc.invalidateQueries({ queryKey: QUERY_KEYS.missions });
     },
   });
@@ -420,15 +416,24 @@ export function useAssignProject() {
     onSuccess: (_r, v) => qc.invalidateQueries({ queryKey: ['user-projects', v.userId] }),
   });
 }
+const inFlightFileWrites = new Map<string, Promise<{ ok: boolean }>>();
+/** Saving is not gated on `isPending` (Cmd+S fires whenever), so two writes to the SAME file can be
+ *  in flight at once — and then the slower, older request can settle last and put its stale content
+ *  back into the cache and onto disk. Chain the writes per project + path so that never happens,
+ *  while writes to different files (or projects) still run in parallel. react-query's `scope` can't
+ *  express this: its id is fixed in the hook's options, but the file only arrives with the variables. */
+function writeProjectFileSerialized(id: number, path: string, content: string): Promise<{ ok: boolean }> {
+  const key = `${id}\u0000${path}`;
+  const previous = inFlightFileWrites.get(key);
+  // allSettled: a failed write must not block the next save of that file.
+  const run = Promise.allSettled([previous]).then(() => elowenClient.writeProjectFile(id, path, content));
+  inFlightFileWrites.set(key, run);
+  return run.finally(() => { if (inFlightFileWrites.get(key) === run) inFlightFileWrites.delete(key); });
+}
 export function useWriteProjectFile() {
   const qc = useQueryClient();
   return useMutation({
-    // Saving is not gated on `isPending` (Cmd+S fires whenever), so two writes to the same file can
-    // be in flight at once. A shared scope makes react-query run them one after another: without it
-    // the slower, older request can settle last and put its stale content back into the cache — and
-    // onto disk. One scope for all file writes is enough; the editor only ever saves one at a time.
-    scope: { id: 'project-file-write' },
-    mutationFn: (v: { id: number; path: string; content: string }) => elowenClient.writeProjectFile(v.id, v.path, v.content),
+    mutationFn: (v: { id: number; path: string; content: string }) => writeProjectFileSerialized(v.id, v.path, v.content),
     onSuccess: (_r, v) => {
       // Update the file cache with what we just wrote before invalidating — the editor clears its local
       // draft on save and falls back to this cache, so without the update it would briefly flash the
