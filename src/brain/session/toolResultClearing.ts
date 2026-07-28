@@ -46,12 +46,20 @@ export const CLEAR_MIN_BYTES = 4096;
  *  for the idle gate: at ~12k tokens one result of this size costs more context than the whole rest of
  *  a typical turn, and the model can read it back in full from the spill path.
  *
- *  50 000 is Claude Code's DEFAULT_MAX_RESULT_SIZE_CHARS, kept because nothing in our tree argues for a
- *  different number — `toolOutputMaxChars` caps the TRANSCRIPT preview, not what the model receives, so
- *  it neither bounds nor competes with this. Measured in bytes rather than characters because this
- *  module already measures in bytes (textBytes, CLEAR_MIN_BYTES); for the ASCII-dominant output that
- *  reaches this size the two differ by a rounding error, and one measure beats two. */
+ *  50 000 is Claude Code's DEFAULT_MAX_RESULT_SIZE_CHARS, kept as the DEFAULT of the operator-tunable
+ *  `toolResultInlineBytes` knob (Elowen AI → Limits) — `toolOutputMaxChars` caps the TRANSCRIPT preview,
+ *  not what the model receives, so it neither bounds nor competes with this. Measured in bytes rather than
+ *  characters because this module already measures in bytes (textBytes, CLEAR_MIN_BYTES); for the
+ *  ASCII-dominant output that reaches this size the two differ by a rounding error, and one measure beats
+ *  two. */
 export const SPILL_MAX_RESULT_BYTES = 50_000;
+
+/** The size trigger's threshold, resolved live so a Limits change applies without a restart — the same
+ *  module-level-resolver seam messageView uses for its tool-output caps ({@link setToolOutputCaps}).
+ *  Injected once at bootstrap; defaults to {@link SPILL_MAX_RESULT_BYTES} so tests and any un-wired path
+ *  keep the historical behaviour. */
+let spillMaxResultBytes: () => number = () => SPILL_MAX_RESULT_BYTES;
+export function setSpillMaxResultBytes(resolve: () => number): void { spillMaxResultBytes = resolve; }
 
 /** How much of a size-spilled result the placeholder carries, so the model can tell what it got — and
  *  whether it is worth a Read — without the full text. 2 000 matches Claude Code's preview budget.
@@ -171,7 +179,7 @@ export function selectOversizedToolResults(
     if (message?.role !== 'toolResult') continue;
     if (!message.toolCallId || alreadyCleared.has(message.toolCallId)) continue;
     const bytes = textBytes(message);
-    if (bytes <= SPILL_MAX_RESULT_BYTES) continue;
+    if (bytes <= spillMaxResultBytes()) continue;
     selection.push({ index, toolCallId: message.toolCallId, bytes });
   }
   return selection;

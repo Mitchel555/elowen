@@ -50,6 +50,7 @@ export interface ElowenConfig {
 export interface BrainLimits {
   toolOutputMaxLines: number;
   toolOutputMaxChars: number;
+  toolResultInlineBytes: number;
   elicitationTimeoutMs: number;
   memoryRecallCount: number;
   memoryRecallChars: number;

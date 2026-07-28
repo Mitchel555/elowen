@@ -15,6 +15,7 @@ import {
   installToolResultClearing,
   selectClearableToolResults,
   selectOversizedToolResults,
+  setSpillMaxResultBytes,
   toolResultSpillPath,
 } from '../../../src/brain/session/toolResultClearing.js';
 import { toolResultSpillDir } from '../../../src/shared/paths.js';
@@ -126,6 +127,23 @@ describe('selectOversizedToolResults', () => {
     const exact = 'z'.repeat(SPILL_MAX_RESULT_BYTES);
     const messages: PiAgentMessage[] = [user('one', T0), toolResult('exact', exact, T0 + 1)];
     expect(selectOversizedToolResults(messages, new Set())).toEqual([]);
+  });
+
+  it('applies the live resolver threshold, not just the default constant', () => {
+    // Comfortably UNDER the default trigger — left in context while the default is in force.
+    const under = 'z'.repeat(SPILL_MAX_RESULT_BYTES - 10_000);
+    const messages: PiAgentMessage[] = [user('one', T0), toolResult('fresh', under, T0 + 1)];
+    expect(selectOversizedToolResults(messages, new Set())).toEqual([]);
+    // Lower the resolver below that size and the SAME result now spills. If the call site still read the
+    // constant this assertion would fail — the resolver would be ignored and nothing selected.
+    setSpillMaxResultBytes(() => under.length - 100);
+    try {
+      const selected = selectOversizedToolResults(messages, new Set());
+      expect(selected.map((s) => s.toolCallId)).toEqual(['fresh']);
+      expect(selected[0]?.bytes).toBe(under.length);
+    } finally {
+      setSpillMaxResultBytes(() => SPILL_MAX_RESULT_BYTES);
+    }
   });
 });
 

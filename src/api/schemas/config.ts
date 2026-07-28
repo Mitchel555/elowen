@@ -32,6 +32,7 @@ const providerConfigPatchSchema = z.object({
 const brainLimitsPatchSchema = z.object({
   toolOutputMaxLines: z.number().optional(),
   toolOutputMaxChars: z.number().optional(),
+  toolResultInlineBytes: z.number().optional(),
   elicitationTimeoutMs: z.number().optional(),
   memoryRecallCount: z.number().optional(),
   memoryRecallChars: z.number().optional(),

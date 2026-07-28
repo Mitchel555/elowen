@@ -79,6 +79,7 @@ import { brainConfigFromElowen } from '../brain/config.js';
 import { loadAgentRegistry, agentCatalog, type AgentDef } from '../brain/agents/agentRegistry.js';
 import { listBrainModels } from '../brain/models.js';
 import { setToolOutputCaps, setToolOutputPolicy } from '../brain/messageView.js';
+import { setSpillMaxResultBytes } from '../brain/session/toolResultClearing.js';
 import { makeToolOutputPolicy } from '../brain/toolOutput.js';
 import { BUILTIN_TOOL_OUTPUT_SHOWN } from '../brain/tools/index.js';
 import { discoverPlugins, loadPlugins } from '../plugins/loader.js';
@@ -572,6 +573,9 @@ export async function buildApp(opts: BuildOpts) {
   // providerId/model → the service degrades to keyword search and the queue no-ops.
   // Tool-output preview caps (Elowen AI → Limits) feed the shared messageView renderer; read live.
   setToolOutputCaps(() => ({ lines: config.get().brain.limits.toolOutputMaxLines, chars: config.get().brain.limits.toolOutputMaxChars }));
+  // Size trigger for inline tool results (Elowen AI → Limits): a single result above this is spilled to
+  // disk and the model gets a placeholder instead. Read live so a Settings change applies without a restart.
+  setSpillMaxResultBytes(() => config.get().brain.limits.toolResultInlineBytes);
   // Tool-output VISIBILITY policy (single source, mirrors the icon pipeline): output is hidden by
   // default; the built-in show defaults plus every enabled plugin's manifest `showOutput` are merged and
   // injected into the shared messageView renderer so the live (events.ts) and history (shapeBrainMessages)

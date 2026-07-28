@@ -46,7 +46,7 @@ describe('ConfigStore brain limits', () => {
   it('defaults to the built-in limits', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     expect(cs.get().brain.limits).toEqual({
-      toolOutputMaxLines: 80, toolOutputMaxChars: 30000, elicitationTimeoutMs: 300000,
+      toolOutputMaxLines: 80, toolOutputMaxChars: 30000, toolResultInlineBytes: 50000, elicitationTimeoutMs: 300000,
       memoryRecallCount: 6, memoryRecallChars: 6000, goalTurnBudget: 24, goalMaxTurns: 64, channelSessionCap: 32,
       delegateContextChars: 20000,
     });

@@ -188,6 +188,7 @@ const clampMaxSteps = (next: number | undefined, fallback: number): number =>
 export interface BrainLimits {
   toolOutputMaxLines: number;
   toolOutputMaxChars: number;
+  toolResultInlineBytes: number;
   elicitationTimeoutMs: number;
   memoryRecallCount: number;
   memoryRecallChars: number;
@@ -200,6 +201,9 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   toolOutputMaxLines: 80,
   // Matches Claude Code's BASH_MAX_OUTPUT_DEFAULT (30 000 chars).
   toolOutputMaxChars: 30_000,
+  // Matches Claude Code's DEFAULT_MAX_RESULT_SIZE_CHARS — a single result above this is spilled to disk
+  // and the model gets a placeholder instead (toolResultClearing's size trigger).
+  toolResultInlineBytes: 50_000,
   elicitationTimeoutMs: 300_000,
   memoryRecallCount: 6,
   // ~1500 tokens. Spread over memoryRecallCount hits that is ~1000 chars per memory, enough for one to
@@ -227,6 +231,9 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // In the editor's own unit (4 chars per token) that is ~20k tokens of tool output and ~5k of recall.
   toolOutputMaxLines: band('toolOutputMaxLines', 200),
   toolOutputMaxChars: band('toolOutputMaxChars', 80_000),
+  // Plain ±50% rule (25 000–75 000): unlike the transcript-preview caps this is what the model actually
+  // receives inline, so its tuning margin is the default band rather than a raised operator ceiling.
+  toolResultInlineBytes: band('toolResultInlineBytes'),
   // memoryRecallChars is the budget these hits SHARE, so raising the count alone makes each hit smaller:
   // at the 6000-char default, 20 memories leave ~300 chars each and most get cut mid-sentence. An
   // operator who wants many memories wants the char budget raised with it — hence both ceilings.
