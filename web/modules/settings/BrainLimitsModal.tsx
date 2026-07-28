@@ -34,11 +34,11 @@ type BrainLimitField = {
  *  the daemon would silently lower. `web/tests/modules/settings/brainLimitsParity.test.ts` compares the two
  *  tables and fails on drift; `kind` owns the UI unit conversion. */
 const BRAIN_LIMIT_FIELDS: BrainLimitField[] = [
-  { key: 'toolOutputMaxLines', kind: 'count', min: 40, max: 120, step: 10, icon: AlignLeft },
-  { key: 'toolOutputMaxChars', kind: 'size', min: 15000, max: 45000, step: 1000, icon: Type },
-  { key: 'elicitationTimeoutMs', kind: 'duration', min: 30000, max: 3600000, step: 30000, icon: Timer },
+  { key: 'toolOutputMaxLines', kind: 'count', min: 40, max: 200, step: 10, icon: AlignLeft },
+  { key: 'toolOutputMaxChars', kind: 'size', min: 15000, max: 80000, step: 1000, icon: Type },
+  { key: 'elicitationTimeoutMs', kind: 'duration', min: 30000, max: 21600000, step: 30000, icon: Timer },
   { key: 'memoryRecallCount', kind: 'count', min: 3, max: 9, step: 1, icon: Brain },
-  { key: 'memoryRecallChars', kind: 'size', min: 3000, max: 9000, step: 500, icon: ListChecks },
+  { key: 'memoryRecallChars', kind: 'size', min: 3000, max: 20000, step: 500, icon: ListChecks },
   { key: 'goalTurnBudget', kind: 'count', min: 4, max: 500, step: 1, icon: Target },
   { key: 'goalMaxTurns', kind: 'count', min: 8, max: 500, step: 1, icon: Repeat },
   { key: 'channelSessionCap', kind: 'count', min: 4, max: 256, step: 1, icon: MessagesSquare },

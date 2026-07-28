@@ -221,20 +221,24 @@ const band = (key: keyof BrainLimits, maxOverride?: number): [min: number, max: 
 };
 
 const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> = {
-  toolOutputMaxLines: band('toolOutputMaxLines'),
-  toolOutputMaxChars: band('toolOutputMaxChars'),
+  // The three ceilings below are raised past the ±50% rule at the instance owner's request: the rule
+  // sizes a tuning margin around a sensible default, but these are the knobs an operator reaches for
+  // when a single tool result or a recalled memory genuinely needs more room than the default allows.
+  // In the editor's own unit (4 chars per token) that is ~20k tokens of tool output and ~5k of recall.
+  toolOutputMaxLines: band('toolOutputMaxLines', 200),
+  toolOutputMaxChars: band('toolOutputMaxChars', 80_000),
   memoryRecallCount: band('memoryRecallCount'),
-  memoryRecallChars: band('memoryRecallChars'),
+  memoryRecallChars: band('memoryRecallChars', 20_000),
   // Ceiling capped below the ±50% rule (which would give 30 000): packDelegatedPromptAppend re-trims
   // anything above MAX_PROMPT_TOTAL_CHARS (32 000, brain/delegatedScope.ts:33), and that total is
   // fair-shared with the child's role prompt — so a higher ceiling here would just be trimmed off again.
   delegateContextChars: band('delegateContextChars', 26_000),
   // Deliberately exempt from the ±50% rule: for these four the wide range is load-bearing, not a tuning
-  // margin. The 1 hour elicitation ceiling was requested by the instance owner (a question may
-  // legitimately wait out a working session), a busy channel may hold many more live sessions than a
-  // quiet one, and the two goal knobs are one family — a per-goal budget that could not approach its own
-  // ceiling would make the ceiling unreachable, so both span the same range.
-  elicitationTimeoutMs: [30_000, 3_600_000],
+  // margin. The elicitation ceiling was raised to 6 hours by the instance owner — a question may
+  // legitimately wait out a whole working day, not just a session. A busy channel may hold many more
+  // live sessions than a quiet one, and the two goal knobs are one family — a per-goal budget that could
+  // not approach its own ceiling would make the ceiling unreachable, so both span the same range.
+  elicitationTimeoutMs: [30_000, 21_600_000],
   goalTurnBudget: [4, 500],
   goalMaxTurns: [8, 500],
   channelSessionCap: [4, 256],

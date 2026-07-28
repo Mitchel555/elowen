@@ -54,13 +54,13 @@ describe('BrainLimitsModal', () => {
     );
     const timeout = screen.getByRole('slider', { name: 'Question timeout' }) as HTMLInputElement;
     expect(timeout.min).toBe('0.5');
-    expect(timeout.max).toBe('60');
+    expect(timeout.max).toBe('360'); // 6 hours, in the slider's own unit (minutes)
 
-    fireEvent.change(timeout, { target: { value: '90' } });
+    fireEvent.change(timeout, { target: { value: '500' } }); // past the ceiling — must come back clamped
 
     const update = updates[0];
     if (!update) throw new Error('slider change did not reach onChange');
-    expect(update(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(3600000);
+    expect(update(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(21_600_000);
   });
 
   it('names the value actually in force on a field the daemon clamped', () => {

@@ -52,28 +52,29 @@ describe('ConfigStore brain limits', () => {
     });
   });
 
-  // Every tuning knob is adjustable to its default ±50%; the bound is derived from the default so the
-  // two cannot drift apart. A value inside the band survives untouched, one outside lands on the edge.
-  it('accepts a tuning knob anywhere in its default ±50% band and clamps beyond it', () => {
+  // Every tuning knob's LOWER bound is its default −50%, derived from the default so the two cannot drift
+  // apart. Three ceilings are raised past the +50% rule at the owner's request (tool output lines/chars
+  // and memory recall chars), so those are pinned to their explicit overrides instead.
+  it('accepts a tuning knob anywhere in its band and clamps beyond it', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    cs.update({ brain: { limits: { toolOutputMaxChars: 22_000, memoryRecallChars: 5_000, toolOutputMaxLines: 120 } } });
+    cs.update({ brain: { limits: { toolOutputMaxChars: 22_000, memoryRecallChars: 5_000, toolOutputMaxLines: 200 } } });
     expect(cs.get().brain.limits.toolOutputMaxChars).toBe(22000);
     expect(cs.get().brain.limits.memoryRecallChars).toBe(5000);
-    expect(cs.get().brain.limits.toolOutputMaxLines).toBe(120); // upper edge, exactly in range
-    cs.update({ brain: { limits: { toolOutputMaxChars: 500_000, memoryRecallChars: 10, toolOutputMaxLines: 1 } } });
-    expect(cs.get().brain.limits.toolOutputMaxChars).toBe(45000); // 30 000 + 50%
-    expect(cs.get().brain.limits.memoryRecallChars).toBe(3000);   // 6 000 − 50%
+    expect(cs.get().brain.limits.toolOutputMaxLines).toBe(200); // upper edge, exactly in range
+    cs.update({ brain: { limits: { toolOutputMaxChars: 500_000, memoryRecallChars: 100_000, toolOutputMaxLines: 1 } } });
+    expect(cs.get().brain.limits.toolOutputMaxChars).toBe(80000); // explicit ceiling, ~20k tokens
+    expect(cs.get().brain.limits.memoryRecallChars).toBe(20000);  // explicit ceiling, ~5k tokens
     expect(cs.get().brain.limits.toolOutputMaxLines).toBe(40);    // 80 − 50%
   });
 
   // These four are exempt from the ±50% rule because their range is load-bearing: the far ends are real
-  // operating points, not slack. The 1 hour question timeout was an explicit owner request, and the two
-  // goal knobs span the same range on purpose — a per-goal budget that could not approach its own ceiling
-  // would make that ceiling unreachable.
+  // operating points, not slack. The 6 hour question timeout was an explicit owner request — a question
+  // may wait out a whole working day — and the two goal knobs span the same range on purpose: a per-goal
+  // budget that could not approach its own ceiling would make that ceiling unreachable.
   it('lets the exempt limits reach their far ends and clamps past them', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    cs.update({ brain: { limits: { elicitationTimeoutMs: 3_600_000, goalTurnBudget: 500, goalMaxTurns: 500, channelSessionCap: 256 } } });
-    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
+    cs.update({ brain: { limits: { elicitationTimeoutMs: 21_600_000, goalTurnBudget: 500, goalMaxTurns: 500, channelSessionCap: 256 } } });
+    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(21_600_000);
     expect(cs.get().brain.limits.goalTurnBudget).toBe(500);
     expect(cs.get().brain.limits.goalMaxTurns).toBe(500);
     expect(cs.get().brain.limits.channelSessionCap).toBe(256);
@@ -82,8 +83,8 @@ describe('ConfigStore brain limits', () => {
     expect(cs.get().brain.limits.goalTurnBudget).toBe(4);
     expect(cs.get().brain.limits.goalMaxTurns).toBe(8);
     expect(cs.get().brain.limits.channelSessionCap).toBe(4);
-    cs.update({ brain: { limits: { elicitationTimeoutMs: 7_200_000, goalTurnBudget: 999, goalMaxTurns: 999, channelSessionCap: 1 } } });
-    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(3_600_000);
+    cs.update({ brain: { limits: { elicitationTimeoutMs: 86_400_000, goalTurnBudget: 999, goalMaxTurns: 999, channelSessionCap: 1 } } });
+    expect(cs.get().brain.limits.elicitationTimeoutMs).toBe(21_600_000);
     expect(cs.get().brain.limits.goalTurnBudget).toBe(500);
     expect(cs.get().brain.limits.goalMaxTurns).toBe(500);
     expect(cs.get().brain.limits.channelSessionCap).toBe(4);
