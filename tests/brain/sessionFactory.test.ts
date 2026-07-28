@@ -162,6 +162,79 @@ describe('BrainSessionFactory context-saving installers', () => {
   });
 });
 
+describe('BrainSessionFactory turn-boundary compaction toggle', () => {
+  /** A PI session exposing the two seams the boundary check needs: the native `_checkCompaction` the
+   *  coordinator wraps, and the `prepareNextTurnWithContext` hook the installer replaces. */
+  function compactionSession() {
+    // Held separately: the coordinator REPLACES `_checkCompaction` on the session with its own wrapper.
+    const checkCompaction = vi.fn(async () => false);
+    return {
+      checkCompaction,
+      sessionId: 'sess-compaction',
+      _checkCompaction: checkCompaction,
+      abortCompaction: vi.fn(),
+      agent: {
+        state: { messages: [], model: {}, thinkingLevel: 'high' },
+        prepareNextTurnWithContext: undefined as unknown,
+      },
+      subscribe: () => () => {},
+      messages: [] as unknown[],
+    };
+  }
+
+  async function createWithAutoCompact(session: ReturnType<typeof compactionSession>, autoCompact: boolean) {
+    const factory = new BrainSessionFactory({
+      store: new BrainStore(openDb(':memory:')),
+      createSession: vi.fn(async () => ({ session })) as never,
+      resourceLoaderFactory: () => undefined,
+    });
+    return factory.create({
+      sessionId: session.sessionId, ownerUserId: 1, runtime: undefined,
+      model: { id: 'test-model', provider: 'kimi-coding', contextWindow: 200_000 },
+      cwd: process.cwd(), systemPrompt: 'sp', appendSystemPrompt: [], skills: [], tools: [],
+      autoCompact, autoCompactAtPct: 80,
+    } as never);
+  }
+
+  /** Drive one PI turn boundary. A session with no hook installed simply has no boundary check, so the
+   *  assertions below report the missing CHECK rather than crashing on the missing hook. */
+  const runBoundary = async (session: ReturnType<typeof compactionSession>): Promise<void> => {
+    const hook = session.agent.prepareNextTurnWithContext as
+      ((turn: unknown) => Promise<unknown>) | undefined;
+    await hook?.({
+      message: { role: 'assistant', content: [], stopReason: 'toolUse', timestamp: 1, usage: undefined },
+      context: { messages: [] },
+      toolResults: [],
+    });
+  };
+
+  it('starts checking at turn boundaries as soon as auto-compaction is switched on mid-conversation', async () => {
+    // Regression: the boundary hook was installed only when auto-compaction was on AT SPAWN, so enabling
+    // it from Account settings did nothing until the session was respawned.
+    const session = compactionSession();
+    const { applyCompaction } = await createWithAutoCompact(session, false);
+
+    await runBoundary(session);
+    expect(session.checkCompaction).not.toHaveBeenCalled();
+
+    applyCompaction(true, 80);
+    await runBoundary(session);
+    expect(session.checkCompaction).toHaveBeenCalledOnce();
+  });
+
+  it('stops checking at turn boundaries as soon as auto-compaction is switched off', async () => {
+    const session = compactionSession();
+    const { applyCompaction } = await createWithAutoCompact(session, true);
+
+    await runBoundary(session);
+    expect(session.checkCompaction).toHaveBeenCalledOnce();
+
+    applyCompaction(false, 80);
+    await runBoundary(session);
+    expect(session.checkCompaction).toHaveBeenCalledOnce();
+  });
+});
+
 describe('BrainSessionFactory deferred-tool wiring', () => {
   async function createWithDeferral(deferred: Set<string>) {
     const home = mkdtempSync(join(tmpdir(), 'elowen-home-'));

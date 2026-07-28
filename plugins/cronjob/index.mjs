@@ -562,11 +562,33 @@ class CronAdapter {
   }
 }
 
+/** Parsing only proves the file was JSON, not that it holds what this plugin stores. A hand-edited or
+ *  half-migrated state file can be `{}` instead of an array, or an array with a null in it — and iterating
+ *  that threw inside the tick. Since the corruption is persistent, EVERY later tick failed the same way and
+ *  no job ran again. So the shape is validated here: well-formed entries are kept, the rest are dropped
+ *  with a log rather than allowed to take the scheduler down. */
+function validEntries(value, isValid, onInvalid) {
+  if (!Array.isArray(value)) {
+    onInvalid('the file does not contain a JSON array');
+    return [];
+  }
+  return value.filter((entry, index) => {
+    if (isValid(entry)) return true;
+    onInvalid(`entry #${index} is malformed`);
+    return false;
+  });
+}
+
+/** A record this plugin can safely iterate, patch and filter — anything else is not one of ours. */
+const isRecord = (entry) => typeof entry === 'object' && entry !== null && !Array.isArray(entry) && typeof entry.id === 'string';
+
 class JobStore {
   constructor(file, logger) { this.file = file; this.log = logger; }
   all() {
-    return readJsonSafe(this.file, [], (e) =>
+    const parsed = readJsonSafe(this.file, [], (e) =>
       this.log?.error?.(`cron: corrupt jobs file ${this.file} — treating as empty: ${e?.message ?? e}`));
+    return validEntries(parsed, isRecord, (reason) =>
+      this.log?.error?.(`cron: skipping malformed job in ${this.file} — ${reason}`));
   }
   save(jobs) {
     try { writeJsonAtomic(this.file, jobs); }
@@ -581,8 +603,11 @@ class JobStore {
 class DeliveryStore {
   constructor(file, logger) { this.file = file; this.log = logger; }
   all() {
-    return readJsonSafe(this.file, [], (e) =>
+    const parsed = readJsonSafe(this.file, [], (e) =>
       this.log?.error?.(`cron: corrupt pending-deliveries file ${this.file} — treating as empty: ${e?.message ?? e}`));
+    // A pending entry is only useful if it still carries the text to deliver.
+    return validEntries(parsed, (entry) => isRecord(entry) && typeof entry.body === 'string', (reason) =>
+      this.log?.error?.(`cron: skipping malformed pending delivery in ${this.file} — ${reason}`));
   }
   save(entries) {
     try { writeJsonAtomic(this.file, entries); }

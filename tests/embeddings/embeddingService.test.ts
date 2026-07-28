@@ -117,6 +117,27 @@ describe('EmbeddingService', () => {
     await expect(svc.embed(cfg({ dimensions: 3 }), 'x')).rejects.toThrow(/dimension mismatch/);
   });
 
+  it('throws on an empty vector (it would count as embedded but never match anything)', async () => {
+    const svc = new EmbeddingService({
+      resolveProvider,
+      fetchImpl: fakeFetch(() => ({ body: { data: [{ embedding: [] }] } })),
+    });
+    await expect(svc.embed(cfg(), 'x')).rejects.toThrow(/non-empty finite/);
+  });
+
+  it('throws on a non-finite component (NaN/Infinity would poison every score)', async () => {
+    const infinite = new EmbeddingService({
+      resolveProvider,
+      fetchImpl: fakeFetch(() => ({ body: { data: [{ embedding: [1, Number.POSITIVE_INFINITY] }] } })),
+    });
+    await expect(infinite.embed(cfg(), 'x')).rejects.toThrow(/non-empty finite/);
+    const notANumber = new EmbeddingService({
+      resolveProvider,
+      fetchImpl: fakeFetch(() => ({ body: { data: [{ embedding: [1, Number.NaN] }] } })),
+    });
+    await expect(notANumber.embed(cfg(), 'x')).rejects.toThrow(/non-empty finite/);
+  });
+
   it('works with a local baseUrl endpoint and no providerId', async () => {
     let seenUrl = '';
     let seenAuth: string | undefined;

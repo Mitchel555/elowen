@@ -428,6 +428,44 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     expect(sent?.channelId).toBe('cron-job-1'); // today's channel-keyed session
   });
 
+  // A proactive push that reached nobody used to resolve like a successful one, so the cron scheduler
+  // deleted the pending delivery it had promised to retry and the finished result was lost for good.
+  describe('proactive notify', () => {
+    const orchestratorWith = async (adapters: { name: string; notify?: (t: string) => Promise<void> }[]) => {
+      const orch = new PlatformOrchestrator({
+        plugins: async () => ({ platforms: adapters.map((a) => ({ ...a, listen: () => {}, connect: async () => {} })) }) as never,
+        platformOwner: () => 1,
+        identity: linkedResolver(false),
+        channels: { send: async () => 'ok', fragmentFor: () => '' } as never,
+      });
+      await orch.startAll();
+      return orch;
+    };
+
+    it('reports failure when EVERY notification sink threw', async () => {
+      const orch = await orchestratorWith([
+        { name: 'discord', notify: async () => { throw new Error('discord 500'); } },
+        { name: 'telegram', notify: async () => { throw new Error('telegram timeout'); } },
+      ]);
+      await expect(orch.notify('the report')).rejects.toThrow(/discord 500.*telegram timeout/);
+    });
+
+    it('stays fail-open when one sink is down but another delivered', async () => {
+      const delivered: string[] = [];
+      const orch = await orchestratorWith([
+        { name: 'discord', notify: async () => { throw new Error('discord 500'); } },
+        { name: 'telegram', notify: async (t: string) => { delivered.push(t); } },
+      ]);
+      await expect(orch.notify('the report')).resolves.toBeUndefined();
+      expect(delivered).toEqual(['the report']);
+    });
+
+    it('resolves when no platform has a notification channel at all', async () => {
+      const orch = await orchestratorWith([{ name: 'cron' }]);
+      await expect(orch.notify('the report')).resolves.toBeUndefined();
+    });
+  });
+
   it('a LINKED sender with no disabled tools gets an undefined tool policy (no restriction)', async () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;

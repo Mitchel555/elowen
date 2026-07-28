@@ -50,6 +50,7 @@ function setup(opts: { idleMs?: number; prompts?: unknown } = {}) {
   const recorded: unknown[] = [];
   const systemPrompts: string[] = [];
   let now = 1_000_000;
+  const createSession = vi.fn(async () => ({ session }));
   const svc = new BrainWorkerService({
     store: new BrainStore(db),
     runtime: sharedRuntime,
@@ -59,13 +60,13 @@ function setup(opts: { idleMs?: number; prompts?: unknown } = {}) {
     url: 'http://daemon', token: 'tok',
     now: () => now,
     idleMs: opts.idleMs,
-    createSession: vi.fn(async () => ({ session })) as never,
+    createSession: createSession as never,
     fetchImpl: fetchImpl as never,
     prompts: opts.prompts as never,
     resourceLoaderFactory: (o) => { systemPrompts.push(o.systemPrompt); return undefined; },
   });
   const launchInput = { projectId: 1, projectPath: '/repo', taskId: 'T-1', agentName: 'a1', spec: { program: 'elowen', model: 'relay/kimi' } };
-  return { svc, tasks, session, workDirs, sessionIds, release, fetchImpl, recorded, systemPrompts, published, launchInput, advance: (ms: number) => { now += ms; }, db };
+  return { svc, tasks, session, workDirs, sessionIds, release, fetchImpl, recorded, systemPrompts, published, launchInput, createSession, advance: (ms: number) => { now += ms; }, db };
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
@@ -77,6 +78,34 @@ describe('BrainWorkerService', () => {
     expect(session).toBe('elowen-a1');
     expect(svc.isLive('elowen-a1')).toBe(true);
     expect(svc.liveSessionNames()).toEqual(['elowen-a1']);
+  });
+
+  // Idempotence keyed on the agent name alone answered a SECOND task with the first task's session: the
+  // second got no worker at all, yet its row stayed in_progress behind a session the stuck detector reads
+  // as alive. The tmux path fails a duplicate session name, and the callers already revert on that.
+  it('refuses a second task under a live agent name instead of reporting a session that is not its own', async () => {
+    const { svc, tasks, launchInput } = setup();
+    tasks.create({ id: 'T-2', project_id: 1, title: 'Another task' });
+    await svc.launch(launchInput);
+    await expect(svc.launch({ ...launchInput, taskId: 'T-2' })).rejects.toThrow(/already running task T-1/);
+    expect(svc.liveSessionNames()).toEqual(['elowen-a1']);
+  });
+
+  it('a re-launch of the SAME task is still idempotent (one worker, same session)', async () => {
+    const { svc, launchInput, createSession } = setup();
+    const first = await svc.launch(launchInput);
+    expect(await svc.launch(launchInput)).toEqual(first);
+    expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('two concurrent launches of one task spawn exactly one worker', async () => {
+    const { svc, launchInput, createSession } = setup();
+    const [a, b] = await Promise.all([svc.launch(launchInput), svc.launch(launchInput)]);
+    expect(a).toEqual({ session: 'elowen-a1' });
+    expect(b).toEqual({ session: 'elowen-a1' });
+    // The guard and the live.set() are separated by awaits: without serialization both calls passed it
+    // and the first session stayed live with nothing tracking (or disposing) it.
+    expect(createSession).toHaveBeenCalledTimes(1);
   });
 
   it('persists the transcript under brain-task-<id> and scopes tools to the close tool', async () => {

@@ -73,6 +73,16 @@ describe('sweepStuckTasks', () => {
     expect(r.escalated).toEqual([]);
   });
 
+  it('never reaps anything when the session lookup itself fails', async () => {
+    // A tmux outage must not read as "every agent died": the driver reports a real failure instead of
+    // an empty list, the sweep propagates it, and the daemon's tick logs it — no task is touched.
+    const { tasks, bus, start } = setup();
+    start('t1', 'Alive', NOW - 300_000);
+    const tmux = { list: () => Promise.reject(new Error('lost server')) };
+    await expect(sweepStuckTasks({ tmux, tasks, bus, now: NOW, graceMs: 120_000, maxRelaunch: 2 })).rejects.toThrow('lost server');
+    expect(tasks.get('t1')!.status).toBe('in_progress');
+  });
+
   it('invokes onReap with the dead task before reverting (for resume capture)', async () => {
     const { tasks, tmux, bus, start } = setup();
     start('t1', 'Ghost', NOW - 300_000);

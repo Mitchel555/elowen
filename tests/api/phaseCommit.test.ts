@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { openDb } from '../../src/store/db.js';
 import { TaskStore } from '../../src/store/taskStore.js';
@@ -39,7 +39,7 @@ function build(prEnabled: boolean) {
     project: { id: project.id, path: repo }, fallback: { program: 'claude-code', model: 'sonnet' },
     clock: new SystemClock(), config,
   });
-  return { app, missionGit, prs };
+  return { app, missionGit, prs, tasks };
 }
 
 beforeEach(() => {
@@ -66,5 +66,20 @@ describe('phase commit on close (PR-native)', () => {
     const { app, prs } = build(false);
     expect(prs.get('m-epic')).toBeNull();              // no worktree provisioned
     expect((await close(app, 'p1')).status).toBe(200); // close still succeeds, just no commit side-effect
+  });
+
+  it('a failed phase commit does not freeze an empty change snapshot', async () => {
+    const { app, missionGit, prs, tasks } = build(true);
+    await missionGit.onEngage('m-epic', 'epic');
+    const dir = prs.get('m-epic')!.worktree;
+    tasks.markBase('p1', git(repo, 'rev-parse', 'HEAD').trim()); // spawn-time baseline, as the engine stamps it
+    writeFileSync(join(dir, 'feature.txt'), 'work\n');           // real, uncommitted phase output
+    // Hold the worktree's index lock: `git add -A` fails, while the repo stays perfectly readable — so
+    // the snapshot below would happily record a (wrong, empty) base..HEAD change list.
+    writeFileSync(join(repo, '.git', 'worktrees', basename(dir), 'index.lock'), '');
+
+    expect((await close(app, 'p1')).status).toBe(200); // the close itself must still succeed
+    // The work never landed, so the task must NOT carry a snapshot claiming it changed nothing.
+    expect(tasks.get('p1')!.head_sha).toBeNull();
   });
 });

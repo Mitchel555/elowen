@@ -53,6 +53,14 @@ describe('buildContributionReport', () => {
     ]);
   });
 
+  it('never attributes a tool to a plugin that did not register it (name collision)', () => {
+    const reg = new PluginRegistry();
+    stage(reg, 'alpha', (ctx) => ctx.registerTool(tool('shared_tool')));
+    stage(reg, 'beta', (ctx) => ctx.registerTool(tool('shared_tool')));
+    expect(buildContributionReport(reg).tools).toEqual([{ name: 'shared_tool', plugin: 'alpha' }]);
+    expect(pluginContributions(reg, 'beta').tools).toEqual([]);
+  });
+
   it('reports an empty shape for a registry with no contributions', () => {
     expect(buildContributionReport(new PluginRegistry())).toEqual(emptyContributionReport());
   });

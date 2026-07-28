@@ -95,15 +95,17 @@ export class MissionGit {
   /** Commit a finished phase's work so the per-task change snapshot has a stable base..HEAD to diff.
    *  In PR-native mode this commits the mission's worktree; otherwise it commits the shared project
    *  checkout (`fallbackDir`) so non-PR missions still record each phase's delta. No-op (returns false)
-   *  when there's no target dir or the tree is clean. */
+   *  when there's no target dir or the tree is clean. A git failure THROWS: reporting it as `false` made
+   *  it indistinguishable from a clean tree, so the caller went on to freeze a change snapshot (and the
+   *  mission later pushed a branch) that silently missed the phase's work. */
   async commitPhase(missionId: string, phaseTitle: string, fallbackDir?: string): Promise<boolean> {
     const dir = this.worktreeFor(missionId) ?? (this.prEnabled(missionId) ? null : fallbackDir ?? null);
     if (!dir) return false;
     try {
       return await commitAll(dir, phaseTitle);
     } catch (e) {
-      log.error(`phase commit failed for mission ${missionId}`, e);
-      return false;
+      log.error(`phase commit failed for mission ${missionId} in ${dir}`, e);
+      throw e;
     }
   }
 

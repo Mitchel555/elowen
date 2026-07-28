@@ -134,6 +134,44 @@ describe('cron state durability (Tier 2 #22)', () => {
     expect(logger.error.mock.calls.some((c) => String(c[0]).includes('corrupt jobs file'))).toBe(true);
   });
 
+  // Valid JSON of the WRONG SHAPE used to reach the tick untouched: iterating `{}` (or a null entry)
+  // threw, and because the corruption sits on disk every following tick threw again — one bad file
+  // silently stopped the whole scheduler.
+  it('a jobs.json of the wrong shape does not stop the scheduler — malformed entries are skipped', async () => {
+    const dataRoot = freshDataRoot();
+    mkdirSync(join(dataRoot, 'cronjob'), { recursive: true });
+    writeFileSync(jobsFile(dataRoot), JSON.stringify([null, {
+      id: 'r1', name: 'report', schedule: 'every 5m', prompt: 'do it',
+      lastRun: new Date(Date.now() - 10 * 60_000).toISOString(), createdAt: new Date().toISOString(),
+    }]));
+    const delivered: string[] = [];
+    const { adapter, logger } = await loadCron(dataRoot, async (t: string) => { delivered.push(t); });
+    adapter.listen(async () => 'the report');
+
+    await adapter.tick();
+    expect(delivered).toHaveLength(1); // the healthy job still ran
+    expect(delivered[0]).toContain('the report');
+    expect(logger.error.mock.calls.some((c) => String(c[0]).includes('skipping malformed job'))).toBe(true);
+  });
+
+  it('a pending-deliveries.json that is not an array is reported and treated as empty', async () => {
+    const dataRoot = freshDataRoot();
+    mkdirSync(join(dataRoot, 'cronjob'), { recursive: true });
+    writeFileSync(pendingFile(dataRoot), '{}'); // valid JSON, wrong shape
+    writeJobs(dataRoot, [{
+      id: 'r1', name: 'report', schedule: 'every 5m', prompt: 'do it',
+      lastRun: new Date(Date.now() - 10 * 60_000).toISOString(), createdAt: new Date().toISOString(),
+    }]);
+    const delivered: string[] = [];
+    const { adapter, logger } = await loadCron(dataRoot, async (t: string) => { delivered.push(t); });
+    adapter.listen(async () => 'the report');
+
+    await adapter.tick(); // queueing the new result must not trip over the corrupt queue file
+    expect(delivered).toHaveLength(1);
+    expect(logger.error.mock.calls.some((c) => String(c[0]).includes('skipping malformed pending delivery'))).toBe(true);
+    expect(JSON.parse(readFileSync(pendingFile(dataRoot), 'utf-8'))).toEqual([]); // delivered, so nothing left pending
+  });
+
   it('jobs.json is written atomically: CronAdd never leaves a half-written file behind', async () => {
     const dataRoot = freshDataRoot();
     const { reg } = await loadCron(dataRoot, async () => {});

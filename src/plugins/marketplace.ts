@@ -210,7 +210,7 @@ export class MarketplaceService {
       const existing = this.opts.discovered().find((p) => p.manifest.name === name);
       if (existing?.source === 'bundled') throw new MarketplaceError(`"${name}" is a built-in plugin, managed by the app`, 409);
 
-      this.copyFromCache(name);
+      const swap = this.copyFromCache(name);
 
       if (opts.enable ?? true) {
         const enabled = this.opts.getEnabled();
@@ -219,10 +219,10 @@ export class MarketplaceService {
       // Guard against the loader's "bundled wins" dedupe silently shadowing the fresh folder.
       const after = this.opts.discovered().find((p) => p.manifest.name === name);
       if (!after || after.source !== 'user') {
-        rmSync(join(this.opts.userPluginsDir, name), { recursive: true, force: true });
+        swap.rollback();
         throw new MarketplaceError(`installed "${name}" but it did not resolve as a user plugin`, 500);
       }
-      await this.opts.reload();
+      await this.applyOrRollback(name, swap);
       log.info(`plugin installed: ${name}`);
     });
   }
@@ -236,8 +236,8 @@ export class MarketplaceService {
       if (existing.source !== 'user') throw new MarketplaceError(`"${name}" is a built-in plugin`, 409);
       await this.ensureFresh(true);
       if (!this.readRegistry().some((e) => e.name === name)) throw new MarketplaceError(`"${name}" is not in the registry`, 404);
-      this.copyFromCache(name);
-      await this.opts.reload();
+      const swap = this.copyFromCache(name);
+      await this.applyOrRollback(name, swap);
       log.info(`plugin updated: ${name}`);
     });
   }
@@ -278,6 +278,21 @@ export class MarketplaceService {
 
   // ── internals ──────────────────────────────────────────────────────────────
 
+  /** Put a freshly swapped-in version into service, and keep the previous one only until that succeeds.
+   *  A reload that throws means the daemon could not rebuild itself around the new version, so the old
+   *  folder is restored and re-applied before the failure propagates — reporting the error while leaving
+   *  the failed version live and the backup deleted is what makes such an update unrecoverable. */
+  private async applyOrRollback(name: string, swap: { commit: () => void; rollback: () => void }): Promise<void> {
+    try {
+      await this.opts.reload();
+    } catch (e) {
+      swap.rollback();
+      await this.opts.reload().catch((re) => log.error(`plugin ${name}: reload after rollback failed: ${errMsg(re)}`));
+      throw e;
+    }
+    swap.commit();
+  }
+
   private ensureSafeName(name: string): void {
     if (!NAME_RE.test(name)) throw new MarketplaceError('invalid plugin name', 400);
     // Belt-and-suspenders: the validated name must be a plain single segment under each root.
@@ -307,7 +322,9 @@ export class MarketplaceService {
 
   private async refreshCache(): Promise<void> {
     if (!(await this.cacheHealthy())) {
-      rmSync(this.cacheDir, { recursive: true, force: true });
+      // No pre-emptive delete: clone() swaps the new checkout in atomically, so wiping here would only
+      // destroy the last-good registry.json whenever the re-clone then fails (offline), turning a
+      // degraded catalog into an empty one.
       await this.clone();
       this.lastFetch = this.io.now();
       return;
@@ -359,8 +376,12 @@ export class MarketplaceService {
 
   /** Copy `cache/plugins/<name>` into the user dir atomically: validate a staging copy, then swap it in
    *  over any existing folder with a restore-on-failure backup. Same-filesystem staging (a sibling of the
-   *  destination) so the final `rename` can't hit EXDEV. */
-  private copyFromCache(name: string): void {
+   *  destination) so the final `rename` can't hit EXDEV.
+   *
+   *  The previous version survives as a backup until the caller `commit()`s, because the swap alone does
+   *  not prove the new version works: whether it is usable is only known after the reload, and by then
+   *  deleting the backup would have made the failure unrecoverable. `rollback()` puts the old folder back. */
+  private copyFromCache(name: string): { commit: () => void; rollback: () => void } {
     const src = join(this.cacheDir, 'plugins', name);
     if (!existsSync(join(src, 'elowen-plugin.json'))) throw new MarketplaceError(`payload for "${name}" is missing from the registry`, 502);
 
@@ -388,7 +409,13 @@ export class MarketplaceService {
         if (hadOld) renameSync(backup, final);
         throw e;
       }
-      if (hadOld) rmSync(backup, { recursive: true, force: true });
+      return {
+        commit: () => { if (hadOld) rmSync(backup, { recursive: true, force: true }); },
+        rollback: () => {
+          rmSync(final, { recursive: true, force: true });
+          if (hadOld) renameSync(backup, final);
+        },
+      };
     } catch (e) {
       rmSync(staging, { recursive: true, force: true });
       throw e instanceof MarketplaceError ? e : new MarketplaceError(`install of "${name}" failed: ${errMsg(e)}`, 400);

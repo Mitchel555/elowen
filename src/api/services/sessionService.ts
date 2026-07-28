@@ -4,20 +4,24 @@ import { parseResumeLabel } from '../../spawn/resume/index.js';
 import { resolveOwnerId } from '../../prompts/owner.js';
 import { projectHead } from '../../integrations/projectFiles.js';
 import { uniqueName } from '../../daemon/uniqueName.js';
+import { logger } from '../../shared/logger.js';
 import type { KeyedMutex } from '../../shared/keyedMutex.js';
 import type { Task } from '../../store/types.js';
 import type { ServerDeps } from '../deps.js';
 
+const log = logger('api');
+
 /** Outcome of a manual launch: the live session name, or a typed reason the controller maps to a
- *  status code (busy → 409, spawn-failed → 500). Keeps HTTP concerns out of the service. */
+ *  status code (busy → 409, spawn-failed/gone → 500). Keeps HTTP concerns out of the service. */
 type LaunchOutcome =
   | { ok: true; session: string }
-  | { ok: false; reason: 'busy' | 'spawn-failed'; message: string };
+  | { ok: false; reason: 'busy' | 'spawn-failed' | 'gone'; message: string };
 
 export interface SessionService {
   /** Manually (re)launch a worker for a task into its project checkout: claim the shared checkout
    *  atomically, baseline the per-task change snapshot, pin a manual-restart resume note and spawn,
-   *  reverting the claim if the spawn fails. The caller has already gated exec/project access. */
+   *  reverting the claim if the spawn fails and stopping the fresh agent again if the claim did not
+   *  survive the spawn. The caller has already gated exec/project access. */
   launchManual(task: Task, exec: string | undefined): Promise<LaunchOutcome>;
 }
 
@@ -67,6 +71,15 @@ export function createSessionService(d: ServerDeps, gitLock: KeyedMutex, pathFor
       d.tasks.setStatus(taskId, 'open');
       d.bus.publish({ type: 'task', taskId, status: 'open' });
       return { ok: false, reason: 'spawn-failed', message: (e as Error).message };
+    }
+    // The claim above and the spawn are not one step: a DELETE of the task, or a status revert, that
+    // lands in between kills a session that does not exist YET, so the agent started here would
+    // outlive its task and keep editing the checkout with nothing left to stop it by. Re-read the row
+    // and require it to still be exactly the claim this call made; otherwise stop what was spawned.
+    const claimed = d.tasks.get(taskId);
+    if (!claimed || claimed.status !== 'in_progress' || !claimed.labels.includes(`agent:${agentName}`)) {
+      await d.tmux.kill(session).catch((e) => log.error(`failed to stop orphaned session ${session}`, e));
+      return { ok: false, reason: 'gone', message: 'task was removed or reassigned during launch' };
     }
     d.bus.publish({ type: 'task', taskId, status: 'in_progress' });
     return { ok: true, session };

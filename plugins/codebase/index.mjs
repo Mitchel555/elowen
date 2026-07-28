@@ -434,20 +434,35 @@ export function register(ctx) {
     return db;
   };
 
+  // Auto-reindex passes currently running, keyed by repo — the SINGLE-FLIGHT registry. `register` runs once
+  // per plugin load, so this closure is process-wide: every concurrent session's search shares it.
+  const inFlight = new Map();
+
   // Lazily run ONE bounded incremental pass per stale-by-time repo. ADMIN-GATED at the call site (it writes
   // shared state + spends the embedding provider — exactly what CodebaseReindex refuses to non-admins).
   // The 5-minute debounce ALWAYS applies — even to a repo that indexes to zero chunks (a failing provider,
   // an all-excluded repo) — so a persistently-empty repo can't re-walk + re-embed on every search. Never
   // throws (best-effort; a failed pass must not break the search).
+  //
+  // Two guards keep concurrent callers from running the SAME repo twice (double embedding spend, and a
+  // slower pass overwriting a newer pass's snapshot of a file):
+  //  - the in-flight map, joined instead of re-run — it also holds when a pass outlives the debounce window;
+  //  - the debounce marker, claimed BEFORE the pass rather than after it, so a caller that does not share
+  //    this map (a plugin reload swaps in a fresh closure over the same index.db) still sees the claim.
   const maybeAutoReindex = async (database, repos) => {
     if (!cfg.autoReindex || !ctx.embeddings.isConfigured()) return;
     const now = Date.now();
     for (const repo of repos) {
+      const running = inFlight.get(repo);
+      if (running) { await running; continue; }
       const last = Number(getMeta(database, `reindex:${repo}`) ?? 0);
       if (now - last < AUTO_REINDEX_DEBOUNCE_MS) continue;
-      try { await reindexRepo(ctx, database, repo, { cfg, budget: cfg.reindexEmbedBudget, full: false }); }
-      catch { /* auto-reindex is best-effort — never break a search */ }
       setMeta(database, `reindex:${repo}`, String(now));
+      const pass = reindexRepo(ctx, database, repo, { cfg, budget: cfg.reindexEmbedBudget, full: false })
+        .catch(() => { /* auto-reindex is best-effort — never break a search */ })
+        .finally(() => { inFlight.delete(repo); });
+      inFlight.set(repo, pass);
+      await pass;
     }
   };
 
@@ -481,7 +496,8 @@ export function register(ctx) {
 
         // Auto-reindex is ADMIN-ONLY (same gate as CodebaseReindex: it writes shared state + spends the
         // embedding provider). Fire-and-forget so the search answer NEVER waits on a full walk+embed pass —
-        // freshly embedded chunks surface on the NEXT search; the 5-minute debounce guards re-entry.
+        // freshly embedded chunks surface on the NEXT search; single-flight + the 5-minute debounce guard
+        // re-entry, so concurrent searches never start a second pass over the same repo.
         let kickedReindex = false;
         if (cfg.autoReindex && ctx.isAdminSession()) {
           kickedReindex = true;

@@ -282,12 +282,27 @@ export class PlatformOrchestrator {
   }
 
   /** Push a proactive message to every started platform that has a notification channel (Discord, …).
-   *  Fail-open per adapter — a broken sink must not break the cron tick that triggered it. */
+   *  Fail-open per adapter — one broken sink must not stop the others, so a push that reached at least one
+   *  of them counts as delivered. But when EVERY sink threw, nothing was delivered, and reporting success
+   *  there is what let the cron scheduler drop a result it had promised to retry (it deletes the stored
+   *  pending delivery on a resolved push). So that case rejects, carrying each sink's failure.
+   *  An instance with no notification sink at all is a configuration state, not a delivery failure — it
+   *  resolves, exactly as before, so nothing queues results for a channel that does not exist. */
   async notify(text: string, channelId?: string): Promise<void> {
+    let delivered = false;
+    const failures: string[] = [];
     for (const p of this.started) {
       if (typeof p.notify === 'function') {
-        try { await p.notify(text, channelId); } catch { /* one sink down must not block the rest */ }
+        try {
+          await p.notify(text, channelId);
+          delivered = true;
+        } catch (e) {
+          failures.push(`${p.name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
+    }
+    if (!delivered && failures.length > 0) {
+      throw new Error(`notification delivery failed on every platform — ${failures.join('; ')}`);
     }
   }
 }

@@ -2034,6 +2034,32 @@ describe('BrainService', () => {
     expect(await variant('four')).toBe('cli/plan-mode-sparse');
   });
 
+  // Admission rolls a rejected turn's user row back, so the mode state it carried has to roll back with
+  // it: a turn the model never received cannot be what the sparse line means by "earlier in this
+  // conversation". Otherwise a failed FIRST plan turn consumed the entry and every later plan turn got a
+  // one-liner pointing at rules that were never delivered.
+  it('does not confirm the mode of a turn that never reached the model', async () => {
+    const d = fakeDeps();
+    d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
+      name.startsWith('cli/') ? name : `PERSONA:${name}:${vars.userName}`,
+    );
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const variant = async (text: string): Promise<string | undefined> => {
+      d.prompts.render.mockClear();
+      await svc.send({ userId: 1, text, mode: 'plan', session: 'brain-1' });
+      return (d.prompts.render.mock.calls.map((c) => c[0] as string)).find((n) => n.startsWith('cli/'));
+    };
+
+    d.session.prompt.mockRejectedValueOnce(new Error('provider refused the turn'));
+    await expect(svc.send({ userId: 1, text: 'outline it', mode: 'plan', session: 'brain-1' }))
+      .rejects.toThrow('provider refused the turn');
+
+    // Still ENTERING plan mode, because nothing has entered it yet.
+    expect(await variant('outline it again')).toBe('cli/plan-mode');
+    expect(await variant('and continue')).toBe('cli/plan-mode-sparse');
+  });
+
   it('plan mode hides mutating tools from the model for that turn', async () => {
     const d = fakeDeps();
     d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>

@@ -44,6 +44,19 @@ function mergeModelUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   };
 }
 
+/** A patch the store refused mid-write (a dangling/cyclic dependency edge, an illegal reparent). It
+ *  carries the client-facing reason so the handler can roll the WHOLE patch back and answer 400,
+ *  instead of leaving the accepted half of the same request applied. */
+class PatchRejected extends Error {}
+
+/** Whether an agent session is STILL live after its kill failed — the only evidence that lets a
+ *  destructive route treat that failure as a benign "already gone" rather than a stranded worker. An
+ *  unreadable session list counts as live: unverified is not the same as gone. */
+async function sessionLive(d: RouteContext['d'], session: string): Promise<boolean> {
+  if (d.brainWorkers?.isLive(session)) return true;
+  try { return (await d.tmux.list()).includes(session); } catch { return true; }
+}
+
 /** Tasks, usage, admin cleanup and the plan/replan endpoints. The post-done review workflow that the
  *  close path drives lives in {@link ReviewService}; planning lives in {@link PlanService}. */
 export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
@@ -71,8 +84,14 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
     const target = resolveTarget(c, b.project_id);
     if ('error' in target) return c.json({ error: target.error }, target.status);
     const id = b.id ?? shortId(basename(target.project.path));
-    const created = d.tasks.create({ id, project_id: target.project.id, title: b.title, type: b.type, priority: b.priority, description: b.description, scheduled_at: b.scheduled_at, autostart: b.autostart, created_by: c.get('user')?.id ?? null });
-    if (Array.isArray(b.deps)) d.tasks.setDeps(created.id, b.deps);
+    // The row and its dependency edges are ONE unit of work: a task that survived a failed setDeps
+    // would be created with no predecessors at all and go straight into the ready queue, running
+    // ahead of the work it was declared to wait for.
+    const created = d.tasks.transaction(() => {
+      const task = d.tasks.create({ id, project_id: target.project.id, title: b.title, type: b.type, priority: b.priority, description: b.description, scheduled_at: b.scheduled_at, autostart: b.autostart, created_by: c.get('user')?.id ?? null });
+      if (Array.isArray(b.deps)) d.tasks.setDeps(task.id, b.deps);
+      return task;
+    });
     d.bus.publish({ type: 'task', taskId: created.id, status: created.status });
     return c.json(created, 201);
   });
@@ -208,27 +227,9 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
       const allowed = new Set(['status', 'result_summary', 'outcome']);
       if (Object.keys(b).some((k) => !allowed.has(k))) return c.json({ error: 'forbidden' }, 403);
     }
-    if (b.status) {
-      // Reverting a RUNNING task to open/cancelled must stop its live agent FIRST. Otherwise the
-      // orphaned session keeps editing the shared checkout while the scheduler — which counts only
-      // in_progress tasks as busy (checkoutBusy) — treats the checkout as free and can spawn a SECOND
-      // concurrent agent into it. Mirror the sessions DELETE kill path: embedded brain worker → abort,
-      // tmux pane → kill. Best-effort; a missing session is already gone.
-      if (existing.status === 'in_progress' && (b.status === 'open' || b.status === 'cancelled')) {
-        const agent = existing.labels.find((l) => l.startsWith('agent:'))?.slice('agent:'.length);
-        if (agent) {
-          const session = `elowen-${agent}`;
-          if (d.brainWorkers?.isLive(session)) await d.brainWorkers.abort(session).catch(() => { /* already gone */ });
-          else await d.tmux.kill(session).catch(() => { /* already gone */ });
-        }
-      }
-      if (b.status === 'closed') d.tasks.close(id, { summary: b.result_summary, outcome: b.outcome });
-      else d.tasks.setStatus(id, b.status);
-      d.bus.publish({ type: 'task', taskId: id, status: b.status });
-      // Drive the post-done overseer review gate (mission phases) or snapshot a standalone task's
-      // change list. Only on close; the status flip + SSE publish already happened above.
-      if (b.status === 'closed') await reviewService.onTaskClosed(id, existing, { outcome: b.outcome, summary: b.result_summary });
-    }
+    // Validate the WHOLE command before writing ANY of it. The exec gate used to run after the status
+    // branch, so `{status:'closed', exec:'<not allowed>'}` closed the task, published its SSE and drove
+    // the review workflow — and only then answered 400, leaving the rejected command half-applied.
     if (typeof b.exec === 'string') {
       // Gate the executor exactly like the plan/session routes: an unvalidated exec is stored as an
       // `exec:<spec>` label and later interpolated into the agent launch command, so without this check
@@ -236,24 +237,62 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
       // metacharacters through the model field. Empty string clears the override (revert to fallback).
       if (b.exec && !d.config.get().allowedExecs.includes(b.exec)) return c.json({ error: 'exec not allowed' }, 400);
       if (b.exec && !execAllowedForUser(c, b.exec)) return c.json({ error: 'exec not allowed for user' }, 403);
-      d.tasks.setExec(id, b.exec);
     }
-    if (typeof b.title === 'string' || typeof b.type === 'string' || typeof b.priority === 'string' || typeof b.description === 'string' || b.scheduled_at !== undefined || b.autostart !== undefined) {
-      d.tasks.update(id, { title: b.title, type: b.type, priority: b.priority, description: b.description, scheduled_at: b.scheduled_at, autostart: b.autostart });
+    // Reverting a RUNNING task to open/cancelled must stop its live agent FIRST. Otherwise the
+    // orphaned session keeps editing the shared checkout while the scheduler — which counts only
+    // in_progress tasks as busy (checkoutBusy) — treats the checkout as free and can spawn a SECOND
+    // concurrent agent into it. Mirror the sessions DELETE kill path: embedded brain worker → abort,
+    // tmux pane → kill. Best-effort; a missing session is already gone.
+    if (b.status && existing.status === 'in_progress' && (b.status === 'open' || b.status === 'cancelled')) {
+      const agent = existing.labels.find((l) => l.startsWith('agent:'))?.slice('agent:'.length);
+      if (agent) {
+        const session = `elowen-${agent}`;
+        if (d.brainWorkers?.isLive(session)) await d.brainWorkers.abort(session).catch(() => { /* already gone */ });
+        else await d.tmux.kill(session).catch(() => { /* already gone */ });
+      }
     }
-    if (Array.isArray(b.deps)) d.tasks.setDeps(id, b.deps);
-    // Single-edge add (the drag-onto-card "add dependency" gesture): atomic, unlike a client-side
-    // fetch-current-deps-then-PATCH-the-whole-array round trip, which races against a concurrent
-    // editor of the same task's deps. setDeps stays the bulk-replace path (the deps modal). Unlike
-    // that bulk path, this is one deliberate action, so a rejected edge (missing endpoint, cross-
-    // project) surfaces as a 400 instead of silently vanishing.
-    if (typeof b.addDep === 'string' && !d.tasks.addDep(id, b.addDep)) return c.json({ error: 'invalid dependency' }, 400);
+    // Every write of the patch in ONE transaction, so a field the store refuses (a dangling/cyclic
+    // dependency edge, an illegal reparent) rolls back the fields that were accepted alongside it
+    // instead of persisting a partial patch behind the 400.
+    try {
+      d.tasks.transaction(() => {
+        if (b.status) {
+          if (b.status === 'closed') d.tasks.close(id, { summary: b.result_summary, outcome: b.outcome });
+          else d.tasks.setStatus(id, b.status);
+        }
+        if (typeof b.exec === 'string') d.tasks.setExec(id, b.exec);
+        if (typeof b.title === 'string' || typeof b.type === 'string' || typeof b.priority === 'string' || typeof b.description === 'string' || b.scheduled_at !== undefined || b.autostart !== undefined) {
+          d.tasks.update(id, { title: b.title, type: b.type, priority: b.priority, description: b.description, scheduled_at: b.scheduled_at, autostart: b.autostart });
+        }
+        if (Array.isArray(b.deps)) d.tasks.setDeps(id, b.deps);
+        // Single-edge add (the drag-onto-card "add dependency" gesture): atomic, unlike a client-side
+        // fetch-current-deps-then-PATCH-the-whole-array round trip, which races against a concurrent
+        // editor of the same task's deps. setDeps stays the bulk-replace path (the deps modal). Unlike
+        // that bulk path, this is one deliberate action, so a rejected edge (missing endpoint, cross-
+        // project) surfaces as a 400 instead of silently vanishing.
+        if (typeof b.addDep === 'string' && !d.tasks.addDep(id, b.addDep)) throw new PatchRejected('invalid dependency');
+        // Drag-a-card-onto-another-card "make subtask" gesture. reparent() promotes the target to an
+        // epic if needed.
+        if (typeof b.parent_id === 'string') {
+          const result = d.tasks.reparent(id, b.parent_id);
+          if ('error' in result) throw new PatchRejected(result.error);
+        }
+      });
+    } catch (e) {
+      if (e instanceof PatchRejected) return c.json({ error: e.message }, 400);
+      throw e;
+    }
+    // Side effects only once the whole patch is committed — an observer (SSE client, review workflow,
+    // mission tick) must never see a state the transaction could still roll back.
+    if (b.status) {
+      d.bus.publish({ type: 'task', taskId: id, status: b.status });
+      // Drive the post-done overseer review gate (mission phases) or snapshot a standalone task's
+      // change list. Only on close.
+      if (b.status === 'closed') await reviewService.onTaskClosed(id, existing, { outcome: b.outcome, summary: b.result_summary });
+    }
+    // If the new parent's mission is already live, tick it so the new phase is picked up now instead
+    // of waiting for the next scheduled tick — same pattern as insert-phases below.
     if (typeof b.parent_id === 'string') {
-      // Drag-a-card-onto-another-card "make subtask" gesture. reparent() promotes the target to an
-      // epic if needed; if its mission is already live, tick it so the new phase is picked up now
-      // instead of waiting for the next scheduled tick — same pattern as insert-phases below.
-      const result = d.tasks.reparent(id, b.parent_id);
-      if ('error' in result) return c.json({ error: result.error }, 400);
       const missionId = `m-${b.parent_id}`;
       if (d.engine?.isActive(missionId)) await d.engine.tick(missionId);
     }
@@ -412,8 +451,18 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
       // on-disk worktree when the epic is deleted (the mission_pr row is also pruned by the cascade).
       const missionId = `m-${id}`;
       const mission = d.missions.get(missionId);
-      if (mission && mission.state !== 'disengaged') await d.engine.disengage(missionId).catch(() => { /* best-effort */ });
-      await d.missionGit?.cleanup(missionId).catch(() => { /* best-effort */ });
+      // Teardown must SUCCEED before the rows go. Both calls already return quietly for the "nothing
+      // to tear down" state — disengage() is skipped for an already-disengaged mission and cleanup()
+      // returns early when there is no worktree record — so anything thrown here is a teardown that
+      // genuinely failed. Deleting the epic then would strand live agents and an on-disk worktree
+      // against a mission that no longer exists in the DB, with nothing left to find them by.
+      try {
+        if (mission && mission.state !== 'disengaged') await d.engine.disengage(missionId);
+        await d.missionGit?.cleanup(missionId);
+      } catch (e) {
+        log.error(`epic ${id} not deleted — mission teardown failed`, e);
+        return c.json({ error: 'mission teardown failed' }, 500);
+      }
       const removed = d.tasks.deleteEpic(id);
       d.bus.publish({ type: 'task', taskId: id, status: 'cancelled' });
       d.events?.deleteForTarget(id);
@@ -428,8 +477,18 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
       const agent = existing.labels.find((l) => l.startsWith('agent:'))?.slice('agent:'.length);
       if (agent) {
         const session = `elowen-${agent}`;
-        if (d.brainWorkers?.isLive(session)) await d.brainWorkers.abort(session).catch(() => { /* already gone */ });
-        else await d.tmux.kill(session).catch(() => { /* already gone */ });
+        try {
+          if (d.brainWorkers?.isLive(session)) await d.brainWorkers.abort(session);
+          else await d.tmux.kill(session);
+        } catch (e) {
+          // Only a session VERIFIED to be gone may be ignored (killing one that already exited is the
+          // normal failure here). One that is still live outlived its kill, so keep the row: deleting
+          // it would leave the worker editing the checkout with nothing left to find or stop it by.
+          if (await sessionLive(d, session)) {
+            log.error(`task ${id} not deleted — agent teardown failed`, e);
+            return c.json({ error: 'agent teardown failed' }, 500);
+          }
+        }
       }
     }
     d.tasks.delete(id);
@@ -443,15 +502,34 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (notAdmin(c)) return c.json({ error: 'forbidden' }, 403);
     // Stop missions cleanly first (kills their agents + drains overseers), then sweep any remaining
     // elowen- sessions (manual launches / zombies) so no agent keeps running against deleted tasks.
-    for (const m of d.missions.live()) await d.engine.disengage(m.id).catch(() => { /* best-effort */ });
-    for (const s of (await d.tmux.list()).filter((s) => s.startsWith('elowen-'))) {
-      await d.tmux.kill(s).catch(() => { /* already gone */ });
+    // A teardown that FAILS aborts the wipe: erasing every task and mission row while an agent is
+    // still live leaves it editing checkouts with nothing left in the DB to find or stop it by.
+    try {
+      for (const m of d.missions.live()) await d.engine.disengage(m.id);
+    } catch (e) {
+      log.error('cleanup aborted — mission disengage failed', e);
+      return c.json({ error: 'mission teardown failed' }, 500);
+    }
+    const sessions = (await d.tmux.list()).filter((s) => s.startsWith('elowen-'));
+    for (const s of sessions) await d.tmux.kill(s).catch(() => { /* verified below */ });
+    // A kill fails routinely for a session that exited on its own, so the kill itself proves nothing —
+    // re-read the live list and judge by what actually survived. Sessions spawned after the sweep
+    // started are not ours to account for, so only the ones we tried to kill are checked.
+    const surviving = (await d.tmux.list()).filter((s) => sessions.includes(s));
+    if (surviving.length > 0) {
+      log.error(`cleanup aborted — agent sessions survived teardown: ${surviving.join(', ')}`);
+      return c.json({ error: 'agent teardown failed' }, 500);
     }
     // Free every mission's on-disk worktree (and its mission_pr row) before deleteAll() wipes the DB —
     // the disengage sweep above only reaches 'active'/'stalled' missions, but a paused or naturally-
     // completed one still holds a worktree for the pause/PR-feedback path. cleanup() is a no-op for a
     // mission with no PR record, so calling it for every mission id here is safe.
-    for (const missionId of d.tasks.listMissionIds()) await d.missionGit?.cleanup(missionId).catch(() => { /* best-effort */ });
+    try {
+      for (const missionId of d.tasks.listMissionIds()) await d.missionGit?.cleanup(missionId);
+    } catch (e) {
+      log.error('cleanup aborted — worktree cleanup failed', e);
+      return c.json({ error: 'mission teardown failed' }, 500);
+    }
     const removed = d.tasks.deleteAll();
     const events = d.events?.deleteAll() ?? 0;
     return c.json({ ok: true, tasks: removed.tasks, missions: removed.missions, events });

@@ -121,6 +121,46 @@ describe('AccountView', () => {
     await waitFor(() => expect(screen.getByText('Friendly')).toBeVisible());
   });
 
+  it('never reseeds the profile form over edits typed while a /auth/me refetch is in flight', async () => {
+    let serverName = 'Bob';
+    let patches = 0;
+    let gets = 0;
+    // Hold the refetch the autosave's invalidation triggers, so the user can keep typing while the
+    // stale response is on the wire — the exact window where a blind reseed types over them.
+    const gate: { release: (() => void) | null } = { release: null };
+    server.use(
+      http.get('*/api/auth/me', async () => {
+        gets += 1;
+        if (gets > 1) await new Promise<void>((resolve) => { gate.release = resolve; });
+        return HttpResponse.json({ user: meUser({ name: serverName }) });
+      }),
+      http.patch('*/api/auth/me', async ({ request }) => {
+        const body = await request.json() as { name?: string };
+        patches += 1;
+        serverName = body.name ?? serverName;
+        return HttpResponse.json(meUser({ name: serverName }));
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: [], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper, client } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    const nameInput = await screen.findByDisplayValue('Bob');
+    fireEvent.change(nameInput, { target: { value: 'Bob Renamed' } });
+    await waitFor(() => expect(patches).toBe(1), { timeout: 3000 });
+    await waitFor(() => expect(gate.release).not.toBeNull());
+
+    // Still typing while the refetch hangs.
+    fireEvent.change(nameInput, { target: { value: 'Bob Renamed Twice' } });
+    gate.release?.();
+
+    await waitFor(() => expect(client.getQueryData(['me'])).toMatchObject({ user: { name: 'Bob Renamed' } }));
+    expect(nameInput).toHaveValue('Bob Renamed Twice');
+    // Let the second edit's autosave land while the handlers are still installed.
+    await waitFor(() => expect(patches).toBe(2), { timeout: 3000 });
+  });
+
   it('shows a retryable error instead of an infinite skeleton when /auth/me fails', async () => {
     let attempts = 0;
     server.use(

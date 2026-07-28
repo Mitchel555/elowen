@@ -1530,6 +1530,7 @@ export const cs = {
     running: 'běží',
     done: 'hotovo',
     error: 'chyba',
+    openTranscript: 'Otevřít průběh sub-agenta',
   },
   brainChat: {
     modeNav: 'Režim panelu',
@@ -1599,6 +1600,7 @@ export const cs = {
     },
     queued: 'Ve frontě',
     removeFromQueue: 'Odebrat z fronty',
+    queueRemoveError: 'Zprávu se nepodařilo odebrat — stále čeká ve frontě na doručení',
     showThoughts: 'Zobrazit uvažování',
     hideThoughts: 'Skrýt uvažování',
     toolRunning: 'Probíhá',

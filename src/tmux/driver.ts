@@ -11,6 +11,21 @@ const run = promisify(execFile);
  *  same form valid for pane/window targets (send-keys, capture-pane) as well as sessions. */
 const exact = (session: string): string => `=${session}:`;
 
+/** tmux reports "there are no sessions" as a FAILURE: the server exits with its last session, so
+ *  `list-sessions` then can't connect at all. These two shapes are the only ones that mean "nothing is
+ *  running"; every other failure (tmux missing, socket permissions, a server fault) is a real fault. */
+const NO_SERVER = /no server running|error connecting to/i;
+/** tmux's message when the target session is already gone (the server itself is up). */
+const NO_SESSION = /can't find session|session not found/i;
+
+/** execFile rejects with an Error carrying tmux's `stderr`; the message alone omits it on some paths,
+ *  so classify against both. */
+function tmuxError(e: unknown): string {
+  if (typeof e !== 'object' || e === null) return String(e);
+  const err = e as { stderr?: unknown; message?: unknown };
+  return `${typeof err.stderr === 'string' ? err.stderr : ''}\n${typeof err.message === 'string' ? err.message : ''}`;
+}
+
 export class RealTmuxDriver implements TmuxDriver {
   async spawn(session: string, opts: SpawnOpts) {
     // Session env via `-e KEY=VAL` (tmux >= 3.0): the pane shell inherits it, so a token the command needs
@@ -24,7 +39,15 @@ export class RealTmuxDriver implements TmuxDriver {
     // Pin the window size so detached TUIs (opencode etc.) keep our requested dimensions
     // instead of collapsing to tmux's 80×24 default.
     await run('tmux', ['set-option', '-t', exact(session), 'window-size', 'manual']).catch(() => { /* older tmux — best effort */ });
-    await run('tmux', ['send-keys', '-t', exact(session), opts.command, 'Enter']);
+    try {
+      await run('tmux', ['send-keys', '-t', exact(session), opts.command, 'Enter']);
+    } catch (e) {
+      // The pane shell is already up but never received its command. Leaving it behind would idle
+      // forever AND make the caller's retry fail with "duplicate session", so the whole spawn must be
+      // all-or-nothing: tear the session down, then report the original failure.
+      await this.kill(session).catch(() => { /* nothing further we can do about the orphan */ });
+      throw e;
+    }
   }
   /** Launch directly with `new-session -- <argv>` and `-e KEY=VAL` session env — no shell, no `send-keys`.
    *  The command AND its environment (which may carry a token) therefore never enter the pane scrollback,
@@ -75,9 +98,25 @@ export class RealTmuxDriver implements TmuxDriver {
       return stdout;
     } catch { return ''; } // dead/missing session → empty frame, stream stays alive (spec §6)
   }
+  /** Live session names. An empty list means "tmux is up and nothing is running" — NOT "the lookup
+   *  failed": callers treat a missing session as a dead agent and revert/reap its work, so a transient
+   *  tmux fault reported as an empty list would declare every running agent dead. Real faults throw. */
   async list() {
     try { const { stdout } = await run('tmux', ['list-sessions', '-F', '#{session_name}']); return stdout.split('\n').map(s => s.trim()).filter(Boolean); }
-    catch { return []; }
+    catch (e) {
+      if (NO_SERVER.test(tmuxError(e))) return []; // no server ⇒ genuinely no sessions
+      throw e;
+    }
   }
-  async kill(session: string) { try { await run('tmux', ['kill-session', '-t', exact(session)]); } catch { /* already gone */ } }
+  /** Kill a session. Resolves when it was already gone (the desired state is reached either way), but a
+   *  real failure throws: callers proceed as if the process were terminated, so swallowing one leaves a
+   *  live agent behind a "killed" task. */
+  async kill(session: string) {
+    try { await run('tmux', ['kill-session', '-t', exact(session)]); }
+    catch (e) {
+      const text = tmuxError(e);
+      if (NO_SESSION.test(text) || NO_SERVER.test(text)) return; // already gone
+      throw e;
+    }
+  }
 }

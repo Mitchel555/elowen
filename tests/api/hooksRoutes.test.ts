@@ -94,6 +94,31 @@ describe('hook routes', () => {
     expect(called).toBe(0);
   });
 
+  it('stops reading an oversized chunked body instead of buffering it whole', async () => {
+    // Webhook mounts are public and the dispatcher buffers the body (arrayBuffer) to hand it to the
+    // plugin. A chunked request declares no content-length, so the cap must bound the READ itself —
+    // checking the buffered length afterwards means the daemon already holds the whole payload.
+    let called = 0;
+    const registry = registryWith([{
+      plugin: 'msteams', declared: ['messages'],
+      route: { path: 'messages', handler: async () => { called += 1; return {}; } },
+    }]);
+    const { app } = setup(registry);
+    let pulled = 0;
+    const chunk = 64 * 1024;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= 8 * 1024 * 1024) { controller.close(); return; }
+        pulled += chunk;
+        controller.enqueue(new Uint8Array(chunk).fill(0x78));
+      },
+    });
+    const res = await app.request('/hooks/msteams/messages', { method: 'POST', body, duplex: 'half' });
+    expect(res.status).toBe(413);
+    expect(called).toBe(0);
+    expect(pulled).toBeLessThan(2 * 1024 * 1024); // stopped near the 1 MB cap, not after the whole 8 MB
+  });
+
   it('maps a handler throw to an opaque 500', async () => {
     const registry = registryWith([{
       plugin: 'msteams', declared: ['messages'],

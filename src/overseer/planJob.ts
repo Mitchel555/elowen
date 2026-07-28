@@ -30,8 +30,14 @@ export interface PlanJob {
  *  which the API surfaces as failed (the user retries). Persistence is unnecessary — a plan job
  *  lives seconds (relay) to minutes (agent). */
 /** How long a finished (done/failed) job is kept so the client can still read its result before it's
- *  pruned. Planning jobs are never pruned (they're in flight). 10 min covers the slowest agent plan. */
+ *  pruned. An in-flight job is prunable only once its planning window (below) has elapsed. 10 min
+ *  covers the slowest agent plan. */
 const TERMINAL_TTL_MS = 10 * 60_000;
+/** Hard cap on an in-flight job. Nothing settles a job whose Pilot died (crashed pane, killed session):
+ *  only the Pilot's own `plan submit` does, so without a cap the client polls a job that will never
+ *  answer and the map keeps it for the daemon's lifetime. Far above any real plan (seconds for relay,
+ *  minutes for an agent), so it can only ever fire on a Pilot that is gone. */
+const PLANNING_MAX_MS = 60 * 60_000;
 
 export class PlanJobStore {
   private jobs = new Map<string, PlanJob>();
@@ -49,15 +55,29 @@ export class PlanJobStore {
     return job;
   }
 
-  /** Drop done/failed jobs older than the TTL. In-flight ('planning') jobs are always kept. */
+  /** Settle a job whose planning window has elapsed — its Pilot is gone and will never submit, so the
+   *  caller must read a definite failure instead of a perpetual 'planning'. No-op within the window. */
+  private expireStale(id: string, job: PlanJob): PlanJob {
+    if (job.status === 'planning' && (this.created.get(id) ?? 0) <= this.now() - PLANNING_MAX_MS) {
+      job.status = 'failed';
+      job.error = 'plan_timed_out';
+    }
+    return job;
+  }
+
+  /** Drop done/failed jobs older than the TTL. An in-flight job is kept until its planning window
+   *  elapses, at which point it settles as failed and becomes prunable like any other. */
   private prune(): void {
     const cutoff = this.now() - TERMINAL_TTL_MS;
     for (const [id, job] of this.jobs) {
-      if (job.status === 'planning') continue;
+      if (this.expireStale(id, job).status === 'planning') continue;
       if ((this.created.get(id) ?? 0) <= cutoff) { this.jobs.delete(id); this.created.delete(id); }
     }
   }
-  get(id: string): PlanJob | null { return this.jobs.get(id) ?? null; }
+  get(id: string): PlanJob | null {
+    const job = this.jobs.get(id);
+    return job ? this.expireStale(id, job) : null;
+  }
   /** Record the Pilot's tmux session once it's spawned (agent-mode planning only). */
   setSession(id: string, sessionName: string): PlanJob | null {
     const j = this.jobs.get(id); if (!j) return null;

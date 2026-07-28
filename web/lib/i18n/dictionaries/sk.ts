@@ -1530,6 +1530,7 @@ export const sk = {
     running: 'beží',
     done: 'hotovo',
     error: 'chyba',
+    openTranscript: 'Otvoriť priebeh sub-agenta',
   },
   brainChat: {
     modeNav: 'Režim panela',
@@ -1599,6 +1600,7 @@ export const sk = {
     },
     queued: 'Vo fronte',
     removeFromQueue: 'Odobrať z frontu',
+    queueRemoveError: 'Správu sa nepodarilo odobrať — stále čaká vo fronte na doručenie',
     showThoughts: 'Zobraziť uvažovanie',
     hideThoughts: 'Skryť uvažovanie',
     toolRunning: 'Prebieha',

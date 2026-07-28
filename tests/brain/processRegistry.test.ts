@@ -79,13 +79,12 @@ describe('ProcessRegistry', () => {
     expect(reg.kill('1')).toBe(false); // already gone
   });
 
-  it('remove() drops without killing; runningCount counts live ones', () => {
+  it('remove() drops without killing', () => {
     const reg = new ProcessRegistry();
     const a = fakeHandle('1');
     const b = fakeHandle('2');
     reg.register(a.handle); reg.register(b.handle);
     b.state.running = false;
-    expect(reg.runningCount()).toBe(1);
     expect(reg.remove('1')).toBe(true);
     expect(a.state.killed).toBe(false); // remove ≠ kill
     expect(reg.list().map((p) => p.id)).toEqual(['2']);
@@ -114,6 +113,46 @@ describe('ProcessRegistry', () => {
     reg.kill('1');          // killed → dropped from the registry
     reg.markExited('1');    // its subsequent close finds nothing → no wake
     expect(fired).toBe(0);
+  });
+
+  // Process ids are short and time-based, so two spawns can collide. The registry must never drop a LIVE
+  // handle silently — that child would keep running with nothing able to list, read or kill it.
+  describe('id collision', () => {
+    it('kills the process it evicts and releases everyone waiting on it', async () => {
+      const reg = new ProcessRegistry();
+      const first = fakeHandle('dup', 'first'); first.handle.sessionId = 's';
+      reg.register(first.handle);
+      const waiter = reg.waitForExit('dup', 60_000);
+
+      const second = fakeHandle('dup', 'second'); second.handle.sessionId = 's';
+      reg.register(second.handle);
+
+      expect(first.state.killed).toBe(true);
+      expect(second.state.killed).toBe(false);
+      expect(reg.list().map((p) => p.command)).toEqual(['second']);
+      await expect(waiter).resolves.toBe('exited');
+    });
+
+    it('settles the evicted handle\'s own session, whose job count just dropped', async () => {
+      const reg = new ProcessRegistry();
+      const old = fakeHandle('dup'); old.handle.sessionId = 'a'; old.handle.completionMode = 'job';
+      reg.register(old.handle);
+      const idle = reg.waitForSessionJobsIdle('a', 60_000);
+      const fresh = fakeHandle('dup'); fresh.handle.sessionId = 'b'; fresh.handle.completionMode = 'job';
+      reg.register(fresh.handle);
+      await expect(idle).resolves.toBe('idle');
+    });
+
+    it('treats re-registering the SAME handle (foreground detach) as an update, not a collision', () => {
+      const reg = new ProcessRegistry();
+      const fg = fakeHandle('1'); fg.handle.sessionId = 's'; fg.handle.completionMode = 'foreground';
+      reg.register(fg.handle);
+      fg.handle.completionMode = 'job';
+      reg.register(fg.handle);
+      expect(fg.state.killed).toBe(false);
+      expect(fg.state.running).toBe(true);
+      expect(reg.runningJobCountForSession('s')).toBe(1);
+    });
   });
 
   it('fires the change listener on register/kill/remove', () => {

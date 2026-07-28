@@ -126,6 +126,11 @@ export class LspClient {
   // or an earlier caller's promise would never settle. Waiters stay registered across publishes (they
   // resolve on quiescence, not on the first publish) and remove themselves when they finish.
   private diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
+  // Every operation that changes a document's server-side state runs exclusively per URI. A didChange
+  // sent by a hover/references call while a diagnose is waiting for that URI's (version-less) publish
+  // would otherwise hand the waiting caller a verdict computed for someone else's text — and the request
+  // itself could equally be answered against text a concurrent diagnose had just pushed.
+  private uriOperations = new Map<string, Promise<unknown>>();
   private starting: Promise<void> | null = null;
   private disposed = false;
 
@@ -244,6 +249,17 @@ export class LspClient {
     return this.starting;
   }
 
+  /** Queue `op` behind every other operation on this URI (see {@link uriOperations}). A failed operation
+   *  settles the chain for its own caller instead of poisoning the next one; different URIs never wait
+   *  on each other. */
+  private runOnUri<T>(uri: string, op: () => Promise<T>): Promise<T> {
+    const queued = (this.uriOperations.get(uri) ?? Promise.resolve())
+      .catch(() => { /* a previous caller's failure is theirs to handle */ })
+      .then(op);
+    this.uriOperations.set(uri, queued);
+    return queued.finally(() => { if (this.uriOperations.get(uri) === queued) this.uriOperations.delete(uri); });
+  }
+
   /** Open (or, on a re-check, update) a document and resolve with the diagnostics the server publishes
    *  for it. Servers publish in PASSES — tsserver sends a (usually empty) syntax pass and the semantic
    *  verdict right after — so resolving on the first publish would return a false "no problems" for a
@@ -264,7 +280,7 @@ export class LspClient {
       await active.promise;
       if (this.disposed) throw new Error('language server disposed');
     }
-    const promise = this.diagnoseCurrent(uri, text, language, timeoutMs, settleMs);
+    const promise = this.runOnUri(uri, () => this.diagnoseCurrent(uri, text, language, timeoutMs, settleMs));
     const active = { language, text, promise };
     this.diagnosesByUri.set(uri, active);
     try { return await promise; }
@@ -369,7 +385,9 @@ export class LspClient {
   // Each ensures the document is open (didOpen/didChange), then sends the corresponding LSP request
   // and returns the raw result. The caller (lspTools) formats it for the model.
 
-  /** Open or update a document so subsequent requests operate on the current text. */
+  /** Open or update a document so subsequent requests operate on the current text. Callers must hold the
+   *  URI's operation slot (see withDocument): an unserialized didChange is exactly what let one caller's
+   *  text answer another caller's pending request. */
   async ensureOpen(path: string, text: string, language: string): Promise<void> {
     if (this.disposed) throw new Error('language server disposed');
     await this.start();
@@ -391,43 +409,53 @@ export class LspClient {
     }
   }
 
+  /** Update the document and run one request against it as a single exclusive unit (see runOnUri), so
+   *  the server answers for exactly the text this call opened. */
+  private withDocument<T>(path: string, text: string, language: string, op: (uri: string) => Promise<T>): Promise<T> {
+    const uri = pathToFileURL(path).href;
+    return this.runOnUri(uri, async () => {
+      await this.ensureOpen(path, text, language);
+      return op(uri);
+    });
+  }
+
   /** textDocument/definition — where a symbol is defined. */
   async definition(path: string, text: string, language: string, line: number, character: number, timeoutMs = 8000): Promise<unknown> {
-    const uri = pathToFileURL(path).href;
-    await this.ensureOpen(path, text, language);
-    const res = await this.request('textDocument/definition', {
-      textDocument: { uri }, position: { line: line - 1, character: character - 1 },
-    }, timeoutMs);
-    return res.result;
+    return this.withDocument(path, text, language, async (uri) => {
+      const res = await this.request('textDocument/definition', {
+        textDocument: { uri }, position: { line: line - 1, character: character - 1 },
+      }, timeoutMs);
+      return res.result;
+    });
   }
 
   /** textDocument/references — all references to a symbol. */
   async references(path: string, text: string, language: string, line: number, character: number, timeoutMs = 8000): Promise<unknown> {
-    const uri = pathToFileURL(path).href;
-    await this.ensureOpen(path, text, language);
-    const res = await this.request('textDocument/references', {
-      textDocument: { uri }, position: { line: line - 1, character: character - 1 },
-      context: { includeDeclaration: true },
-    }, timeoutMs);
-    return res.result;
+    return this.withDocument(path, text, language, async (uri) => {
+      const res = await this.request('textDocument/references', {
+        textDocument: { uri }, position: { line: line - 1, character: character - 1 },
+        context: { includeDeclaration: true },
+      }, timeoutMs);
+      return res.result;
+    });
   }
 
   /** textDocument/hover — documentation and type info for a symbol. */
   async hover(path: string, text: string, language: string, line: number, character: number, timeoutMs = 8000): Promise<unknown> {
-    const uri = pathToFileURL(path).href;
-    await this.ensureOpen(path, text, language);
-    const res = await this.request('textDocument/hover', {
-      textDocument: { uri }, position: { line: line - 1, character: character - 1 },
-    }, timeoutMs);
-    return res.result;
+    return this.withDocument(path, text, language, async (uri) => {
+      const res = await this.request('textDocument/hover', {
+        textDocument: { uri }, position: { line: line - 1, character: character - 1 },
+      }, timeoutMs);
+      return res.result;
+    });
   }
 
   /** textDocument/documentSymbol — all symbols (functions, classes, variables) in a document. */
   async documentSymbol(path: string, text: string, language: string, timeoutMs = 8000): Promise<unknown> {
-    const uri = pathToFileURL(path).href;
-    await this.ensureOpen(path, text, language);
-    const res = await this.request('textDocument/documentSymbol', { textDocument: { uri } }, timeoutMs);
-    return res.result;
+    return this.withDocument(path, text, language, async (uri) => {
+      const res = await this.request('textDocument/documentSymbol', { textDocument: { uri } }, timeoutMs);
+      return res.result;
+    });
   }
 
   /** workspace/symbol — search for symbols across the entire workspace. */

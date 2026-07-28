@@ -35,12 +35,19 @@ function lspBoundary(path: string): string | undefined {
 }
 
 /** The workspace boundary for a symbol search. Unlike {@link lspBoundary} there is NO file to anchor on
- *  — the query is a symbol name, never a path — so the boundary is the caller's own scope: their
- *  most-specific allowed repo root, else the turn's bound work dir. Passing the query string to
- *  realPathWithin (the original bug) always yielded null, so the tool always found nothing. */
-function workspaceBoundary(): string | undefined {
-  const permitted = allowedRoots().slice().sort((a, b) => b.length - a.length)[0];
-  return permitted ?? currentWorkDir();
+ *  — the query is a symbol name, never a path — so the boundary is the caller's own scope. WHICH of
+ *  their allowed repos is decided by the turn's bound work dir: ranking the roots by path length alone
+ *  answered from whichever repo happened to have the longest path, so a user working in project A got
+ *  project B's symbols. Falls back to the widest scope when the work dir names no allowed repo, and to
+ *  the work dir itself for an all-access turn (which carries no allowed roots).
+ *  Passing the query string to realPathWithin (the original bug) always yielded null, so the tool always
+ *  found nothing. Exported for the boundary unit test. */
+export function workspaceBoundary(): string | undefined {
+  const roots = allowedRoots();
+  const workDir = currentWorkDir();
+  if (roots.length === 0) return workDir;
+  const containing = workDir ? roots.filter((root) => realPathWithin(workDir, [root]) !== null) : [];
+  return (containing.length > 0 ? containing : roots.slice()).sort((a, b) => b.length - a.length)[0];
 }
 
 /** A tool-result text block (tools report, they never throw). */

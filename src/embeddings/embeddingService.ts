@@ -108,10 +108,14 @@ export class EmbeddingService {
   }
 
   /** Validate one row's embedding into a Float32Array, enforcing the configured width so a
-   *  wrong-length vector never reaches storage. */
+   *  wrong-length vector never reaches storage. Emptiness and non-finite components are rejected HERE,
+   *  at the boundary: both are numerically silent downstream — an empty vector cosines to 0 forever
+   *  while counting as embedded, and a NaN/Infinity component poisons every score it touches — and
+   *  neither trips the callers' catch-based keyword fallback unless this throws. */
   private toVector(embedding: unknown, dimensions: number | undefined, index: number): Float32Array {
-    if (!Array.isArray(embedding) || !embedding.every((n): n is number => typeof n === 'number')) {
-      throw new Error(`embeddings malformed response: vector ${index} is not a number[]`);
+    if (!Array.isArray(embedding) || embedding.length === 0
+      || !embedding.every((n): n is number => typeof n === 'number' && Number.isFinite(n))) {
+      throw new Error(`embeddings malformed response: vector ${index} is not a non-empty finite number[]`);
     }
     if (dimensions !== undefined && embedding.length !== dimensions) {
       throw new Error(`embeddings dimension mismatch: expected ${dimensions}, got ${embedding.length} (vector ${index})`);

@@ -185,7 +185,7 @@ async function fixture(o: FixtureOptions = {}): Promise<{
     tools: ['context_probe'], noTools: 'builtin', thinkingLevel: 'high',
   });
   route?.install(session);
-  installTurnBoundaryAutoCompaction(session, sessionManager, true);
+  installTurnBoundaryAutoCompaction(session, sessionManager, () => true);
   activeSession = session;
   return { session, sessionManager, calls, compactions, selected };
 }
@@ -318,7 +318,7 @@ describe('Compaction model routing', () => {
       },
     };
     const manager = { getBranch: () => [] };
-    installTurnBoundaryAutoCompaction(session as never, manager as never, true, () => [{
+    installTurnBoundaryAutoCompaction(session as never, manager as never, () => true, () => [{
       text: 'queued screenshot',
       images: [{ type: 'image', data: 'BASE64', mimeType: 'image/png' }],
     }]);
@@ -345,7 +345,7 @@ describe('Compaction model routing', () => {
     const manager = { getBranch: () => [{
       type: 'compaction', id: 'compact-1', timestamp: new Date(1_000).toISOString(),
     }] };
-    installTurnBoundaryAutoCompaction(session as never, manager as never, true);
+    installTurnBoundaryAutoCompaction(session as never, manager as never, () => true);
     const staleAssistant = {
       ...assistantMessage({} as never, [], 'stop', 9_000), timestamp: 100,
     };
@@ -380,7 +380,7 @@ describe('Compaction model routing', () => {
       },
     };
     const manager = { getBranch: () => [] };
-    expect(installTurnBoundaryAutoCompaction(session as never, manager as never, true)).toBe(true);
+    expect(installTurnBoundaryAutoCompaction(session as never, manager as never, () => true)).toBe(true);
 
     const pending = (session.agent.prepareNextTurnWithContext as unknown as (
       turn: unknown, signal: AbortSignal,
@@ -422,7 +422,7 @@ describe('Compaction model routing', () => {
       },
     };
     const manager = { getBranch: () => [] };
-    expect(installTurnBoundaryAutoCompaction(session as never, manager as never, true)).toBe(true);
+    expect(installTurnBoundaryAutoCompaction(session as never, manager as never, () => true)).toBe(true);
 
     const pending = (session.agent.prepareNextTurnWithContext as unknown as (
       turn: unknown, signal: AbortSignal,

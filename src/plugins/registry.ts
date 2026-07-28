@@ -100,13 +100,19 @@ export class PluginRegistry {
   readonly toolPlanSafe = new Set<string>();
 
   /** Absorb another registry's contributions (the loader stages each plugin and merges on success).
-   *  Controls + commands are name-keyed and drive admin routes / the slash menu, so a later plugin must
-   *  not silently hijack a name a prior plugin owns. This join is the ONLY place two plugins' registries
-   *  meet (each registers into its own staging registry), so cross-plugin collisions are enforced HERE —
-   *  first-writer-wins, with `warn` surfacing the drop. */
+   *  Tools, controls + commands are name-keyed and drive tool dispatch / admin routes / the slash menu, so
+   *  a later plugin must not silently hijack a name a prior plugin owns. This join is the ONLY place two
+   *  plugins' registries meet (each registers into its own staging registry), so cross-plugin collisions
+   *  are enforced HERE — first-writer-wins, with `warn` surfacing the drop. */
   merge(other: PluginRegistry, warn?: (msg: string) => void): void {
-    this.tools.push(...other.tools);
-    for (const [k, v] of other.toolOwner) this.toolOwner.set(k, v);
+    for (const t of other.tools) {
+      const owner = other.toolOwner.get(t.name) ?? '?';
+      const prior = this.toolOwner.get(t.name);
+      // A dropped tool must not be pushed either: `toolOwner` drives per-role filtering AND the
+      // contribution report, so keeping the definition would attribute it to the wrong plugin.
+      if (prior && prior !== owner) { warn?.(`tool "${t.name}" from "${owner}" ignored — already registered by "${prior}"`); continue; }
+      this.tools.push(t); this.toolOwner.set(t.name, owner);
+    }
     this.skills.push(...other.skills);
     this.promptFragments.push(...other.promptFragments);
     this.hooks.push(...other.hooks);

@@ -93,6 +93,24 @@ describe('symlink escape', () => {
       expect(assertPathAllowed(join(repo, 'new.txt'))).toContain('new.txt');
     });
   });
+
+  it('rejects a not-yet-existing path whose ANCESTOR is a symlink out of the root', async () => {
+    const { mkdtempSync, mkdirSync, symlinkSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const base = mkdtempSync(join(tmpdir(), 'elowen-guard-deep-'));
+    const repo = join(base, 'repo'); const outside = join(base, 'outside');
+    mkdirSync(repo); mkdirSync(outside);
+    // Neither the target nor its immediate parent exists — only the symlinked ancestor does, so the
+    // guard has to walk up to it instead of falling back to the lexical path.
+    symlinkSync(outside, join(repo, 'link'));
+    const policy = { allowedProjectIds: new Set([1]), allowedPaths: () => [repo] };
+    runWithPolicy(policy, () => {
+      expect(() => assertPathAllowed(join(repo, 'link', 'a', 'b.txt'))).toThrow(/not allowed/);
+      // a deep new path with no symlink in it stays allowed (the tail is preserved, not dropped)
+      expect(assertPathAllowed(join(repo, 'sub', 'deep', 'new.txt'))).toMatch(/repo\/sub\/deep\/new\.txt$/);
+    });
+  });
 });
 
 describe('own tool-result spill dir', () => {

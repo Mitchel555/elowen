@@ -104,9 +104,20 @@ export class ProcessRegistry {
    *  wires this to wake the operator's conversation so a finished build/command nudges the agent. */
   setExitListener(fn: (info: ProcessInfo, userId: number | null, sessionId: string | null) => void): void { this.onExitFn = fn; }
 
+  /** Register (or re-register) a handle. The terminal plugin re-registers the SAME handle when a
+   *  foreground run detaches — its mode flips to `job` — so only a DIFFERENT handle under a taken id is a
+   *  collision. Silently dropping the previous one would leave a child nothing can list or kill, so its
+   *  process is terminated here and everyone blocked on it is released before the id changes owner. */
   register(handle: ProcessHandle): void {
+    const previous = this.handles.get(handle.id);
+    if (previous && previous !== handle) {
+      if (previous.running()) previous.kill();
+      this.settleExitWaiters(handle.id);
+    }
     this.handles.set(handle.id, handle);
     this.exited.delete(handle.id);
+    // The evicted handle may belong to another session, whose job count just dropped.
+    if (previous && previous !== handle && previous.sessionId !== handle.sessionId) this.notifySession(previous.sessionId);
     this.notifySession(handle.sessionId);
   }
 
@@ -186,13 +197,6 @@ export class ProcessRegistry {
       this.notifySession(sessionId);
     }
     return existed;
-  }
-
-  /** Count of processes still running — used to decide whether to show/refresh the panel. */
-  runningCount(): number {
-    let n = 0;
-    for (const h of this.handles.values()) if (h.running()) n++;
-    return n;
   }
 
   runningJobCountForSession(sessionId: string): number {

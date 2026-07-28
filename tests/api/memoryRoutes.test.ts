@@ -48,7 +48,7 @@ function setup(opts: { fetchImpl?: typeof fetch; embeddingConfigured?: boolean }
   });
   const up = new UserProjectStore(db);
   up.assign(bob.id, 1); // let bob's per-user surface through the project gate
-  return { app, memoryStore, config, users, amyId: amy.id, bobId: bob.id, amyTok: users.issueToken(amy.id), bobTok: users.issueToken(bob.id) };
+  return { app, db, memoryStore, config, users, amyId: amy.id, bobId: bob.id, amyTok: users.issueToken(amy.id), bobTok: users.issueToken(bob.id) };
 }
 
 const auth = (t: string) => ({ headers: { authorization: `Bearer ${t}` } });
@@ -138,6 +138,36 @@ describe('memory routes', () => {
     // Only the merged row is active now.
     const list = await (await app.request('/memory', auth(amyTok))).json();
     expect(list.map((m: { id: number }) => m.id)).toEqual([mRow.id]);
+  });
+
+  it('batch purge hard-deletes the caller\'s rows and skips a foreign id', async () => {
+    const { app, amyTok, bobTok } = setup();
+    const a = await (await app.request('/memory', post(amyTok, { body: 'a' }))).json();
+    const b = await (await app.request('/memory', post(amyTok, { body: 'b' }))).json();
+    const bobRow = await (await app.request('/memory', post(bobTok, { body: 'bob secret' }))).json();
+    const res = await app.request('/memory/purge', post(amyTok, { ids: [a.id, bobRow.id, b.id] }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ purged: 2 });
+    expect(await (await app.request('/memory', auth(amyTok))).json()).toEqual([]);
+    expect((await app.request(`/memory/${bobRow.id}`, auth(bobTok))).status).toBe(200); // untouched
+  });
+
+  it('batch purge is all-or-nothing — a row failing mid-batch leaves the earlier ones intact', async () => {
+    const { app, db, amyTok } = setup();
+    const a = await (await app.request('/memory', post(amyTok, { body: 'a' }))).json();
+    const b = await (await app.request('/memory', post(amyTok, { body: 'boom' }))).json();
+    const c = await (await app.request('/memory', post(amyTok, { body: 'c' }))).json();
+    // A hard purge is irreversible: purging id-by-id (a transaction each) commits the batch's prefix
+    // before the failure surfaces, so the user loses rows the request reported as failed.
+    db.prepare(
+      `CREATE TRIGGER fail_on_boom BEFORE DELETE ON memories WHEN OLD.body = 'boom'
+       BEGIN SELECT RAISE(ABORT, 'no'); END`
+    ).run();
+
+    const res = await app.request('/memory/purge', post(amyTok, { ids: [a.id, b.id, c.id] }));
+    expect(res.status).toBe(500);
+    const left = await (await app.request('/memory', auth(amyTok))).json() as { id: number }[];
+    expect(left.map((m) => m.id).sort()).toEqual([a.id, b.id, c.id].sort());
   });
 
   it('events feed: per-memory trail and whole-user feed', async () => {

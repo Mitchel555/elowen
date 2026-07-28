@@ -217,6 +217,18 @@ export class MemoryStore {
     })();
   }
 
+  /** HARD-delete a BATCH of owned memories in ONE transaction (nested as a savepoint per id). A
+   *  per-id loop of {@link purge} commits each delete on its own, so a failure part-way through leaves
+   *  the batch's prefix irreversibly gone while the caller sees an error; here the whole batch rolls
+   *  back instead. Owner-scoped: a foreign/missing id is skipped. Returns the count purged. */
+  purgeMany(userId: number, ids: number[], actor: string, reason: string): number {
+    return this.db.transaction(() => {
+      let purged = 0;
+      for (const id of ids) { if (this.purge(userId, id, actor, reason)) purged += 1; }
+      return purged;
+    })();
+  }
+
   /** HARD-delete ALL of this user's soft-deleted (status='deleted') memories — empties the trash. Each
    *  row's embedding cascades away; each purge is audited. Owner-scoped, atomic. Returns the count purged. */
   purgeDeleted(userId: number, actor: string, reason: string): number {

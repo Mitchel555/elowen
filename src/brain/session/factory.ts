@@ -355,14 +355,18 @@ export class BrainSessionFactory {
     // Kept as a re-callable closure (returned to the caller) because PI reads compaction lazily at each
     // check: re-applying it turns a saved threshold change into an immediate effect on a RUNNING
     // conversation, instead of one that only appears after the next respawn.
+    // The proactive flag has the same runtime mutability as the threshold, so the turn-boundary check
+    // reads it through this cell instead of the spawn-time snapshot — see installTurnBoundaryAutoCompaction.
+    let proactiveCompaction = spec.autoCompact;
     const applyCompaction = (proactive: boolean, atPercent: number): void => {
+      proactiveCompaction = proactive;
       settingsManager.applyOverrides({
         compaction: { enabled: true, reserveTokens: compactionReserveTokens(spec.model.contextWindow, proactive, atPercent) },
       });
     };
     applyCompaction(spec.autoCompact, spec.autoCompactAtPct);
     const boundaryCompactionInstalled = installTurnBoundaryAutoCompaction(
-      session, sessionManager, spec.autoCompact, spec.pendingCompactionMessages,
+      session, sessionManager, () => proactiveCompaction, spec.pendingCompactionMessages,
     );
     if (spec.autoCompact && !boundaryCompactionInstalled && !missingBoundaryCompactionWarned) {
       missingBoundaryCompactionWarned = true;

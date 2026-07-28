@@ -1530,6 +1530,7 @@ export const en = {
     running: 'running',
     done: 'done',
     error: 'error',
+    openTranscript: 'Open the sub-agent progress',
   },
   brainChat: {
     modeNav: 'Dock mode',
@@ -1599,6 +1600,7 @@ export const en = {
     },
     queued: 'Queued',
     removeFromQueue: 'Remove from queue',
+    queueRemoveError: 'The message was not removed — it is still queued for delivery',
     showThoughts: 'Show reasoning',
     hideThoughts: 'Hide reasoning',
     toolRunning: 'Running',

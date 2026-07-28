@@ -13,7 +13,23 @@ import { MissionEngine } from '../../src/overseer/missionEngine.js';
 import { FakeClock } from '../../src/shared/clock.js';
 import { ConfigStore } from '../../src/store/configStore.js';
 import { ProjectStore } from '../../src/store/projectStore.js';
+import { UserStore } from '../../src/store/userStore.js';
 import { FakeInference } from '../../src/inference/client.js';
+
+/** A body streamed in chunks with NO content-length header — the chunked shape a hard cap has to stop.
+ *  `pulled()` reports how many bytes the daemon actually read, so a test can tell "rejected after
+ *  buffering everything" from "rejected while reading". */
+function streamedBody(totalBytes: number, chunkBytes = 16 * 1024) {
+  let pulled = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulled >= totalBytes) { controller.close(); return; }
+      pulled += chunkBytes;
+      controller.enqueue(new Uint8Array(chunkBytes).fill(0x78)); // 'x'
+    },
+  });
+  return { body, pulled: () => pulled };
+}
 
 function makeApp() {
   const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
@@ -578,6 +594,25 @@ it('POST /tasks/:epicId/phases ticks an active mission so it picks up the new ph
   const body = await res.json() as { phases: { description?: string }[] };
   expect(body.phases[0]!.description).toContain('Validate the login redirect');
   expect(body.phases[0]!.description).toContain('Overall goal: goal');
+});
+
+it('POST /auth/login caps the body before parsing it, without buffering the stream', async () => {
+  // /auth/login is public, so an anonymous caller reaches a handler that reads the whole body. A
+  // chunked request carries no content-length to pre-check — the cap has to stop the read itself.
+  const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
+  const users = new UserStore(db); users.create('admin', 'pw');
+  const app = createServer({
+    tasks: new TaskStore(db), readiness: new Readiness(db), missions: new MissionStore(db), bus: new EventBus(),
+    engine: null as any, spawn: null as any, tmux: null as any,
+    project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
+    clock: new FakeClock(0), config: new ConfigStore(db), users,
+  });
+  const { body, pulled } = streamedBody(4 * 1024 * 1024);
+  const res = await app.request('/auth/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body, duplex: 'half',
+  });
+  expect(res.status).toBe(413);
+  expect(pulled()).toBeLessThan(256 * 1024); // stopped near the cap — the 4 MB stream was never buffered
 });
 
 it('returns 400 on a malformed JSON body (central onError, not a 500)', async () => {

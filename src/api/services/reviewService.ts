@@ -124,7 +124,16 @@ export function createReviewService({ d, log, gitLock, decisionQueue, checkoutPa
                 // Under the checkout lock so it can't interleave with the next agent's baseline read —
                 // the snapshot below then has a stable base..HEAD that captures exactly this phase.
                 await gitLock.run(reviewPath, async () => {
-                  await d.missionGit?.commitPhase(mission.id, existing.title, reviewPath).catch((e) => log.error('phase commit failed', e));
+                  try {
+                    await d.missionGit?.commitPhase(mission.id, existing.title, reviewPath);
+                  } catch (e) {
+                    // The commit failed, so the phase's work is still sitting uncommitted in the
+                    // checkout. Snapshotting base..HEAD now would freeze an EMPTY change list and report
+                    // the phase as having landed nothing — indistinguishable from a genuinely clean tree.
+                    // Leave the task un-snapshotted instead, so the failure stays visible.
+                    log.error(`phase commit failed for task ${id} — work left uncommitted in ${reviewPath}`, e);
+                    return;
+                  }
                   await snapshotTaskChanges(d.tasks, id, reviewPath);
                 });
                 // Gate opens: release the gated dependents and resume so the next phase spawns promptly
@@ -178,7 +187,14 @@ export function createReviewService({ d, log, gitLock, decisionQueue, checkoutPa
       if (mission && !reviewEnqueued) {
         const snapPath = checkoutPathFor(mission.id, existing.project_id);
         await gitLock.run(snapPath, async () => {
-          await d.missionGit?.commitPhase(mission.id, existing.title, snapPath).catch((e) => log.error('phase commit failed', e));
+          try {
+            await d.missionGit?.commitPhase(mission.id, existing.title, snapPath);
+          } catch (e) {
+            // Same as the review path above: a failed commit must not be frozen into an empty snapshot
+            // that hides the phase's uncommitted work.
+            log.error(`phase commit failed for task ${id} — work left uncommitted in ${snapPath}`, e);
+            return;
+          }
           await snapshotTaskChanges(d.tasks, id, snapPath);
         });
       }

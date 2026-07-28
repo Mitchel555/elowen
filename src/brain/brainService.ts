@@ -332,14 +332,7 @@ export class BrainService {
   async abort(userId: number, session?: string): Promise<void> {
     const b = session ? this.sessions.get(this.lifecycle.ownedUserSession(userId, session)) : this.lifecycle.activeLive(userId);
     if (!b) throw new Error('brain not started');
-    // Fence before taking the child snapshot. Otherwise an idle drill-in continuation can register a
-    // fresh child between childrenOf() and the deregistration of the doomed ones, escaping this stop tree.
-    this.sessions.beginParentAbort(b.sessionId);
-    try {
-      await this.abortLive(b);
-    } finally {
-      this.sessions.endParentAbort(b.sessionId);
-    }
+    await this.abortFenced(b);
   }
 
   /** Interrupt the current PI run and immediately promote the oldest native queued message into a fresh
@@ -479,6 +472,19 @@ export class BrainService {
     clearDeliveredUserEchoes(b);
   }
 
+  /** `abortLive` behind the parent-abort fence — the one entry point every caller that already HOLDS the
+   *  live record uses. Fence before the child snapshot is taken inside: otherwise an idle drill-in
+   *  continuation can register a fresh child between childrenOf() and the deregistration of the doomed
+   *  ones, escaping this stop tree. */
+  private async abortFenced(b: LiveBrain): Promise<void> {
+    this.sessions.beginParentAbort(b.sessionId);
+    try {
+      await this.abortLive(b);
+    } finally {
+      this.sessions.endParentAbort(b.sessionId);
+    }
+  }
+
   /** Whether a client-initiated stop may interrupt this session's turn (Invariant 2). A detaching client
    *  must not abort a turn ANOTHER interactive client is watching. A stable client id identifies a terminal
    *  ending its own run, so only another stable client — or one mid-boot, which is on its way to watch —
@@ -589,7 +595,12 @@ export class BrainService {
       // and the abandoned-teardown path clears it explicitly, but a throw in between (a goal, elicitation
       // or card teardown) would strand it — pinning a perfectly healthy session on the slow path forever.
       try {
-        try { await this.abort(userId, sessionId); } catch { /* already idle/settled */ }
+        // Abort through the record this teardown already holds, NOT the public abort(): that one throws a
+        // bare 'brain not started' for an already-settled conversation, so catching it here also swallowed
+        // a REAL failure — a workflow that refused to cancel, a foreground delegate that stayed up, a PI
+        // turn that never unwound — and disposed the parent anyway, leaving that work running with nothing
+        // above it. Nothing live to abort is the only benign case, and it cannot happen under this lock.
+        await this.abortFenced(live);
         // Re-check after the abort settles: a client can attach during that await, and it must not be
         // disposed out from under. If one arrived, leave the (now idle) session live for the new observer.
         // Deliberately NOT counting a pending claim here, unlike the gate above: a start that arrives once
@@ -856,17 +867,52 @@ export class BrainService {
   deleteSession(userId: number, sessionId: string): void {
     const row = this.d.store.getSession(sessionId);
     if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
-    // Tear down any chat terminal bound to this conversation FIRST (docs order: terminal, then session).
-    // Fire-and-forget — deleteSession is sync and the binding row outlives store.deleteSession (separate
-    // table), so the async teardown still resolves the row; the janitor is the backstop if it's unwired.
-    void this.terminalTeardown?.(userId, sessionId).catch((e) => logger('brain').error(`terminal teardown failed for ${sessionId}`, e));
-    this.cleanupProcessesForTree(sessionId);
-    this.elicitation.cancelForSession(sessionId, 'conversation deleted'); // release a parked turn before dropping its session
-    this.goals.cancelGoalContinuation(sessionId);
-    this.cards.clearSession(sessionId);
-    this.sessions.dispose(sessionId);
-    if (this.sessions.activeIdFor(userId) === sessionId) this.sessions.clearActive(userId);
+    this.teardownDeletedSession(userId, sessionId);
     this.d.store.deleteSession(sessionId);
+  }
+
+  /** Everything a conversation owns, released before its row is dropped — shared by the user-facing
+   *  delete and the admin one so the two cannot drift apart (they already had: only one of them cleared
+   *  the active pointer and the card cache, so an admin delete of the active conversation left
+   *  `activeSessionId` naming a row that no longer existed).
+   *
+   *  A delete spares nothing, unlike a stop: a detached delegate or a background workflow keeps burning
+   *  tokens for an inbox that has ceased to exist. */
+  private teardownDeletedSession(userId: number, id: string): void {
+    // Tear down any chat terminal bound to this conversation FIRST (docs order: terminal, then session).
+    // Fire-and-forget — the delete paths are sync and the binding row outlives store.deleteSession
+    // (separate table), so the async teardown still resolves the row; the janitor is the backstop if
+    // it's unwired. No-op when the conversation has no bound terminal (channel/task sessions never do).
+    void this.terminalTeardown?.(userId, id).catch((e) => logger('brain').error(`terminal teardown failed for ${id}`, e));
+    this.cleanupProcessesForTree(id);
+    this.cancelDelegatedWorkFor(id);
+    this.elicitation.cancelForSession(id, 'conversation deleted'); // release a parked turn before dropping its session
+    this.goals.cancelGoalContinuation(id);
+    this.cards.clearSession(id);
+    if (isChannelSession(id)) this.sessions.channelDispose(channelIdOf(id));
+    else this.sessions.dispose(id);
+    // The in-memory pointer must not survive the row it names, or status/send would keep answering for a
+    // conversation that no longer exists (lifecycle.activeSessionId trusts the pointer verbatim).
+    if (this.sessions.activeIdFor(userId) === id) this.sessions.clearActive(userId);
+  }
+
+  /** Stop the DELEGATED work a deleted conversation is still driving: the workflow DAG that keeps
+   *  launching fresh nodes into it, and every running delegated child whose result now has nowhere to be
+   *  delivered. cleanupProcessesForTree reaches only the shell processes those children spawned, never
+   *  the agent turns themselves.
+   *
+   *  Fired and logged rather than awaited: the workflow control lives behind the plugin registry (async)
+   *  while both delete entry points are synchronous — the same contract the terminal teardown above uses.
+   *  Cancel the engine BEFORE the children, or it relaunches a node the moment an aborted one settles. */
+  private cancelDelegatedWorkFor(id: string): void {
+    const children = this.sessions.childrenOf(id);
+    void (async () => {
+      await this.cancelWorkflowsFor(id);
+      for (const child of children) {
+        if (isChannelSession(child)) await this.channelService.abort(channelIdOf(child));
+        this.sessions.setChildRunning(id, child, false);
+      }
+    })().catch((e) => logger('brain').error(`delegated teardown failed for ${id}`, e));
   }
 
   renameSession(userId: number, sessionId: string, title: string): { id: string; title: string } {
@@ -983,14 +1029,7 @@ export class BrainService {
   deleteManagedSession(userId: number, id: string): number {
     const row = this.d.store.getSession(id);
     if (!row || row.user_id !== userId) return 0;
-    // Same terminal-first teardown as deleteSession (the admin panel's per-session delete). No-op when the
-    // conversation has no bound terminal (channel/task sessions never do).
-    void this.terminalTeardown?.(userId, id).catch((e) => logger('brain').error(`terminal teardown failed for ${id}`, e));
-    this.cleanupProcessesForTree(id);
-    this.elicitation.cancelForSession(id, 'session deleted');
-    this.goals.cancelGoalContinuation(id);
-    if (isChannelSession(id)) this.sessions.channelDispose(channelIdOf(id));
-    else if (this.sessions.has(id)) this.sessions.dispose(id);
+    this.teardownDeletedSession(userId, id);
     this.d.store.deleteSession(id);
     return 1;
   }

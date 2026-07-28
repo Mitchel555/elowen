@@ -1,5 +1,16 @@
 import { ZodError, type ZodType } from 'zod';
-import type { Context } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
+import type { Context, MiddlewareHandler } from 'hono';
+
+/** Hard cap on a request body, enforced BEFORE anything reads it. Every body-reading path buffers the
+ *  whole thing (`c.req.json()` here, `c.req.arrayBuffer()` in the webhook dispatcher) and a chunked
+ *  request carries no `content-length` to pre-check, so a public endpoint without this lets one
+ *  anonymous request stream the daemon out of memory. Used on the surfaces reachable WITHOUT a token
+ *  (login, plugin webhooks) so JSON routes and webhooks are bounded the same way; everything else is
+ *  answered 401 by the auth guard before a handler touches the body. */
+export function bodyLimitBytes(maxSize: number): MiddlewareHandler {
+  return bodyLimit({ maxSize, onError: (c) => c.json({ error: 'payload too large' }, 413) });
+}
 
 /** Parse and validate a JSON request body against a zod schema. A malformed/empty body throws a
  *  SyntaxError (which `onError` maps to a clean `invalid JSON body` 400), and a well-formed body of the

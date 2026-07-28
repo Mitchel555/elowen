@@ -65,20 +65,23 @@ function latestCompaction(sessionManager: SessionManager) {
 export function installTurnBoundaryAutoCompaction(
   session: AgentSession,
   sessionManager: SessionManager,
-  enabled: boolean,
+  enabled: () => boolean,
   pendingMessages?: () => readonly PendingCompactionMessage[],
 ): boolean {
   const checkCompaction = coordinateNativeCompactionChecks(session);
   // Injected/custom AgentSession implementations may intentionally expose only the public surface.
   // Their ordinary end-of-run PI behavior remains intact; the production 0.80 runtime has this seam.
   if (!checkCompaction) return false;
-  // Even with proactive compaction disabled, keep native pre-prompt/overflow checks coordinated with
-  // abortSessionWork. Only the extra between-tool-turn invocation below is feature-gated.
-  if (!enabled) return false;
 
   const previous = session.agent.prepareNextTurnWithContext;
   session.agent.prepareNextTurnWithContext = async (turn, signal) => {
     const snapshot = await previous?.(turn, signal);
+    // Read per boundary, never latched at install time: the user can switch proactive compaction on for a
+    // conversation that is ALREADY running (BrainService.applyAutoCompactSettings → applyCompaction), and
+    // installing conditionally meant that setting only took effect after the next respawn. Disabled leaves
+    // PI's own end-of-run behavior untouched, exactly as not installing did — while native pre-prompt and
+    // overflow checks stay coordinated with abortSessionWork either way.
+    if (!enabled()) return snapshot;
     if (signal?.aborted) return snapshot;
 
     const beforeEntry = latestCompaction(sessionManager);

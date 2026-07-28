@@ -160,6 +160,24 @@ describe('codexUsageSource via UsageService', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('never lets a window-less response replace the last usable snapshot', async () => {
+    let now = 10;
+    const fetchImpl = vi.fn(async () => json(body())) as unknown as typeof fetch;
+    const svc = service({ auth: oauth(), fetchImpl, now: () => now, ttlMs: 60_000 });
+    const fresh = await svc.getUsage();
+
+    now += 60_001;
+    vi.mocked(fetchImpl).mockResolvedValueOnce(json({ plan_type: 'pro', rate_limit: {} }));
+    await expect(svc.getUsage()).resolves.toEqual({ ...fresh, stale: true });
+    // The cache line survived it, so a later transient failure still has something to serve.
+    now += 60_001;
+    vi.mocked(fetchImpl).mockResolvedValueOnce(new Response('', { status: 503 }));
+    await expect(svc.getUsage()).resolves.toEqual({ ...fresh, stale: true });
+
+    const emptyFetch = vi.fn(async () => json({ plan_type: 'pro', rate_limit: {} })) as unknown as typeof fetch;
+    await expect(service({ auth: oauth(), fetchImpl: emptyFetch }).getUsage()).resolves.toBeNull();
+  });
+
   it('times out a hung request and falls back to null when no stale snapshot exists', async () => {
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
