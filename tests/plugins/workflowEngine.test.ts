@@ -107,6 +107,7 @@ function harness(opts: {
   /** The node child sessions the engine asked the host to abort — the stand-in for the real abort tree. */
   const stoppedSessions: string[] = [];
   const ctx = {
+    dataDir: () => workflowFilesDir,
     registerTool: (def: Tool) => { tools.set(def.name, def); },
     registerControl: (name: string, control: WorkflowControl) => { controls.set(name, control); },
     stopSubagent: async (id: string) => { stoppedSessions.push(id); return { stopped: true }; },
@@ -150,6 +151,11 @@ describe('workflow engine', () => {
     expect(start.parameters?.properties).not.toHaveProperty('nodes');
     expect(start.parameters?.required).toContain('nodesFile');
     expect(start.description).toContain('use Write');
+    // The default directory has to appear VERBATIM: it is resolved from the daemon's data root, so naming
+    // it here is the only way the model can learn it. Lose the interpolation and the tool still works
+    // while quietly sending every definition back into the user's repository.
+    expect(start.description).toContain(resolve(workflowFilesDir, 'workflows'));
+    expect(start.parameters?.properties.nodesFile?.description).toContain(resolve(workflowFilesDir, 'workflows'));
 
     await start.execute('shape-array', { nodesFile: workflowFile([{ id: 'array', task: 'array' }]) });
     await start.execute('shape-object', {
@@ -538,6 +544,7 @@ describe('workflow engine', () => {
       return `done:${task}`;
     };
     const ctx = {
+      dataDir: () => workflowFilesDir,
       registerTool: (def: Tool) => { tools.set(def.name, def); },
       registerControl: () => {},
       logger: { info() {}, warn() {} },
@@ -592,6 +599,7 @@ describe('workflow engine', () => {
       return `done:${task}`;
     };
     const ctx = {
+      dataDir: () => workflowFilesDir,
       registerTool: (def: Tool) => { tools.set(def.name, def); },
       registerControl: () => {},
       logger: { info() {}, warn() {} },
@@ -723,6 +731,7 @@ describe('workflow start limit', () => {
       return `done:${task}`;
     };
     const ctx = {
+      dataDir: () => workflowFilesDir,
       registerTool: (def: Tool) => { tools.set(def.name, def); },
       registerControl: () => {},
       logger: { info() {}, warn() {} },
@@ -798,6 +807,7 @@ describe('workflow background + detach', () => {
       return `done:${task}`;
     };
     const ctx = {
+      dataDir: () => workflowFilesDir,
       registerTool: (def: Tool) => { tools.set(def.name, def); },
       registerControl: (name: string, control: Ctrl) => { controls.set(name, control); },
       registerHook: (hook: Hook) => { hooks.push(hook); },

@@ -5,7 +5,8 @@
 // parent's clients as `workflow` events on every state change. It does NOT emit `subagent` events, so a
 // workflow node never doubles up in the flat sub-agent panel.
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { validateWorkflowNodes, mergeWorkflowNodes, readyNodeIds } from './dag.mjs';
@@ -127,6 +128,20 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   /** id -> workflow. In-memory only (mirrors delegate's `jobs`): a workflow does not survive a daemon
    *  restart, and its node child sessions persist on their own. */
   const workflows = new Map();
+
+  /** Where a workflow definition belongs by default: under elowen's own data dir, not in the user's
+   *  repository. A definition is scaffolding for one run — writing it into the project would leave
+   *  untracked files behind after every workflow, or worse, get committed.
+   *
+   *  Named in the tool description rather than derived by the model, because it is the ONLY way it can
+   *  learn this path: it is resolved from the daemon's data root, which no prompt otherwise mentions.
+   *  That works because the path is per-INSTALL, not per-session, so it is known at registration.
+   *
+   *  The directory is created here for the same reason plan mode creates its own: Write does not create
+   *  parent directories, so naming a path that does not exist would hand the model an ENOENT it has no
+   *  tool to fix. A repository path stays perfectly valid — this is the default, not a restriction. */
+  const workflowDir = join(ctx.dataDir(), 'workflows');
+  try { mkdirSync(workflowDir, { recursive: true }); } catch { /* surfaces on first write instead */ }
 
   const freshNodeState = () => ({ status: 'pending', sessionId: '', channelId: '', resumed: false, tools: 0, detail: undefined, tokens: undefined, seconds: undefined, model: undefined, startedAt: undefined, result: undefined, error: undefined });
 
@@ -560,7 +575,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   ctx.registerTool(defineTool({
     name: 'WorkflowStart', label: 'Run a workflow',
     description: [
-      'Run a DAG of sub-agents whose complete definition lives in a JSON file. Before calling this tool, use Write to create the file inside an accessible repository, then pass its path as nodesFile. Do not pass nodes inline.',
+      `Run a DAG of sub-agents whose complete definition lives in a JSON file. Before calling this tool, use Write to create that file, then pass its path as nodesFile. Do not pass nodes inline. Write it under ${workflowDir} (it already exists) so the run leaves nothing behind in the user's project; a path inside an accessible repository also works, and is the right choice for a definition you want to keep and version.`,
       'The file may contain either a JSON array of node objects, or an object shaped as { title?, context?, nodes: [...], background? }. Explicit title, context, or background tool arguments override the corresponding values from the file, so one file can be reused as a template.',
       'Each node requires a short unique string id and a complete self-contained string task. Optional fields are deps (node ids that must finish first), model, read_only, tools, and subagent_type. At least one node must have no deps. Each node is a fresh sub-agent that cannot see this conversation; put everything it needs in task or shared context.',
       'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. Independent nodes run in parallel, and a dependent receives its dependencies\' results as context. For fully independent tasks, plain parallel delegate calls are simpler.',
@@ -568,7 +583,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       'If the result names failed or skipped nodes and the workflow is still held in memory, use WorkflowResume instead of starting over — it re-runs only unfinished nodes and leaves every completed node unchanged.',
     ].join(' '),
     parameters: Type.Object({
-      nodesFile: Type.String({ description: 'Path to the JSON workflow definition. First create it with Write inside an accessible repository; pass either a node array or { title?, context?, nodes, background? }.' }),
+      nodesFile: Type.String({ description: `Path to the JSON workflow definition. Create it with Write first — under ${workflowDir} for a one-off run, or inside an accessible repository for one you want to keep. Pass either a node array or { title?, context?, nodes, background? }.` }),
       title: Type.Optional(Type.String({ description: 'Override the file\'s title. Human label shown in the CLI panel: AT MOST 4 WORDS, in the user\'s language, no trailing punctuation (the UI appends an ellipsis).' })),
       context: Type.Optional(Type.String({ description: 'Override the file\'s context. Background shared by ALL nodes (added to each node\'s cache-friendly system prefix).' })),
       background: Type.Optional(Type.Boolean({ description: 'Override the file\'s background setting. True starts asynchronously and delivers the summary in a NEW turn; false blocks until completion.' })),
