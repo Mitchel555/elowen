@@ -118,6 +118,26 @@ describe('BrainChat control state mirrors the daemon', () => {
     await screen.findByText('Kterou variantu?');
   });
 
+  // The question is raised on every client of the conversation, so answering it in the CLI has to take
+  // the card down here too — otherwise it sits there and its answer would match nothing.
+  it('drops the question when it is settled on another surface', async () => {
+    const es = await renderChat();
+    es.emit('ask', { id: 'q1', questions: [question] });
+    await screen.findByText('Kterou variantu?');
+    es.emit('ask_resolved', { id: 'q1', reason: 'answered' });
+    await waitFor(() => expect(screen.queryByText('Kterou variantu?')).toBeNull());
+  });
+
+  it('ignores a resolution for a question it is not showing', async () => {
+    const es = await renderChat();
+    es.emit('ask', { id: 'q2', questions: [question] });
+    await screen.findByText('Kterou variantu?');
+    // A late frame for the PREVIOUS question must not clear the one now on screen.
+    es.emit('ask_resolved', { id: 'q1', reason: 'timeout' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText('Kterou variantu?')).not.toBeNull();
+  });
+
   it('counts only running sub-agents in the chip', async () => {
     const es = await renderChat();
     es.emit('snapshot', snapshot({

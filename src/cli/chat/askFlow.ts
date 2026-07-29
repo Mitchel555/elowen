@@ -303,7 +303,7 @@ export interface AskFlowOpts {
  *  checklist dock: Space toggles choices, Enter confirms, and selected answers are visible at the bottom.
  *  Free-text Other remains available (unless the question sets `custom: false`), but only after the user
  *  explicitly chooses it. */
-export function runAskFlow(o: AskFlowOpts): void {
+export function runAskFlow(o: AskFlowOpts): { close(): void } {
   const answers: AskAnswer[] = [];
 
   const setSlot = (component: Component, focus: Component): void => {
@@ -366,4 +366,6 @@ export function runAskFlow(o: AskFlowOpts): void {
   };
 
   next();
+  // Tears the dock down WITHOUT answering or cancelling — for a question settled on another surface.
+  return { close: restore };
 }

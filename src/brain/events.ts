@@ -90,6 +90,14 @@ export type BrainEvent =
    *  `kind: 'approval'` marks a blocking tool-permission prompt (three fixed options — see
    *  brain/toolPermissions.ts) so frontends can style it differently; absent = a regular question. */
   | { type: 'ask'; id: string; questions: AskQuestion[]; kind?: 'approval' }
+  /** That parked question is SETTLED and every surface should stop showing it. The `ask` event fans out
+   *  to all of a conversation's clients, so the CLI and the web raise the same question — without this
+   *  the one that did NOT answer keeps showing a prompt that can no longer be answered (its POST would
+   *  find nothing to match). `reason` distinguishes a real answer from a timeout, an abort, or the
+   *  supersede when the model asks a second question, so a surface can say why it vanished. Synthetic,
+   *  like `ask` itself, and emitted AFTER the entry is removed so a follow-up /brain/status is
+   *  already consistent with it. */
+  | { type: 'ask_resolved'; id: string; reason: 'answered' | 'timeout' | 'cancelled' }
   /** A new agent step (one model round-trip / turn) started within the current run. `step` is 1-based;
    *  `maxSteps` is the configured ceiling (0 = unlimited). `usage` snapshots context at step boundaries
    *  so clients don't wait until the final idle event to refresh context fill. Synthetic — counted

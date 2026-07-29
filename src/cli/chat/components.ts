@@ -531,16 +531,21 @@ export interface ApprovalFlowOpts {
 }
 
 /** Drive one blocking approval prompt in the TUI (the approval sibling of runAskFlow): swap the chat
- *  editor for an ApprovalDock, restore it on any decision, then deliver the pick. */
-export function runApprovalFlow(o: ApprovalFlowOpts): void {
+ *  editor for an ApprovalDock, restore it on any decision, then deliver the pick.
+ *  The returned handle tears the dock down WITHOUT deciding — for when the same question was already
+ *  settled on another surface, since the prompt fans out to every client of the conversation. */
+export function runApprovalFlow(o: ApprovalFlowOpts): { close(): void } {
+  const restore = (): void => {
+    o.slot.clear();
+    o.slot.addChild(o.editor);
+    o.tui.setFocus(o.editor);
+    o.tui.requestRender(true);
+  };
   const dock = new ApprovalDock({
     tui: o.tui,
     question: o.question,
     onPick: (label) => {
-      o.slot.clear();
-      o.slot.addChild(o.editor);
-      o.tui.setFocus(o.editor);
-      o.tui.requestRender(true);
+      restore();
       o.onDecision(label);
     },
   });
@@ -548,6 +553,7 @@ export function runApprovalFlow(o: ApprovalFlowOpts): void {
   o.slot.addChild(dock);
   o.tui.setFocus(dock);
   o.tui.requestRender(true);
+  return { close: restore };
 }
 
 /** Pending image attachments as a chip row above the input ("[img] shot.png · 42 KB · esc to drop").

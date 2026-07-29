@@ -623,6 +623,14 @@ function useBrainChatController(): BrainChatValue {
       const { id, questions, kind } = JSON.parse((e as MessageEvent).data) as { id: string; questions: AskQuestion[]; kind?: 'approval' };
       setAsk({ id, questions, kind });
     });
+    // That question is settled — answered on another surface, timed out, or the turn was aborted. The
+    // `ask` frame fans out to every client of the conversation, so without this the surface that did not
+    // answer keeps showing a card whose POST can no longer match anything. Compared by id so a late
+    // frame cannot clear the NEXT question.
+    onFrame('ask_resolved', (e) => {
+      const { id } = JSON.parse((e as MessageEvent).data) as { id: string };
+      setAsk((cur) => (cur && cur.id === id ? null : cur));
+    });
     // Every step boundary carries a fresh usage snapshot, so context fill, token totals and cost move
     // DURING the turn instead of jumping once at the end. The daemon has always sent this (see the
     // `step` event in brain/events.ts) and the CLI has always read it (chat/streamCoordinator.ts); the

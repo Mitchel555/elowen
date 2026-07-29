@@ -79,6 +79,41 @@ describe('StreamCoordinator — parent stream ownership', () => {
   });
 });
 
+describe('StreamCoordinator — a question settled elsewhere', () => {
+  // The `ask` event reaches every client of the conversation, so answering in the web has to take the
+  // CLI dock down too. Without it the dock keeps the editor slot and its answer would match nothing.
+  it('routes ask_resolved to closeAsk with the id, and never into the transcript', () => {
+    let onEvent!: (e: BrainEvent) => void;
+    const client = {
+      stream: (cb: (e: BrainEvent) => void) => { onEvent = cb; return Promise.resolve(); },
+      history: () => Promise.resolve([]),
+      rebind: () => {},
+    } as unknown as BrainClient;
+    const rt = state();
+    const ac = new AbortController();
+    rt.streamAc = ac;
+    const closed: string[] = [];
+    const launched: string[] = [];
+    const flows = {
+      launchAsk: (id: string) => { launched.push(id); },
+      closeAsk: (id: string) => { closed.push(id); },
+      openPlanDecision: () => {},
+    } as unknown as Flows;
+    const stream = new StreamCoordinator(
+      rt, { client }, actions(), flows,
+      new SnapshotHydrator<BrainEvent>(), new HydrationNoticeOwner(),
+    );
+    stream.openStream(ac);
+
+    onEvent({ type: 'ask', id: 'q1', questions: [{ question: 'Which?', header: 'H', multiSelect: false, options: [{ label: 'A' }] }] });
+    expect(launched).toEqual(['q1']);
+    onEvent({ type: 'ask_resolved', id: 'q1', reason: 'answered' });
+    expect(closed).toEqual(['q1']);
+    // It is control state, like `ask` itself — it must not leave a turn behind.
+    expect(turns(rt.transcript)).toEqual([]);
+  });
+});
+
 describe('StreamCoordinator — idle rollover', () => {
   it('resets to the fresh conversation on `session` and rebuilds from the daemon stream (no refetch)', () => {
     let onEvent!: (e: BrainEvent) => void;

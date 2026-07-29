@@ -18,6 +18,9 @@ interface Pending {
   resolve: (answers: AskAnswer[]) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Kept from `park` so every exit can announce itself on the same fan-out the question arrived on.
+   *  Without it a surface that did not answer keeps showing a prompt nobody can settle any more. */
+  emit: (e: BrainEvent) => void;
 }
 
 /** In-memory registry of parked `AskUserQuestion` calls. One instance is owned by BrainService and
@@ -68,11 +71,12 @@ export class ElicitationRegistry {
       const ms = typeof this.timeoutMs === 'function' ? this.timeoutMs() : this.timeoutMs;
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        emit({ type: 'ask_resolved', id, reason: 'timeout' });
         resolve(questions.map((q) => ({ header: q.header, selected: NO_ANSWER })));
       }, ms);
       // Node keeps the event loop alive for pending timers; a parked question must not block process exit.
       if (typeof timer.unref === 'function') timer.unref();
-      this.pending.set(id, { sessionId, questions, kind, resolve, reject, timer });
+      this.pending.set(id, { sessionId, questions, kind, resolve, reject, timer, emit });
       emit({ type: 'ask', id, questions, ...(kind ? { kind } : {}) });
     });
   }
@@ -84,6 +88,10 @@ export class ElicitationRegistry {
     if (!p) return false;
     this.pending.delete(id);
     clearTimeout(p.timer);
+    // Announced BEFORE resolve: resolving lets the parked turn run on, and its first events must not
+    // reach a surface still showing a question the turn has already moved past. The delete above keeps
+    // a /brain/status racing this consistent either way.
+    p.emit({ type: 'ask_resolved', id, reason: 'answered' });
     p.resolve(answers);
     return true;
   }
@@ -108,6 +116,7 @@ export class ElicitationRegistry {
       if (p.sessionId !== sessionId) continue;
       this.pending.delete(id);
       clearTimeout(p.timer);
+      p.emit({ type: 'ask_resolved', id, reason: 'cancelled' });
       p.reject(new Error(reason));
     }
   }
@@ -118,6 +127,7 @@ export class ElicitationRegistry {
     for (const [id, p] of this.pending) {
       this.pending.delete(id);
       clearTimeout(p.timer);
+      p.emit({ type: 'ask_resolved', id, reason: 'cancelled' });
       p.reject(new Error(reason));
     }
     this.approvalChain.clear();

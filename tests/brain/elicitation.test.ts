@@ -63,7 +63,9 @@ describe('ElicitationRegistry — parked AskUserQuestion lifecycle', () => {
   it('serializes two back-to-back approvals in one session — neither cancels the other into a deny', async () => {
     const reg = new ElicitationRegistry();
     const events: { id: string }[] = [];
-    const emit = (e: BrainEvent) => { events.push(e as unknown as { id: string }); };
+    // Only the parks — settling one now emits an `ask_resolved` on the same fan-out, and this test
+    // counts how many questions were RAISED.
+    const emit = (e: BrainEvent) => { if (e.type === 'ask') events.push(e as unknown as { id: string }); };
     const p1 = reg.ask('sess-1', Q, emit, 'approval');
     const p2 = reg.ask('sess-1', Q, emit, 'approval');
     // Only the FIRST approval is parked/emitted; the second queues behind it (no supersede-cancel).
@@ -92,5 +94,68 @@ describe('ElicitationRegistry — parked AskUserQuestion lifecycle', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // The `ask` event fans out to EVERY client of the conversation, so one surface answering leaves the
+  // others showing a prompt that can no longer be settled. Each exit has to say so on the same fan-out.
+  it('announces the answer so the surfaces that did not answer can drop the prompt', async () => {
+    const reg = new ElicitationRegistry();
+    const events: BrainEvent[] = [];
+    const p = reg.ask('sess-1', Q, (e) => { events.push(e); });
+    const id = (events[0] as { id: string }).id;
+    reg.answer(id, [{ header: 'Choice', selected: ['A'] }]);
+    await p;
+    expect(events).toHaveLength(2);
+    expect(events[1]).toEqual({ type: 'ask_resolved', id, reason: 'answered' });
+    // Emitted after the entry is gone, so a /brain/status racing the event agrees with it.
+    expect(reg.pendingForSession('sess-1')).toBeNull();
+  });
+
+  it('announces a timeout, so an unanswered prompt does not linger on every surface', async () => {
+    vi.useFakeTimers();
+    try {
+      const reg = new ElicitationRegistry(1000);
+      const events: BrainEvent[] = [];
+      const p = reg.ask('sess-1', Q, (e) => { events.push(e); });
+      const id = (events[0] as { id: string }).id;
+      vi.advanceTimersByTime(1001);
+      await p;
+      expect(events[1]).toEqual({ type: 'ask_resolved', id, reason: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('announces a cancel — abort and supersede both leave a dock up otherwise', async () => {
+    const reg = new ElicitationRegistry();
+    const events: BrainEvent[] = [];
+    const p = reg.ask('sess-1', Q, (e) => { events.push(e); });
+    const id = (events[0] as { id: string }).id;
+    reg.cancelForSession('sess-1', 'aborted');
+    await expect(p).rejects.toThrow('aborted');
+    expect(events[1]).toEqual({ type: 'ask_resolved', id, reason: 'cancelled' });
+
+    // cancelAll (plugin reload / dispose-all) has the same obligation.
+    const events2: BrainEvent[] = [];
+    const p2 = reg.ask('sess-2', Q, (e) => { events2.push(e); });
+    const id2 = (events2[0] as { id: string }).id;
+    reg.cancelAll('sessions reset');
+    await expect(p2).rejects.toThrow('sessions reset');
+    expect(events2[1]).toEqual({ type: 'ask_resolved', id: id2, reason: 'cancelled' });
+  });
+
+  it('a superseding question resolves the one it replaces, not just the promise', async () => {
+    const reg = new ElicitationRegistry();
+    const events: BrainEvent[] = [];
+    const p1 = reg.ask('sess-1', Q, (e) => { events.push(e); });
+    const first = (events[0] as { id: string }).id;
+    // A second regular question drops the earlier one — which must be announced, or the first question's
+    // dock stays on screen underneath the second.
+    const p2 = reg.ask('sess-1', Q, (e) => { events.push(e); });
+    await expect(p1).rejects.toThrow(/superseded/);
+    expect(events[1]).toEqual({ type: 'ask_resolved', id: first, reason: 'cancelled' });
+    expect(events[2]).toMatchObject({ type: 'ask' });
+    reg.answer((events[2] as { id: string }).id, [{ header: 'Choice', selected: ['B'] }]);
+    await expect(p2).resolves.toEqual([{ header: 'Choice', selected: ['B'] }]);
   });
 });
