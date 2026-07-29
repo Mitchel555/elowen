@@ -193,6 +193,50 @@ describe('AccountView', () => {
     expect(emailInput).toHaveValue('new@example.com');
   });
 
+  it('adopts a value another window wrote while this form\'s own save was in flight', async () => {
+    // The saved edit is settled, not an edit in progress: once the refetch reports someone else's newer
+    // name, this form must follow it instead of keeping its own echo and writing it back on the next save.
+    const stored = { name: 'Bob', email: 'bob@example.com' };
+    const patches: Record<string, unknown>[] = [];
+    const gate: { release: (() => void) | null } = { release: null };
+    let gets = 0;
+    server.use(
+      http.get('*/api/auth/me', async () => {
+        gets += 1;
+        // Hold the refetch the save's invalidation triggers — the window another window writes into.
+        if (gets === 2) await new Promise<void>((resolve) => { gate.release = resolve; });
+        return HttpResponse.json({ user: meUser(stored) });
+      }),
+      http.patch('*/api/auth/me', async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        patches.push(body);
+        if (typeof body.name === 'string') stored.name = body.name;
+        if (typeof body.email === 'string') stored.email = body.email;
+        return HttpResponse.json({ user: meUser(stored) });
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: [], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    const nameInput = await screen.findByDisplayValue('Bob');
+    fireEvent.change(nameInput, { target: { value: 'Bob From Here' } });
+    await waitFor(() => expect(patches).toHaveLength(1), { timeout: 3000 });
+    await waitFor(() => expect(gate.release).not.toBeNull());
+
+    stored.name = 'Bob From The Other Window'; // written elsewhere while the refetch hangs
+    gate.release?.();
+
+    expect(await screen.findByDisplayValue('Bob From The Other Window')).toBeInTheDocument();
+
+    // Editing an unrelated field now must not carry the superseded name back to the server.
+    fireEvent.change(await screen.findByDisplayValue('bob@example.com'), { target: { value: 'new@example.com' } });
+    await waitFor(() => expect(patches).toHaveLength(2), { timeout: 3000 });
+    expect(patches[1]).toEqual({ email: 'new@example.com' });
+    expect(stored.name).toBe('Bob From The Other Window');
+  });
+
   it('shows a retryable error instead of an infinite skeleton when /auth/me fails', async () => {
     let attempts = 0;
     server.use(

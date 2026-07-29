@@ -249,10 +249,12 @@ function useBrainChatController(): BrainChatValue {
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [queued, setQueued] = useState<{ id: string; text: string }[]>([]);
-  // Bumped by every server-authoritative queue snapshot that arrives WITHOUT a generation change (the
-  // `queue` frame). An optimistic remove captures it and rolls back only while it still holds: a snapshot
-  // that landed since is newer truth than a failure now surfacing from an older request.
-  const queueEpochRef = useRef(0);
+  // Ids whose DELETE is in flight. The optimistic remove HIDES the item instead of taking it out of the
+  // list, so a failure only has to unhide it and there is no position left to reconstruct — reconstructing
+  // one from an index captured at click time is what reordered the queue whenever two failing removes
+  // overlapped, and this order is the order the agent is fed in. Every server-authoritative snapshot clears
+  // the set: it is newer truth, and queue ids are POSITIONAL, so a stale id would hide a different message.
+  const [removingQueue, setRemovingQueue] = useState<ReadonlySet<string>>(() => new Set());
   const [readOnly, setReadOnly] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -370,6 +372,7 @@ function useBrainChatController(): BrainChatValue {
     setAsk(null); // drop any parked question from the previous conversation
     setCards([]); // and any cards from the previous conversation
     setQueued([]); // and any pending mid-turn queue from the previous conversation
+    setRemovingQueue(new Set()); // its in-flight removes name ids that mean something else here
     setGoal(null); // a goal belongs to ONE conversation; the snapshot frame hydrates this one's own
     const generation = nextGeneration();
     const previousSession = boundSessionRef.current;
@@ -567,7 +570,7 @@ function useBrainChatController(): BrainChatValue {
     // replace wholesale — the optimistic remove must never fight an incoming snapshot.
     onFrame('queue', (e) => {
       const { items } = JSON.parse((e as MessageEvent).data) as { items: { id: string; text: string }[] };
-      queueEpochRef.current++; // fences any optimistic remove still in flight against this newer truth
+      setRemovingQueue(new Set()); // this snapshot supersedes every optimistic remove still in flight
       setQueued(items);
     });
     // The daemon's authoritative render of the user's turn (every real send — immediate or a queued
@@ -739,26 +742,22 @@ function useBrainChatController(): BrainChatValue {
   };
   const removeAttachment = (index: number): void => setAttachments((cur) => cur.filter((_, j) => j !== index));
 
-  // Optimistic remove: the item leaves the list immediately, but on failure it is still queued
-  // server-side, so put it back where it was rather than leaving the UI claiming it was removed. The
-  // rollback is fenced, because a DELETE can fail long after the UI moved on and queue ids are POSITIONAL
-  // — the same id names a different message in another conversation.
+  // Optimistic remove: the item disappears immediately, but on failure it is still queued server-side, so
+  // it comes back rather than leaving the UI claiming it was removed. Hiding it (instead of splicing the
+  // list) is what makes the rollback exact — it restores the item's own position, never a remembered one.
   const onQueueRemove = (id: string): void => {
-    const index = queued.findIndex((x) => x.id === id);
-    if (index < 0) return;
-    const removed = queued[index];
+    if (removingQueue.has(id) || !queued.some((x) => x.id === id)) return;
     const generation = genRef.current;
     const session = boundSessionRef.current;
-    const epoch = queueEpochRef.current;
-    setQueued((cur) => cur.filter((x) => x.id !== id));
+    setRemovingQueue((cur) => new Set(cur).add(id));
     void elowenClient.brainQueueRemove(id, session).catch(() => {
       // Another conversation is on screen (a switch bumped the generation, or an idle rollover rebound the
-      // session without one): restoring would plant a ghost chip pointing at a stranger's message, and the
+      // session without one): unhiding would plant a ghost chip pointing at a stranger's message, and the
       // error concerns a queue the user is no longer looking at.
       if (generation !== genRef.current || session !== boundSessionRef.current) return;
-      // A newer server snapshot already replaced the list — it is authoritative and it already carries this
-      // item if the server still holds it, so report the failure but leave the list alone.
-      if (epoch === queueEpochRef.current) setQueued((cur) => [...cur.slice(0, index), removed, ...cur.slice(index)]);
+      // A newer snapshot cleared the set meanwhile: it is authoritative and already carries this item if the
+      // server still holds it, so the delete below is a no-op and only the failure is reported.
+      setRemovingQueue((cur) => { const next = new Set(cur); return next.delete(id) ? next : cur; });
       toast(t.brainChat.queueRemoveError, 'error');
     });
   };
@@ -776,6 +775,9 @@ function useBrainChatController(): BrainChatValue {
     }
   };
   const abort = (): void => { void elowenClient.brainAbort(boundSessionRef.current).catch(() => undefined); };
+
+  // What the surface renders: the server's queue minus the items whose removal is in flight.
+  const visibleQueue = useMemo(() => (removingQueue.size ? queued.filter((x) => !removingQueue.has(x.id)) : queued), [queued, removingQueue]);
 
   // Both projections are pure folds of the transcript, so they survive a reconnect for free: history
   // carries the same `sub`/`wf` attachments the live events wrote.
@@ -983,7 +985,7 @@ function useBrainChatController(): BrainChatValue {
   }, []);
 
   return {
-    turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
+    turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued: visibleQueue, readOnly, activeSessionId,
     usage, telemetry, goal, subagents, workflows, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,

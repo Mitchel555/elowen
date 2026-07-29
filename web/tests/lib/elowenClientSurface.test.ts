@@ -129,6 +129,7 @@ describe('react-query cache invalidation', () => {
   it('invalidates only query keys that some query registers', () => {
     const invalidated = new Set<string>();
     const registered = new Set<string>();
+    const unreadable: string[] = [];
     let readSites = 0;
 
     for (const source of sources) {
@@ -139,7 +140,11 @@ describe('react-query cache invalidation', () => {
         const preceding = source.slice(Math.max(0, match.index - 80), match.index);
         if (INVALIDATION.test(preceding)) {
           readSites += 1;
-          for (const head of keyHeads(expression)) invalidated.add(head);
+          const heads = keyHeads(expression);
+          // A key this scan cannot resolve to any head — `queryKey: someVariable` — names nothing, so it
+          // would satisfy the check below without a single key of it ever being checked.
+          if (heads.length === 0) unreadable.push(expression.trim());
+          for (const head of heads) invalidated.add(head);
         } else if (!CACHE_OPERATION.test(preceding)) {
           for (const head of keyHeads(expression)) registered.add(head);
         }
@@ -153,6 +158,7 @@ describe('react-query cache invalidation', () => {
     const calls = count(/invalidateQueries\(/g);
     expect(calls).toBeGreaterThan(0);
     expect(readSites + count(/invalidateQueries\(\{\s*queryKey\s*\}\)/g)).toBe(calls);
+    expect(unreadable).toEqual([]);
 
     expect([...invalidated].filter((head) => !registered.has(head))).toEqual([]);
   });

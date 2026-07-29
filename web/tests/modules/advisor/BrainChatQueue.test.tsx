@@ -96,7 +96,7 @@ describe('BrainChat pending queue', () => {
     renderChat();
     // The stream connects after brainStart/history/status resolve.
     await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
-    const es = FakeES.instances[0]!;
+    const es = FakeES.instances[0];
 
     // A full-snapshot queue event → two pending chips with a "Queued" badge, no premature user bubbles.
     act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'check the logs' }, { id: 'q2', text: 'and the metrics' }] }));
@@ -106,7 +106,7 @@ describe('BrainChat pending queue', () => {
 
     // Clicking × on the first chip optimistically drops it AND DELETEs /brain/queue/q1.
     const removeButtons = screen.getAllByRole('button', { name: /Remove from queue|Odebrat z fronty/i });
-    act(() => fireEvent.click(removeButtons[0]!));
+    act(() => fireEvent.click(removeButtons[0]));
     await waitFor(() => expect(removed).toEqual(['q1']));
     expect(screen.queryByText('check the logs')).toBeNull(); // optimistic removal
     expect(screen.getByText('and the metrics')).toBeTruthy();
@@ -178,10 +178,33 @@ describe('BrainChat pending queue', () => {
     expect(screen.getByText('drained and refilled')).toBeTruthy();
   });
 
+  it('restores the queue in its own order when two overlapping removes both fail', async () => {
+    // The queue order is the order the agent is fed in, so a failed remove must put the item back exactly
+    // where it was — including when a second remove is already in flight over the shortened list.
+    const release = gateQueueRemove();
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
+    const es = FakeES.instances[0];
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'first' }, { id: 'q2', text: 'second' }, { id: 'q3', text: 'third' }] }));
+    expect(await screen.findByText('first')).toBeTruthy();
+
+    const removeButtons = () => screen.getAllByRole('button', { name: /Remove from queue|Odebrat z fronty/i });
+    const queueTexts = () => removeButtons().map((button) => button.previousElementSibling?.textContent ?? '');
+
+    act(() => fireEvent.click(removeButtons()[1])); // the middle item
+    await waitFor(() => expect(removed).toEqual(['q2']));
+    act(() => fireEvent.click(removeButtons()[1])); // the last one — same position in the shortened list
+    await waitFor(() => expect(removed).toEqual(['q2', 'q3']));
+
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 50)); });
+
+    expect(queueTexts()).toEqual(['first', 'second', 'third']);
+  });
+
   it('folds a `user` delivery event into a you-turn bubble', async () => {
     renderChat();
     await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
-    const es = FakeES.instances[0]!;
+    const es = FakeES.instances[0];
     act(() => es.emit({ type: 'user', text: 'combined queued delivery' }));
     expect(await screen.findByText('combined queued delivery')).toBeTruthy();
   });
@@ -191,13 +214,12 @@ describe('BrainChat pending queue', () => {
     server.use(http.post('*/api/brain/send', async ({ request }) => { sent = (await request.json()) as { text?: string }; return HttpResponse.json({ ok: true }); }));
     renderChat();
     await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
-    const es = FakeES.instances[0]!;
+    const es = FakeES.instances[0];
     const textarea = screen.getByRole('textbox');
     act(() => fireEvent.change(textarea, { target: { value: 'hello there' } }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Send|Odeslat/i })); });
     // The send POSTed the message, but the composer did NOT push an optimistic 'you' bubble.
-    await waitFor(() => expect(sent).toBeTruthy());
-    expect(sent!.text).toBe('hello there');
+    await waitFor(() => expect(sent).toMatchObject({ text: 'hello there' }));
     expect(screen.queryByText('hello there')).toBeNull();
     // The daemon's authoritative `user` event is what renders the 'you' turn — exactly once, no dupe.
     act(() => es.emit({ type: 'user', text: 'hello there' }));

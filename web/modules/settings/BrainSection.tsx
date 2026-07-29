@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { BrainCircuit, Plus, Pencil, Trash2, KeyRound, Link2, Unlink, ExternalLink, Check, ListChecks, SlidersHorizontal, Gauge, EyeOff } from 'lucide-react';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
@@ -54,6 +54,12 @@ function OAuthConnectDialog({ flow: initial, onDone }: { flow: OAuthFlowState; o
   const [flow, setFlow] = useState(initial);
   const [code, setCode] = useState('');
   const titleId = useId();
+  // The dialog owns the poll; `onDone` is only how it reports the outcome. Reading it through a ref keeps
+  // it out of the effect's dependencies, because the parent re-renders on its own (a 20s rate-limit
+  // refetch) and a fresh inline callback would otherwise retire the poll — dropping the answer in flight
+  // and restarting the interval every time.
+  const doneRef = useRef(onDone);
+  doneRef.current = onDone;
 
   useEffect(() => {
     // A poll already in flight resolves after the dialog is torn down. Clearing the timer does not
@@ -70,7 +76,7 @@ function OAuthConnectDialog({ flow: initial, onDone }: { flow: OAuthFlowState; o
         setFlow(f);
         if (f.status === 'success' || f.status === 'error') {
           cancelled = true;
-          onDone(f.status);
+          doneRef.current(f.status);
           return;
         }
         timer = setTimeout(poll, 1500);
@@ -78,7 +84,7 @@ function OAuthConnectDialog({ flow: initial, onDone }: { flow: OAuthFlowState; o
     };
     timer = setTimeout(poll, 1500);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [flow.id, onDone]);
+  }, [flow.id]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby={titleId}>

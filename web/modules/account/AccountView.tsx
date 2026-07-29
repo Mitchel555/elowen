@@ -172,15 +172,23 @@ export function AccountView() {
   // changed elsewhere (another window, another device) from being written back from this form's stale
   // copy when the user saves an unrelated field. The id resets the whole form when the identity changes.
   const [profileBase, setProfileBase] = useState<{ id: number; name: string; email: string; default_exec: string } | null>(null);
+  // What this form last wrote for each field. A value the user changed no longer equals its baseline, so
+  // without this it reads as an edit in progress forever — even once it has been saved and acknowledged.
+  // The baseline then adopts whatever the refetch reports (another window's newer value) while the input
+  // keeps the settled edit, and the next save carries it back out, silently undoing that other window.
+  const profileSent = useRef<ProfilePatch>({});
   useEffect(() => {
     const user = me.data?.user;
     if (!user) return;
     const server = { id: user.id, name: user.name, email: user.email, default_exec: user.default_exec };
     if (profileBase && profileBase.id === server.id) {
       if (profileBase.name === server.name && profileBase.email === server.email && profileBase.default_exec === server.default_exec) return;
-      setName((cur) => (cur === profileBase.name ? server.name : cur));
-      setEmail((cur) => (cur === profileBase.email ? server.email : cur));
-      setDefaultExec((cur) => (cur === profileBase.default_exec ? server.default_exec : cur));
+      // Follow the server whenever the field holds nothing but a settled value: its baseline, or this
+      // form's own last write coming back as an echo. Anything else is the user's unsaved text.
+      const sent = profileSent.current;
+      setName((cur) => (cur === profileBase.name || cur.trim() === sent.name ? server.name : cur));
+      setEmail((cur) => (cur === profileBase.email || cur.trim() === sent.email ? server.email : cur));
+      setDefaultExec((cur) => (cur === profileBase.default_exec || cur === sent.default_exec ? server.default_exec : cur));
     } else {
       setName(server.name);
       setEmail(server.email);
@@ -201,6 +209,7 @@ export function AccountView() {
   const profileSave = useAutoSaveStatus([name, email, defaultExec], async () => {
     try {
       await updateMe.mutateAsync(profilePatch);
+      profileSent.current = { ...profileSent.current, ...profilePatch };
     } catch (error) {
       toast(t.account.saveError, 'error');
       throw error;
