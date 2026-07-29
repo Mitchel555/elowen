@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, PlayCircle } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
@@ -19,6 +19,7 @@ import { AskQuestionCard } from './AskQuestionCard';
 import { ProcessPanel } from './ProcessPanel';
 import { AgentsTable } from './AgentsTable';
 import { StatsModal } from './StatsModal';
+import { PlanDecisionModal } from './PlanDecisionModal';
 import { ChatHistoryRail } from './ChatHistoryRail';
 import { ModelPicker } from './ModelPicker';
 import { useBrainChat } from './BrainChatProvider';
@@ -429,14 +430,6 @@ function RenameDialog({ current, onClose, onSubmit }: { current: string; onClose
   );
 }
 
-/** True when the newest turn ends with a plan the model submitted through `ExitPlanMode` — the point at
- *  which plan mode is waiting on the user, exactly like the CLI's plan follow-up. */
-function awaitsPlanDecision(turns: ChatTurn[]): boolean {
-  const last = turns[turns.length - 1];
-  if (!last || last.role === 'you' || last.role === 'divider' || last.role === 'event') return false;
-  return last.segments.some((seg) => seg.kind === 'tools' && seg.items.some((item) => item.plan));
-}
-
 /** The presentational brain chat surface, driven entirely by the shared controller (BrainChatProvider)
  *  read from context. It owns NO network or session state: only pure view affordances (the picker-open
  *  toggle, the slash keyboard cursor, DOM refs + autoscroll) live here, so unmounting it (Chat↔Terminál
@@ -454,7 +447,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     usage, lineCfg, currentModel, subagents, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
     ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
-    workMode, implementPlan, planSubmitting, renameOpen, closeRename, renameSession,
+    workMode, planDecision, implementPlan, dismissPlan, planSubmitting, renameOpen, closeRename, renameSession,
   } = c;
 
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -781,22 +774,17 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
         {statsOpen ? (
           <StatsModal onClose={() => setStatsOpen(false)} />
         ) : null}
-        {/* Plan mode's decision point: the model submitted a plan and the turn settled. Without this the
-            web could enter plan mode but never act on the result — the CLI raises the same choice in its
-            plan follow-up modal. Refining needs no button: another message keeps the mode as it is. */}
-        {workMode === 'plan' && !busy && !readOnly && awaitsPlanDecision(turns) ? (
-          <div data-testid="chat-plan-decision" className="flex flex-wrap items-center gap-2 rounded-md border border-accent/30 bg-accent/5 px-2.5 py-2 text-tiny text-text-muted">
-            <span className="min-w-0 flex-1">{t.brainChat.planDecision}</span>
-            <button
-              type="button"
-              onClick={implementPlan}
-              disabled={planSubmitting}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 py-1 text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
-            >
-              <PlayCircle size={12} aria-hidden />
-              {t.brainChat.planImplement}
-            </button>
-          </div>
+        {/* Plan mode's decision point: the model submitted a plan and the turn settled. The controller
+            derives it from the DAEMON's answer, so it also appears for a plan submitted from the CLI and
+            survives a reload — and it is a modal, like the CLI picker, because implementing is the only
+            thing that leaves plan mode. */}
+        {planDecision ? (
+          <PlanDecisionModal
+            plan={planDecision.plan}
+            submitting={planSubmitting}
+            onImplement={implementPlan}
+            onDismiss={dismissPlan}
+          />
         ) : null}
         {ask ? (
           <AskQuestionCard

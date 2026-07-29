@@ -1,4 +1,4 @@
-import type { BrainCard, BrainMessage, BrainStreamTailEvent, BrainWorkflowView, ToolOutputView } from './types';
+import type { BrainCard, BrainMessage, BrainPendingPlan, BrainStreamTailEvent, BrainWorkflowView, ToolOutputView } from './types';
 
 /** The workflow DAG a `WorkflowStart` call is running — the shared wire shape (BrainWorkflowView),
  *  attached to its tool item by call id exactly as `sub` is for a delegate call. */
@@ -386,6 +386,25 @@ export function collectWorkflows(turns: ChatTurn[]): WorkflowState[] {
     }
   }
   return [...byId.values()];
+}
+
+/** The plan an `ExitPlanMode` call submitted in the newest assistant turn, with the id of the call that
+ *  submitted it — the transcript's own answer to "is a plan waiting on the user", live from `tool_end`
+ *  and rebuilt from history on every hydration. Mirror of the CLI's `TranscriptModel.lastSubmittedPlan`.
+ *
+ *  Trailing non-assistant turns are SKIPPED rather than disqualifying: a session-event marker or a
+ *  compaction divider landing after the plan (the user switching model or mode in that window) is not the
+ *  conversation moving on, and treating it as such is what made the decision disappear. A newer 'you' turn
+ *  or a later assistant turn without a plan still answers null, so nothing resurrects. */
+export function submittedPlan(turns: ChatTurn[]): BrainPendingPlan | null {
+  const last = turns.findLast((turn) => turn.role !== 'event' && turn.role !== 'divider');
+  if (last?.role !== 'elowen') return null;
+  let found: BrainPendingPlan | null = null;
+  for (const seg of last.segments) {
+    if (seg.kind !== 'tools') continue;
+    for (const item of seg.items) if (item.plan) found = { ...(item.id ? { id: item.id } : {}), plan: item.plan };
+  }
+  return found;
 }
 
 /** Fold a live `card` event into the card list: replace by id, append when new, drop when it came back

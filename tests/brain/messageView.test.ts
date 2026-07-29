@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { stripInlineReasoning, extractText, toolDetail, toolDisplay, toolOutputView, isThinkingOnlyReply, shapeBrainMessages, setToolOutputPolicy } from '../../src/brain/messageView.js';
+import { stripInlineReasoning, extractText, toolDetail, toolDisplay, toolOutputView, isThinkingOnlyReply, shapeBrainMessages, pendingSubmittedPlan, setToolOutputPolicy } from '../../src/brain/messageView.js';
 import { makeToolOutputPolicy } from '../../src/brain/toolOutput.js';
 
 describe('toolDisplay: skill loads', () => {
@@ -407,5 +407,58 @@ describe('tool output tone (needs attention)', () => {
       content: [{ type: 'text', text: 'Error: connect ECONNREFUSED' }],
     });
     expect(v?.tone).toBe('warning');
+  });
+});
+
+describe('pendingSubmittedPlan', () => {
+  const planCall = (id: string, plan: string) => [
+    { role: 'assistant', content: JSON.stringify({ role: 'assistant', content: [{ type: 'toolCall', id, name: 'ExitPlanMode', arguments: { plan } }] }) },
+    { role: 'toolResult', content: JSON.stringify({ role: 'toolResult', toolCallId: id, details: { plan } }) },
+  ];
+
+  it('reports the plan the newest turn submitted, keyed by its tool call id', () => {
+    const rows = [
+      { role: 'user', content: JSON.stringify({ role: 'user', content: 'plan the migration' }) },
+      ...planCall('call-1', '# Migrate the store\n\n1. Add the column'),
+    ];
+    expect(pendingSubmittedPlan(rows)).toEqual({ id: 'call-1', plan: '# Migrate the store\n\n1. Add the column' });
+  });
+
+  it('still reports it when the turn carried on past the tool call', () => {
+    const rows = [
+      { role: 'user', content: JSON.stringify({ role: 'user', content: 'plan it' }) },
+      ...planCall('call-1', '# Ship it'),
+      { role: 'assistant', content: JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: 'Tell me if that works.' }] }) },
+    ];
+    expect(pendingSubmittedPlan(rows)).toEqual({ id: 'call-1', plan: '# Ship it' });
+  });
+
+  it('drops the decision once a newer user turn moved the conversation on', () => {
+    const rows = [
+      { role: 'user', content: JSON.stringify({ role: 'user', content: 'plan it' }) },
+      ...planCall('call-1', '# Ship it'),
+      { role: 'user', content: JSON.stringify({ role: 'user', content: 'actually, forget it' }) },
+      { role: 'assistant', content: JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: 'sure' }] }) },
+    ];
+    expect(pendingSubmittedPlan(rows)).toBeNull();
+  });
+
+  it('takes the LAST plan when one turn submitted two, and ignores every other tool', () => {
+    const rows = [
+      { role: 'user', content: JSON.stringify({ role: 'user', content: 'plan it' }) },
+      ...planCall('call-1', '# First take'),
+      { role: 'assistant', content: JSON.stringify({ role: 'assistant', content: [{ type: 'toolCall', id: 'read-1', name: 'Read', arguments: { path: 'a.ts' } }] }) },
+      { role: 'toolResult', content: JSON.stringify({ role: 'toolResult', toolCallId: 'read-1', details: { plan: 'not a plan tool' } }) },
+      ...planCall('call-2', '# Second take'),
+    ];
+    expect(pendingSubmittedPlan(rows)).toEqual({ id: 'call-2', plan: '# Second take' });
+  });
+
+  it('answers null for a turn whose ExitPlanMode call never got its result', () => {
+    const rows = [
+      { role: 'user', content: JSON.stringify({ role: 'user', content: 'plan it' }) },
+      { role: 'assistant', content: JSON.stringify({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'ExitPlanMode', arguments: { plan: '# Ship it' } }] }) },
+    ];
+    expect(pendingSubmittedPlan(rows)).toBeNull();
   });
 });

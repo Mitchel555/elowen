@@ -6,8 +6,8 @@ import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
-import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainModelOption, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
-import { collectSubagents, collectWorkflows, emptyView, fromHistory, fromSnapshot, prependHistory, reduce, upsertCard, type ChatTurn, type ChatView, type SubagentState, type TranscriptEvent, type WorkflowState } from '../../lib/transcript';
+import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainModelOption, BrainPendingPlan, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
+import { collectSubagents, collectWorkflows, emptyView, fromHistory, fromSnapshot, prependHistory, reduce, submittedPlan, upsertCard, type ChatTurn, type ChatView, type SubagentState, type TranscriptEvent, type WorkflowState } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
 import { subscribeRevive, STALE_HIDE_MS } from '../../lib/useRevive';
@@ -35,6 +35,12 @@ const WORK_MODES: readonly BrainWorkMode[] = ['build', 'plan', 'workflow'];
 /** What approving a submitted plan sends, verbatim from the CLI's plan follow-up (src/cli/chat/flows.ts)
  *  so both surfaces hand the model the same sentence. Model-facing, hence not translated. */
 const IMPLEMENT_PLAN_PROMPT = 'Implement the plan you proposed above.';
+
+/** Stable identity of a submitted plan: its ExitPlanMode call id, or the plan text for a call PI minted no
+ *  id for. Mirror of the key the CLI dedupes its own plan decision on (`planDecisionRaisedFor`). */
+function planKey(plan: BrainPendingPlan | null): string | null {
+  return plan ? plan.id ?? plan.plan : null;
+}
 
 /** How long a freshly opened stream may go without its guaranteed snapshot frame before it is retried. */
 const SNAPSHOT_TIMEOUT_MS = 15_000;
@@ -150,14 +156,23 @@ export interface BrainChatValue {
    *  reappear the moment it is switched back on. Persisted per browser. */
   showThoughts: boolean;
   setShowThoughts: (v: boolean) => void;
-  /** The work mode every send is stamped with (`/plan`, `/build`, `/workflow`). Session-scoped and kept in
-   *  MEMORY only — a reload starts in 'build', exactly like a fresh CLI process, so the two surfaces can
-   *  never disagree about which mode a conversation is in. */
+  /** The work mode every send FROM THIS TAB is stamped with (`/plan`, `/build`, `/workflow`). Session-scoped
+   *  and kept in MEMORY only — a reload starts in 'build', exactly like a fresh CLI process. It says nothing
+   *  about the mode the conversation is actually in; that is the daemon's, and it reaches the surface as
+   *  `planDecision` rather than by overwriting the composer's own choice. */
   workMode: BrainWorkMode;
   setWorkMode: (m: BrainWorkMode) => void;
-  /** Approve a submitted plan: switch to build mode and send the CLI's implement prompt. Without it a web
+  /** The plan waiting on the user's implement/cancel decision, `null` when none is. Derived from the
+   *  DAEMON's answer (mode + submitted plan, hydrated on connect and on every snapshot frame) and kept in
+   *  step by the transcript, so the decision survives a reload, a second tab, and plan mode having been
+   *  entered from another surface — none of which tab-local state could ever see. */
+  planDecision: BrainPendingPlan | null;
+  /** Approve the submitted plan: switch to build mode and send the CLI's implement prompt. Without it a web
    *  user who entered plan mode would have no way to act on the plan they just got. */
   implementPlan: () => void;
+  /** Decline the decision without leaving plan mode (the CLI picker's Cancel): the plan stays in the
+   *  transcript and another message keeps refining it. */
+  dismissPlan: () => void;
   /** True while an approval is in flight — the button disables itself instead of firing twice. */
   planSubmitting: boolean;
   /** The `/rename` dialog's open state (the surface renders the modal; the controller owns the write). */
@@ -267,9 +282,18 @@ function useBrainChatController(): BrainChatValue {
   const [modelsError, setModelsError] = useState(false);
   const [currentModel, setCurrentModel] = useState('');
   const [focusNonce, setFocusNonce] = useState(0);
-  // Work mode + the `/rename` dialog: plain in-memory state. The daemon holds no mode (every send stamps
-  // its own), so persisting it here would make a reloaded tab claim a mode the CLI never has.
+  // Work mode + the `/rename` dialog: plain in-memory state. This is what the composer STAMPS on its own
+  // sends, so persisting it would make a reloaded tab claim a mode the user never re-chose.
   const [workMode, setWorkMode] = useState<BrainWorkMode>('build');
+  // Plan mode's decision, as the DAEMON sees it — the mode it last ran a turn in plus the plan that turn
+  // submitted. Both are hydrated from the server (status on connect, then every snapshot frame): the mode
+  // above is this tab's own stamp and knows nothing about a plan entered in the CLI, and it resets to
+  // 'build' on reload, which is exactly how the decision used to vanish from the page that had it.
+  const [daemonMode, setDaemonMode] = useState<BrainWorkMode>('build');
+  const [pendingPlan, setPendingPlan] = useState<BrainPendingPlan | null>(null);
+  /** The plan this tab has already decided on (implemented or dismissed), keyed like the CLI's
+   *  `planDecisionRaisedFor` so a re-hydration cannot raise the same decision twice. */
+  const [planDecided, setPlanDecided] = useState<string | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   // Lives on the controller (mounted once) rather than the surface, so the choice survives the dock's
   // Chat↔Terminál toggle and every route change, exactly like the transcript itself.
@@ -370,6 +394,8 @@ function useBrainChatController(): BrainChatValue {
     setReady(false);
     setNotice(''); // a fresh connection (mount / session switch) starts without a stale runtime line
     setAsk(null); // drop any parked question from the previous conversation
+    setPendingPlan(null); // and any plan decision — it belongs to the conversation being left
+    setPlanDecided(null); // whose decided key would otherwise suppress the NEXT conversation's plan
     setCards([]); // and any cards from the previous conversation
     setQueued([]); // and any pending mid-turn queue from the previous conversation
     setRemovingQueue(new Set()); // its in-flight removes name ids that mean something else here
@@ -391,7 +417,7 @@ function useBrainChatController(): BrainChatValue {
     // Every field here is hydration from the server, so each one is applied UNCONDITIONALLY: a
     // `if (st.x) setX(st.x)` can only ever set, which leaves a question the daemon already settled on
     // screen (and unanswerable) instead of clearing it.
-    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); setAsk(st.pendingAsk ?? null); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
+    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); setAsk(st.pendingAsk ?? null); setDaemonMode(st.workMode ?? 'build'); setPendingPlan(st.pendingPlan ?? null); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
     // The identity rides purely as query params — native EventSource cannot set headers, and the daemon
     // parses session/client/generation off the URL (tapping the bound conversation, not the active pointer).
     // `snapshot=1` makes the FIRST frame the hydration: the newest history page plus the running turn's
@@ -454,8 +480,14 @@ function useBrainChatController(): BrainChatValue {
       const streaming = control ? control.streaming : folded.thinking;
       setView({ ...folded, thinking: streaming });
       // Explicit null included — this frame is the one moment the client can learn a question it never
-      // saw is parked, or that one it still shows is long gone.
-      if (control) setAsk(control.pendingAsk);
+      // saw is parked, or that one it still shows is long gone. The plan decision rides the same rule:
+      // this frame is what tells a reloaded page, a second tab, or a surface that never entered plan mode
+      // that the conversation is waiting on a plan.
+      if (control) {
+        setAsk(control.pendingAsk);
+        setDaemonMode(control.workMode);
+        setPendingPlan(control.pendingPlan);
+      }
       // The goal rides beside the journal because it OUTLIVES it: the journal is cleared at settle, so a
       // client that connects between turns would otherwise show no goal while one is plainly running. The
       // presence check (not `?? null`) is what distinguishes an older daemon from an explicit "none".
@@ -824,8 +856,25 @@ function useBrainChatController(): BrainChatValue {
     setWorkMode(mode);
     toast(`${t.brainChat.modeSwitched} ${t.brainChat.workMode[mode]}`, 'ok');
   };
+  // The transcript carries the same submitted plan the daemon does — live on `tool_end`, and rebuilt from
+  // history on every hydration — so it is what keeps the hydrated decision in step between snapshots, in
+  // BOTH directions: it raises a plan submitted while this tab is attached, and drops one the conversation
+  // has since moved past. Keyed on the turns rather than on the scan's result: two consecutive "no plan"
+  // answers are both null and would leave a stale decision standing. Reconciled by plan key, so the common
+  // case (a text delta) settles to the same state object and re-renders nothing.
+  useEffect(() => {
+    const scanned = submittedPlan(turns);
+    setPendingPlan((cur) => (planKey(cur) === planKey(scanned) ? cur : scanned));
+  }, [turns]);
+  // A decision is open while the daemon is in plan mode, the turn that submitted the plan has settled, and
+  // this tab has not already answered for that plan. Read-only previews are somebody else's conversation.
+  const openPlanKey = planKey(pendingPlan);
+  const planDecision = daemonMode === 'plan' && !busy && !readOnly && openPlanKey && openPlanKey !== planDecided
+    ? pendingPlan
+    : null;
   const [planSubmitting, setPlanSubmitting] = useState(false);
   const planInFlightRef = useRef(false);
+  const dismissPlan = (): void => setPlanDecided(openPlanKey);
   const implementPlan = (): void => {
     // The mode follows the daemon's ACCEPTANCE, never the click. Switching to `build` up front removed the
     // decision row — the only control that can approve the plan — the instant a send failed, leaving the
@@ -834,7 +883,7 @@ function useBrainChatController(): BrainChatValue {
     planInFlightRef.current = true;
     setPlanSubmitting(true);
     void elowenClient.brainSend(IMPLEMENT_PLAN_PROMPT, undefined, undefined, binding(), 'build')
-      .then(() => setWorkMode('build'))
+      .then(() => { setWorkMode('build'); setPlanDecided(openPlanKey); })
       .catch(() => toast(t.brainChat.sendError, 'error'))
       .finally(() => { planInFlightRef.current = false; setPlanSubmitting(false); });
   };
@@ -999,7 +1048,7 @@ function useBrainChatController(): BrainChatValue {
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
     showThoughts: thoughts === 'show',
     setShowThoughts: (v) => setThoughts(v ? 'show' : 'hide'),
-    workMode, setWorkMode: runMode, implementPlan, planSubmitting,
+    workMode, setWorkMode: runMode, planDecision, implementPlan, dismissPlan, planSubmitting,
     renameOpen, closeRename: () => setRenameOpen(false), renameSession,
     commands, runSlash: (cmd) => void runSlash(cmd),
     slash: { items: slashItems, open: slashItems.length > 0, modelOptsOpen: modelSlashOpen, clearModelOpts: () => setModelSlashOpen(false) },

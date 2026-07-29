@@ -84,9 +84,6 @@ export interface BrainModelOption {
   fastAvailable?: boolean;
   default?: boolean;
 }
-/** The work mode a turn is sent in (mirror of the daemon's `mode` on POST /brain/send). Session-scoped
- *  client state on every surface: the client stamps it per send, the daemon keeps none. */
-export type BrainWorkMode = 'build' | 'plan' | 'workflow';
 /** One brain conversation in the session picker (web chat + CLI). */
 export interface BrainSessionInfo { id: string; title: string; model: string; updated_at: string; running: boolean; active: boolean }
 /** A row in the admin session-management panel (all brain sessions the operator anchors). */
@@ -102,9 +99,10 @@ export interface BrainSearchHit { sessionId: string; sessionTitle: string; role:
  *  daemon's `BrainMessageView`. */
 import type {
   ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef, AskQuestion, BrainStreamControl,
+  BrainWorkMode, BrainPendingPlan,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
-export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion };
+export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan };
 export type BrainMessage = BrainMessageView;
 
 /** One backwards page of chat history (lazy-load). `nextBefore` is the cursor for the next older page —
@@ -180,7 +178,7 @@ export interface StatuslineConfig { showModel?: boolean; showContext?: boolean; 
 export interface BrainProject { cwd: string | null; branch: string | null }
 /** One MCP server of this daemon. `mcp: null` (non-admin, or the plugin is off) hides the section. */
 export interface McpServerStatus { name: string; status: string }
-export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean; project?: BrainProject; lspEnabled?: boolean; mcp?: McpServerStatus[] | null }
+export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; workMode?: BrainWorkMode; pendingPlan?: BrainPendingPlan | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean; project?: BrainProject; lspEnabled?: boolean; mcp?: McpServerStatus[] | null }
 /** One subscription rate-limit window of a connected OAuth account (mirrors the daemon's providerUsage). */
 interface UsageWindow { usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
 /** A connected OAuth account's usage rail: its windows (ordered shortest-first) plus plan/freshness meta. */

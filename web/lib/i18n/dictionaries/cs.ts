@@ -1584,6 +1584,7 @@ export const cs = {
     proposedPlan: 'Navržený plán',
     planImplement: 'Implementovat plán',
     planDecision: 'Plán čeká na vaše rozhodnutí — nebo pokračujte v jeho upřesňování zprávou.',
+    planDecisionTitle: 'Plán je připraven',
     workMode: { build: 'Build', plan: 'Plánování', workflow: 'Workflow' },
     workModeLabel: 'Pracovní režim',
     modeSwitched: 'Pracovní režim:',

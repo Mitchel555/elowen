@@ -3622,7 +3622,7 @@ describe('sub-agent session tap + owner steering', () => {
     };
 
     expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
-      .toEqual({ streaming: false, pendingAsk: null });
+      .toEqual({ streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null });
 
     d.session.isStreaming = true;
     void internals.elicitation.ask(sessionId, [{
@@ -3636,7 +3636,35 @@ describe('sub-agent session tap + owner steering', () => {
     internals.elicitation.cancelForSession(sessionId);
     d.session.isStreaming = false;
     expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
-      .toEqual({ streaming: false, pendingAsk: null });
+      .toEqual({ streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null });
+  });
+
+  // Plan mode's decision lives in no client: the mode is stamped per send and the plan is a tool call, so
+  // a surface that was not attached when the turn ran — a reloaded tab, a second browser, the web while
+  // the plan was submitted from the CLI — can only learn that one is waiting from the daemon.
+  it('publishes the work mode and the plan awaiting a decision on both the status and the snapshot', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    expect(svc.status(1)).toMatchObject({ workMode: 'build', pendingPlan: null });
+
+    await svc.send({ userId: 1, text: 'outline the migration', mode: 'plan' });
+    d.store.appendMessage({
+      id: 'plan-call', sessionId: 'brain-1', parentId: null, role: 'assistant',
+      content: { role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'ExitPlanMode', arguments: { plan: '# Ship it' } }] },
+    });
+    d.store.appendMessage({
+      id: 'plan-result', sessionId: 'brain-1', parentId: null, role: 'toolResult',
+      content: { role: 'toolResult', toolCallId: 'call-1', details: { plan: '# Ship it' } },
+    });
+
+    expect(svc.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+    expect(svc.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot.control)
+      .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+
+    // Approving it is an ordinary build turn, so the decision clears itself — nothing has to remember it.
+    await svc.send({ userId: 1, text: 'Implement the plan you proposed above.', mode: 'build' });
+    expect(svc.status(1)).toMatchObject({ workMode: 'build', pendingPlan: null });
   });
 
   it('windows the snapshot history AFTER removing journaled rows, with a cursor the lazy-load can continue', async () => {

@@ -1584,6 +1584,7 @@ export const en = {
     proposedPlan: 'Proposed plan',
     planImplement: 'Implement plan',
     planDecision: 'The plan is waiting for your decision — or keep refining it with a message.',
+    planDecisionTitle: 'Plan ready',
     workMode: { build: 'Build', plan: 'Plan', workflow: 'Workflow' },
     workModeLabel: 'Work mode',
     modeSwitched: 'Work mode:',

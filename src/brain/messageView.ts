@@ -7,7 +7,7 @@ type StoredTurnRow = { id?: string; role: string; content: string; created_at?: 
 // The display-transcript shapes are the daemon↔web wire contract — defined once in src/shared and
 // re-exported here for daemon callers (BrainStore passes its validated rows straight through). See
 // wireContract.ts for why they live outside src/brain.
-import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView } from '../shared/wireContract.js';
+import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView, BrainPendingPlan } from '../shared/wireContract.js';
 import { parseDbTs } from '../shared/time.js';
 import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
@@ -83,6 +83,48 @@ export function submittedPlan(toolName: string, result: unknown): string | undef
   const details = (result as { details?: unknown } | null | undefined)?.details;
   const plan = (details as { plan?: unknown } | null | undefined)?.plan;
   return typeof plan === 'string' && plan.trim() ? stripControl(plan) : undefined;
+}
+
+/** The plan the conversation is currently waiting on a decision for, rebuilt from its durable rows: the
+ *  plan an `ExitPlanMode` call submitted in the NEWEST assistant turn, or null.
+ *
+ *  Same question the CLI answers over its own in-memory transcript (`TranscriptModel.lastSubmittedPlan`),
+ *  answered here for every client that has no transcript of its own — which is what lets the decision
+ *  survive a reload, a second tab and a client that was not attached when the turn ran.
+ *
+ *  The scan is the newest turn, not the newest row: a turn ends on plain text as often as on the tool call
+ *  itself, and taking only the last assistant row would lose a plan that had prose after it. A newer USER
+ *  row ends the turn and the decision with it — the conversation moved on. Display-only session events
+ *  (a model/mode marker landing between the plan and the turn's end) live in their own table, so nothing
+ *  in this row stream can hide the plan. */
+export function pendingSubmittedPlan(rows: readonly StoredTurnRow[]): BrainPendingPlan | null {
+  let start = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i]?.role === 'user') { start = i + 1; break; }
+  }
+  const turn = rows.slice(start);
+  const results = new Map<string, unknown>();
+  for (const row of turn) {
+    if (row.role !== 'toolResult') continue;
+    try {
+      const message = JSON.parse(row.content) as { toolCallId?: string };
+      if (message.toolCallId) results.set(message.toolCallId, message);
+    } catch { /* malformed row → no result to read a plan off */ }
+  }
+  let found: BrainPendingPlan | null = null;
+  for (const row of turn) {
+    if (row.role !== 'assistant') continue;
+    let content: unknown;
+    try { content = (JSON.parse(row.content) as { content?: unknown }).content; }
+    catch { continue; }
+    for (const part of Array.isArray(content) ? content : []) {
+      const call = part as { type?: string; id?: string; name?: string };
+      if (call?.type !== 'toolCall' || typeof call.name !== 'string' || !call.id) continue;
+      const plan = submittedPlan(call.name, results.get(call.id));
+      if (plan) found = { id: call.id, plan };
+    }
+  }
+  return found;
 }
 
 export function toolDisplay(toolName: string, args: unknown): { name: string; detail?: string } {

@@ -1,9 +1,10 @@
 import { createAgentSession, SessionManager, DefaultResourceLoader } from '@earendil-works/pi-coding-agent';
-import type { BrainStore, BrainSearchHit, BrainWorkflowRun } from '../../store/brainStore.js';
+import type { BrainStore, BrainSearchHit, BrainMessageRow, BrainWorkflowRun } from '../../store/brainStore.js';
 import type { BrainRuntimeConfig } from '../providers.js';
 import { buildBrainRegistry, resolveBrainModel } from '../providers.js';
-import { extractText, shapeBrainMessages, lastAssistant } from '../messageView.js';
+import { extractText, shapeBrainMessages, lastAssistant, pendingSubmittedPlan } from '../messageView.js';
 import type { BrainMessageView } from '../messageView.js';
+import type { BrainPendingPlan, BrainWorkMode } from '../../shared/wireContract.js';
 import { sessionUsageSnapshot } from '../events.js';
 import type { AskQuestion, BrainCard, BrainUsage } from '../events.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
@@ -66,6 +67,8 @@ export interface BrainStatusView {
   fast: boolean;
   fastAvailable: boolean;
   pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null;
+  workMode: BrainWorkMode;
+  pendingPlan: BrainPendingPlan | null;
   cards: BrainCard[];
   queued: { id: string; text: string }[];
   yolo: boolean;
@@ -158,6 +161,20 @@ export class BrainStatusService {
       this.d.store.getSessionEvents(sessionId),
       this.workflowRuns(sessionId),
     );
+  }
+
+  /** Plan mode's state for one conversation: the mode the daemon last ran a turn in, plus the plan that
+   *  turn submitted and is now waiting on the user. Published so a client stops having to guess either —
+   *  the mode is stamped per send and kept nowhere else, so a plan entered from the CLI was invisible to
+   *  the web, and a tab that reloaded lost the decision entirely.
+   *
+   *  The plan is read ONLY in plan mode: outside it there is no decision to raise (the model calls
+   *  ExitPlanMode nowhere else), and the gate is also what keeps every ordinary status call off the
+   *  history read. `rows` lets a caller that already loaded them (the snapshot) skip a second query. */
+  private planState(live: LiveBrain | undefined, sessionId: string | null, rows?: BrainMessageRow[]): { workMode: BrainWorkMode; pendingPlan: BrainPendingPlan | null } {
+    const workMode = live?.lastTurnMode ?? 'build';
+    if (workMode !== 'plan' || !sessionId) return { workMode, pendingPlan: null };
+    return { workMode, pendingPlan: pendingSubmittedPlan(rows ?? this.d.store.getMessages(sessionId)) };
   }
 
   /** The current provider config, or null when nothing is configured (never throws). Shared by the
@@ -254,6 +271,10 @@ export class BrainStatusService {
       // A question parked for the active conversation, so a client reconnecting mid-question (refresh, SSE
       // drop) restores the picker instead of hanging until the timeout.
       pendingAsk: b ? this.d.elicitation.pendingForSession(b.sessionId) : null,
+      // Plan mode's mode + parked decision, for the same reason as the question above: a client that was
+      // not attached when the plan was submitted (a reload, a second tab, a surface that never entered
+      // plan mode itself) can only learn about it here.
+      ...this.planState(b, activeId),
       // The conversation's display cards (ctx.emitCard) so a client restores them on connect. Keyed on the
       // CONVERSATION, not the live session: reopening a chat the user closed has no live brain yet, and
       // that is exactly when the todo checklist has to come back rather than show up empty.
@@ -369,9 +390,10 @@ export class BrainStatusService {
     // Journaled users are already durable, but replaying them is what preserves their position among
     // pre/post-steer deltas. Remove exactly those id-matched rows from the history prefix (no text
     // guessing: display text may differ from persisted image/mention framing).
+    const rows = this.d.store.getMessages(sessionId);
     const clean = this.shapedHistory(
       sessionId,
-      this.d.store.getMessages(sessionId).filter((message) => !orderedUserRows.has(message.id)),
+      rows.filter((message) => !orderedUserRows.has(message.id)),
     );
     // Window AFTER the removal, never before: cutting first would let a journaled row consume a slot of
     // the window and drop a real turn out of the page. The removed rows all belong to the UNSETTLED run,
@@ -386,6 +408,7 @@ export class BrainStatusService {
       control: {
         streaming: !!live && (live.session.isStreaming || this.d.sessions.hasActiveChildren(live.sessionId)),
         pendingAsk: live ? this.d.elicitation.pendingForSession(live.sessionId) : null,
+        ...this.planState(live, sessionId, rows),
       },
       ...(page ? { hasMore: page.hasMore, nextBefore: page.nextBefore } : {}),
       ...replay,
