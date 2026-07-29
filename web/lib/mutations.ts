@@ -2,7 +2,7 @@
 import { useMutation, useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { elowenClient } from './elowenClient';
 import { QUERY_KEYS } from './queries';
-import type { Task, CreateTaskInput, UpdateTaskInput, PlanInput, EngageInput, ConfigPatch, InsertPhasesInput, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, CronJob, MemoryCreate, MemoryPatch, EmbeddingSettingsPatch, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettingsPatch, PluginInfo, PluginDetail } from './types';
+import type { Task, CreateTaskInput, UpdateTaskInput, PlanInput, EngageInput, ConfigPatch, InsertPhasesInput, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, CronJob, MemoryCreate, MemoryPatch, EmbeddingSettingsPatch, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettingsPatch, PluginInfo, PluginDetail, PluginSkill } from './types';
 
 type TaskCacheSnapshot = Array<[QueryKey, Task[] | undefined]>;
 
@@ -329,12 +329,22 @@ export function useCreatePluginSkill() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['plugin-skills'] }),
   });
 }
-/** Edit a user skill in place — description/content and the disable-model-invocation flag. */
+/** Edit a user skill in place — description/content and the disable-model-invocation flag. Optimistic:
+ *  the row flips instantly (the daemon's plugin hot-reload can take a while, and the old wait-for-refetch
+ *  behaviour left the toggle greyed out until a manual reload). On error the change rolls back; on settle
+ *  the list re-fetches the real backend state. */
 export function useUpdatePluginSkill() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (v: { name: string; patch: { description?: string; content?: string; disableModelInvocation?: boolean } }) => elowenClient.updatePluginSkill(v.name, v.patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['plugin-skills'] }),
+    onMutate: async (v) => {
+      await qc.cancelQueries({ queryKey: ['plugin-skills'] });
+      const prev = qc.getQueryData<PluginSkill[]>(['plugin-skills']);
+      qc.setQueryData<PluginSkill[]>(['plugin-skills'], (cur) => cur?.map((s) => (s.name === v.name ? { ...s, ...v.patch } : s)));
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => { if (ctx?.prev) qc.setQueryData(['plugin-skills'], ctx.prev); },
+    onSettled: () => { void qc.invalidateQueries({ queryKey: ['plugin-skills'] }); },
   });
 }
 export function useDeletePluginSkill() {

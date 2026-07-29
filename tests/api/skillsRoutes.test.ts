@@ -113,10 +113,73 @@ describe('skills routes', () => {
     expect((await app.request('/plugins/skills/deploy-checklist', patch(adminTok, { disableModelInvocation: true }))).status).toBe(200);
     expect(readFileSync(join(userDir, 'deploy-checklist.md'), 'utf-8'))
       .toBe('---\nname: deploy-checklist\ndescription: When deploying.\ndisable-model-invocation: true\n---\n\nCheck twice.\n');
-    // Edit body + description, and clear the flag.
+    // Edit body + description, and clear the flag. A content edit bumps metadata.version (absent → 1).
     expect((await app.request('/plugins/skills/deploy-checklist', patch(adminTok, { description: 'Updated.', content: 'New body.', disableModelInvocation: false }))).status).toBe(200);
     expect(readFileSync(join(userDir, 'deploy-checklist.md'), 'utf-8'))
-      .toBe('---\nname: deploy-checklist\ndescription: Updated.\n---\n\nNew body.\n');
+      .toBe('---\nname: deploy-checklist\ndescription: Updated.\nmetadata:\n  version: 1\n---\n\nNew body.\n');
+  });
+
+  it('PATCH preserves unknown frontmatter fields (license/allowed-tools/metadata/compatibility)', async () => {
+    const { app, userDir, adminTok } = setup();
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'claude-skill.md'),
+      '---\nname: claude-skill\ndescription: "Quoted: with a colon"\nlicense: MIT\nallowed-tools:\n  - Read\n  - Grep\ncompatibility: pi>=1\nmetadata:\n  version: 3\n  author: sam\n---\n\nOriginal body.\n');
+    // Toggle the disclosure flag only — nothing else may be lost, and the version must NOT bump.
+    expect((await app.request('/plugins/skills/claude-skill', patch(adminTok, { disableModelInvocation: true }))).status).toBe(200);
+    const raw = readFileSync(join(userDir, 'claude-skill.md'), 'utf-8');
+    expect(raw).toContain('license: MIT\n');
+    expect(raw).toContain('allowed-tools:\n  - Read\n  - Grep\n');
+    expect(raw).toContain('compatibility: pi>=1\n');
+    expect(raw).toContain('version: 3\n');
+    expect(raw).toContain('author: sam\n');
+    expect(raw).toContain('disable-model-invocation: true\n');
+    // The quoted description parses cleanly (no surrounding quotes leak into the UI payload).
+    const list = (await (await app.request('/plugins/skills/list', auth(adminTok))).json()) as { name: string; description: string; version: number | null }[];
+    const row = list.find((s) => s.name === 'claude-skill');
+    expect(row?.description).toBe('Quoted: with a colon');
+    expect(row?.version).toBe(3);
+  });
+
+  it('PATCH bumps metadata.version on a content edit but not on a flag-only toggle', async () => {
+    const { app, userDir, adminTok } = setup();
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'versioned.md'), '---\nname: versioned\ndescription: D.\nmetadata:\n  version: 5\n---\n\nBody.\n');
+    // Flag-only toggle: version stays 5.
+    await app.request('/plugins/skills/versioned', patch(adminTok, { disableModelInvocation: true }));
+    expect(readFileSync(join(userDir, 'versioned.md'), 'utf-8')).toContain('version: 5\n');
+    // Content edit: 5 → 6.
+    await app.request('/plugins/skills/versioned', patch(adminTok, { content: 'Changed.' }));
+    expect(readFileSync(join(userDir, 'versioned.md'), 'utf-8')).toContain('version: 6\n');
+  });
+
+  it('reads, edits and deletes the directory-form <name>/SKILL.md layout', async () => {
+    const { app, userDir, adminTok } = setup();
+    const skillDir = join(userDir, 'nested-skill');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: nested-skill\ndescription: Nested.\n---\n\nNested body.\n');
+    // A support file that must survive a delete of the skill.
+    mkdirSync(join(skillDir, 'references'), { recursive: true });
+    writeFileSync(join(skillDir, 'references', 'notes.md'), 'keep me\n');
+
+    const list = (await (await app.request('/plugins/skills/list', auth(adminTok))).json()) as { name: string; content?: string }[];
+    expect(list).toContainEqual(expect.objectContaining({ name: 'nested-skill', content: 'Nested body.' }));
+
+    expect((await app.request('/plugins/skills/nested-skill', patch(adminTok, { content: 'Edited.' }))).status).toBe(200);
+    expect(readFileSync(join(skillDir, 'SKILL.md'), 'utf-8')).toContain('Edited.\n');
+
+    expect((await app.request('/plugins/skills/nested-skill', del(adminTok))).status).toBe(200);
+    expect(existsSync(join(skillDir, 'SKILL.md'))).toBe(false);
+    // Support files remain, so the folder is kept.
+    expect(existsSync(join(skillDir, 'references', 'notes.md'))).toBe(true);
+  });
+
+  it('DELETE removes an empty directory-form skill folder entirely', async () => {
+    const { app, userDir, adminTok } = setup();
+    const skillDir = join(userDir, 'bare-skill');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: bare-skill\ndescription: Bare.\n---\n\nBody.\n');
+    expect((await app.request('/plugins/skills/bare-skill', del(adminTok))).status).toBe(200);
+    expect(existsSync(skillDir)).toBe(false);
   });
 
   it('PATCH rejects a bundled skill (400), a missing skill (404) and empty content (400)', async () => {

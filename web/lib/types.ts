@@ -473,8 +473,9 @@ export interface WhatsAppPairing { qrImage: string | null; code: string | null; 
 /** One markdown skill of the skills plugin (GET /plugins/skills/list). Bundled skills ship with the
  *  install and are read-only; user skills are created at runtime and can be edited or deleted.
  *  `disableModelInvocation` mirrors PI's `disable-model-invocation` frontmatter flag — when set the
- *  skill is hidden from progressive disclosure and reachable only via `/skill:name`. */
-export interface PluginSkill { name: string; description: string; source: 'bundled' | 'user'; disableModelInvocation: boolean; content?: string }
+ *  skill is hidden from progressive disclosure and reachable only via `/skill:name`. `version` mirrors
+ *  the optional `metadata.version` frontmatter field (null when the skill carries none). */
+export interface PluginSkill { name: string; description: string; source: 'bundled' | 'user'; disableModelInvocation: boolean; version?: number | null; content?: string }
 /** One typed sub-agent of the subagent plugin (GET /plugins/agents/list). Built-in explore/plan ship
  *  with the install and are read-only; user agents are one `.md` each and can be edited or deleted.
  *  `tools` is the frontmatter spec: a preset keyword (`read-only`/`all`/`inherit`) or an explicit tool
