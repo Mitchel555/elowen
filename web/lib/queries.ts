@@ -21,6 +21,7 @@ export const QUERY_KEYS = {
   missions: ['missions'] as const,
   health: ['health'] as const,
   config: ['config'] as const,
+  me: ['me'] as const,
   sessionSignals: ['session-signals'] as const,
   advisorStatus: ['advisor-status'] as const,
   system: ['system'] as const,
@@ -148,9 +149,16 @@ export const useSystemSkills = () =>
 
 export const useUsers = () => useQuery({ queryKey: ['users'], queryFn: elowenClient.listUsers });
 
-export const useActivity = (type?: string) =>
-  // SSE task/mission/signal/review events all invalidate ['activity']; no 5s poll needed.
-  useQuery({ queryKey: ['activity', type ?? 'all'], queryFn: () => elowenClient.activity(type ? { type } : undefined) });
+export const useActivity = (type?: string, limit?: number) =>
+  // SSE task/mission/signal/review events all invalidate ['activity']; no 5s poll needed. `limit` joins
+  // the key so a small dashboard tail and the full timeline never share one cached payload.
+  useQuery({
+    queryKey: ['activity', type ?? 'all', limit ?? null],
+    queryFn: () => elowenClient.activity({
+      ...(type ? { type } : {}),
+      ...(limit ? { limit } : {}),
+    }),
+  });
 
 /** Pending overseer escalations — phases a post-done review rejected that still need a human, derived
  *  from the persisted review feed joined to live task/dep state. Shared by the Escalations page, the
@@ -243,7 +251,7 @@ export const useProjectsCommits = (projectIds: number[], hours: number) =>
   });
 
 export const useMe = () =>
-  useQuery({ queryKey: ['me'], queryFn: elowenClient.me, staleTime: 5 * 60 * 1000 });
+  useQuery({ queryKey: QUERY_KEYS.me, queryFn: elowenClient.me, staleTime: 5 * 60 * 1000 });
 
 /** First-run subsystem readiness (admin-only endpoint). Gated by `enabled` so non-admin surfaces never
  *  fire the 403 request. Powers the dashboard "finish setup" nudge and the onboarding checklist. */

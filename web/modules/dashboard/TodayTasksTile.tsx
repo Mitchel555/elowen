@@ -4,6 +4,7 @@ import { Check } from 'lucide-react';
 import { useTasks } from '../../lib/queries';
 import { useTranslation } from '../../lib/i18n';
 import { parseTs } from '../../lib/format';
+import { LoadingState } from '../../components/ui/states';
 import type { Task } from '../../lib/types';
 
 const isSameDay = (ms: number | null, now: number): boolean => {
@@ -35,7 +36,9 @@ export function TodayTasksTile({ now }: { now: number }) {
         <h2 id="dashboard-tasks" className="dash-label">{t.dashboard.todayTasks}</h2>
         {rows.length > 0 ? <span className="font-mono text-[10px] tabular-nums text-text-muted">{t.dashboard.todayTasksCount.replace('{done}', String(done)).replace('{total}', String(rows.length))}</span> : null}
       </header>
-      {rows.length === 0 ? (
+      {tasks.isLoading ? (
+        <LoadingState />
+      ) : rows.length === 0 ? (
         <p className="py-5 text-sm text-text-muted">{t.dashboard.todayTasksEmpty}</p>
       ) : (
         <div>

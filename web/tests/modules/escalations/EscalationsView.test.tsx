@@ -20,7 +20,9 @@ const server = setupServer(
 beforeAll(() => server.listen({ onUnhandledRequest })); afterEach(() => { server.resetHandlers(); patched = []; approvedGates = []; asksReplied = []; }); afterAll(() => server.close());
 
 function seed(client: ReturnType<typeof createWrapper>['client']) {
-  client.setQueryData(['activity', 'review'], [
+  // The activity key carries the row limit as its third segment (unset → null), so a capped dashboard
+  // tail and this uncapped review feed never share one cached payload.
+  client.setQueryData(['activity', 'review', null], [
     { id: 2, ts: '2026-06-22 10:00:00', type: 'review', target: 'p1', detail: 'escalated: summary claims a fix that is not in the diff', project_id: 1, label: 'Audit docs' },
   ]);
   client.setQueryData(['tasks'], [
@@ -74,7 +76,7 @@ describe('EscalationsView', () => {
 
   it('renders a parked agent question and sends a human reply that unblocks it', async () => {
     const { wrapper: Wrapper, client } = createWrapper();
-    client.setQueryData(['activity', 'review'], []);
+    client.setQueryData(['activity', 'review', null], []);
     client.setQueryData(['tasks'], []);
     client.setQueryData(['tasks', 'deps'], []);
     client.setQueryData(['pending-asks'], [
@@ -90,7 +92,7 @@ describe('EscalationsView', () => {
 
   it('renders an empty state when nothing is escalated', () => {
     const { wrapper: Wrapper, client } = createWrapper();
-    client.setQueryData(['activity', 'review'], []);
+    client.setQueryData(['activity', 'review', null], []);
     client.setQueryData(['tasks'], []);
     client.setQueryData(['tasks', 'deps'], []);
     render(<Wrapper><ToastProvider><EscalationsView /></ToastProvider></Wrapper>);
