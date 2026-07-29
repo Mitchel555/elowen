@@ -50,11 +50,24 @@ describe('cli/setup/headless.parseFlags', () => {
     expect(parseFlags(['--project', '/repo/x'], {}).project).toBe('/repo/x');
   });
 
-  it('a flag whose value is another flag reads as absent (never eats the next flag)', () => {
-    // A forgotten password value must not silently become "--provider" (the shared reader's own
-    // semantics are covered in tests/cli/flags.test.ts).
-    expect(parseFlags(['--admin-password', '--provider', 'openai'], {}).adminPassword).toBeUndefined();
+  it('refuses a flag written without its value instead of falling back to a default', () => {
+    // It must never eat the next flag either (that reader's own semantics live in tests/cli/flags.test.ts) —
+    // but silently reading as absent is just as wrong here: unattended, `--provider --api-key sk-x` used to
+    // skip provider setup entirely and still report success.
+    expect(() => parseFlags(['--admin-password', '--provider', 'openai'], {})).toThrow(/missing value for --admin-password/);
+    expect(() => parseFlags(['--provider', '--api-key', 'sk-x'], {})).toThrow(/missing value for --provider/);
+    // A value that legitimately starts with `--` still gets through, via the =value escape.
+    expect(parseFlags(['--admin-password=--secret'], {}).adminPassword).toBe('--secret');
     expect(parseFlags(['--admin-password', 'secret'], {}).adminPassword).toBe('secret');
+  });
+
+  it('names every offending flag at once, so an unattended run is fixed in one pass', () => {
+    expect(() => parseFlags(['--provider', '--model', '--project'], {}))
+      .toThrow(/missing value for --project, --provider, --model/);
+  });
+
+  it('a --memory written without a value is refused rather than silently skipping memory', () => {
+    expect(() => parseFlags(['--memory'], {})).toThrow(/missing value for --memory/);
   });
 
   it('prefers a flag over the env var, falls back to env otherwise', () => {

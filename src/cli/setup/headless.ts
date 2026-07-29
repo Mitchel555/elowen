@@ -7,7 +7,7 @@ import { writeMarker } from './marker.js';
 import { webBaseUrl } from '../installInfo.js';
 import { getBrainProviders, keepProvider, putEmbeddedExec } from './steps/shared.js';
 import { realRunner } from '../install/runner.js';
-import { flagValue } from '../flags.js';
+import { flagValue, requireFlagValues } from '../flags.js';
 import { provisionOllama } from '../provision/ollama.js';
 import { installTsServer, TS_SERVER_COMMAND, TS_SERVER_INSTALL_HINT } from './steps/lsp.js';
 import { commandExists } from '../../lsp/servers.js';
@@ -26,7 +26,11 @@ export async function runHeadlessSetup(base: string, env: NodeJS.ProcessEnv, arg
   if (rawMemory !== undefined && !(MEMORY_MODES as readonly string[]).includes(rawMemory)) {
     return die(`Unknown --memory "${rawMemory}". Use one of: ${MEMORY_MODES.join(', ')}.`);
   }
-  const o = parseFlags(args, env);
+  // Parsing is a hard gate, before a single request is made: a malformed flag must stop the run while
+  // nothing has been created yet, not halfway through onboarding.
+  let o: HeadlessOpts;
+  try { o = parseFlags(args, env); }
+  catch (e) { return die(msg(e)); }
   const ctx: WizardCtx = { base, fetchFn: fetch, answers: {} };
 
   // ── Account ──────────────────────────────────────────────────────────────────────────────────
@@ -202,7 +206,16 @@ export interface HeadlessOpts {
 
 const MEMORY_MODES = ['reuse', 'openrouter', 'skip'] as const;
 
+/** Every flag here takes a VALUE. Written without one it used to fall through to a default or to nothing
+ *  at all, which on an unattended setup is the worst kind of failure: `--provider --api-key sk-x` left the
+ *  provider unconfigured and the run still printed "Setup complete". Same contract as `elowen install`. */
+const VALUE_FLAGS = [
+  '--admin-user', '--admin-password', '--project', '--project-slug', '--provider',
+  '--api-key', '--base-url', '--model', '--memory', '--memory-key', '--embedding-model',
+] as const;
+
 export function parseFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts {
+  requireFlagValues(args, VALUE_FLAGS);
   const val = (name: string): string | undefined => flagValue(args, name);
   const has = (name: string): boolean => args.includes(name);
   const memory = (val('--memory') ?? 'skip') as HeadlessOpts['memory'];
