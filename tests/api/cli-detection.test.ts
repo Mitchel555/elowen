@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { detectClis } from '../../src/integrations/cliDetection.js';
 import { createServer } from '../../src/api/server.js';
 import { openDb } from '../../src/store/db.js';
@@ -9,6 +9,12 @@ import { EventBus } from '../../src/api/sse.js';
 import { FakeClock } from '../../src/shared/clock.js';
 import { ConfigStore } from '../../src/store/configStore.js';
 import { UserStore } from '../../src/store/userStore.js';
+
+// Every detectClis() call spawns 9 real binaries with --version, and one of them (kilo) boots a
+// daemon to answer, so a single case costs ~2.5s idle. Vitest's 5s default left only 2x headroom,
+// which the full 400-file suite eats: these cases timed out on a loaded machine and passed on re-run.
+// The work is genuinely slow, not stuck — the limit was wrong, so give it a real one.
+vi.setConfig({ testTimeout: 30_000 });
 
 function makeAuthedApp() {
   const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
