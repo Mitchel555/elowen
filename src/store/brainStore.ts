@@ -12,7 +12,7 @@ import {
   sameDelegatedExecutionScope,
   type DelegatedExecutionScope,
 } from '../brain/delegatedScope.js';
-import { BrainUsageStore, rollupDroppedUsage } from './brainUsageStore.js';
+import { BrainUsageStore, numeric, rollupDroppedUsage } from './brainUsageStore.js';
 import { BrainDelegationStore } from './brainDelegationStore.js';
 import type { BrainCard, BrainGoalState } from '../brain/events.js';
 
@@ -216,10 +216,13 @@ export class BrainStore {
    *  corrupt message would otherwise fail this query for the WHOLE user), so a bad row is isolated —
    *  contributes 0 — instead of crashing every session's total. NULL (no message, via the LEFT JOIN)
    *  also fails `json_valid` and falls to the same 0 branch, so the join's "session with no messages"
-   *  case is unaffected. */
+   *  case is unaffected. The field itself goes through the shared {@link numeric} read, so a
+   *  numeric-looking STRING (which SUM() would silently coerce) counts here exactly as it counts in the
+   *  usage views and in `rollupDroppedUsage` — otherwise this panel and the Stats page disagree about
+   *  the same session, and compacting it would change this total. */
   tokenTotals(userId: number): Record<string, number> {
     const rows = this.db.prepare(
-      `SELECT s.id AS id, COALESCE(SUM(CASE WHEN json_valid(m.content) THEN json_extract(m.content, '$.usage.totalTokens') ELSE 0 END), 0) AS tokens
+      `SELECT s.id AS id, COALESCE(SUM(CASE WHEN json_valid(m.content) THEN ${numeric('m.content', '$.usage.totalTokens')} ELSE 0 END), 0) AS tokens
          FROM brain_sessions s LEFT JOIN brain_messages m ON m.session_id = s.id
         WHERE s.user_id = ? GROUP BY s.id`
     ).all(userId) as { id: string; tokens: number }[];

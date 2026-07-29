@@ -8,8 +8,9 @@ import { TASK_PREFIX } from '../brain/sessionId.js';
 // rows, counts only real finite numbers. Without the type check the two disagree, so compacting a session
 // would CHANGE its historical totals. `absent` is 0 for the summed columns, but NULL for cost and ts: a
 // missing cost must stay "unavailable" rather than become a real $0, and an undated row is excluded by
-// `ts IS NOT NULL`.
-const numeric = (src: string, path: string, absent = '0'): string =>
+// `ts IS NOT NULL`. Exported because every SQL sum over these fields must read them the SAME way —
+// {@link BrainStore.tokenTotals} sums `$.usage.totalTokens` outside this file and would otherwise drift.
+export const numeric = (src: string, path: string, absent = '0'): string =>
   `CASE WHEN json_type(${src}, '${path}') IN ('integer', 'real') THEN json_extract(${src}, '${path}') ELSE ${absent} END`;
 
 // Normalized usage rows shared by usageByDay + usageByModel. One row per LIVE assistant message (its
@@ -93,7 +94,8 @@ export interface BrainDescendantUsage {
  *  under `$.usageRollup` — one bucket per model that produced dropped spend — under a key that is NEVER
  *  `usage`, so PI's live session and `usageOf` (statusline) never double-count it after rehydrate.
  *  `model` preserves per-model attribution across compaction; `at` is the ms-epoch of the newest dropped
- *  row of that model (the day/window attribution basis, standing in for a live row's `$.timestamp`).
+ *  row of that model (the day/window attribution basis, standing in for a live row's `$.timestamp`) and
+ *  is ABSENT when nothing dropped into the bucket carried a date — see {@link rollupDroppedUsage}.
  *  `durationMs` and `measuredOutput` are the MEASURED pair — wall time and output tokens of the dropped
  *  generations that carried both — so their tokens/sec survives compaction. They are a subset of `output`:
  *  untimed rows (predating the timing stamp) and aborts (a duration with an empty `usage`) contribute to
@@ -102,7 +104,7 @@ export interface BrainDescendantUsage {
 export interface UsageRollupBucket {
   model: string;
   input: number; output: number; cacheRead: number; cacheWrite: number;
-  totalTokens: number; reasoning: number; at: number;
+  totalTokens: number; reasoning: number; at?: number;
   durationMs?: number; measuredOutput?: number; cost?: { total: number };
 }
 
@@ -135,7 +137,7 @@ export function rollupDroppedUsage(dropped: readonly { content: string }[]): Usa
     }
     const cost = (u as { cost?: { total?: unknown } }).cost;
     if (cost && typeof cost === 'object' && typeof cost.total === 'number') b.cost = { total: (b.cost?.total ?? 0) + cost.total };
-    if (at > b.at) b.at = at; // newest dropped row of this model wins as its attribution point
+    if (at > (b.at ?? 0)) b.at = at; // newest dropped row of this model wins as its attribution point
   };
   for (const row of dropped) {
     let content: unknown;
@@ -157,7 +159,11 @@ export function rollupDroppedUsage(dropped: readonly { content: string }[]): Usa
   }
   const buckets = [...byModel.values()].filter((b) => b.totalTokens !== 0 || b.cost != null);
   if (buckets.length === 0) return null;
-  for (const b of buckets) if (b.at === 0) b.at = Date.now(); // undated legacy → the compaction moment
+  // A legacy row with no numeric `$.timestamp` is already invisible to the day/model views (`ts IS NOT
+  // NULL`), so its bucket must stay undated too: dating it — to the compaction moment or anything else —
+  // would make compaction ADD spend to a day the session never spent it on. Undated stays undated, on
+  // both sides of a compaction; the tokens still count wherever no date is required (descendantUsage).
+  for (const b of buckets) if (b.at === 0) delete b.at;
   return buckets;
 }
 

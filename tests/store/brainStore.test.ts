@@ -948,6 +948,22 @@ describe('BrainStore', () => {
         expect(days.find((d) => d.day === '2026-06-20')?.tokens).toBe(5);
       });
 
+      it('leaves an UNDATED dropped row undated, so compaction cannot conjure spend onto a new day', () => {
+        const compactMs = Date.parse('2026-06-20T00:00:00Z');
+        store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+        // A legacy assistant row carrying usage but NO `$.timestamp`: the day/model views exclude it
+        // (`ts IS NOT NULL`) BEFORE the compaction, so they must still exclude it after — dating its
+        // bucket would make a compaction add historical spend to the day it happened to run on.
+        store.appendMessage({
+          id: 'undated', sessionId: 'brain-a', parentId: null, role: 'assistant',
+          content: { role: 'assistant', model: 'claude-opus-4-8', usage: { totalTokens: 70, cost: { total: 0.07 } } },
+        });
+        usageMsg('brain-a', 'keep', { totalTokens: 5, cost: 0.005 }, compactMs, 'claude-opus-4-8');
+        store.compactSessionMessages('brain-a', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary', summary: 's', timestamp: compactMs } }, 1);
+        expect(store.usageByModel(1)[0]!.usage.total).toBe(5);
+        expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(5);
+      });
+
       it('chains across a second compaction without losing the earlier rollup', () => {
         store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
         usageMsg('brain-a', 'a', { totalTokens: 100, cost: 0.1 });
@@ -1033,6 +1049,9 @@ describe('BrainStore', () => {
       expect(row!.usage.costUsd).toBeCloseTo(0.1); // the "9.9" string never reaches the sum
       expect(row!.usage.outputTps).toBeNull();     // nor does a stringly-typed duration fake a speed
       expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+      // The session panel reads the SAME field with its own SQL: an untyped read there would show 600
+      // next to the Stats page's 100 for one session, and drop back to 100 the moment it compacts.
+      expect(store.tokenTotals(1)['brain-a']).toBe(100);
       // What the SQL counts must be exactly what a compaction of the same rows would carry forward.
       expect(rollupDroppedUsage(store.getMessages('brain-a'))!.reduce((s, b) => s + b.totalTokens, 0)).toBe(100);
     });
