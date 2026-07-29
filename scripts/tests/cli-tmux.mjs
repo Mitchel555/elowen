@@ -193,7 +193,10 @@ function scrollbarThumb(plain, frame) {
 }
 
 function panelMeterRows(plain) {
-  return paneLines(plain).filter((line) => /\[[▰ ]{4,}\]/u.test(line));
+  // 2+ cells, not 4+: at the 36-column minimum panel a long reset label ("↻ Sat 01:40 PM") squeezes the
+  // rate-limit bars to their floor, because the rail spends its remaining width on the guaranteed right
+  // gutter rather than on the meter. These rows still have to BE meters — `[]` and `[ ]` stay excluded.
+  return paneLines(plain).filter((line) => /\[[▰ ]{2,}\]/u.test(line));
 }
 
 // The two bottom rows are the footer: the model/reasoning/activity meta line (status) and the keybind
@@ -575,7 +578,7 @@ try {
   assert.ok(meterRows.every((row) => !/[░▱]/u.test(row)),
     'telemetry meters must use only the framed ▰ vocabulary, never the retired █/░/▱ track designs');
   assert.ok(meterRows.every((row) => {
-    const framed = row.match(/\[[▰ ]{4,}\]/gu) ?? [];
+    const framed = row.match(/\[[▰ ]{2,}\]/gu) ?? [];
     return framed.length === 1 && /^\[▰* *\]$/u.test(framed[0]);
   }), 'each narrow telemetry meter must be one framed [▰ … ] run with lit segments packed at the start');
   assert.match(narrowPanelCapture, /5h[\s▰\[\]]+23%/u, '5h OAuth meter must fit at 36 columns');

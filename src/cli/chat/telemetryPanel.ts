@@ -335,6 +335,9 @@ export class TelemetryPanel implements Component {
     // its two-space indent is `label(7) bar(cells) ' ' pct(4) ' ' reset`, so the fixed overhead beside the
     // bar is 13 columns; the bar fills whatever the shared content width leaves.
     const resetWidth = Math.max(...limits.windows.map((w) => visibleWidth(this.rateLimitReset(w.resetsAt, w.windowMinutes))));
+    // The floor keeps a bar present rather than pretty: at the 36-column minimum panel a long reset
+    // label ("↻ Sat 01:40 PM") leaves it only a few cells. Raising the floor would buy legibility with
+    // the right gutter, which the rail guarantees at every width — so the meter yields, not the margin.
     const cells = Math.max(4, this.contentWidth(width) - 13 - resetWidth);
     for (const window of limits.windows) rows.push(this.rateLimitWindowRow(window, cells));
     return rows;
