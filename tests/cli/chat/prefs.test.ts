@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { resolveLocale } from '../../../src/cli/chat/prefs.js';
+import { loadPrefs, resolveLocale, savePrefs } from '../../../src/cli/chat/prefs.js';
 
 const env = (vars: Record<string, string>): NodeJS.ProcessEnv => vars as NodeJS.ProcessEnv;
 
@@ -26,5 +29,26 @@ describe('resolveLocale', () => {
     expect(resolveLocale({}, env({}))).toBe('en');
     expect(resolveLocale({}, env({ LANG: 'de_DE.UTF-8' }))).toBe('en');
     expect(resolveLocale({}, env({ LANG: 'en_US.UTF-8' }))).toBe('en');
+  });
+});
+
+describe('showMascot persistence', () => {
+  it('round-trips through cli-prefs.json and merges without clobbering other prefs', () => {
+    const home = mkdtempSync(join(tmpdir(), 'elowen-mascot-pref-'));
+    try {
+      const e = env({ HOME: home });
+      expect(loadPrefs(e).showMascot).toBeUndefined(); // unset → the caller treats it as shown
+
+      savePrefs({ theme: 'nord' }, e);
+      savePrefs({ showMascot: false }, e);
+      const prefs = loadPrefs(e);
+      expect(prefs.showMascot).toBe(false); // survives a fresh load == a CLI restart
+      expect(prefs.theme).toBe('nord');     // the earlier pref is not clobbered by the merge
+
+      savePrefs({ showMascot: true }, e);
+      expect(loadPrefs(e).showMascot).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

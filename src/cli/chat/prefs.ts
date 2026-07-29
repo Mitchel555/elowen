@@ -10,6 +10,9 @@ export interface CliPrefs {
   theme?: string;
   /** Render the model's Thought rows in the transcript (default true) — toggled by `/reasoning show`. */
   showThoughts?: boolean;
+  /** Show the flame mascot on the start screen and in the telemetry rail (default true) — toggled by
+   *  `/maskot`. Purely local CLI chrome, so unlike showThoughts it is NEVER mirrored to the server. */
+  showMascot?: boolean;
   /** Custom keybinds: action id → chord spec (see DEFAULT_KEYBINDS in keys.ts for the grammar).
    *  Edited by hand; /keybinds lists the effective map and flags invalid entries. */
   keybinds?: Record<string, string>;

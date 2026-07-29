@@ -2,6 +2,7 @@ import { CURSOR_MARKER, ProcessTerminal, SelectList, TUI, decodeKittyPrintable, 
 import type { Component, Focusable, SelectItem } from '@earendil-works/pi-tui';
 import { color, chatTheme, paintRow } from '../chat/theme.js';
 import { MASCOT_ART } from '../chat/mascot.js';
+import { loadPrefs } from '../chat/prefs.js';
 import { terminalInlineText, terminalSafeAnsi, terminalSafeComponent } from './text.js';
 
 const CANCEL: symbol = Symbol('elowen-prompt-cancel');
@@ -65,7 +66,9 @@ export function mascot(): void {
  *  runtime decoding) plus a spacer — or nothing while unarmed, when the viewport is narrower than the art
  *  (it would hard-wrap into garbage), or too short to fit art + prompt without pushing the prompt off. */
 export function mascotHeaderLines(width: number): string[] {
-  if (!mascotArmed || width < 28 || termHeight() < 30) return [];
+  // Respect the CLI-wide `/maskot` preference so a user who hid the flame in chat does not meet it again
+  // over the setup/menu modals. Default (unset) stays shown.
+  if (!mascotArmed || loadPrefs().showMascot === false || width < 28 || termHeight() < 30) return [];
   const pad = ' '.repeat(Math.max(0, Math.floor((width - 28) / 2)));
   return [...MASCOT_ART.map((line) => pad + line), ''];
 }

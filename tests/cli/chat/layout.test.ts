@@ -849,6 +849,22 @@ describe('chat layout components', () => {
     expect(last.indexOf('elowen v1.8.7')).toBeGreaterThan(last.indexOf('~/elowen · main'));
   });
 
+  it('drops the flame wordmark from the start screen when /maskot is off, still pinning input and status', () => {
+    const input = { invalidate: (): void => { /* stateless */ }, render: (width: number): string[] => [`[input ${width}]`] };
+    const state = {
+      modelLine: 'Build · kimi-k2 moonshot', hints: '⏎ send · / commands', tip: 'Tip ask anything',
+      notice: '', statusLeft: '~/elowen · main', version: '1.8.7', showMascot: false,
+    };
+    const screen = new StartScreen(input, () => 24, () => state);
+    const rows = screen.render(90);
+    expect(rows).toHaveLength(24);
+    const rendered = rows.join('\n');
+    expect(rendered).not.toContain('▀'); // mascot hidden
+    expect(rendered).toContain('[input 72]'); // composer still centered and present
+    expect(rendered).toContain('Tip ask anything');
+    expect(rows.at(-1)).toContain('elowen v1.8.7'); // status row still pinned to the bottom
+  });
+
   it('keeps the compact start screen inside a very short terminal allocation', () => {
     const input = { invalidate: (): void => {}, render: (): string[] => ['input one', 'input two', 'input three'] };
     const screen = new StartScreen(input, () => 6, () => ({

@@ -170,6 +170,9 @@ export class ChatApplication {
     const keymap = initKeymap(prefs.keybinds);
     const locale = resolveLocale(prefs);
     let showThoughts = prefs.showThoughts !== false;
+    // Local-only chrome: default shown, no server mirror (unlike showThoughts, which terminalSettings
+    // can override below). Nobody's view changes until they run /maskot to hide it.
+    const showMascot = prefs.showMascot !== false;
     const client = this.client;
     await client.start({ provider: options.model, session: options.session, fresh: options.fresh });
     if (this.stopped) return;
@@ -224,6 +227,7 @@ export class ChatApplication {
       queued: boot?.queued ?? [],
       processes,
       showThoughts,
+      showMascot,
       locale,
       mentionFrecency: loadMentionFrecency(process.cwd()),
     });

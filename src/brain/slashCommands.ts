@@ -41,6 +41,9 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   // WhatsApp, Telegram and Teams; only the web dock has no picker for it yet (would show a dead menu entry).
   { name: 'reasoning', description: 'Set the reasoning effort · "show" toggles Thought rows', kind: 'picker', surfaces: ['cli', 'discord', 'whatsapp', 'telegram', 'msteams'] },
   { name: 'theme', description: 'Switch the terminal colour theme', kind: 'picker', surfaces: ['cli'] },
+  // CLI-local like /theme: toggles the flame mascot and persists the choice in cli-prefs.json. Purely
+  // local chrome, so it is never mirrored to the server — meaningless on the other surfaces.
+  { name: 'maskot', description: 'Show or hide the flame mascot (on by default)', kind: 'action', surfaces: ['cli'] },
   // CLI-local: opens the keybinds modal in the TUI (parseCommand dispatches it before any server call).
   // Lives in the catalog so the CLI command menu lists it from the single roster, not a synthetic inject.
   { name: 'keybinds', description: 'List keyboard shortcuts and where to customize them', kind: 'info', surfaces: ['cli'] },

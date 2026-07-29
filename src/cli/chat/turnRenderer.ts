@@ -204,8 +204,10 @@ export class TurnRenderer {
               // then its `$ cmd · done` shell affordance follows.
               add(`${TOOL_INDENT}${color.faint(SHOWN_OUTPUT_CONNECTOR)} ${color.faint('$')} ${color.dim(truncateToWidth(command, Math.max(12, width - 14), '…'))} ${color.faint(turn.streaming && item === lastToolItem ? '· running…' : '· done')}`);
               if (item.progress) {
+                // Shell output is CONTENT, not decoration, so it takes the dim (muted) tier rather than
+                // faint — a readable contrast for the machine's actual words, not a background whisper.
                 for (const line of terminalPlainText(item.progress).split('\n').slice(-PROGRESS_TAIL_ROWS)) {
-                  add(`${TOOL_OUTPUT_INDENT}${color.faint(truncateToWidth(line, Math.max(12, width - 14), '…'))}`);
+                  add(`${TOOL_OUTPUT_INDENT}${color.dim(truncateToWidth(line, Math.max(12, width - 14), '…'))}`);
                 }
               }
             } else {
@@ -229,7 +231,9 @@ export class TurnRenderer {
         if (rows.length > 0 && rows.at(-1)?.line !== '') addBlank();
         add(`  ${color.warning(expanded ? '▾' : '▸')} ${color.warning(label)} ${color.faint('click')} ${color.dim(truncateToWidth(first, Math.max(12, width - 32), '…'))}`, 'thought', key);
         if (expanded) {
-          for (const line of wrapTextWithAnsi(reasoning, Math.max(1, width - 6))) add(`    ${color.faint(line)}`);
+          // The expanded reasoning body is CONTENT the user chose to read — dim (muted), not faint, so it
+          // clears the same readability bar as the shell output above rather than fading into the panel.
+          for (const line of wrapTextWithAnsi(reasoning, Math.max(1, width - 6))) add(`    ${color.dim(line)}`);
         }
         addBlank();
         continue;

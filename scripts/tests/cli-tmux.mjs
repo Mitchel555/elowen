@@ -66,12 +66,12 @@ function capture() {
   return tmux(['capture-pane', '-p', '-t', session]);
 }
 
-// The pending-queue strip renders each queued message as its own indented row led by a quiet pause glyph
-// (`⏸ <text>`) — see QueuedMessages in src/cli/chat/components.ts. There is no `⏸ N queued` header: that
+// The pending-queue strip renders each queued message as its own indented row led by a quiet pointer glyph
+// (`❯ <text>`) — see QueuedMessages in src/cli/chat/components.ts. There is no `N queued` header: that
 // label was deliberately dropped so the strip reads as the messages rather than an announcement about them.
-// Anchored on the queued TEXT rather than a bare glyph, because the same `⏸` is the workflow 'pending'
-// status marker, so a glyph-only pattern could match a workflow row instead of the strip.
-const QUEUE_STRIP_ROW = /^\s*⏸ +E2E QUEUED LINE/mu;
+// Anchored on the queued TEXT rather than a bare glyph, so the pattern can never match a stray `❯` prompt
+// pointer elsewhere on the pane instead of the strip.
+const QUEUE_STRIP_ROW = /^\s*❯ +E2E QUEUED LINE/mu;
 
 function captureAnsi() {
   if (!hasSession()) return '';

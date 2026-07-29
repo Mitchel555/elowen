@@ -564,7 +564,7 @@ export class AttachmentChips implements Component {
 }
 
 /** Pending mid-turn messages shown above the input: the queued message text itself, each on its own
- *  indented line marked by a quiet pause glyph — no 'N queued' header label, so the strip reads as the
+ *  indented line marked by a quiet pointer glyph — no 'N queued' header label, so the strip reads as the
  *  messages rather than an announcement about them. These are messages typed while a turn streams; they
  *  are STEERED into the running turn (PI delivers them between steps) and reported as a transient backlog
  *  via the daemon's `queue` snapshot. Renders nothing while empty, so it costs no rows at rest. `removeHint`
@@ -583,7 +583,7 @@ export class QueuedMessages implements Component {
   render(width: number): string[] {
     if (this.items.length === 0 || this.maxRows <= 0) return [];
     const room = Math.max(8, width - 7);
-    const lines = this.items.map((it) => `  ${color.accentDim('⏸')} ${DIM(truncateToWidth(inlineText(it.text), room, '…'))}`);
+    const lines = this.items.map((it) => `  ${FAINTC('❯')} ${DIM(truncateToWidth(inlineText(it.text), room, '…'))}`);
     if (this.removeHint) lines.push(`     ${FAINTC(inlineText(this.removeHint))}`);
     if (lines.length <= this.maxRows) return lines;
     // Over budget: the last visible row counts the messages hidden by the clip (that note takes one row).

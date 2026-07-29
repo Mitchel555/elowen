@@ -99,6 +99,14 @@ describe('chat components', () => {
     expect(lines[0]).not.toMatch(/\d+ queued/); // the 'N queued' count header is gone; only the messages show
   });
 
+  it('QueuedMessages marks each row with the quiet pointer glyph, not the old pause glyph', () => {
+    const q = new QueuedMessages();
+    q.set([{ id: 'a', text: 'check the logs' }]);
+    const [line] = q.render(60);
+    expect(line).toContain('❯'); // the queued strip reads like a prompt, not a paused announcement
+    expect(line).not.toContain('⏸'); // ⏸ stays reserved for the workflow 'pending' status marker
+  });
+
   it('QueuedMessages truncates a long pending message to the width and drops the hint when unset', () => {
     const q = new QueuedMessages();
     q.set([{ id: 'a', text: 'x'.repeat(400) }]); // no hint

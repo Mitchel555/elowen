@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { compactNotice, parseCommand, resolveThinkingLevel, wireSubmit } from '../../../src/cli/chat/commands.js';
+import { loadPrefs } from '../../../src/cli/chat/prefs.js';
 import { TranscriptModel } from '../../../src/brain/transcriptModel.js';
 import { ChatState } from '../../../src/cli/chat/chatState.js';
 import { ChatApplicationLifetime } from '../../../src/cli/chat/applicationLifetime.js';
@@ -62,6 +63,58 @@ describe('parseCommand — work-mode commands', () => {
 
   it('captures a headless prompt after /workflow', () => {
     expect(parseCommand('/workflow ship the parser')).toEqual({ cmd: 'workflow', arg: 'ship the parser' });
+  });
+});
+
+describe('parseCommand — /maskot', () => {
+  it('recognises a bare toggle and explicit on/off', () => {
+    expect(parseCommand('/maskot')).toEqual({ cmd: 'maskot' });
+    expect(parseCommand('/maskot on')).toEqual({ cmd: 'maskot', arg: 'on' });
+    expect(parseCommand('/maskot off')).toEqual({ cmd: 'maskot', arg: 'off' });
+  });
+});
+
+describe('/maskot toggles and persists the mascot preference', () => {
+  it('flips state.showMascot, writes it to cli-prefs.json and reads back after a reload', () => {
+    const home = mkdtempSync(join(tmpdir(), 'elowen-maskot-'));
+    const priorHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      let onSubmit: ((text: string) => void) | undefined;
+      const editor = {
+        addToHistory: vi.fn(), setText: vi.fn(),
+        set onSubmit(fn: (text: string) => void) { onSubmit = fn; },
+      };
+      const render = vi.fn();
+      const state = new ChatState({ transcript: new TranscriptModel() });
+      expect(state.showMascot).toBe(true); // product default: shown until the user hides it
+      wireSubmit(
+        state,
+        {
+          client: {}, editor, shellContext: new LocalShellBuffer(), attachmentChips: {}, commandDefs: [], tui: {},
+          lifetime: new ChatApplicationLifetime<'metadata'>(),
+        } as never,
+        { render } as never,
+        { stream: {}, pickers: {} } as never,
+      );
+      const env = { HOME: home } as NodeJS.ProcessEnv;
+
+      onSubmit?.('/maskot');
+      expect(state.showMascot).toBe(false);
+      expect(loadPrefs(env).showMascot).toBe(false); // persisted → survives a CLI restart
+
+      onSubmit?.('/maskot');
+      expect(state.showMascot).toBe(true);
+      expect(loadPrefs(env).showMascot).toBe(true);
+
+      onSubmit?.('/maskot off'); // explicit form forces the state regardless of the current value
+      expect(state.showMascot).toBe(false);
+      expect(loadPrefs(env).showMascot).toBe(false);
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
