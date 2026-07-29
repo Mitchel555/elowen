@@ -129,8 +129,8 @@ export class PlatformOrchestrator {
             // the owner's ambient policy. `owner` is independently authenticated, never inferred from an
             // admin role (a foreign Discord admin is not the instance operator).
             // Read-only MODE — from a read-only agent TYPE or a bare `read_only` delegation — resolves to ONE
-            // host-side definition: the READ_ONLY_AGENT_TOOLS preset plus a minted read-only permission
-            // boundary (Bash gated to look-only commands even though the child runs unattended — see
+            // host-side definition: the READ_ONLY_AGENT_TOOLS preset plus a minted permission boundary (Bash
+            // clamped to non-destructive commands even though the child runs unattended — see
             // readOnlyBoundary.ts). This is the single source of "read-only"; the subagent plugin no longer
             // carries its own toolset.
             const readOnlyMode = agentDef?.toolsSpec === 'read-only' || src.access.readOnly === true;

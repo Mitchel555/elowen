@@ -279,7 +279,7 @@ export function register(ctx) {
   const agentTypeLine = agentTypes.length
     ? ' You may run the sub-agent as a named TYPE via subagent_type — each carries its own role prompt and toolset. Available types: '
       + agentTypes.map((t) => `"${t.name}" (${t.description})`).join('; ')
-      + '. A read-only type (e.g. explore/plan) gets read-only tools plus read-only shell no matter what you hold. Omit subagent_type for a generic sub-agent that inherits your own tools.'
+      + '. A read-only type (e.g. explore/plan) gets read-only tools plus the non-destructive shell clamp no matter what you hold. Omit subagent_type for a generic sub-agent that inherits your own tools.'
     : '';
 
   ctx.registerTool(defineTool({
@@ -289,7 +289,7 @@ export function register(ctx) {
       'Delegate when the subtask is self-contained and only the conclusion matters, not the exploration trail; when answering would mean reading across many files and you want the summary rather than the file dumps; or when you have independent work to run in parallel. Do NOT delegate a single-fact lookup where you already know the file or symbol, work that needs nuanced judgment about the user\'s intent, or anything so small that spawning an agent costs more than doing it.',
       'By default the call BLOCKS and returns the sub-agent\'s final result. Set background=true for an independent side-quest: it returns a job id immediately and the result is delivered to you in a NEW turn — do other work meanwhile, then end your turn. You are woken when it lands, so never poll DelegateStatus in a loop.',
       'To launch several independent sub-agents, put multiple delegate calls in ONE response so they run concurrently; do not serialize them. Once you have delegated a search, do not also run it yourself.',
-      'Use read_only=true when the sub-agent only needs to look (explore, search, report) — it then gets read-only tools plus a read-only shell (inspect commands only) and cannot write, mutate or delegate further. Use `tools` to hand it an exact toolset. Either way you can only ever narrow what you already hold.',
+      'Use read_only=true when the sub-agent only needs to look (explore, search, report) — it then gets read-only TOOLS (no Write/Edit) plus a shell clamped to non-destructive commands, and cannot delegate further. The shell clamp is a guardrail, not a sandbox: redirection and `sed -i` are permitted, so the child can still write files the daemon user can reach; what it cannot run is rm/mv/chmod, git commit/push/reset, npm, systemctl, kill, curl/wget/ssh or sudo. Use `tools` to hand it an exact toolset. Either way you can only ever narrow what you already hold.',
       'The sub-agent inherits your model; pass `model` only when the user explicitly asked for a different one. Its final message comes back to you, not to the user — relay what matters. A sub-agent that already ran is NOT gone: its transcript is kept, so before delegating something that builds on earlier work, check DelegateList and send that sub-agent a follow-up with DelegateContinue instead — it resumes with its full context, where a fresh one would have to rediscover everything.'
       + agentTypeLine,
     ].join(' '),
@@ -309,13 +309,13 @@ export function register(ctx) {
         description: 'Start asynchronously and return a stable job id immediately. Omit or false to wait for the result.',
       })),
       read_only: Type.Optional(Type.Boolean({
-        description: 'Give the sub-agent read-only tools plus a read-only shell (look-only commands like ls/cat/grep/git status) — it can inspect and run safe shell, but cannot write, mutate or delegate further. Use it for any task that just explores and reports.',
+        description: 'Give the sub-agent read-only tools (no Write/Edit) plus a shell clamped to non-destructive commands — inspection (ls/cat/grep/find/git status) and data transforms, but not rm/mv/chmod, git commit/push, npm, systemctl, curl/wget or sudo. It cannot delegate further. Note the clamp still allows writing a file through redirection, so it is not a sandbox. Use it for any task that just explores and reports.',
       })),
       tools: Type.Optional(Type.Array(Type.String(), {
         description: 'Give the sub-agent EXACTLY these tools and nothing else. Names must match your own toolset. Combined with read_only, it narrows further (the intersection). You can only narrow your own access, never widen it.',
       })),
       subagent_type: Type.Optional(Type.String({
-        description: 'Run the sub-agent as a named TYPE (see the list in this tool\'s description) — it supplies the role prompt and toolset. Omit for a generic sub-agent. The type governs the toolset (a read-only type already includes read-only shell), so read_only is redundant with it; an explicit `tools` list still narrows further on top.',
+        description: 'Run the sub-agent as a named TYPE (see the list in this tool\'s description) — it supplies the role prompt and toolset. Omit for a generic sub-agent. The type governs the toolset (a read-only type already includes the non-destructive shell clamp), so read_only is redundant with it; an explicit `tools` list still narrows further on top.',
       })),
     }),
     execute: async (id, p) => {

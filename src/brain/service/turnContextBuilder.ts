@@ -16,7 +16,7 @@ import { applyToolVisibility } from '../session/capabilities.js';
 import type { LiveBrain } from '../session/liveBrain.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
 import { isPromptCommand } from '../slashCommands.js';
-import { summarizePermissions, READ_ONLY_BASH_RULES } from '../toolPermissions.js';
+import { summarizePermissions, NON_DESTRUCTIVE_BASH_RULES } from '../toolPermissions.js';
 import { xmlEscape } from '../../shared/xml.js';
 import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
@@ -49,7 +49,7 @@ interface TurnContextBuilderDeps {
  *  these does, so they are admitted here — beside the mode that clamps them — rather than by claiming
  *  something untrue in a manifest. Admitting a tool here WITHOUT its clamp hands plan mode a way to
  *  mutate, so the two must always move together:
- *   - `Bash` — `scopeOptions` below narrows the turn's shell rules to READ_ONLY_BASH_RULES.
+ *   - `Bash` — `scopeOptions` below narrows the turn's shell rules to NON_DESTRUCTIVE_BASH_RULES.
  *   - `Delegate` — `scopeOptions` puts the turn's mode on the AsyncLocalStorage, and
  *     pathGuard.currentAccess stamps `readOnly` on every delegation a planning turn makes, which the
  *     host bakes into the child's toolset and permission boundary (brain/platforms.ts).
@@ -253,19 +253,20 @@ export class TurnContextBuilder {
     const workDir = turnWorkDir(live.policy, clientCwd ?? live.workDir, this.d.projectPath);
     const base = this.d.permissions.turnPermissions(userId, live, true);
     // The other half of admitting Bash in plan mode: narrow the turn's shell rules to the shared
-    // read-only clamp. Appended LAST so last-match-wins puts it over the user's own rules — a planning
-    // turn must not mutate even for someone who allowed `rm *` in Settings. `deny` also survives YOLO
-    // (which only promotes `ask`), so plan mode keeps its promise with auto-approval switched on.
+    // non-destructive clamp. Appended LAST so last-match-wins puts it over the user's own rules — a
+    // planning turn must not run destructive commands even for someone who allowed `rm *` in Settings.
+    // `deny` also survives YOLO (which only promotes `ask`), so plan mode keeps its promise with
+    // auto-approval switched on.
     // Synthesized when there is no base, rather than skipped. A turn with no TurnPermissions leaves the
-    // permission gate inert, so making the clamp conditional on one would mean plan mode's read-only
-    // promise holds only when permissions happen to be configured — the same conditional the write clamp
-    // was deliberately moved out of. The defaults here are the resolver's own: no YOLO, and `ask`
+    // permission gate inert, so making the clamp conditional on one would mean plan mode's shell
+    // restriction holds only when permissions happen to be configured — the same conditional the write
+    // clamp was deliberately moved out of. The defaults here are the resolver's own: no YOLO, and `ask`
     // allowed, which is what an unattended turn already does.
     const permissions = mode !== 'plan'
       ? base
       : {
         ...base,
-        ruleset: [...(base?.ruleset ?? []), ...READ_ONLY_BASH_RULES],
+        ruleset: [...(base?.ruleset ?? []), ...NON_DESTRUCTIVE_BASH_RULES],
         yolo: base?.yolo ?? false,
       };
     return {
@@ -295,8 +296,8 @@ export class TurnContextBuilder {
   buildScope(userId: number, live: LiveBrain): PreparedTurnContext {
     // The session's own mode, NOT 'build'. Plan mode admits Delegate, so a background delegation started
     // while planning delivers its result through here — and hard-coding 'build' rebuilt that follow-up turn
-    // without the read-only shell clamp and re-advertised the withheld tools, so the model could mutate
-    // mid-plan. The mode a delivery inherits must be the one the user is actually in.
+    // without the shell clamp and re-advertised the withheld tools, so the model could run destructive
+    // commands mid-plan. The mode a delivery inherits must be the one the user is actually in.
     const scope = this.scopeOptions(userId, live, live.lastTurnMode ?? 'build');
     return {
       autoSaveMemory: false,
