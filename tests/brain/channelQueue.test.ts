@@ -373,6 +373,44 @@ describe('ChannelSessionService — mid-turn steering (Discord double-message)',
     expect(child.session.clearQueue).toHaveBeenCalledTimes(2);
   });
 
+  it('steers a hidden result for a delegated parent into its RUNNING turn', async () => {
+    // A background sub-agent whose own parent is itself a delegated child: the result has to reach that
+    // child mid-turn, exactly as it does for owner chat. It rides PI's custom seam, not the visible queue
+    // mirror — a hidden message must not surface as a queue chip or a durable user row — and it must not
+    // start a second turn on a session that is already running one.
+    const store = new BrainStore(openDb(':memory:'));
+    const registry = new LiveSessionRegistry<Brain>();
+    const parentSessionId = 'brain-parent-result';
+    const childChannel = 'subagent-result-mid-run';
+    const childSessionId = channelSessionId(childChannel);
+    const scope: DelegatedExecutionScope = { admin: true, projectIds: [], owner: true, permissionBoundary: null };
+    store.createSession({ id: parentSessionId, userId: 1, model: 'kimi' });
+    store.createSession({ id: childSessionId, userId: 1, model: 'kimi', parentSessionId, delegatedAccess: scope });
+    const child = fakeBrain('moonshot', 'kimi', undefined, childSessionId);
+    child.session.isStreaming = true;
+    const sendCustomMessage = vi.fn(async () => {});
+    Object.assign(child.session, { sendCustomMessage, clearQueue: vi.fn() });
+    registry.channelTouch(childChannel, child);
+    const svc = new ChannelSessionService({ registry, store, users: { get: () => ({ username: 'owner' }) }, spawn: vi.fn() } as never);
+    const content = '<system-reminder>\n<subagent-result id="res-1" status="done"></subagent-result>\n</system-reminder>';
+
+    const reply = await svc.send({
+      channelId: childChannel, ownerUserId: 1, parentSessionId,
+      policy: { allowedProjectIds: 'all' as const, allowedPaths: () => [] }, trusted: true, ownerSteer: true,
+      delegatedAccess: scope, identity: { platform: 'subagent', userId: 'subagent', admin: true, owner: true },
+      internalSystem: { customType: 'subagent-result', resultId: 'res-1' },
+    } as never, content);
+
+    expect(reply).toBe('');
+    expect(sendCustomMessage).toHaveBeenCalledWith(
+      { customType: 'subagent-result', content, display: false, details: { source: 'elowen', resultId: 'res-1' } },
+      { triggerTurn: false, deliverAs: 'steer' },
+    );
+    expect(child.session.prompt).not.toHaveBeenCalled();
+    expect(child.session.steer).not.toHaveBeenCalled(); // never mirrored as a visible queued message
+    expect(store.getMessages(childSessionId)).toEqual([]); // and never persisted as a user row
+  });
+
   it('fences a fresh nested child while its parent abort is still draining', async () => {
     const store = new BrainStore(openDb(':memory:'));
     const registry = new LiveSessionRegistry<Brain>();

@@ -17,6 +17,7 @@ function fakeDeps(persistedYolo: boolean) {
     getAllTools: () => [], getActiveToolNames: () => [], setActiveToolsByName: vi.fn(),
     supportsThinking: () => false,
     getSteeringMessages: () => [] as string[], getFollowUpMessages: () => [] as string[],
+    setSteeringMode: vi.fn(),
   };
   return {
     store: new BrainStore(openDb(':memory:')),

@@ -54,6 +54,7 @@ describe('BrainSessionFactory context-saving installers', () => {
       agent: {} as { transformContext?: (m: unknown[]) => Promise<unknown[]> },
       subscribe: (l: (e: unknown) => void) => { listeners.push(l); return () => {}; },
       messages: [] as unknown[],
+      setSteeringMode: vi.fn(),
     };
     const factory = new BrainSessionFactory({
       store: new BrainStore(openDb(':memory:')),
@@ -126,6 +127,7 @@ describe('BrainSessionFactory context-saving installers', () => {
       agent: {} as Record<string, unknown>,
       subscribe: () => () => {},
       messages: history as unknown[],
+      setSteeringMode: vi.fn(),
     };
     const factory = new BrainSessionFactory({
       store: new BrainStore(openDb(':memory:')),
@@ -179,6 +181,7 @@ describe('BrainSessionFactory turn-boundary compaction toggle', () => {
       },
       subscribe: () => () => {},
       messages: [] as unknown[],
+      setSteeringMode: vi.fn(),
     };
   }
 
@@ -245,6 +248,7 @@ describe('BrainSessionFactory deferred-tool wiring', () => {
       subscribe: () => () => {},
       messages: [] as unknown[],
       setActiveToolsByName: vi.fn(),
+      setSteeringMode: vi.fn(),
     };
     const createSession = vi.fn(async () => ({ session }));
     const factory = new BrainSessionFactory({
@@ -279,5 +283,32 @@ describe('BrainSessionFactory deferred-tool wiring', () => {
   it('with nothing deferred it never touches the active set (byte-identical to before deferral existed)', async () => {
     const { session } = await createWithDeferral(new Set());
     expect(session.setActiveToolsByName).not.toHaveBeenCalled();
+  });
+});
+
+describe('BrainSessionFactory steering queue', () => {
+  it('drains the whole steering queue into one model round', async () => {
+    // PI's default is "one-at-a-time": messages sent while a turn streams are injected one per model
+    // round, so a burst of three costs three rounds and the agent answers each blind to the rest.
+    const session = {
+      sessionId: 'sess-steering',
+      agent: {} as Record<string, unknown>,
+      subscribe: () => () => {},
+      messages: [] as unknown[],
+      setSteeringMode: vi.fn(),
+    };
+    const factory = new BrainSessionFactory({
+      store: new BrainStore(openDb(':memory:')),
+      createSession: vi.fn(async () => ({ session })) as never,
+      resourceLoaderFactory: () => undefined,
+    });
+    await factory.create({
+      sessionId: session.sessionId, ownerUserId: 1, runtime: undefined,
+      model: { id: 'test-model', provider: 'kimi-coding', contextWindow: 200_000 },
+      cwd: process.cwd(), systemPrompt: 'sp', appendSystemPrompt: [], skills: [], tools: [],
+      autoCompact: false, autoCompactAtPct: 80,
+    } as never);
+
+    expect(session.setSteeringMode).toHaveBeenCalledWith('all');
   });
 });

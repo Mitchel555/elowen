@@ -312,6 +312,12 @@ export class BrainSessionFactory {
     // pipeline created for this session. The extension above has already been loaded and only marks
     // PI's own compaction signal; it never executes or returns a custom compaction.
     compactionModelRoute?.install(session);
+    // PI's steering queue defaults to "one-at-a-time", so N messages sent during a running turn cost N
+    // model rounds and the agent answers each without seeing the ones behind it. "all" hands the whole
+    // queue to the loop, which injects every message into the context before a SINGLE model call. The
+    // messages stay separate transcript rows — durable per-message rows, positional queue-remove ids and
+    // image attachments all survive. Session-local: it lands in the in-memory SettingsManager above.
+    session.setSteeringMode('all');
     // Wire the live session onto the deferred-tool handle so ToolSearch (which closes over the handle) can
     // read the registry and change the active slice. AgentSession structurally satisfies the handle's
     // ToolActivationTarget (getAllTools/getActiveToolNames/setActiveToolsByName). No-op when nothing is

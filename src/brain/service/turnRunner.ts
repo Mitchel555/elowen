@@ -31,16 +31,23 @@ import { logger } from '../../shared/logger.js';
  *  row pending, no further timer). A later user turn on the parent re-triggers one more attempt. */
 const MAX_RESULT_DELIVERY_ATTEMPTS = 5;
 
-/** Raised when a hidden sub-agent-result delivery finds the parent session already streaming a turn. PI
- *  would only PARK the follow-up in its native queue — a structural duplicate of what the running turn
- *  already sees — so we refuse to touch PI and leave the result durable + pending. send()'s post-turn
- *  hook re-drains it once the turn settles. Distinct from a transport failure: the drain neither notes a
- *  failure nor schedules a retry timer for it. */
-class ParentTurnBusyError extends Error {
-  constructor(sessionId: string) {
-    super(`parent session ${sessionId} is streaming; deferring sub-agent result delivery`);
-    this.name = 'ParentTurnBusyError';
-  }
+/** A message carrying our result id, as it appears in a live PI transcript. */
+type CustomResultMessage = { role?: string; details?: { resultId?: string } };
+
+/** How far a hidden custom message got.
+ *  `landed`  — it is provably in the parent's context (or went through a delegated parent's own verified
+ *              turn), so the durable row may be acknowledged.
+ *  `steered` — PI accepted it into the RUNNING turn's steering queue and will inject it before that turn's
+ *              next model call. Not yet provable: a stop that clears PI's queue in between would erase it,
+ *              so the row stays pending until a later drain SEES it in the transcript. */
+type CustomDelivery = 'landed' | 'steered';
+
+/** Is this result's hidden custom message already in the session's live context? It carries our result id,
+ *  so its presence is the only honest answer to "did this land?", whatever became of the turn that was
+ *  supposed to carry it. An id-less delivery matches our own id-less custom message, which is what the
+ *  caller wants: it has no other handle on the thing it just sent. */
+function resultInContext(messages: readonly CustomResultMessage[], resultId: string | undefined): boolean {
+  return messages.some((message) => message.role === 'custom' && message.details?.resultId === resultId);
 }
 
 interface TurnRunnerDeps {
@@ -97,42 +104,58 @@ export class BrainTurnRunner {
     return this.d.sessions.withLock(key, fn);
   }
 
-  /** Deliver host-owned lifecycle information through PI's native hidden custom-message seam. The
-   * conversation lock places it after the current owner turn; `display:false` keeps it out of the user
-   * transcript, while `triggerTurn` lets the main agent react when idle. */
-  async sendCustomSystem(userId: number, session: string, customType: string, content: string, resultId?: string): Promise<void> {
+  /** Deliver host-owned lifecycle information through PI's native hidden custom-message seam. `display:false`
+   * keeps it out of the user transcript either way; how it gets in depends on the parent.
+   *
+   * IDLE parent — take the conversation lock and let `triggerTurn` run a turn on it, so the agent reacts now.
+   *
+   * STREAMING parent — STEER it into the running turn. PI injects a steering message into the context before
+   * that turn's next model call, so a background result reaches the agent during the work it belongs to
+   * instead of a whole turn later. Delivery is not confirmed here (see `CustomDelivery`). */
+  async sendCustomSystem(userId: number, session: string, customType: string, content: string, resultId?: string): Promise<CustomDelivery> {
     if (isNonUserSession(session)) {
       if (!resultId || !this.d.sendDelegatedCustom) throw new Error('delegated result delivery unavailable');
       await this.d.sendDelegatedCustom(userId, session, customType, content, resultId);
-      return;
+      return 'landed';
     }
     const target = this.d.lifecycle.ownedUserSession(userId, session);
     if (!this.d.sessions.get(target)) await this.d.lifecycle.ensureLive(userId, target);
+    const message = {
+      customType,
+      content,
+      display: false,
+      details: { source: 'elowen', ...(resultId ? { resultId } : {}) },
+    };
+    const running = this.d.sessions.get(target);
+    if (!running) throw new Error('brain not started for user');
+    if (running.session.isStreaming) {
+      // Deliberately OUTSIDE the send/session locks: the turn we are steering into is the one holding them,
+      // so taking them would mean waiting for exactly the turn we want to reach — which is the behaviour
+      // this path replaces. Same reasoning as ChannelService.trySteerIntoRunningTurn.
+      if (resultId && resultInContext(running.session.messages as CustomResultMessage[], resultId)) return 'landed';
+      // triggerTurn is off for the one race the isStreaming read above cannot close: were the turn to end in
+      // between, PI would start a whole turn from here, outside the lock that serializes prompts on this
+      // session. Off, it appends the message to the transcript instead and the agent reads it next turn.
+      await running.session.sendCustomMessage(message, { triggerTurn: false, deliverAs: 'steer' });
+      return 'steered';
+    }
     // The bare session lock (inner) is nested under the outer `send-` lock, matching a user turn's own
     // ordering (send-<id> → <id>), so this never deadlocks against a concurrent send()/compact/stop.
     await this.serial(`send-${target}`, () => this.serial(target, async () => {
       const live = this.d.sessions.get(target);
       if (!live) throw new Error('brain not started for user');
-      // A streaming parent would only PARK this follow-up in PI's native queue — a structural duplicate of
-      // what the running turn already sees. Refuse BEFORE touching PI and leave the result pending; send()'s
-      // post-turn hook re-drains it once the turn settles (no note-failure, no retry timer for this case).
-      if (live.session.isStreaming) throw new ParentTurnBusyError(target);
+      // An earlier steer that landed while we queued behind that turn is already in the context. Sending a
+      // second copy is the one failure mode this whole durable pipeline must not produce.
+      if (resultId && resultInContext(live.session.messages as CustomResultMessage[], resultId)) return;
       const before = lastAssistant(live.session.messages as { role?: string }[]);
       const context = this.contextBuilder.buildScope(userId, live);
-      await context.run(() => live.session.sendCustomMessage({
-        customType,
-        content,
-        display: false,
-        details: { source: 'elowen', ...(resultId ? { resultId } : {}) },
-      }, { triggerTurn: true, deliverAs: 'followUp' }));
+      await context.run(() => live.session.sendCustomMessage(message, { triggerTurn: true, deliverAs: 'followUp' }));
       const settled = lastAssistant(live.session.messages as { role?: string; stopReason?: string; errorMessage?: string }[]);
       // A turn that did not settle normally is NOT automatically a failure to deliver: PI appends the
       // custom message to the transcript before running the turn, so the result may already be in the
       // parent's context, and re-delivering it would put it there twice. Don't assume from the turn's
-      // shape — look for the message. It carries our result id, so its presence is the only honest answer
-      // to "did this land?", whatever became of the turn afterwards.
-      const landed = (live.session.messages as { role?: string; details?: { resultId?: string } }[])
-        .some((message) => message.role === 'custom' && message.details?.resultId === resultId);
+      // shape — look for the message.
+      const landed = resultInContext(live.session.messages as CustomResultMessage[], resultId);
       // No new assistant at all. Usually a genuine non-delivery — but PI strips the errored assistant out
       // of live state BEFORE its retry backoff, so a retry the user cancels mid-sleep settles with the
       // pre-delivery assistant still last, having already put the result in context.
@@ -151,6 +174,7 @@ export class BrainTurnRunner {
         logger('brain-subagent').info(`sub-agent result for ${target} entered the context of an ${why} parent turn; acknowledging without retry`);
       }
     }));
+    return 'landed';
   }
 
   /** Store-first terminal completion ingress shared by explicit background jobs and Ctrl+B detaches. */
@@ -214,14 +238,16 @@ export class BrainTurnRunner {
             + 'The child transcript remains available separately; do not claim its internal tool calls as your own.</instruction>\n'
             + '</system-reminder>';
         try {
-          await this.sendCustomSystem(userId, parentSessionId, 'subagent-result', content, result.id);
+          const delivery = await this.sendCustomSystem(userId, parentSessionId, 'subagent-result', content, result.id);
+          // Steered into a running turn: PI holds it, but "PI accepted it" is not "the parent's context has
+          // it" — a stop clearing PI's queue in between would erase it. Leave the row pending and move on to
+          // the rest of the queue; the post-turn drain finds the message in the transcript and acknowledges
+          // it there, or re-delivers it for real. Not a failure: no attempt spent, no retry timer.
+          if (delivery === 'steered') continue;
           if (this.d.store.acknowledgeSubagentResult(parentSessionId, result.id)) {
             this.publishResultDelivery(parentSessionId, result.toolCallId, 'acknowledged');
           }
         } catch (error) {
-          // A streaming parent isn't a failure — the result stays pending and send()'s post-turn hook will
-          // re-drain it. Don't burn an attempt or arm a retry timer.
-          if (error instanceof ParentTurnBusyError) return;
           const cause = error instanceof Error ? error.message : String(error);
           this.d.store.noteSubagentResultFailure(parentSessionId, result.id);
           logger('brain-subagent').warn(`sub-agent result ${result.id} for ${parentSessionId} failed delivery attempt ${result.attempts + 1}/${MAX_RESULT_DELIVERY_ATTEMPTS}: ${cause}`);
@@ -465,9 +491,10 @@ export class BrainTurnRunner {
       // Safety net: if the turn threw before it started (rollover/preflight rejection), its pending
       // compaction chip is still up — drop it so a rejected send never leaves a phantom waiting chip.
       if (pendingCompactionEchoId) this.dropPendingCompactionEcho(active, pendingCompactionEchoId);
-      // A sub-agent result that arrived while this turn was streaming was DEFERRED (ParentTurnBusyError) and
-      // left durable + pending. Now that the turn has settled, re-drain it — this post-turn hook is the ONLY
-      // re-trigger for a streaming-deferred result. The drain never calls send(), so there is no recursion.
+      // A sub-agent result that arrived while this turn was streaming was STEERED into it and left durable +
+      // pending, because PI accepting a steer is not yet proof the context holds it. Now that the turn has
+      // settled, re-drain: this pass finds the message in the transcript and acknowledges it — or, if a stop
+      // cleared PI's queue first, delivers it for real. The drain never calls send(), so no recursion.
       if (this.d.store.pendingSubagentResults(completedSessionId).length > 0) {
         void this.drainPendingSubagentResults(userId, completedSessionId);
       }

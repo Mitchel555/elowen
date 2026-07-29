@@ -34,6 +34,7 @@ function fakeSession() {
     abortCompaction: vi.fn(), abortBranchSummary: vi.fn(),
     messages, isStreaming: false, isCompacting: false,
     steer: vi.fn(async () => {}),
+    setSteeringMode: vi.fn(),
     getSteeringMessages: () => [] as string[],
     getFollowUpMessages: () => [] as string[],
     pendingMessageCount: 0,

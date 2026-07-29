@@ -54,6 +54,74 @@ function chunkFrame(payload) {
  *        if a request could match several — in practice each child turn carries exactly one marker.
  * @returns {Promise<{ baseUrl, port, requests, contentText, setFail, close }>}
  */
+/**
+ * Start a model server for the STEERING batch scenario: it answers every completion with plain text and
+ * never calls a tool, but holds the FIRST request open until the test releases it. That open request is
+ * the turn the test steers into — a real streaming window, with no sleep guessing when it starts or ends.
+ *
+ * Every captured request is one model round, so the shape of the recorded contexts is the whole assertion:
+ * how many rounds the steered messages cost, and which round each one reached.
+ *
+ * @returns {Promise<{ baseUrl, port, requests, contentText, firstTurnArrived, releaseFirstTurn, close }>}
+ */
+export async function startSteeringModelServer() {
+  const requests = [];
+  let releaseFirstTurn = () => {};
+  const firstReleased = new Promise((resolve) => { releaseFirstTurn = resolve; });
+  let announceArrival = () => {};
+  const firstTurnArrived = new Promise((resolve) => { announceArrival = resolve; });
+  let rounds = 0;
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const body = await readJson(req);
+    requests.push({ method: req.method, path: url.pathname, body });
+
+    if (req.method !== 'POST' || url.pathname !== '/v1/chat/completions') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `unhandled ${req.method} ${url.pathname}` }));
+      return;
+    }
+
+    rounds += 1;
+    const round = rounds;
+    if (round === 1) {
+      announceArrival();
+      await firstReleased;
+    }
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+    });
+    const base = { id: 'chatcmpl-e2e', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'mock-model' };
+    const delta = (d, finish = null) => chunkFrame({ ...base, choices: [{ index: 0, delta: d, finish_reason: finish }] });
+    res.write(delta({ role: 'assistant', content: `Acknowledged (round ${round}).` }));
+    res.write(delta({}, 'stop'));
+    res.write(chunkFrame({ ...base, choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } }));
+    res.write('data: [DONE]\n\n');
+    res.end();
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('model server did not bind a TCP port');
+
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    port: address.port,
+    requests,
+    contentText,
+    firstTurnArrived,
+    releaseFirstTurn: () => releaseFirstTurn(),
+    close: () => new Promise((resolve) => { releaseFirstTurn(); server.close(() => resolve()); }),
+  };
+}
+
 export async function startScriptedModelServer(opts) {
   if (!opts?.toolName) throw new Error('startScriptedModelServer requires a toolName');
   const toolName = opts.toolName;

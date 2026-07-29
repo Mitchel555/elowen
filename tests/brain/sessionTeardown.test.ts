@@ -35,6 +35,7 @@ function fakeDeps() {
     __queue: [] as string[],
     __emitQueue: () => listeners.forEach((l) => l({ type: 'queue_update', steering: session.__queue.slice(), followUp: [] })),
     steer: vi.fn(async (t: string) => { session.__queue.push(t); session.__emitQueue(); }),
+    setSteeringMode: vi.fn(),
     getSteeringMessages: () => session.__queue,
     getFollowUpMessages: () => [] as string[],
     get pendingMessageCount() { return session.__queue.length; },

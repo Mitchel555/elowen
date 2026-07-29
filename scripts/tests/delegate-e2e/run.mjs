@@ -21,13 +21,21 @@
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startScriptedModelServer } from './model-server.mjs';
+import { startScriptedModelServer, startSteeringModelServer } from './model-server.mjs';
 import { spawnRealDaemon } from '../brain-e2e/spawn-daemon.mjs';
 
 const TURN_DEADLINE_MS = 90_000;
 
 function assert(cond, message) {
   if (!cond) throw new Error(`ASSERTION FAILED: ${message}`);
+}
+
+/** Await a promise under a hard deadline, so a scenario reports what it was waiting for instead of hanging. */
+function withDeadline(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`)), timeoutMs);
+    promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+  });
 }
 
 /** Open a real SSE stream and expose the parsed brain events plus a deadline-bounded `waitFor`. */
@@ -291,9 +299,65 @@ async function scenarioWorkflow() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Scenario 3 — Steering batch: three messages sent while a turn streams must reach the model TOGETHER,
+// in ONE round, not one round each. This can only be proven against a real PI session: the queue is PI's,
+// and how it drains is the behaviour under test — a fake session would just confirm whatever it was told.
+// ---------------------------------------------------------------------------------------------------
+async function scenarioSteeringBatch() {
+  const MARKERS = ['STEER-ONE-a41c9', 'STEER-TWO-b72d4', 'STEER-THREE-c08e6'];
+  const model = await startSteeringModelServer();
+
+  let daemon = null;
+  try {
+    daemon = await spawnRealDaemon({ providerBaseUrl: model.baseUrl, providerId: 'e2e-steer' });
+    const { baseUrl, token } = daemon;
+    console.log(`[steering] daemon up on ${baseUrl}; model on ${model.baseUrl}`);
+
+    const start = await post(baseUrl, '/brain/start', token, { fresh: true });
+    assert(start.status === 201, `POST /brain/start → 201 (got ${start.status}: ${start.text})`);
+    const sessionId = start.json?.sessionId;
+    assert(typeof sessionId === 'string' && sessionId, 'start returned a sessionId');
+
+    const stream = await openStream(baseUrl, `/brain/stream?session=${encodeURIComponent(sessionId)}`, token);
+    await new Promise((r) => setTimeout(r, 200)); // let the session tap attach before the send
+
+    const first = await post(baseUrl, '/brain/send', token, { text: 'Start on the report.', session: sessionId, mode: 'build' });
+    assert(first.status === 202, `first send → 202 accepted (got ${first.status}: ${first.text})`);
+    // The turn is provably in flight only once the provider request lands — before that a send would take
+    // the conversation lock and run its own turn instead of being steered, and the test would prove nothing.
+    await withDeadline(model.firstTurnArrived, TURN_DEADLINE_MS, 'the first turn reached the model');
+
+    for (const marker of MARKERS) {
+      const queued = await post(baseUrl, '/brain/send', token, { text: `Also handle this. ${marker}`, session: sessionId, mode: 'build' });
+      assert(queued.status === 202, `mid-turn send ${marker} → 202 accepted (got ${queued.status}: ${queued.text})`);
+    }
+
+    model.releaseFirstTurn();
+    await stream.waitFor((evs) => evs.some((e) => e.type === 'idle'), TURN_DEADLINE_MS, 'the steered turn reached idle');
+
+    const carrying = model.requests.filter((r) => requestText(model, r).includes(MARKERS[0]));
+    // TEETH: draining one message per round would put the first steered message in three successive
+    // contexts (it stays in history) and would show the model only that one in the round it arrived.
+    assert(carrying.length === 1,
+      `the steered batch cost exactly ONE model round; the first steered message appears in ${carrying.length} request(s)`);
+    const batch = requestText(model, carrying[0]);
+    for (const marker of MARKERS) {
+      assert(batch.includes(marker), `the single steered round carried ${marker} (all three arrive together)`);
+    }
+
+    stream.close();
+    console.log('PASS steering: three mid-turn messages reached the model together, in one round.');
+  } finally {
+    if (daemon) await daemon.stop();
+    await model.close();
+  }
+}
+
 async function main() {
   await scenarioDelegate();
   await scenarioWorkflow();
+  await scenarioSteeringBatch();
 }
 
 main().then(() => {

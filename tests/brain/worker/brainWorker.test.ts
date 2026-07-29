@@ -32,6 +32,7 @@ function fakeSession() {
     subscribe: vi.fn(() => () => {}),
     dispose: vi.fn(),
     abort: vi.fn(async () => {}),
+    setSteeringMode: vi.fn(),
   };
   return { session, workDirs, sessionIds, release: () => releases.shift()?.() };
 }

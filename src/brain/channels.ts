@@ -490,10 +490,30 @@ export class ChannelSessionService {
   private async trySteerIntoRunningTurn(opts: ChannelSendOpts, text: string, delegationAborted: () => boolean): Promise<string | null> {
     const streaming = this.d.registry.channelGet(opts.channelId);
     if (streaming?.session.isStreaming) {
+      // A durable sub-agent/workflow result for a DELEGATED parent (BrainTurnRunner.sendCustomSystem →
+      // sendDelegatedCustom). Steer it in so the child folds the result into the work it is doing instead
+      // of learning about it a turn late — the same reason the owner path steers. It rides PI's custom
+      // seam rather than enqueueMirrored: a hidden message must not surface as a queue chip or a durable
+      // user row. It carries only the result, because the running turn already holds the ambient turn
+      // context this path would otherwise compose around it. `triggerTurn` is off so that a turn ending
+      // between the isStreaming read and here appends the message instead of starting a turn outside the
+      // channel lock.
+      if (opts.internalSystem) {
+        if (delegationAborted()) throw new Error('delegation aborted');
+        await streaming.session.sendCustomMessage({
+          customType: opts.internalSystem.customType, content: text, display: false,
+          details: { source: 'elowen', resultId: opts.internalSystem.resultId },
+        }, { triggerTurn: false, deliverAs: 'steer' });
+        if (delegationAborted()) {
+          streaming.session.clearQueue();
+          throw new Error('delegation aborted');
+        }
+        return '';
+      }
       // Owner steering a delegated SUB-AGENT (BrainService.sendToSubagent sets ownerSteer): inject the
       // guidance mid-run — the owner owns the child, so redirecting it immediately is the point. Now the
       // SAME primitive as the Discord same-sender path below.
-      if (opts.ownerSteer && !opts.internalSystem) {
+      if (opts.ownerSteer) {
         // This path intentionally does not take the channel lock (it must steer the current PI turn), so
         // fence it on both sides of the await. If stop clears PI's queue while steer() is pending, the
         // second check clears it again before rejecting; no late instruction survives the aborted tree.
