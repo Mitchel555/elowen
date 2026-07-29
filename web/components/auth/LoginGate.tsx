@@ -14,7 +14,7 @@
 // fetching /auth/me itself and seeding the result. Seeding cannot win the race now that children mount
 // immediately: their useMe() fires on the same tick as the gate's own probe, so the app would ask twice.
 // Sharing one query key makes the duplicate structurally impossible instead of merely unlikely.
-import { useEffect, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useState, type ReactNode } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { AUTH_CLEARED_EVENT } from '../../lib/token';
@@ -71,7 +71,13 @@ export function LoginGate({ children }: { children: ReactNode }) {
       {/* The SSE bridge stays gated on a confirmed session: mounted tokenless it would 401 once and
           EventSource has no hook to reconnect after login. */}
       {gate === 'open' ? <EventBridge /> : null}
-      {children}
+      {/* Next still server-renders these client pages during the build, and several of them read
+          useSearchParams(), which bails out of SSR unless a Suspense boundary catches it. While the gate
+          returned null until the probe settled, the prerender never reached that call — now it does, and
+          without this boundary `next build` fails on the first such page. One boundary here covers every
+          route, so a new page cannot reintroduce the failure by forgetting its own. The fallback is null
+          because it is only ever seen by the build: in the browser nothing here suspends. */}
+      <Suspense fallback={null}>{children}</Suspense>
     </>
   );
 }
