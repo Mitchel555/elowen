@@ -56,6 +56,9 @@ function harness(opts: {
   /** Emit the child's `session` only after the gate — the host's real ordering, where the delegated call is
    *  registered before the first await but the id surfaces much later. This is the second startup race. */
   lateSession?: boolean;
+  /** Make the host refuse every stop, the way it does when the call is scoped to a turn that does not own
+   *  the child (a node's own turn, after a self-expansion). */
+  stopRejects?: boolean;
 } = {}) {
   gate = null;
   const tools = new Map<string, Tool>();
@@ -106,12 +109,18 @@ function harness(opts: {
   };
   /** The node child sessions the engine asked the host to abort — the stand-in for the real abort tree. */
   const stoppedSessions: string[] = [];
+  /** What the engine warned about — the only channel it has for a failure it cannot itself recover from. */
+  const warnings: string[] = [];
   const ctx = {
     dataDir: () => workflowFilesDir,
     registerTool: (def: Tool) => { tools.set(def.name, def); },
     registerControl: (name: string, control: WorkflowControl) => { controls.set(name, control); },
-    stopSubagent: async (id: string) => { stoppedSessions.push(id); return { stopped: true }; },
-    logger: { info() {}, warn() {} },
+    stopSubagent: async (id: string) => {
+      stoppedSessions.push(id);
+      if (opts.stopRejects) throw new Error('unknown sub-agent for this conversation');
+      return { stopped: true };
+    },
+    logger: { info() {}, warn(message: string) { warnings.push(message); } },
     currentSessionId: () => sessionId.current,
     currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
     currentAccess: () => access.current,
@@ -137,7 +146,7 @@ function harness(opts: {
   registerWorkflow(ctx, () => run, helpers);
   /** Everything the node can read, as one string — the chunks are a transport detail, not the content. */
   const contextOf = (task: string) => (contexts.get(task) ?? []).join('\n\n');
-  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, access, runs, stoppedSessions };
+  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, access, runs, stoppedSessions, warnings };
 }
 
 describe('workflow engine', () => {
@@ -1104,7 +1113,9 @@ describe('WorkflowResume', () => {
   // the node, after it had already been announced as continuing. It has to start clean instead — and say so.
   it('starts an unfinished node in a fresh channel when the access boundary was narrowed since the start', async () => {
     const { tools, snapshots, runs, access } = harness();
-    await tools.get('WorkflowStart')!.execute('r-scope', { nodesFile: workflowFile([{ id: 'a', task: 'a FAIL_ONCE' }]) });
+    await tools.get('WorkflowStart')!.execute('r-scope', {
+      nodesFile: workflowFile([{ id: 'a', task: 'a FAIL_ONCE' }, { id: 'b', task: 'b', deps: ['a'] }]),
+    });
     const wfId = snapshots[0]!.id;
     const firstA = runs.find((r) => r.task === 'a FAIL_ONCE')!;
 
@@ -1114,8 +1125,13 @@ describe('WorkflowResume', () => {
 
     const retryA = runs.filter((r) => r.task === 'a FAIL_ONCE')[1]!;
     expect(retryA.channelId).not.toBe(firstA.channelId);
-    // No resume note either: the fresh conversation holds none of the earlier work to continue from.
-    expect(retryA.fullTask).toBe('a FAIL_ONCE');
+    // Not the resume note: the fresh conversation holds none of the earlier work to continue from, so
+    // pointing the node at it would be nonsense. The earlier attempt is not invisible though — whatever it
+    // wrote is still on disk, and a retry that assumes an untouched tree redoes half-applied work blind.
+    expect(retryA.fullTask).not.toContain('continue from where you stopped');
+    expect(retryA.fullTask).toContain('may have left partial changes on disk');
+    // `b` never launched, so it has no earlier attempt to be warned about at all.
+    expect(runs.find((r) => r.task === 'b')!.fullTask).toBe('b');
     const text = resumed.content[0]!.text;
     expect(text).toMatch(/access boundary has changed/);
     expect(text).toMatch(/status: done/); // the run still completes, it just repeats that node's work
@@ -1180,6 +1196,24 @@ describe('WorkflowResume', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(stoppedSessions).toContain('s-a'); // the late id is stopped on arrival instead
+  });
+
+  it('reports a late child the host refuses to stop instead of dropping the rejection', async () => {
+    // That stop runs on whatever turn is on the stack, and the host scopes a stop to THAT turn's session:
+    // after a self-expansion the turn is a node's own, while the child belongs to the origin, so the host
+    // refuses it. Unhandled, the rejection escapes into the daemon and the orphan is not even reported.
+    const { tools, snapshots, warnings } = harness({ lateSession: true, stopRejects: true });
+    let release!: () => void;
+    gate = { task: 'a', promise: new Promise<void>((r) => { release = r; }) };
+    void tools.get('WorkflowStart')!.execute('c3', { nodesFile: workflowFile([{ id: 'a', task: 'a' }]), background: true });
+    await new Promise((r) => setTimeout(r, 0));
+    const wfId = snapshots[0]!.id;
+
+    await tools.get('WorkflowStop')!.execute('c3-stop', { workflowId: wfId });
+    release();
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(warnings.some((w) => w.includes('s-a') && w.includes('could not be stopped'))).toBe(true);
   });
 
   it('reports nothing to resume once every node has already finished', async () => {

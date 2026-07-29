@@ -215,6 +215,12 @@ async function scenarioWorkflow() {
   // a real agent takes. The suite's daemon bootstraps an ADMIN, whose access carries no repo roots to be
   // confined to, so a temp path resolves; a project-scoped session would have to write inside its own repo.
   const nodesDir = mkdtempSync(join(tmpdir(), 'elowen-delegate-e2e-'));
+  // The finally below only runs when the scenario reaches it; a crash or an unhandled rejection skips it and
+  // strands the directory in /tmp. Same belt-and-braces the daemon data dir uses (brain-e2e/spawn-daemon.mjs).
+  const cleanupNodesDir = () => {
+    try { rmSync(nodesDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  };
+  process.once('exit', cleanupNodesDir);
   const nodesFile = join(nodesDir, 'gather-write.json');
   writeFileSync(nodesFile, JSON.stringify({
     title: 'E2E gather-write',
@@ -280,7 +286,8 @@ async function scenarioWorkflow() {
   } finally {
     if (daemon) await daemon.stop();
     await model.close();
-    rmSync(nodesDir, { recursive: true, force: true });
+    process.off('exit', cleanupNodesDir);
+    cleanupNodesDir();
   }
 }
 

@@ -29,6 +29,12 @@ import { join } from 'node:path';
  *  carries no repo roots to be confined to, so a temp path resolves; a project-scoped session would have to
  *  write inside its own repository (see assertPathAllowed). */
 const nodesDir = mkdtempSync(join(tmpdir(), 'elowen-wf-e2e-'));
+// close() only runs when the suite reaches its own teardown; a crash or an unhandled rejection skips it and
+// strands the directory in /tmp. Same belt-and-braces the daemon data dir uses (brain-e2e/spawn-daemon.mjs).
+const cleanupNodesDir = () => {
+  try { rmSync(nodesDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+};
+process.once('exit', cleanupNodesDir);
 let nodesFileSeq = 0;
 const nodesFile = (nodes) => {
   const path = join(nodesDir, `nodes-${nodesFileSeq += 1}.json`);
@@ -367,7 +373,7 @@ export async function startScriptedModel() {
     releaseHangs: () => releaseHang(),
     close: () => new Promise((resolve) => {
       releaseHang();
-      server.close(() => { rmSync(nodesDir, { recursive: true, force: true }); resolve(); });
+      server.close(() => { process.off('exit', cleanupNodesDir); cleanupNodesDir(); resolve(); });
     }),
   };
 }

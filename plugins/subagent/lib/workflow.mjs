@@ -143,7 +143,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   const workflowDir = join(ctx.dataDir(), 'workflows');
   try { mkdirSync(workflowDir, { recursive: true }); } catch { /* surfaces on first write instead */ }
 
-  const freshNodeState = () => ({ status: 'pending', sessionId: '', channelId: '', resumed: false, tools: 0, detail: undefined, tokens: undefined, seconds: undefined, model: undefined, startedAt: undefined, result: undefined, error: undefined });
+  const freshNodeState = () => ({ status: 'pending', sessionId: '', channelId: '', taskNote: '', tools: 0, detail: undefined, tokens: undefined, seconds: undefined, model: undefined, startedAt: undefined, result: undefined, error: undefined });
 
   /** Appended to a node's task when a resume puts it back into the conversation it already worked in. It has
    *  to read sensibly BOTH ways: the child session usually survives (the node reads its own prior work and
@@ -152,6 +152,16 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   const RESUME_NOTE = 'Note: an earlier attempt at this node was interrupted before it could finish. If this '
     + 'conversation already holds work you did on this task, continue from where you stopped instead of '
     + 'starting over — re-check anything you had not verified. If it holds nothing, just start from the top.';
+
+  /** Appended instead of RESUME_NOTE when a node that HAD already run is relaunched in a FRESH channel,
+   *  because the resume could not carry its session across a changed access boundary. It must not point the
+   *  node at a conversation it does not have — but the earlier attempt is not gone either: whatever it wrote
+   *  is still on disk, and a node that assumes an untouched tree redoes half-applied work blind. The only
+   *  trace it can still observe is that disk state, so that is what this sends it to check. */
+  const RESTART_NOTE = 'Note: an earlier attempt at this node was interrupted before it could finish. It ran in '
+    + 'a different conversation that is not available here, so you cannot see what it did — but it may have '
+    + 'left partial changes on disk. Check the current state of anything you are about to create or modify '
+    + 'before assuming it is untouched, then carry the task through to the end.';
 
   const statusMap = (wf) => {
     const map = {};
@@ -353,7 +363,14 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         // lock and the spawn, so a child that was already launching when the run was cancelled surfaces its
         // id only now — too late for the sweep in WorkflowStop/reload, which can only see ids it has. Stop
         // it here instead, or it would keep running tools and burning tokens after an announced stop.
-        if (wf.finished) void ctx.stopSubagent?.(e.sessionId);
+        // The host scopes a stop to the turn it is called from, and this one runs on whatever turn happens
+        // to be on the stack — a NODE's own turn when the workflow was extended from inside one, while the
+        // child was registered under the origin session. The stop is then refused, and there is nothing
+        // here that can recover: report it instead of letting the rejection go unhandled.
+        if (wf.finished) {
+          ctx.stopSubagent?.(e.sessionId)?.catch((err) => ctx.logger.warn(
+            `workflow ${wf.id}: node "${node.id}" child ${e.sessionId} could not be stopped after cancellation: ${errorText(err)}`));
+        }
         snapshot(wf);
       }
       else if (e.type === 'tool' && e.name) { ns.tools += 1; ns.detail = e.detail ? `${e.name} ${e.detail}` : e.name; ns.seconds = Math.round((Date.now() - ns.startedAt) / 1000); snapshot(wf); }
@@ -377,7 +394,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       const channelId = ns.channelId || `wf-${wf.id}-${node.id}-${randomUUID()}`;
       ns.channelId = channelId;
       const collectSource = { platform: 'subagent', userId: 'subagent', roleIds: [], channelId, access };
-      const raw = await getRun()(collectSource, ns.resumed ? `${node.task}\n\n${RESUME_NOTE}` : node.task, onEvent);
+      const raw = await getRun()(collectSource, ns.taskNote ? `${node.task}\n\n${ns.taskNote}` : node.task, onEvent);
       const reply = raw || '(the node returned nothing)';
       if (reply.startsWith('Error:')) { ns.status = 'error'; ns.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_RESULT_CHARS); }
       // The node's answer reaches the parent through `summarize` and its dependents through the blocks above:
@@ -723,10 +740,17 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       // what lets it resume inside its own session instead of repeating work it already did. A node holds a
       // session only once it started, so a PENDING one (never launched, or skipped because a dependency
       // failed) keeps a clean slate and starts from nothing, exactly as before.
+      //
+      // Losing the channel does NOT make a node that ran a clean-slate one: it is told about its earlier
+      // attempt either way, only in the terms it can act on — its own transcript when it kept the session,
+      // the state left on disk when it did not.
       for (const n of unfinished) {
         const prev = wf.state.get(n.id);
         const next = freshNodeState();
-        if (!scopeChanged && prev?.sessionId && prev.channelId) { next.channelId = prev.channelId; next.resumed = true; }
+        if (prev?.sessionId) {
+          if (!scopeChanged && prev.channelId) { next.channelId = prev.channelId; next.taskNote = RESUME_NOTE; }
+          else next.taskNote = RESTART_NOTE;
+        }
         wf.state.set(n.id, next);
       }
       if (typeof p.background === 'boolean') wf.background = p.background;
