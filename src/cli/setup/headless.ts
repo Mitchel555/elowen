@@ -19,17 +19,24 @@ import type { ReadinessCheck } from '../doctor.js';
  *  env instead of prompts. Lets agents and CI reach a working setup headlessly (and is how the whole flow
  *  is E2E-tested, since the modal TUI needs a real TTY). Prints a readiness matrix and exits non-zero on a
  *  hard failure (bad/missing required input), so a caller can branch on it. */
-export async function runHeadlessSetup(base: string, env: NodeJS.ProcessEnv, args: string[]): Promise<void> {
+/** Pure flag gate for the non-interactive setup — throws on the first malformed flag, touching nothing.
+ *  It is exported because `elowen setup` has to run it BEFORE `bringUp`: bringing the daemon up can
+ *  restart a live service, and a typo must not cost a restart the run is about to abort on anyway. */
+export function parseHeadlessFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts {
   // Reject an unknown --memory value loudly (matching how --provider dies), instead of silently coercing
   // it to 'skip' and leaving memory unconfigured while the run reports success.
   const rawMemory = flagValue(args, '--memory');
   if (rawMemory !== undefined && !(MEMORY_MODES as readonly string[]).includes(rawMemory)) {
-    return die(`Unknown --memory "${rawMemory}". Use one of: ${MEMORY_MODES.join(', ')}.`);
+    throw new Error(`Unknown --memory "${rawMemory}". Use one of: ${MEMORY_MODES.join(', ')}.`);
   }
+  return parseFlags(args, env);
+}
+
+export async function runHeadlessSetup(base: string, env: NodeJS.ProcessEnv, args: string[]): Promise<void> {
   // Parsing is a hard gate, before a single request is made: a malformed flag must stop the run while
   // nothing has been created yet, not halfway through onboarding.
   let o: HeadlessOpts;
-  try { o = parseFlags(args, env); }
+  try { o = parseHeadlessFlags(args, env); }
   catch (e) { return die(msg(e)); }
   const ctx: WizardCtx = { base, fetchFn: fetch, answers: {} };
 

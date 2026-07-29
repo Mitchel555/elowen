@@ -18,10 +18,14 @@ export async function runSetup(args: string[], env: NodeJS.ProcessEnv, base: str
   // Non-interactive: flag-driven setup (agents / CI / E2E). Works in or out of a TTY; never prompts.
   if (nonInteractive) {
     if (reset) clearMarker(env);
+    const { parseHeadlessFlags, runHeadlessSetup } = await import('./headless.js');
+    // Validate the flags before bringUp, not after: bringUp may restart the daemon's services, and a
+    // malformed flag has to stop the run while the machine is still untouched.
+    try { parseHeadlessFlags(args, env); }
+    catch (e) { console.error((e as Error).message); process.exit(1); }
     try { await bringUp(base, env, version); }
     catch (e) { console.error(`Couldn't start the Elowen daemon: ${(e as Error).message}`); process.exit(1); }
     try {
-      const { runHeadlessSetup } = await import('./headless.js');
       await runHeadlessSetup(base, env, args);
     } catch (e) {
       console.error(debug ? ((e as Error).stack ?? String(e)) : (e as Error).message);

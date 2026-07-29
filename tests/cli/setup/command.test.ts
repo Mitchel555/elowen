@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const runLifecycle = vi.fn(async () => true);
 const runHeadlessSetup = vi.fn(async () => {});
+const parseHeadlessFlags = vi.fn(() => ({}));
 const systemctl = vi.fn(async () => ({ code: 0, stdout: '' }));
 /** Whether this box looks like an `elowen install` one (systemd units) or a plain local install. */
 let installed = false;
@@ -19,6 +20,7 @@ vi.mock('../../../src/cli/systemd.js', () => ({
   systemctl: (...args: unknown[]) => systemctl(...(args as [])),
 }));
 vi.mock('../../../src/cli/setup/headless.js', () => ({
+  parseHeadlessFlags: (...args: unknown[]) => parseHeadlessFlags(...(args as [])),
   runHeadlessSetup: (...args: unknown[]) => runHeadlessSetup(...(args as [])),
 }));
 
@@ -31,6 +33,8 @@ beforeEach(() => {
   runLifecycle.mockClear();
   runHeadlessSetup.mockClear();
   systemctl.mockClear();
+  parseHeadlessFlags.mockClear();
+  parseHeadlessFlags.mockImplementation(() => ({}));
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -44,6 +48,24 @@ describe('cli/setup/command bringUp readiness', () => {
     await runSetup(['--non-interactive'], {}, 'http://localhost:4400', '1.2.3');
     expect(verbs()).toContain('up');
     expect(runHeadlessSetup).toHaveBeenCalledOnce();
+  });
+
+  /** The flag gate has to run BEFORE bringUp, not after it. bringUp restarts the daemon on a box that
+   *  looks unhealthy, so with the gate behind it a plain typo — `elowen setup --non-interactive
+   *  --provider` with no value — cost a service restart before the run died on the parse error. */
+  it('refuses a malformed flag before it touches the machine', async () => {
+    parseHeadlessFlags.mockImplementation(() => { throw new Error('missing value for --provider'); });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
+    const exit = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null): never => {
+      throw new Error(`exit:${String(code)}`);
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(runSetup(['--non-interactive', '--provider'], {}, 'http://localhost:4400', '1.2.3')).rejects.toThrow('exit:1');
+    expect(runLifecycle).not.toHaveBeenCalled();
+    expect(systemctl).not.toHaveBeenCalled();
+    expect(runHeadlessSetup).not.toHaveBeenCalled();
+    exit.mockRestore();
+    err.mockRestore();
   });
 
   it('starts nothing when the daemon already answers healthily', async () => {
