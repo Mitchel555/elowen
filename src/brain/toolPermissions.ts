@@ -61,6 +61,35 @@ const NON_DESTRUCTIVE_BASH_ALLOW: readonly string[] = [
   // Bare `env` only: it prints the environment. `env CMD` EXECUTES CMD (env is a wrapper — see
   // BASH_COMMAND_WRAPPERS), so an `env *` pattern would allow-list every command on the system.
   'env',
+  // Search and listing. Same shape as grep/find above — they read the tree and print to stdout.
+  'rg *', 'fd *', 'tree', 'tree *', 'nl *', 'cut *', 'tr *', 'column *', 'comm *', 'paste *',
+  'xxd *', 'od *', 'strings *', 'base64 *', 'readlink *', 'seq *', 'echo *', 'printf *',
+  'md5sum *', 'sha1sum *', 'sha256sum *', 'cksum *',
+  // Host and process facts. Read-only introspection an agent needs to describe the machine it is on.
+  'ps', 'ps *', 'pgrep *', 'free', 'free *', 'uptime', 'whoami', 'id', 'id *', 'groups', 'groups *',
+  'hostname', 'uname', 'uname *', 'nproc', 'arch', 'lsblk', 'lsblk *', 'lsof *', 'ss *', 'netstat *',
+  'printenv', 'printenv *', 'locale', 'locale *', 'getconf *', 'whereis *', 'command -v *', 'type *',
+  // Read-only git plumbing beyond status/diff/log/show. `git branch` is bare-only — `git branch -D`
+  // deletes, and unlike the claw-backs below that is a subcommand flag, not an exec escape.
+  'git blame*', 'git branch', 'git rev-parse*', 'git ls-files*', 'git ls-tree*', 'git cat-file*',
+  'git describe*', 'git shortlog*', 'git show-ref*', 'git merge-base*', 'git name-rev*',
+  'git symbolic-ref*', 'git reflog*', 'git stash list*', 'git remote', 'git remote -v',
+  'git config --get*', 'git config --list*',
+  // Service and log inspection: the read-only systemctl verbs, spelled out rather than `systemctl *`,
+  // which would admit start/stop/restart/disable. journalctl reads, but see the --vacuum/--rotate
+  // claw-backs — those delete history.
+  'systemctl status*', 'systemctl is-active*', 'systemctl is-enabled*', 'systemctl is-failed*',
+  'systemctl show*', 'systemctl cat*', 'systemctl list-units*', 'systemctl list-timers*',
+  'systemctl list-sockets*', 'journalctl*',
+  // Loopback HTTP only, so an agent can probe a service it just described. The host must be local:
+  // curl is the exfiltration path, and a pattern like `curl *` would hand it every URL on the
+  // internet. Mutating verbs and request bodies are clawed back below.
+  'curl*http://127.0.0.1*', 'curl*http://localhost*', 'curl*http://[::1]*',
+  // Verification scripts BY NAME. `npm run *` would be `npm run deploy` too — the script body is
+  // arbitrary and lives in the repo, so the boundary can only trust the conventional names for
+  // "check the code without changing anything".
+  'npm test*', 'npm run lint*', 'npm run typecheck*', 'npm run check*', 'npm run test*',
+  'npx tsc*', 'npx vitest run*', 'npx eslint*', 'npx prettier --check*',
 ];
 
 /** The ways an allow-listed command can still run an ARBITRARY PROGRAM or destroy data — re-denied
@@ -85,6 +114,12 @@ const NON_DESTRUCTIVE_BASH_CLAWBACKS: readonly string[] = [
   '*GIT_CONFIG*=*', '*GIT_PAGER=*',
   'find*-delete*', 'find*-exec*', 'find*-ok*',
   'awk*system(*',
+  // journalctl reads history — these three subcommands destroy it.
+  'journalctl*--vacuum*', 'journalctl*--rotate*', 'journalctl*--flush*',
+  // The loopback allow above is for PROBING a local service. These turn the same command into a write
+  // against it, and --proxy turns a loopback URL into a request to anywhere.
+  'curl*-X *', 'curl*--request*', 'curl*-d *', 'curl*--data*', 'curl*-T *', 'curl*--upload*',
+  'curl*-F *', 'curl*--form*', 'curl*--proxy*',
 ];
 
 /** The full shell clamp for a context that must not run DESTRUCTIVE commands: deny every command,
@@ -96,9 +131,17 @@ const NON_DESTRUCTIVE_BASH_CLAWBACKS: readonly string[] = [
  *  overwrite any file the daemon's own user can reach. (That is also why the old `*>*` and
  *  `*--output*` denies are gone: once redirection is allowed they would forbid one spelling of a
  *  write while another stays open.) What the clamp removes is the destructive and hard-to-reverse
- *  set (rm/mv/dd/chmod/chown/ln/truncate/mkfs, git commit/push/reset/checkout/clean), package,
- *  system and process control (npm/systemctl/kill), network exfiltration (curl/wget/ssh), privilege
- *  escalation (sudo) and the exec escapes clawed back above.
+ *  set (rm/mv/dd/chmod/chown/ln/truncate/mkfs, git commit/push/reset/checkout/clean), package and
+ *  process control (npm install/publish, kill), service control (systemctl start/stop/restart —
+ *  only the read-only verbs are listed), network access beyond a loopback GET (wget/ssh, and curl to
+ *  any host but 127.0.0.1/localhost), privilege escalation (sudo) and the exec escapes clawed back
+ *  above.
+ *
+ *  ONE DELIBERATE HOLE: the conventional verification scripts (`npm test`, `npm run lint|typecheck|
+ *  check`) are allowed by NAME, and a script body is arbitrary repo code. A repo whose `test` script
+ *  deploys would run that deploy. This is the same bargain as `awk`/`sed` above — the clamp is a
+ *  guardrail against unguided destruction, not a sandbox — taken because a planning agent that cannot
+ *  run the project's own check has to guess whether its plan compiles.
  *  Shared by the unattended read-only agent boundary (brain/agents/readOnlyBoundary.ts) and by plan
  *  mode (brain/service/turnContextBuilder.ts), so the shell clamp has exactly ONE definition. */
 export const NON_DESTRUCTIVE_BASH_RULES: readonly PermissionRule[] = [

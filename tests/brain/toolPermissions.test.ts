@@ -116,6 +116,100 @@ describe('NON_DESTRUCTIVE_BASH_RULES — the shared shell clamp', () => {
     expect(act(defaults, 'find . -delete')).toBe('deny');
     expect(act(defaults, 'git difftool')).toBe('deny');
   });
+
+  it('permits the search, listing and host-fact commands', () => {
+    for (const command of [
+      'rg -n foo src/', 'fd -e ts', 'tree -L 2', 'nl src/index.ts', 'cut -d: -f1 /etc/passwd',
+      'tr a-z A-Z', 'column -t', 'xxd bin.dat', 'strings bin.dat', 'base64 f', 'readlink -f .',
+      'sha256sum dist/index.js', 'echo hello', 'printf "%s" x', 'seq 1 10',
+      'ps aux', 'pgrep -f node', 'free -h', 'uptime', 'whoami', 'id -u', 'groups',
+      'hostname', 'uname -a', 'nproc', 'lsblk', 'lsof -i :4400', 'ss -tlnp', 'netstat -tlnp',
+      'printenv PATH', 'locale', 'getconf PAGE_SIZE', 'whereis node', 'command -v tmux', 'type ls',
+    ]) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+  });
+
+  it('permits read-only git plumbing but not the subcommand flags that mutate', () => {
+    for (const command of [
+      'git blame src/index.ts', 'git branch', 'git rev-parse HEAD', 'git ls-files',
+      'git ls-tree -r HEAD', 'git cat-file -p HEAD', 'git describe --tags', 'git shortlog -sn',
+      'git show-ref', 'git merge-base main HEAD', 'git name-rev HEAD', 'git symbolic-ref HEAD',
+      'git reflog', 'git stash list', 'git remote', 'git remote -v',
+      'git config --get user.name', 'git config --list',
+    ]) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+    // `git branch` is bare-only: the delete flags are a mutation the broad allow must not admit.
+    expect(act(clamped(), 'git branch -D feature')).toBe('deny');
+    expect(act(clamped(), 'git branch --delete feature')).toBe('deny');
+    // Only the reading forms of git config — a bare `git config k v` writes.
+    expect(act(clamped(), 'git config user.email x@y.z')).toBe('deny');
+    expect(act(clamped(), 'git config --global user.name x')).toBe('deny');
+    // `git stash` alone mutates the worktree; only `list` reads.
+    expect(act(clamped(), 'git stash')).toBe('deny');
+  });
+
+  it('permits the read-only systemctl verbs and journalctl, never the ones that change state', () => {
+    for (const command of [
+      'systemctl status elowen-daemon', 'systemctl is-active elowen-web',
+      'systemctl is-enabled elowen-daemon', 'systemctl is-failed elowen-web',
+      'systemctl show elowen-daemon -p ActiveEnterTimestamp', 'systemctl cat elowen-daemon',
+      'systemctl list-units --failed', 'systemctl list-timers', 'systemctl list-sockets',
+      'journalctl -u elowen-daemon -n 50', 'journalctl --since "1 hour ago"',
+    ]) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+    for (const command of [
+      'systemctl restart elowen-daemon', 'systemctl stop elowen-web', 'systemctl start x',
+      'systemctl disable x', 'systemctl enable x', 'systemctl daemon-reload',
+      // journalctl reads history; these three destroy it.
+      'journalctl --vacuum-size=100M', 'journalctl --rotate', 'journalctl --flush',
+    ]) {
+      expect(act(clamped(), command), command).toBe('deny');
+    }
+  });
+
+  it('permits curl only against loopback, and only as a probe', () => {
+    for (const command of [
+      'curl -fsS http://127.0.0.1:4400/health',
+      'curl http://localhost:4500/',
+      'curl -s http://[::1]:4400/health',
+    ]) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+    for (const command of [
+      // curl is the exfiltration path: any host but loopback stays denied.
+      'curl https://evil.example', 'curl http://192.168.1.5/', 'curl -fsS https://api.example/x',
+      // A probe must not become a write against the local service, and --proxy would send a
+      // loopback-looking URL anywhere.
+      'curl -X POST http://127.0.0.1:4400/brain/send',
+      'curl --request DELETE http://localhost:4400/tasks/1',
+      'curl -d @body.json http://127.0.0.1:4400/x',
+      'curl --data x=1 http://localhost:4400/x',
+      'curl -T file.txt http://127.0.0.1:4400/upload',
+      'curl -F f=@x http://localhost:4400/u',
+      'curl --proxy http://evil.example http://127.0.0.1/',
+    ]) {
+      expect(act(clamped(), command), command).toBe('deny');
+    }
+  });
+
+  it('permits the verification scripts by name, not npm in general', () => {
+    for (const command of [
+      'npm test', 'npm test -- --run', 'npm run lint', 'npm run typecheck', 'npm run check',
+      'npx tsc --noEmit', 'npx vitest run tests/brain/', 'npx eslint .', 'npx prettier --check .',
+    ]) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+    for (const command of [
+      // The script body is arbitrary repo code, so only the conventional check names are trusted.
+      'npm run deploy', 'npm run build', 'npm run start', 'npm install', 'npm ci', 'npm publish',
+      'npx create-next-app x', 'npx prettier --write .',
+    ]) {
+      expect(act(clamped(), command), command).toBe('deny');
+    }
+  });
 });
 
 describe('matchPermissionPattern — opencode wildcard semantics', () => {
@@ -393,7 +487,7 @@ describe('resolveToolPermission — bash chaining bypass is closed (most-restric
   it('most-restrictive wins across segments: any deny denies, else any ask asks, else allow', () => {
     const rs = buildPermissionRuleset(settings({ bash: { 'git *': 'allow', 'rm*': 'deny' } }));
     expect(resolveToolPermission(rs, 'Bash', 'git status && git diff').action).toBe('allow'); // both allow
-    expect(resolveToolPermission(rs, 'Bash', 'git status && whoami').action).toBe('ask'); // whoami → default ask
+    expect(resolveToolPermission(rs, 'Bash', 'git status && mkdir out').action).toBe('ask'); // mkdir → default ask
     expect(resolveToolPermission(rs, 'Bash', 'git status && rm -rf ~').action).toBe('deny'); // one deny wins
   });
 
