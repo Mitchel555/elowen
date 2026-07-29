@@ -78,7 +78,6 @@ app.get('/ws/terminal', upgradeWebSocket(terminalWsHandler({
   resizeWindow: (session, cols, rows) => { void tmux.resize(session, cols, rows); },
 })));
 
-startLoops();
 // Bind to localhost by default: a daemon token can spawn agents (effectively RCE), so the daemon
 // must not be publicly reachable. Front it with the web app's BFF proxy (or a reverse proxy). Set
 // ELOWEN_HOST=0.0.0.0 to expose it deliberately (e.g. web app on a separate host).
@@ -88,7 +87,15 @@ const server = serve({
   port: Number((process.env.ELOWEN_PORT) ?? 4400),
   hostname: host,
   websocket: { server: new WebSocketServer({ noServer: true }) },
-}, info => log.info(`elowen serve on ${host}:${info.port} — logs → ${LOG_DIR}`));
+}, info => {
+  log.info(`elowen serve on ${host}:${info.port} — logs → ${LOG_DIR}`);
+  // Boot reconcile terminalizes delegation rows left `running` by a previous process, which is only
+  // safe when nothing else is serving them — a live delegation is registered in daemon memory, so a
+  // second instance cannot tell ours apart from a crashed one and would kill it. Winning the port is
+  // what establishes that: run the loops only once the bind succeeded, never before. This still does
+  // not cover a second daemon started on a *different* port against the same database.
+  startLoops();
+});
 // Without an error handler an EADDRINUSE (zombie daemon still holding the port) crashes with a bare
 // stack trace; give it a clear exit message instead.
 server.on('error', (e: NodeJS.ErrnoException) => {
