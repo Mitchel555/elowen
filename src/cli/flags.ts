@@ -27,9 +27,13 @@ function flagPresent(args: string[], name: string): boolean {
 /** Reject flags that were written without a value. A valueless flag reads the same as an absent one, and
  *  for an unattended run that silence is the dangerous outcome: `--user --agents all` would provision the
  *  DEFAULT service user and `--domain --no-tls` would quietly fall back to localhost, both reported as
- *  success. Fail the parse instead, and point at the `--name=value` form for values starting with `--`. */
+ *  success. Fail the parse instead, and point at the `--name=value` form for values starting with `--`.
+ *
+ *  An EMPTY value (`--admin-pass=`) is rejected the same way: no flag on these CLIs takes "" as an
+ *  answer, and it slipped past a `!== undefined` pair check while still reading falsy downstream —
+ *  `--admin-user=x --admin-pass=` installed a box with no admin account and called it a success. */
 export function requireFlagValues(args: string[], names: readonly string[]): void {
-  const missing = names.filter((n) => flagPresent(args, n) && flagValue(args, n) === undefined);
+  const missing = names.filter((n) => flagPresent(args, n) && !flagValue(args, n));
   if (!missing.length) return;
   throw new Error(`missing value for ${missing.join(', ')} — write \`--flag value\`, or \`--flag=value\` when the value itself starts with \`--\``);
 }

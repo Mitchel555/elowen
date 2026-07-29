@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readState, writeState, clearState, isAlive, isTrackedService, status, stop, start, waitHealthy, type RunState, type IsTracked } from '../../src/cli/launcher.js';
-import type { spawn as nodeSpawn } from 'node:child_process';
+import { spawn as spawnProcess, type spawn as nodeSpawn } from 'node:child_process';
+import { once } from 'node:events';
 
 let home: string;
 let env: NodeJS.ProcessEnv;
@@ -45,10 +46,28 @@ describe('cli/launcher.isTrackedService', () => {
     expect(isTrackedService(2147483646, 'daemon')).toBe(false);
   });
   it('rejects a live pid that is not our service (this test runner is not the daemon entry)', () => {
-    // On Linux the procfs argv of the vitest process carries no `daemon/index.js`; elsewhere there is no
-    // /proc so it falls back to liveness (true). Either way it must never be mistaken for the daemon on
-    // the platform we ship to.
-    if (process.platform === 'linux') expect(isTrackedService(process.pid, 'daemon')).toBe(false);
+    // The vitest process's argv carries no `daemon/index.js`, so it must never be mistaken for the daemon.
+    expect(isTrackedService(process.pid, 'daemon')).toBe(false);
+  });
+
+  /** Off Linux there is no /proc, and identity used to fall back to liveness alone: after a reboot
+   *  recycled the pid recorded in run.json, `stop` would SIGTERM a stranger — and `elowen setup` now
+   *  runs `down` on its own. `ps` is POSIX, so the non-procfs branch is exercised here on any platform. */
+  it('validates identity through ps when there is no procfs', async () => {
+    const dir = join(home, 'daemon');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'index.js'), 'setTimeout(() => {}, 30_000);', 'utf8');
+    const child = spawnProcess(process.execPath, [join(dir, 'index.js')], { stdio: 'ignore' });
+    try {
+      await once(child, 'spawn'); // the argv is only the entry script's once the exec has happened
+      const pid = child.pid;
+      if (pid === undefined) throw new Error('failed to spawn the fixture process');
+      expect(isTrackedService(pid, 'daemon', 'darwin')).toBe(true);
+      expect(isTrackedService(pid, 'web', 'darwin')).toBe(false);   // alive, but a different service
+      expect(isTrackedService(process.pid, 'daemon', 'darwin')).toBe(false); // alive, but not ours at all
+    } finally {
+      child.kill('SIGKILL');
+    }
   });
 });
 

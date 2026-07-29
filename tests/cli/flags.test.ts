@@ -60,6 +60,15 @@ describe('cli/flags.requireFlagValues', () => {
   it('ignores flags it was not asked about', () => {
     expect(() => requireFlagValues(['--domain'], ['--user'])).not.toThrow();
   });
+
+  // `--admin-user=x --admin-pass=` passed the pair check in `elowen install` (both flags are present, so
+  // neither is undefined) and then read falsy where the admin is built — the install finished with no
+  // account and no warning. No value flag on these CLIs means anything as "", so reject it in the parser.
+  it('rejects an empty value, which reads as present but means nothing', () => {
+    expect(() => requireFlagValues(['--admin-pass='], ['--admin-pass'])).toThrow(/missing value for --admin-pass/);
+    expect(() => requireFlagValues(['--admin-user=root', '--admin-pass='], ['--admin-user', '--admin-pass']))
+      .toThrow(/missing value for --admin-pass/);
+  });
 });
 
 // The three flag-list CLIs (`elowen` dispatch, `elowen install`, headless `elowen setup`) each used to

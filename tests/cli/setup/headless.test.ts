@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
-import { parseFlags, resolveModel, runHeadlessSetup } from '../../../src/cli/setup/headless.js';
+import { parseHeadlessFlags, resolveModel, runHeadlessSetup } from '../../../src/cli/setup/headless.js';
 import { PREFERRED_DEFAULT } from '../../../src/brain/providers.js';
 import { RECOMMENDED_EMBEDDING_MODEL, OPENROUTER_BASE, OPENAI_BASE } from '../../../src/cli/setup/constants.js';
 import type { WizardCtx } from '../../../src/cli/setup/types.js';
@@ -35,9 +35,9 @@ function fakeDaemon(initial: Record<string, unknown>[] = []): { calls: RecCall[]
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe('cli/setup/headless.parseFlags', () => {
+describe('cli/setup/headless.parseHeadlessFlags', () => {
   it('applies defaults', () => {
-    const o = parseFlags(['--non-interactive'], {});
+    const o = parseHeadlessFlags(['--non-interactive'], {});
     expect(o.adminUser).toBe('admin');
     expect(o.memory).toBe('skip');
     expect(o.embeddingModel).toBe(RECOMMENDED_EMBEDDING_MODEL);
@@ -46,49 +46,51 @@ describe('cli/setup/headless.parseFlags', () => {
   });
 
   it('project is opt-in via --project (no cwd default)', () => {
-    expect(parseFlags([], {}).project).toBeUndefined();
-    expect(parseFlags(['--project', '/repo/x'], {}).project).toBe('/repo/x');
+    expect(parseHeadlessFlags([], {}).project).toBeUndefined();
+    expect(parseHeadlessFlags(['--project', '/repo/x'], {}).project).toBe('/repo/x');
   });
 
   it('refuses a flag written without its value instead of falling back to a default', () => {
     // It must never eat the next flag either (that reader's own semantics live in tests/cli/flags.test.ts) —
     // but silently reading as absent is just as wrong here: unattended, `--provider --api-key sk-x` used to
     // skip provider setup entirely and still report success.
-    expect(() => parseFlags(['--admin-password', '--provider', 'openai'], {})).toThrow(/missing value for --admin-password/);
-    expect(() => parseFlags(['--provider', '--api-key', 'sk-x'], {})).toThrow(/missing value for --provider/);
+    expect(() => parseHeadlessFlags(['--admin-password', '--provider', 'openai'], {})).toThrow(/missing value for --admin-password/);
+    expect(() => parseHeadlessFlags(['--provider', '--api-key', 'sk-x'], {})).toThrow(/missing value for --provider/);
     // A value that legitimately starts with `--` still gets through, via the =value escape.
-    expect(parseFlags(['--admin-password=--secret'], {}).adminPassword).toBe('--secret');
-    expect(parseFlags(['--admin-password', 'secret'], {}).adminPassword).toBe('secret');
+    expect(parseHeadlessFlags(['--admin-password=--secret'], {}).adminPassword).toBe('--secret');
+    expect(parseHeadlessFlags(['--admin-password', 'secret'], {}).adminPassword).toBe('secret');
   });
 
   it('names every offending flag at once, so an unattended run is fixed in one pass', () => {
-    expect(() => parseFlags(['--provider', '--model', '--project'], {}))
+    expect(() => parseHeadlessFlags(['--provider', '--model', '--project'], {}))
       .toThrow(/missing value for --project, --provider, --model/);
   });
 
   it('a --memory written without a value is refused rather than silently skipping memory', () => {
-    expect(() => parseFlags(['--memory'], {})).toThrow(/missing value for --memory/);
+    expect(() => parseHeadlessFlags(['--memory'], {})).toThrow(/missing value for --memory/);
   });
 
   it('prefers a flag over the env var, falls back to env otherwise', () => {
     const env = { ELOWEN_ADMIN_USER: 'envuser', ELOWEN_API_KEY: 'env-key' } as NodeJS.ProcessEnv;
-    const o = parseFlags(['--admin-user', 'flaguser'], env);
+    const o = parseHeadlessFlags(['--admin-user', 'flaguser'], env);
     expect(o.adminUser).toBe('flaguser'); // flag wins
     expect(o.apiKey).toBe('env-key');     // env fallback
   });
 
   it('--no-project clears the default project', () => {
-    expect(parseFlags(['--no-project'], {}).project).toBeUndefined();
+    expect(parseHeadlessFlags(['--no-project'], {}).project).toBeUndefined();
   });
 
-  it('normalizes an invalid --memory to skip', () => {
-    expect(parseFlags(['--memory', 'bogus'], {}).memory).toBe('skip');
-    expect(parseFlags(['--memory', 'openrouter'], {}).memory).toBe('openrouter');
+  // Coercing a typo to 'skip' left memory unconfigured while the run still reported success — the same
+  // silent-default failure the valueless-flag gate exists to prevent.
+  it('refuses an unknown --memory value instead of coercing it to skip', () => {
+    expect(() => parseHeadlessFlags(['--memory', 'bogus'], {})).toThrow(/Unknown --memory "bogus"/);
+    expect(parseHeadlessFlags(['--memory', 'openrouter'], {}).memory).toBe('openrouter');
   });
 
   it('--lsp opts into the language-server install (off by default)', () => {
-    expect(parseFlags([], {}).lsp).toBe(false);
-    expect(parseFlags(['--lsp'], {}).lsp).toBe(true);
+    expect(parseHeadlessFlags([], {}).lsp).toBe(false);
+    expect(parseHeadlessFlags(['--lsp'], {}).lsp).toBe(true);
   });
 });
 

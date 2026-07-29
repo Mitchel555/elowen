@@ -19,19 +19,6 @@ import type { ReadinessCheck } from '../doctor.js';
  *  env instead of prompts. Lets agents and CI reach a working setup headlessly (and is how the whole flow
  *  is E2E-tested, since the modal TUI needs a real TTY). Prints a readiness matrix and exits non-zero on a
  *  hard failure (bad/missing required input), so a caller can branch on it. */
-/** Pure flag gate for the non-interactive setup — throws on the first malformed flag, touching nothing.
- *  It is exported because `elowen setup` has to run it BEFORE `bringUp`: bringing the daemon up can
- *  restart a live service, and a typo must not cost a restart the run is about to abort on anyway. */
-export function parseHeadlessFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts {
-  // Reject an unknown --memory value loudly (matching how --provider dies), instead of silently coercing
-  // it to 'skip' and leaving memory unconfigured while the run reports success.
-  const rawMemory = flagValue(args, '--memory');
-  if (rawMemory !== undefined && !(MEMORY_MODES as readonly string[]).includes(rawMemory)) {
-    throw new Error(`Unknown --memory "${rawMemory}". Use one of: ${MEMORY_MODES.join(', ')}.`);
-  }
-  return parseFlags(args, env);
-}
-
 export async function runHeadlessSetup(base: string, env: NodeJS.ProcessEnv, args: string[]): Promise<void> {
   // Parsing is a hard gate, before a single request is made: a malformed flag must stop the run while
   // nothing has been created yet, not halfway through onboarding.
@@ -213,6 +200,8 @@ export interface HeadlessOpts {
 
 const MEMORY_MODES = ['reuse', 'openrouter', 'skip'] as const;
 
+const isMemoryMode = (v: string): v is HeadlessOpts['memory'] => (MEMORY_MODES as readonly string[]).includes(v);
+
 /** Every flag here takes a VALUE. Written without one it used to fall through to a default or to nothing
  *  at all, which on an unattended setup is the worst kind of failure: `--provider --api-key sk-x` left the
  *  provider unconfigured and the run still printed "Setup complete". Same contract as `elowen install`. */
@@ -221,11 +210,17 @@ const VALUE_FLAGS = [
   '--api-key', '--base-url', '--model', '--memory', '--memory-key', '--embedding-model',
 ] as const;
 
-export function parseFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts {
+/** Pure flag gate for the non-interactive setup — throws on the first malformed flag, touching nothing.
+ *  It is exported because `elowen setup` has to run it BEFORE `bringUp`: bringing the daemon up can
+ *  restart a live service, and a typo must not cost a restart the run is about to abort on anyway. */
+export function parseHeadlessFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts {
   requireFlagValues(args, VALUE_FLAGS);
   const val = (name: string): string | undefined => flagValue(args, name);
   const has = (name: string): boolean => args.includes(name);
-  const memory = (val('--memory') ?? 'skip') as HeadlessOpts['memory'];
+  // Reject an unknown --memory value loudly (matching how --provider dies), instead of coercing it to
+  // 'skip' and leaving memory unconfigured while the run reports success.
+  const memory = val('--memory') ?? 'skip';
+  if (!isMemoryMode(memory)) throw new Error(`Unknown --memory "${memory}". Use one of: ${MEMORY_MODES.join(', ')}.`);
   return {
     adminUser: val('--admin-user') ?? (env.ELOWEN_ADMIN_USER) ?? 'admin',
     adminPassword: val('--admin-password') ?? (env.ELOWEN_ADMIN_PASSWORD),
@@ -238,7 +233,7 @@ export function parseFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts
     apiKey: val('--api-key') ?? (env.ELOWEN_API_KEY),
     baseUrl: val('--base-url'),
     model: val('--model'),
-    memory: (MEMORY_MODES as readonly string[]).includes(memory) ? memory : 'skip',
+    memory,
     memoryKey: val('--memory-key') ?? (env.ELOWEN_OPENROUTER_KEY),
     embeddingModel: val('--embedding-model') ?? RECOMMENDED_EMBEDDING_MODEL,
     skipTest: has('--skip-test'),

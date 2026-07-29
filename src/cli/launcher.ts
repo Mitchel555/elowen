@@ -1,4 +1,4 @@
-import { spawn as nodeSpawn } from 'node:child_process';
+import { execFileSync, spawn as nodeSpawn } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,18 +44,25 @@ export type IsTracked = (pid: number, mark: ServiceMark) => boolean;
 /** Whether a tracked pid is STILL our service, not an unrelated pid that reused the number after a
  *  reboot/crash. A bare `isAlive` check is not enough: run.json survives a reboot, the OS recycles pids,
  *  and `stop` would then SIGTERM an innocent process while `start` would adopt it as "already running"
- *  and never spawn. On Linux we birth-validate by matching the procfs argv against the service's entry
- *  script; a dead pid, or one whose argv doesn't carry the entry, is "not ours". Off Linux there is no
- *  /proc, so this falls back to liveness alone (best effort — documented). */
-export function isTrackedService(pid: number, mark: ServiceMark): boolean {
+ *  and never spawn. We birth-validate by matching the process's own argv against the service's entry
+ *  script; a dead pid, or one whose argv doesn't carry the entry, is "not ours". */
+export function isTrackedService(pid: number, mark: ServiceMark, platform: NodeJS.Platform = process.platform): boolean {
   if (!isAlive(pid)) return false;
-  if (process.platform !== 'linux') return true; // no procfs — liveness is all we have
-  try {
-    const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8'); // NUL-separated argv
-    return cmdline.split('\0').some((arg) => arg.includes(ENTRY_MARK[mark]));
-  } catch {
-    return false; // /proc unreadable or the pid vanished mid-check → cannot confirm it is ours
+  const argv = processArgv(pid, platform);
+  return argv !== null && argv.includes(ENTRY_MARK[mark]);
+}
+
+/** The command line of `pid`, or null when it cannot be read. procfs is the cheap path; off Linux there
+ *  is no /proc and `ps` answers the same question — liveness alone used to stand in for identity there,
+ *  which let `stop` SIGTERM whatever process had inherited a recycled pid (and `elowen setup` now takes
+ *  that path unattended). `platform` is a parameter so the non-procfs branch is testable on Linux. */
+function processArgv(pid: number, platform: NodeJS.Platform): string | null {
+  if (platform === 'linux') {
+    try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } // NUL-separated argv
+    catch { return null; } // /proc unreadable or the pid vanished mid-check
   }
+  try { return execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }); }
+  catch { return null; } // ps failed or the pid is gone → cannot confirm it is ours
 }
 
 /** GET `url` and report whether it answered 2xx within `timeoutMs` — the single readiness probe shared by

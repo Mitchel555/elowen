@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import * as p from '../ui/prompts.js';
 import { defaultLifecycleDeps, runLifecycle } from '../commands.js';
 import { readInstallInfo } from '../installInfo.js';
-import { urlHealthy, waitHealthy } from '../launcher.js';
+import { waitHealthy } from '../launcher.js';
 import { SERVICES, systemctl } from '../systemd.js';
 import { clearMarker, isOnboarded, readMarker } from './marker.js';
 import { runOnboarding } from './wizard.js';
@@ -101,19 +101,34 @@ function tmuxInstallHint(): string {
   return 'install tmux with your system package manager';
 }
 
-/** How long setup waits for the daemon to answer after it has restarted it. */
-const READY_BUDGET_MS = 5000;
+/** How long setup waits for the daemon to answer after it has restarted it. The same 20s the installer
+ *  and `elowen up` allow: the daemon runs its DB migrations on boot, so a box that has any to run does
+ *  not answer within a few seconds and a shorter budget only reports a healthy start as a failure. */
+const READY_BUDGET_MS = 20_000;
+
+/** How long the pre-flight check keeps probing before the daemon counts as unhealthy. Everything that
+ *  follows REPLACES a running daemon (systemctl restart, or down+up), which SIGTERMs the agents it is
+ *  running — one timed-out probe (a load spike, a GC pause) is too thin a reason for that. Kept short so
+ *  the ordinary "nothing is running yet" case is still recovered promptly. */
+const HEALTH_BUDGET_MS = 5000;
 
 /** Bring the daemon up the right way for this box: nothing if it's already healthy, else systemctl on an
  *  `elowen install` box (never a second, port-conflicting detached daemon), otherwise the local lifecycle.
- *  Readiness goes through the shared `urlHealthy` probe (same one the launcher, `ensureDaemon` and the
+ *  Readiness goes through the shared readiness wait (the same probe the launcher, `ensureDaemon` and the
  *  installer use): a bare non-throwing fetch read a wedged daemon's 500 as "up" and let the wizard run on
  *  against it, and it had no timeout, so a half-open connection hung setup instead of failing it.
  *
  *  Everything below this line runs only because the daemon did NOT answer healthily, so both paths must
  *  be able to REPLACE a running-but-broken instance — merely asking for one to exist recovers nothing. */
 async function bringUp(base: string, env: NodeJS.ProcessEnv, version: string): Promise<void> {
-  if (await urlHealthy(`${base}/health`)) return;
+  const [alreadyHealthy] = await waitHealthy([`${base}/health`], { budgetMs: HEALTH_BUDGET_MS, pollMs: 500 });
+  if (alreadyHealthy) return;
+  // Only this machine's own daemon may be replaced. With ELOWEN_URL pointing elsewhere, an unreachable
+  // remote says nothing about the local services, and restarting (or `down`-ing) them would kill a
+  // healthy local daemon over a box we cannot even reach.
+  if (!isLocalBase(base)) {
+    throw new Error(`${base} did not answer, and it is not this machine's daemon (ELOWEN_URL) — start it there, or unset ELOWEN_URL to set up the local one`);
+  }
   if (readInstallInfo()) {
     // `restart`, not `start`: systemd considers a wedged unit active, so `start` is a no-op on the very
     // state that got us here and setup would just wait out the budget. `restart` also starts a stopped unit.
@@ -129,4 +144,14 @@ async function bringUp(base: string, env: NodeJS.ProcessEnv, version: string): P
   const deps = defaultLifecycleDeps(version);
   await runLifecycle('down', env, deps);
   await runLifecycle('up', env, deps);
+}
+
+/** Whether `base` addresses the daemon on THIS machine — the only one setup is allowed to restart. */
+function isLocalBase(base: string): boolean {
+  try {
+    const { hostname } = new URL(base);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
 }
