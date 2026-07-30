@@ -3693,6 +3693,26 @@ describe('sub-agent session tap + owner steering', () => {
       .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
   });
 
+  // A web send has no bound client, so the user may have left the browser — notify their phone. A bound CLI
+  // send is watched live in the terminal, so it must NOT notify. `notifyTurnComplete` is the daemon's push
+  // seam; enablement is implicit (no subscription ⇒ the notifier sends nothing).
+  it('notifies the phone only for a web-started owner turn, never a bound CLI one', async () => {
+    const notified: { userId: number; title: string }[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string) => void }).notifyTurnComplete =
+      (userId, title) => notified.push({ userId, title });
+    const svc = new BrainService(d as never);
+
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'ship it from the web' });
+    expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
+
+    notified.length = 0;
+    const cli = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
+    await svc.send({ userId: 1, text: 'from the cli', session: cli.sessionId, client: { id: 'cli-a', generation: 1 } });
+    expect(notified).toEqual([]);
+  });
+
   it('windows the snapshot history AFTER removing journaled rows, with a cursor the lazy-load can continue', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

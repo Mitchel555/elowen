@@ -201,7 +201,14 @@ export class BrainService {
       sendDelegatedCustom: async (userId, sessionId, customType, content, resultId) => {
         await this.sendDelegated(userId, sessionId, content, { internalSystem: { customType, resultId } });
       },
-      afterTurnSettled: () => this.drainDeferredPluginReload(),
+      afterTurnSettled: (userId, sessionId, fromWeb) => {
+        this.drainDeferredPluginReload();
+        // A web-started turn just finished and nobody was watching it live (a bound CLI would be) — tell the
+        // user's phone. Enablement is implicit: no push subscription means the notifier sends nothing.
+        if (fromWeb && d.notifyTurnComplete) {
+          d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
+        }
+      },
     });
     this.statusView = new BrainStatusService({
       store: d.store, sessions: this.sessions, attachments: this.attachments,

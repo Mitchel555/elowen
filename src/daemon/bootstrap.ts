@@ -34,6 +34,7 @@ import { ConfigStore } from '../store/configStore.js';
 import { ensureVapidKeys } from '../push/vapid.js';
 import { PushSender } from '../push/pushSender.js';
 import { PushDispatcher } from '../push/pushDispatcher.js';
+import { buildTurnDone } from '../push/messages.js';
 import { UserStore } from '../store/userStore.js';
 import { EventStore } from '../store/eventStore.js';
 import { NoteStore } from '../store/noteStore.js';
@@ -704,6 +705,9 @@ export async function buildApp(opts: BuildOpts) {
         runtime: brainRuntime,
         cwd: brainDir,
         projectPath: () => homeProject.path,
+        // A web-started owner turn finished with no CLI watching it live → push it to the user's phone.
+        // No subscription registered ⇒ sendToUsers is a no-op, so this needs no separate enable flag.
+        notifyTurnComplete: (userId, title) => { void pushSender.sendToUsers([userId], buildTurnDone({ title })); },
         plugins: pluginProvider,
         hookAudit,
         policy: (userId) => resolvePolicy({ userProjects, projects }, userId),
