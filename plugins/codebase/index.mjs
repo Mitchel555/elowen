@@ -25,6 +25,8 @@ const DEFAULT_TOP_K = 8;
 const DEFAULT_RELEVANCE_FLOOR = 0.3; // mirrors memoryService MIN_SEMANTIC — tunable (code may score differently)
 const DEFAULT_EMBED_BUDGET = 200;    // chunks embedded per pass, so a big repo spreads across passes
 const AUTO_REINDEX_DEBOUNCE_MS = 5 * 60_000; // don't auto-reindex a repo more often than this
+const DEFAULT_SCHEDULE_MINUTES = 60; // scheduled refresh interval when the operator turns the schedule on
+const DEFAULT_SCHEDULE_MAX_PASSES = 4; // consecutive passes one scheduled tick may spend on a single repo
 const MAX_FILES = 20_000;            // hard cap on files walked per repo
 const MINIFIED_MAX_LINE = 5_000;     // a file with a longer single line is treated as minified/binary → skipped
 const SNIPPET_MAX_LINES = 6;
@@ -204,6 +206,11 @@ function readConfig(raw) {
     relevanceFloor: clampNum(raw.relevanceFloor, DEFAULT_RELEVANCE_FLOOR, 0, 1),
     autoReindex: bool(raw.autoReindex, true),
     reindexEmbedBudget: clampNum(raw.reindexEmbedBudget, DEFAULT_EMBED_BUDGET, 1, 5_000),
+    scheduledReindex: bool(raw.scheduledReindex, false),
+    reindexIntervalMs: clampNum(raw.reindexIntervalMinutes, DEFAULT_SCHEDULE_MINUTES, 5, 1_440) * 60_000,
+    reindexScope: raw.reindexScope === 'listed' ? 'listed' : 'indexed',
+    reindexRepos: splitList(raw.reindexRepos),
+    reindexMaxPasses: clampNum(raw.reindexMaxPassesPerRepo, DEFAULT_SCHEDULE_MAX_PASSES, 1, 20),
   };
 }
 
@@ -424,6 +431,90 @@ function pushTopK(arr, item, k) {
   if (arr.length > k) arr.pop();
 }
 
+// ── scheduled reindexing ─────────────────────────────────────────────────────────────────────────────
+
+/** Background timer that keeps the index converging on its own, so a repo far larger than one pass's embed
+ *  budget does not need someone calling CodebaseReindex until it catches up.
+ *
+ *  It is a platform ADAPTER rather than a bare setInterval inside `register` because that is the only
+ *  teardown the host offers a plugin: `PlatformOrchestrator.stopAll()` calls `disconnect()` immediately
+ *  before a reload swaps in a freshly registered generation. A raw interval would survive that swap and a
+ *  second generation would embed into the same index.db alongside the first, doubling the spend.
+ *  `clearInterval` alone is not enough either — a tick already parked inside `embedBatch` keeps going — so
+ *  `stopped` is checked between repos and between passes, the way the cron adapter does it.
+ *
+ *  It deliberately carries no `notify`: the host broadcasts host-initiated messages to every adapter that
+ *  exposes one, and this adapter has no channel to deliver them to. It is likewise NOT declared in the
+ *  manifest's `provides.platforms` — the settings UI categorizes a plugin as a chat channel by that count,
+ *  and this is an internal timer, not a surface the operator can talk to. */
+class ScheduledIndexer {
+  name = 'codebase-index';
+  constructor({ cfg, logger, getDb, isConfigured, runPass }) {
+    this.cfg = cfg;
+    this.log = logger;
+    this.getDb = getDb;
+    this.isConfigured = isConfigured;
+    this.runPass = runPass;
+    this.timer = null;
+    this.running = false;
+    // Set by disconnect(): this generation has been torn down and must not start any further work.
+    this.stopped = false;
+  }
+  listen() { /* no inbound channel — this adapter owns a timer, nothing else */ }
+  async send() { /* no outbound channel */ }
+
+  async connect() {
+    if (!this.cfg.scheduledReindex) return;
+    this.timer = setInterval(
+      () => void this.tick().catch((e) => this.log.warn(`scheduled reindex failed: ${e?.message ?? e}`)),
+      this.cfg.reindexIntervalMs,
+    );
+  }
+  // Synchronous on purpose — the host's stopAll() cannot await, and a reload must not block for however
+  // long the provider takes to answer the pass that is currently in flight.
+  disconnect() { this.stopped = true; if (this.timer) clearInterval(this.timer); }
+
+  /** The repos this schedule covers. `indexed` refreshes what the index already holds — every one of those
+   *  rows got there through an admin-gated CodebaseReindex, so the timer never widens the indexed set by
+   *  itself. `listed` takes the operator's explicit paths; anything that is not a readable directory is
+   *  skipped with a warning rather than walked. Session scoping (ctx.assertPathAllowed, ctx.allowedRoots)
+   *  is unusable here — it reads a per-turn policy that does not exist on a timer. */
+  targets() {
+    if (this.cfg.reindexScope !== 'listed') {
+      return this.getDb().prepare('SELECT DISTINCT repo FROM files').all().map((r) => r.repo);
+    }
+    const out = [];
+    for (const entry of this.cfg.reindexRepos) {
+      const abs = realAbs(entry);
+      try {
+        if (statSync(abs).isDirectory()) out.push(abs);
+        else this.log.warn(`scheduled reindex skips ${entry}: not a directory`);
+      } catch { this.log.warn(`scheduled reindex skips ${entry}: unreadable`); }
+    }
+    return out;
+  }
+
+  async tick() {
+    if (this.stopped || this.running || !this.cfg.scheduledReindex) return;
+    // Read live: clearing the model in Settings → Memory must silence the timer without a reload.
+    if (!this.isConfigured()) return;
+    this.running = true;
+    try {
+      const database = this.getDb();
+      for (const repo of this.targets()) {
+        if (this.stopped) break;
+        for (let pass = 0; pass < this.cfg.reindexMaxPasses; pass++) {
+          if (this.stopped) break;
+          // Only the first pass asks whether the repo is due; the rest spend the tick's remaining budget on
+          // the claim it just took, otherwise the marker it stamps would block its own follow-up passes.
+          const result = await this.runPass(database, repo, pass === 0 ? this.cfg.reindexIntervalMs : 0);
+          if (!result || result.error || !result.pending) break; // claimed elsewhere, provider down, or done
+        }
+      }
+    } finally { this.running = false; }
+  }
+}
+
 // ── plugin registration ──────────────────────────────────────────────────────────────────────────────
 
 export function register(ctx) {
@@ -438,32 +529,39 @@ export function register(ctx) {
   // per plugin load, so this closure is process-wide: every concurrent session's search shares it.
   const inFlight = new Map();
 
-  // Lazily run ONE bounded incremental pass per stale-by-time repo. ADMIN-GATED at the call site (it writes
-  // shared state + spends the embedding provider — exactly what CodebaseReindex refuses to non-admins).
-  // The 5-minute debounce ALWAYS applies — even to a repo that indexes to zero chunks (a failing provider,
-  // an all-excluded repo) — so a persistently-empty repo can't re-walk + re-embed on every search. Never
-  // throws (best-effort; a failed pass must not break the search).
+  // Run ONE bounded incremental pass for `repo`, unless another caller already holds it. ADMIN-GATED at
+  // every call site (it writes shared state + spends the embedding provider — exactly what CodebaseReindex
+  // refuses to non-admins). `windowMs` is the caller's idea of "too soon": a search debounces on
+  // AUTO_REINDEX_DEBOUNCE_MS, the schedule on its own interval, and a follow-up pass inside one scheduled
+  // tick passes 0 because that repo's turn has already been claimed. Returns the pass result, or null when
+  // the claim went elsewhere. Never throws (best-effort; a failed pass must not break the search).
   //
   // Two guards keep concurrent callers from running the SAME repo twice (double embedding spend, and a
   // slower pass overwriting a newer pass's snapshot of a file):
   //  - the in-flight map, joined instead of re-run — it also holds when a pass outlives the debounce window;
   //  - the debounce marker, claimed BEFORE the pass rather than after it, so a caller that does not share
   //    this map (a plugin reload swaps in a fresh closure over the same index.db) still sees the claim.
+  //    It is re-stamped AFTER the pass too, so a pass slower than its own window cannot be re-claimed by
+  //    such a caller the moment it finishes.
+  const runGuardedPass = async (database, repo, windowMs) => {
+    const running = inFlight.get(repo);
+    if (running) { await running; return null; }
+    const last = Number(getMeta(database, `reindex:${repo}`) ?? 0);
+    if (Date.now() - last < windowMs) return null;
+    setMeta(database, `reindex:${repo}`, String(Date.now()));
+    const pass = reindexRepo(ctx, database, repo, { cfg, budget: cfg.reindexEmbedBudget, full: false })
+      .catch(() => null) // best-effort — never break a search
+      .finally(() => { inFlight.delete(repo); });
+    inFlight.set(repo, pass);
+    const result = await pass;
+    setMeta(database, `reindex:${repo}`, String(Date.now()));
+    return result ?? null;
+  };
+
+  // Lazily refresh every stale-by-time repo a search touches, so the index rarely needs CodebaseReindex.
   const maybeAutoReindex = async (database, repos) => {
     if (!cfg.autoReindex || !ctx.embeddings.isConfigured()) return;
-    const now = Date.now();
-    for (const repo of repos) {
-      const running = inFlight.get(repo);
-      if (running) { await running; continue; }
-      const last = Number(getMeta(database, `reindex:${repo}`) ?? 0);
-      if (now - last < AUTO_REINDEX_DEBOUNCE_MS) continue;
-      setMeta(database, `reindex:${repo}`, String(now));
-      const pass = reindexRepo(ctx, database, repo, { cfg, budget: cfg.reindexEmbedBudget, full: false })
-        .catch(() => { /* auto-reindex is best-effort — never break a search */ })
-        .finally(() => { inFlight.delete(repo); });
-      inFlight.set(repo, pass);
-      await pass;
-    }
+    for (const repo of repos) await runGuardedPass(database, repo, AUTO_REINDEX_DEBOUNCE_MS);
   };
 
   ctx.registerTool(defineTool({
@@ -626,6 +724,18 @@ export function register(ctx) {
         return ok('CodebaseStatus', `${header}\n\n${rows.join('\n')}`, { repos: repoFilter.length, configured: !!desc });
       } catch (e) { return fail('CodebaseStatus', e); }
     },
+  }));
+
+  // The schedule spends the embedding provider with no session behind it, which is only defensible because
+  // both of its inputs are already admin-gated: the settings route that writes this config, and the repos
+  // it touches (already in the index through CodebaseReindex, or typed by the operator). It never discovers
+  // repos on its own, and it does not widen what any session may SEE — searches stay scoped by searchScope.
+  ctx.registerPlatform(new ScheduledIndexer({
+    cfg,
+    logger: ctx.logger,
+    getDb,
+    isConfigured: () => ctx.embeddings.isConfigured(),
+    runPass: runGuardedPass,
   }));
 
   ctx.logger.info('registered CodebaseSearch, CodebaseReindex, CodebaseStatus');

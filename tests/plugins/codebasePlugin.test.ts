@@ -539,3 +539,126 @@ describe('codebase plugin — auto-reindex single-flight', () => {
     await waitFor(() => chunkCount(dataRoot) > 0);
   });
 });
+
+// ── scheduled reindexing: the background timer converges a repo with no search and no manual run ────────
+describe('codebase plugin — scheduled reindex', () => {
+  const cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
+  // The adapter's own surface. `tick` is what the interval calls, driven directly here because the smallest
+  // configurable interval is five minutes.
+  type Indexer = { name: string; connect(): Promise<void>; disconnect(): void; tick(): Promise<void> };
+
+  const countingEmbedder = () => {
+    const state = { calls: 0 };
+    return {
+      state,
+      embedder: {
+        embed: fakeEmbedder.embed,
+        embedBatch: async (c: EmbeddingConfig, texts: string[]) => { state.calls++; return fakeEmbedder.embedBatch(c, texts); },
+      },
+    };
+  };
+  const load = (dataRoot: string, config: Record<string, unknown>, embeddings = fakeEmbedder) => loadPlugins({
+    dirs: [join(repoRoot, 'plugins')], enabled: ['codebase'], logger: log, dataRoot,
+    config: { codebase: config }, embeddings, embeddingConfig: () => cfg,
+  });
+  const indexerOf = (reg: PluginRegistry) => {
+    const found = reg.platforms.find((p) => p.name === 'codebase-index');
+    if (!found) throw new Error('scheduled indexer not registered');
+    return found as unknown as Indexer;
+  };
+  const seed = (tag: string, files: Record<string, string>) => {
+    const dataRoot = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-data-`));
+    const repo = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-repo-`));
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(repo, name), body);
+    return { dataRoot, repo };
+  };
+  const src = (word: string) => `export function f() { return 1; } // ${word} similarity vector\n`;
+  // Expire the shared debounce marker, i.e. make the repo due again without waiting out the interval.
+  const expireMarker = (dataRoot: string, repo: string) => {
+    const db = new Database(join(dataRoot, 'codebase', 'index.db'));
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(`reindex:${realpathSync(repo)}`, '0');
+    db.close();
+  };
+
+  it('registers the adapter but stays idle while the schedule is off', async () => {
+    const { dataRoot, repo } = seed('sch-off', { 'a.ts': src('cosine') });
+    const { embedder, state } = countingEmbedder();
+    // Scope and paths configured, but scheduledReindex left at its default (false).
+    const reg = await load(dataRoot, { reindexScope: 'listed', reindexRepos: repo }, embedder);
+    const indexer = indexerOf(reg);
+
+    await indexer.connect();
+    await indexer.tick();
+
+    expect(state.calls).toBe(0); // an unattended timer must not spend the provider until it is asked to
+    indexer.disconnect();
+  });
+
+  it('indexes only the listed repositories and skips a path that is not a directory', async () => {
+    const { dataRoot, repo } = seed('sch-listed', { 'a.ts': src('cosine') });
+    const reg = await load(dataRoot, {
+      scheduledReindex: true,
+      reindexIntervalMinutes: 5,
+      reindexScope: 'listed',
+      reindexRepos: `${repo}\n/var/empty/does-not-exist-${Date.now()}`,
+    });
+    const indexer = indexerOf(reg);
+
+    await indexer.tick(); // the bogus path must be skipped, not thrown on
+
+    expect(chunkCount(dataRoot)).toBe(1);
+    expect(chunkCount(dataRoot, 'SELECT COUNT(*) AS n FROM chunks WHERE repo = ?', realpathSync(repo))).toBe(1);
+    indexer.disconnect();
+  });
+
+  it('refreshes a repository the index already holds when the scope is everything indexed', async () => {
+    const { dataRoot, repo } = seed('sch-indexed', { 'a.ts': src('cosine') });
+    const reg = await load(dataRoot, { scheduledReindex: true, reindexIntervalMinutes: 5 });
+    await runWithPolicy(adminPolicy(), () => runTool(reg, 'CodebaseReindex', { repo }), { workDir: repo });
+    expect(chunkCount(dataRoot)).toBe(1);
+
+    writeFileSync(join(repo, 'b.ts'), src('dot')); // a commit lands while nobody searches
+    expireMarker(dataRoot, repo);
+    await indexerOf(reg).tick();
+
+    expect(chunkCount(dataRoot)).toBe(2); // the timer found the repo through the index itself
+    indexerOf(reg).disconnect();
+  });
+
+  it('converges a repo bigger than one pass within a single tick', async () => {
+    const { dataRoot, repo } = seed('sch-conv', { 'a.ts': src('cosine'), 'b.ts': src('vector'), 'c.ts': src('dot') });
+    const reg = await load(dataRoot, {
+      scheduledReindex: true,
+      reindexIntervalMinutes: 5,
+      reindexEmbedBudget: 1, // one chunk per pass, so three files need three passes
+      reindexMaxPassesPerRepo: 4,
+      reindexScope: 'listed',
+      reindexRepos: repo,
+    });
+
+    await indexerOf(reg).tick();
+
+    // Follow-up passes must bypass the debounce marker the first pass stamped, or the tick indexes one file
+    // and then blocks itself for the whole interval.
+    expect(chunkCount(dataRoot)).toBe(3);
+    indexerOf(reg).disconnect();
+  });
+
+  it('a disconnected generation does no further work (a reload must not leave two timers indexing)', async () => {
+    const { dataRoot, repo } = seed('sch-stop', { 'a.ts': src('cosine') });
+    const { embedder, state } = countingEmbedder();
+    const config = { scheduledReindex: true, reindexIntervalMinutes: 5, reindexScope: 'listed', reindexRepos: repo };
+    const reg1 = await load(dataRoot, config, embedder);
+    const orphan = indexerOf(reg1);
+    await orphan.connect();
+
+    orphan.disconnect(); // the host tears the old generation down right before swapping in the new one
+    await orphan.tick();
+    expect(state.calls).toBe(0);
+
+    const reg2 = await load(dataRoot, config, embedder); // the live generation still works
+    await indexerOf(reg2).tick();
+    expect(state.calls).toBe(1);
+    indexerOf(reg2).disconnect();
+  });
+});
