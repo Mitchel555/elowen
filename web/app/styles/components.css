@@ -45,6 +45,12 @@ html[data-effects='full'] .card-interactive:hover { transform: translateY(-1px);
    the mobile home indicator (safe-area inset; 0 on devices/desktops without one). */
 .chat-composer-safe { padding-bottom: env(safe-area-inset-bottom); }
 
+/* Phone fullscreen turns the transcript into an inner scroll box (the page itself does not scroll there);
+   a permanent bar down its edge reads as stray page chrome on a phone, so hide it — the swipe still
+   scrolls. Only used in that overlay; elsewhere the platform scrollbar stays. */
+.chat-scroll-hide { scrollbar-width: none; }
+.chat-scroll-hide::-webkit-scrollbar { display: none; }
+
 /* Wide content in assistant prose (markdown tables, fenced code) scrolls inside its own box so the page
    never scrolls sideways at narrow / mobile widths. */
 .chat-markdown table, .chat-markdown pre { display: block; max-width: 100%; overflow-x: auto; }
