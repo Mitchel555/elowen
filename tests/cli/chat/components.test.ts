@@ -412,7 +412,7 @@ describe('chat components', () => {
 describe('SubagentPanel', () => {
   const running = { sessionId: 'brain-ch-subagent-a', task: 'research the config layer', status: 'running' as const, detail: 'Read src/a.ts', tools: 2, tokens: 12000, seconds: 8 };
 
-  it('renders active result inbox entries with icon-only lifecycle state', () => {
+  it('shows only running sub-agents; a finished one drops out at once, even with its result still pending', () => {
     const p = new SubagentPanel();
     p.set([
       running,
@@ -422,15 +422,15 @@ describe('SubagentPanel', () => {
     ]);
     const rendered = p.render(80);
     const plain = rendered.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
-    expect(plain).toContain('finished');
-    expect(plain).toContain('failed');
+    // The one running child shows; every finished one is gone — its result arrives in the conversation as
+    // a message, so a completed row never lingers (a delivery stuck pending forever least of all).
+    expect(plain).not.toContain('finished');
+    expect(plain).not.toContain('failed');
     expect(plain).not.toContain('acked');
-    expect(plain).not.toMatch(/\b(running|done|error)\b/i);
     expect(plain).toContain('●');
-    expect(plain).toContain('✓');
-    expect(plain).toContain('✗');
-    expect(p.targetAt(2)).toBe('done');
-    expect(p.targetAt(3)).toBe('error');
+    expect(plain).not.toContain('✓');
+    expect(plain).not.toContain('✗');
+    expect(p.targetAt(1)).toBe('brain-ch-subagent-a');
   });
 
   it('highlights the focused agent and leaves the rest plain, without moving the click targets', () => {

@@ -192,8 +192,9 @@ export interface SubagentPanelEntry {
 
 /** A bounded live list shared by the telemetry rail and its narrow-terminal chat fallback — a spinner
  *  + task per row with the child's current tool and counters, each row clickable to open that session.
- *  Active agents only: running children plus terminal results awaiting parent acknowledgement. Settled
- *  transcript rows remain drillable after acknowledged entries leave this bounded rail. */
+ *  RUNNING children only: a finished sub-agent leaves the panel at once — its result reaches the
+ *  conversation as a message, and its transcript stays drillable there, so a completed row has no reason
+ *  to linger (least of all a delivery stuck pending forever). */
 export class SubagentPanel implements Component {
   private entries: SubagentPanelEntry[] = [];
   private collapsed = false;
@@ -207,7 +208,7 @@ export class SubagentPanel implements Component {
   private selected: string | null = null;
   invalidate(): void { /* re-rendered on the next frame */ }
   set(entries: readonly SubagentPanelEntry[]): void {
-    this.entries = entries.filter((e) => e.status === 'running' || e.resultDelivery === 'pending');
+    this.entries = entries.filter((e) => e.status === 'running');
     this.clampScroll();
   }
   setSelected(sessionId: string | null): void { this.selected = sessionId; }
