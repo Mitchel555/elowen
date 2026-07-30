@@ -109,6 +109,11 @@ export function deliverQueuedUserEcho(store: BrainStore, live: LiveBrain, delive
   const echo = item?.echo;
   if (!echo) return false;
   const durableId = projectUserTurn(store, live.sessionId, echo.persistText);
+  // A second user message now sits AFTER the admitted one, and Esc-discard deletes from the admitted row to
+  // the end of the session. Leaving the discard claim armed would take this message with it while restoring
+  // only the first — a silent loss of text the user typed. Once the turn has grown a second user row, the
+  // turn is no longer discardable as a unit; Esc still aborts, it just stops rewriting history.
+  live.lastAdmitted = undefined;
   const event = { type: 'user' as const, text: echo.displayText, durableId };
   if (echo.publish) live.replay.publish(event);
   else live.replay.journal(event);

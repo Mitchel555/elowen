@@ -61,10 +61,17 @@ export class MemoryCategorizer {
     try {
       const mem = this.memories.get(userId, memoryId);
       if (!mem || mem.status !== 'active') return;
+      // Captured BEFORE the round-trip so the audit names the model that actually decided, even if the
+      // workspace switches categorization models while this call is in flight.
+      const model = this.inference()?.model ?? null;
       const catId = await this.classify(userId, mem.body);
-      if (catId !== mem.category_id) {
-        this.memories.setCategory(userId, memoryId, catId, actor, 'categorizer: auto-classified',
-          this.inference()?.model ?? null);
+      // A model round-trip is long enough for the owner to have filed this memory by hand in the meantime.
+      // Re-read and write only if nothing moved under us: an automatic guess must never quietly replace a
+      // category a person chose.
+      const fresh = this.memories.get(userId, memoryId);
+      if (!fresh || fresh.status !== 'active' || fresh.category_id !== mem.category_id) return;
+      if (catId !== fresh.category_id) {
+        this.memories.setCategory(userId, memoryId, catId, actor, 'categorizer: auto-classified', model);
       }
     } catch (err) {
       this.logger?.warn('memory categorizer failed', { userId, memoryId, error: String(err) });

@@ -3810,6 +3810,27 @@ describe('sub-agent session tap + owner steering', () => {
     expect(notified).toEqual([]);
   });
 
+  // `fromWeb` only means "not from a bound CLI", which is equally true of the browser tab the user is
+  // reading right now. Buzzing their phone about an answer they are watching arrive is pure noise, so an
+  // attached client stream — the web tab's own SSE — suppresses it.
+  it('stays quiet when a client stream is still watching the web turn', async () => {
+    const notified: { userId: number; title: string }[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string) => void }).notifyTurnComplete =
+      (userId, title) => notified.push({ userId, title });
+    const svc = new BrainService(d as never);
+
+    const started = await svc.start(1);
+    const off = svc.tapSession(1, started.sessionId, () => {});
+    await svc.send({ userId: 1, text: 'ship it while I watch' });
+    expect(notified).toEqual([]);
+
+    // Once the tab is gone the very same send does notify — that is the case the feature exists for.
+    off();
+    await svc.send({ userId: 1, text: 'ship it after I left' });
+    expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
+  });
+
   it('windows the snapshot history AFTER removing journaled rows, with a cursor the lazy-load can continue', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

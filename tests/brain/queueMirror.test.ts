@@ -109,4 +109,39 @@ describe('queueMirror.enqueueMirrored', () => {
     expect(store.getMessages('s1').map((row) => JSON.parse(row.content).content)).toEqual(['expanded durable text']);
     expect(published).toEqual([expect.objectContaining({ type: 'user', text: 'clean display' })]);
   });
+
+  // Esc-discard deletes from the admitted user row to the END of the session, so a second user row landing
+  // inside the same turn would be deleted along with it — while only the first is handed back to the
+  // composer. Delivering a queued message therefore drops the discard claim: the turn stops being
+  // discardable as a unit the moment it contains text the discard could not restore.
+  it('drops the discard claim once a second user message lands in the turn', () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 's1', userId: 1, model: 'm' });
+    const echo = { persistText: 'the steered message', displayText: 'the steered message', publish: true };
+    const live = {
+      sessionId: 's1',
+      lastAdmitted: { durableId: 'u1', text: 'the first message' },
+      turnProducedOutput: false,
+      replay: { publish: () => {}, journal: () => {} },
+    } as unknown as LiveBrain;
+
+    stageDeliveredUserEchoes(live, [{ text: 'the steered message', queuedText: 'pi text', echo }]);
+    expect(deliverQueuedUserEcho(store, live, 'pi text')).toBe(true);
+
+    expect(live.lastAdmitted).toBeUndefined();
+  });
+
+  it('leaves the discard claim alone when nothing was delivered', () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 's1', userId: 1, model: 'm' });
+    const admitted = { durableId: 'u1', text: 'the first message' };
+    const live = {
+      sessionId: 's1', lastAdmitted: admitted,
+      replay: { publish: () => {}, journal: () => {} },
+    } as unknown as LiveBrain;
+
+    // An ordinary prompt message_start, not a queued delivery — the turn is still discardable as a unit.
+    expect(deliverQueuedUserEcho(store, live, 'something never staged')).toBe(false);
+    expect(live.lastAdmitted).toBe(admitted);
+  });
 });

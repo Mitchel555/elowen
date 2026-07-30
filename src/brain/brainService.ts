@@ -203,9 +203,11 @@ export class BrainService {
       },
       afterTurnSettled: (userId, sessionId, fromWeb) => {
         this.drainDeferredPluginReload();
-        // A web-started turn just finished and nobody was watching it live (a bound CLI would be) — tell the
-        // user's phone. Enablement is implicit: no push subscription means the notifier sends nothing.
-        if (fromWeb && d.notifyTurnComplete) {
+        // A web-started turn just finished with NO client stream still attached — tell the user's phone.
+        // `fromWeb` alone only means the send did not come from a bound CLI, which is also true of the web
+        // tab the user is reading right now: notifying then buzzes someone who is watching the answer
+        // arrive. Enablement is implicit: no push subscription means the notifier sends nothing.
+        if (fromWeb && this.attachments.attachedCount(sessionId) === 0 && d.notifyTurnComplete) {
           d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
         }
       },
