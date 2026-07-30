@@ -172,9 +172,15 @@ export class BrainStatusService {
    *  ExitPlanMode nowhere else), and the gate is also what keeps every ordinary status call off the
    *  history read. `rows` lets a caller that already loaded them (the snapshot) skip a second query. */
   private planState(live: LiveBrain | undefined, sessionId: string | null, rows?: BrainMessageRow[]): { workMode: BrainWorkMode; pendingPlan: BrainPendingPlan | null } {
-    const workMode = live?.lastTurnMode ?? 'build';
-    if (workMode !== 'plan' || !sessionId) return { workMode, pendingPlan: null };
-    return { workMode, pendingPlan: pendingSubmittedPlan(rows ?? this.d.store.getMessages(sessionId)) };
+    if (!sessionId) return { workMode: live?.lastTurnMode ?? 'build', pendingPlan: null };
+    // The pending plan is read from durable history, not from live.lastTurnMode: that stamp lives only in
+    // memory and a daemon restart resets it to 'build', which would strand a decision the transcript still
+    // holds (the modal that never came back after a redeploy). A submitted, still-undecided ExitPlanMode IS
+    // the proof we are plan-pending — the tool is called in no other mode — so it also fixes the reported
+    // work mode when the live stamp is gone. `rows` lets the snapshot reuse the history it already loaded;
+    // the status poll reads only the newest turn so this stays off the full-history query.
+    const pendingPlan = pendingSubmittedPlan(rows ?? this.d.store.getLatestTurn(sessionId));
+    return { workMode: pendingPlan ? 'plan' : (live?.lastTurnMode ?? 'build'), pendingPlan };
   }
 
   /** The current provider config, or null when nothing is configured (never throws). Shared by the

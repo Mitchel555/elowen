@@ -3667,6 +3667,32 @@ describe('sub-agent session tap + owner steering', () => {
     expect(svc.status(1)).toMatchObject({ workMode: 'build', pendingPlan: null });
   });
 
+  // A redeploy restarts the daemon mid-decision: the live session and its in-memory lastTurnMode are gone,
+  // but the submitted plan still sits in durable history. The modal has to come back on reconnect — the
+  // regression the user hit was the daemon reporting 'build'/null because the mode stamp did not survive.
+  it('restores a pending plan from durable history after a daemon restart drops the live mode stamp', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'outline the migration', mode: 'plan' });
+    d.store.appendMessage({
+      id: 'plan-call', sessionId: 'brain-1', parentId: null, role: 'assistant',
+      content: { role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'ExitPlanMode', arguments: { plan: '# Ship it' } }] },
+    });
+    d.store.appendMessage({
+      id: 'plan-result', sessionId: 'brain-1', parentId: null, role: 'toolResult',
+      content: { role: 'toolResult', toolCallId: 'call-1', details: { plan: '# Ship it' } },
+    });
+    expect(svc.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+
+    // Restart: a fresh service over the same durable store has no live brain and no mode stamp, exactly as
+    // after a redeploy. activeSessionId falls back to the stored session, and the decision must return.
+    const afterRestart = new BrainService(d as never);
+    expect(afterRestart.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+    expect(afterRestart.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot.control)
+      .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+  });
+
   it('windows the snapshot history AFTER removing journaled rows, with a cursor the lazy-load can continue', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

@@ -356,6 +356,16 @@ export class BrainStore {
       .all(sessionId) as BrainMessageRow[];
   }
 
+  /** The newest turn's rows only — everything after the last user message (or the whole session when it
+   *  has none yet). Lets a hot status poll read a still-pending plan off durable history without loading
+   *  the entire conversation the way getMessages does. */
+  getLatestTurn(sessionId: string): BrainMessageRow[] {
+    const floor = (this.db.prepare("SELECT MAX(rowid) AS r FROM brain_messages WHERE session_id = ? AND role = 'user'")
+      .get(sessionId) as { r: number | null }).r ?? 0;
+    return this.db.prepare('SELECT * FROM brain_messages WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC')
+      .all(sessionId, floor) as BrainMessageRow[];
+  }
+
   /** Persist a display card (ctx.emitCard) so the panel outlives the live session — closing the chat
    *  disposes the session, and a memory-only todo list would die with it. An upsert keeps the row's
    *  rowid, so re-emitting a card updates it in place without jumping to the end of the panel. */
