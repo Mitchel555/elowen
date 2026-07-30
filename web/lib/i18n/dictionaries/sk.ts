@@ -1654,6 +1654,7 @@ export const sk = {
     processes: 'Procesy',
     processesCount: { one: 'proces', few: 'procesy', many: 'procesov' },
     processOpen: 'Zobraziť výstup procesu',
+    otherProcesses: 'Ostatné procesy',
     project: 'Projekt',
     branch: 'vetva',
     mcp: 'MCP',

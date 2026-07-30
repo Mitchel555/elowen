@@ -19,3 +19,13 @@ export function ownedSessionIds(activeSessionId: string | null, subagents: reado
 export function isOwnProcess(proc: ProcessInfo, owned: ReadonlySet<string>): boolean {
   return proc.sessionId !== null && owned.has(proc.sessionId);
 }
+
+/** Where a process came from, for rows that are NOT the open conversation's: a delegated sub-agent, a
+ *  channel session (Discord/WhatsApp…), or one of the user's other chats. Returns the i18n key under
+ *  `t.processes`, or null for a session-less process — there is no origin to name, so it gets no badge. */
+export function processOrigin(sessionId: string | null): 'subagent' | 'channel' | 'otherChat' | null {
+  if (sessionId === null) return null;
+  if (sessionId.startsWith('brain-ch-subagent-')) return 'subagent';
+  if (sessionId.startsWith('brain-ch-')) return 'channel';
+  return 'otherChat';
+}

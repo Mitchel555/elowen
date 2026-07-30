@@ -1654,6 +1654,7 @@ export const cs = {
     processes: 'Procesy',
     processesCount: { one: 'proces', few: 'procesy', many: 'procesů' },
     processOpen: 'Zobrazit výstup procesu',
+    otherProcesses: 'Ostatní procesy',
     project: 'Projekt',
     branch: 'větev',
     mcp: 'MCP',

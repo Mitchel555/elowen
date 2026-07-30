@@ -1654,6 +1654,7 @@ export const en = {
     processes: 'Processes',
     processesCount: { one: 'process', few: 'processes', many: 'processes' },
     processOpen: 'Show the process output',
+    otherProcesses: 'Other processes',
     project: 'Project',
     branch: 'branch',
     mcp: 'MCP',
