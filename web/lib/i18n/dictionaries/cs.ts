@@ -1547,7 +1547,7 @@ export const cs = {
     searchPlaceholder: 'Hledat v konverzacích…',
     searchEmpty: 'Nic nenalezeno',
     searchOpenError: 'Tuto konverzaci nelze otevřít',
-    reconnecting: 'Obnovuji spojení…',
+    reconnecting: 'Probíhá připojování…',
     sendError: 'Zprávu se nepodařilo odeslat — návrh zůstal v editoru',
     freshConversation: 'Předchozí konverzace byla neaktivní — pokračujeme v nové',
     readOnly: 'Historie jen ke čtení (Discord kanál nebo task relace)',

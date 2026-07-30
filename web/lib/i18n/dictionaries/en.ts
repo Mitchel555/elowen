@@ -1547,7 +1547,7 @@ export const en = {
     searchPlaceholder: 'Search conversations…',
     searchEmpty: 'No matches',
     searchOpenError: 'This conversation cannot be opened',
-    reconnecting: 'Reconnecting…',
+    reconnecting: 'Connecting…',
     sendError: 'Message was not sent — your draft is still in the editor',
     freshConversation: 'The previous conversation was idle — continuing in a new one',
     readOnly: 'Read-only history (Discord channel or task session)',

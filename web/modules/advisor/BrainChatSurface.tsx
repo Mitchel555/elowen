@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Loader, Brain, Activity, Pencil } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
@@ -623,12 +623,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           owns the empty boot), so the overlay does not flash on open. */}
       {reconnecting ? (
         <div
-          className="absolute inset-0 z-40 flex items-center justify-center gap-2.5 bg-bg/50 backdrop-blur-sm"
+          className="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-4 bg-bg/60 backdrop-blur-md"
           role="status"
           aria-live="polite"
         >
-          <Loader2 size={18} className="animate-spin text-text-muted" aria-hidden />
-          <span className="text-sm text-text-muted">{t.brainChat.reconnecting}</span>
+          <Loader size={40} className="animate-spin text-text-muted" aria-hidden />
+          <span className="text-base text-text-muted">{t.brainChat.reconnecting}</span>
         </div>
       ) : null}
       {/* Conversation bar. Compact (dock): title + picker dropdown + new chat. Full (/chat): a light
