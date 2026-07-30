@@ -44,7 +44,10 @@ export function ChatView() {
 
   return (
     <>
-      <ChatDeckHero />
+      {/* The stat hero is desktop-only: on a phone its icon + wrapping stat row just ate vertical space and
+          scrolled away (it is not sticky), and every stat it shows is already reachable in the telemetry
+          drawer. `mobile === false` (not `!mobile`) so it never flashes in during the pre-measure commit. */}
+      {mobile === false ? <ChatDeckHero /> : null}
       <div
         ref={surfaceRef}
         style={fillHeight ? { minHeight: fillHeight } : undefined}
