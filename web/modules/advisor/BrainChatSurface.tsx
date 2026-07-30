@@ -698,6 +698,17 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     return () => document.removeEventListener('keydown', onKey);
   }, [fullscreen, slashOpen, setFullscreen]);
 
+  // The overlay is `fixed`, but the shell's scroll container behind it still holds a viewport-tall
+  // placeholder and keeps scrolling — its scrollbar showed through along the edge as if the chat itself
+  // had one. Lock the background scroller for as long as the overlay is up (standard overlay scroll lock);
+  // the cleanup releases it on exit, on unmount and on a variant switch.
+  useEffect(() => {
+    if (variant !== 'full' || !fullscreen) return;
+    const root = document.documentElement;
+    root.classList.add('chat-fullscreen-lock');
+    return () => root.classList.remove('chat-fullscreen-lock');
+  }, [variant, fullscreen]);
+
   // Auto-enter fullscreen ONCE on a phone so the conversation owns the whole viewport (the embedded /chat
   // page is cramped there). The user can still toggle back out — an orientation change that re-crosses the
   // breakpoint must NOT re-force it, so a ref gates the auto-enter to a single fire.

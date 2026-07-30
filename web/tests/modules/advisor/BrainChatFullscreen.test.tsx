@@ -71,6 +71,32 @@ describe('chat fullscreen preference', () => {
     expect(screen.getByRole('button', { name: 'Exit fullscreen' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('locks the page scroll behind the overlay and releases it on exit', async () => {
+    renderSurface();
+    const root = document.documentElement;
+    expect(root.classList.contains('chat-fullscreen-lock')).toBe(false);
+
+    // Without the lock the shell's scroll container keeps scrolling behind the fixed overlay, and its
+    // scrollbar shows through along the edge as if the chat itself had one.
+    fireEvent.click(await screen.findByRole('button', { name: 'Fullscreen' }));
+    await waitFor(() => expect(root.classList.contains('chat-fullscreen-lock')).toBe(true));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Exit fullscreen' }));
+    await waitFor(() => expect(root.classList.contains('chat-fullscreen-lock')).toBe(false));
+  });
+
+  it('releases the scroll lock when the chat unmounts still in fullscreen', async () => {
+    // A leaked class would lock scrolling for every other page the shell renders afterwards.
+    localStorage.setItem(STORAGE_KEY, 'on');
+    const { unmount } = renderSurface();
+    const root = document.documentElement;
+    await waitFor(() => expect(root.classList.contains('chat-fullscreen-lock')).toBe(true));
+
+    unmount();
+
+    expect(root.classList.contains('chat-fullscreen-lock')).toBe(false);
+  });
+
   it('ignores a foreign stored value instead of trusting it', async () => {
     localStorage.setItem(STORAGE_KEY, 'maximised');
     renderSurface();

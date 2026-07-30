@@ -51,6 +51,12 @@ html[data-effects='full'] .card-interactive:hover { transform: translateY(-1px);
 .chat-scroll-hide { scrollbar-width: none; }
 .chat-scroll-hide::-webkit-scrollbar { display: none; }
 
+/* The fullscreen chat is a fixed overlay, but the shell's scroll container behind it still holds a
+   viewport-tall placeholder — so it kept its own scrollbar, which showed through as a stray bar down the
+   edge (its reserved gutter did the same). Lock that scroller while the overlay is up; the transcript
+   inside does the scrolling. Released the moment fullscreen ends. */
+.chat-fullscreen-lock main { overflow: hidden; scrollbar-gutter: auto; }
+
 /* Wide content in assistant prose (markdown tables, fenced code) scrolls inside its own box so the page
    never scrolls sideways at narrow / mobile widths. */
 .chat-markdown table, .chat-markdown pre { display: block; max-width: 100%; overflow-x: auto; }
