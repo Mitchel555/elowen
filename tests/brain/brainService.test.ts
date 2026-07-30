@@ -3693,6 +3693,18 @@ describe('sub-agent session tap + owner steering', () => {
       .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
   });
 
+  // planState reads durable history to recover a plan a restart's lost stamp would strand, but a LIVE
+  // build-mode conversation (the common poll) has no plan by definition, so it must trust the in-memory
+  // stamp and never touch the DB — the only index there is on session_id.
+  it('keeps the build-mode status poll off the durable history read', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const spy = vi.spyOn(d.store, 'getLatestTurn');
+    expect(svc.status(1)).toMatchObject({ workMode: 'build', pendingPlan: null });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   // A web send has no bound client, so the user may have left the browser — notify their phone. A bound CLI
   // send is watched live in the terminal, so it must NOT notify. `notifyTurnComplete` is the daemon's push
   // seam; enablement is implicit (no subscription ⇒ the notifier sends nothing).

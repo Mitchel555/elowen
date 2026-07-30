@@ -173,12 +173,16 @@ export class BrainStatusService {
    *  history read. `rows` lets a caller that already loaded them (the snapshot) skip a second query. */
   private planState(live: LiveBrain | undefined, sessionId: string | null, rows?: BrainMessageRow[]): { workMode: BrainWorkMode; pendingPlan: BrainPendingPlan | null } {
     if (!sessionId) return { workMode: live?.lastTurnMode ?? 'build', pendingPlan: null };
-    // The pending plan is read from durable history, not from live.lastTurnMode: that stamp lives only in
+    // A LIVE conversation whose last turn ran in build mode has no pending plan — ExitPlanMode is called in
+    // no other mode — so trust the in-memory stamp and skip the history read entirely. This keeps the hot
+    // status poll (build mode is the common case) off the DB, where the only index is on session_id.
+    if (live && live.lastTurnMode !== 'plan') return { workMode: 'build', pendingPlan: null };
+    // Otherwise the plan is read from durable history, not from live.lastTurnMode: that stamp lives only in
     // memory and a daemon restart resets it to 'build', which would strand a decision the transcript still
     // holds (the modal that never came back after a redeploy). A submitted, still-undecided ExitPlanMode IS
-    // the proof we are plan-pending — the tool is called in no other mode — so it also fixes the reported
-    // work mode when the live stamp is gone. `rows` lets the snapshot reuse the history it already loaded;
-    // the status poll reads only the newest turn so this stays off the full-history query.
+    // the proof we are plan-pending, so it also fixes the reported work mode when the live stamp is gone —
+    // a cold session after a restart (no live to trust) falls through here. `rows` lets the snapshot reuse
+    // the history it already loaded; the status poll reads only the newest turn, never the full history.
     const pendingPlan = pendingSubmittedPlan(rows ?? this.d.store.getLatestTurn(sessionId));
     return { workMode: pendingPlan ? 'plan' : (live?.lastTurnMode ?? 'build'), pendingPlan };
   }
