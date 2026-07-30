@@ -257,10 +257,13 @@ export class BrainStore {
   }
 
   /** Delete a message AND every message after it in the same session (by rowid, the canonical transcript
-   *  order). Used to discard a whole aborted user turn: the user row plus any partial assistant output its
+   *  order) — literally to the END of the session, not to the end of a turn: the SQL has no upper bound.
+   *  Used to discard a whole aborted user turn: the user row plus any partial assistant output its
    *  agent_end persisted before the abort landed — deleting only the user row would leave an answer
-   *  fragment with no question after a reconnect. Returns the number of rows removed (0 if the id is
-   *  unknown / in another session). */
+   *  fragment with no question after a reconnect. Safe only because the caller passes the TRAILING user
+   *  turn (discard is refused once the turn produced output), so there is nothing later to lose; handing
+   *  it an id from the middle of a transcript would take out everything below it. Returns the number of
+   *  rows removed (0 if the id is unknown / in another session). */
   deleteMessagesFrom(sessionId: string, fromId: string): number {
     const row = this.db.prepare('SELECT rowid FROM brain_messages WHERE id = ? AND session_id = ?')
       .get(fromId, sessionId) as { rowid: number } | undefined;

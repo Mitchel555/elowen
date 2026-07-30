@@ -144,12 +144,13 @@ export interface AskAnswer { header: string; selected: string[]; other?: string 
 interface BrainCardItem { text: string; status?: 'pending' | 'in_progress' | 'completed' }
 export interface BrainCard { id: string; title?: string; items?: BrainCardItem[]; body?: string; pinned?: boolean }
 
-/** One background shell process (terminal plugin's `Bash(background:true)`) — the process panel
- *  next to the todos lists these, reads output for the modal, and kills on demand. */
-/** `sessionId` is the brain session the process was started in — the panel derives the origin badge
- *  (sub-agent / channel) from it; null when the process has no session. `completionMode` is `foreground`
- *  while a still-in-flight `Bash` call can still be detached — not a background job yet, so live panels
- *  leave those out. */
+/** One background shell process (terminal plugin's `Bash(background:true)`). The transcript panel next to
+ *  the todos lists the ones the open conversation owns; the telemetry rail lists those plus, in a separate
+ *  section, everything it does not. Both read output for the modal and kill on demand. `sessionId` is the
+ *  brain session it was started in, or null when it has none — the rail names the origin (sub-agent,
+ *  channel, another chat) from it, and lib/processScope.ts decides ownership. `completionMode` is
+ *  `foreground` while a still-in-flight `Bash` call can still be detached — not a background job yet, so
+ *  live panels leave those out. */
 export interface ProcessInfo { id: string; command: string; cwd: string; startedAt: string; sessionId: string | null; running: boolean; exitCode: number | null; completionMode?: 'job' | 'service' | 'foreground' }
 
 /** Durable state of one autonomous goal (mirror of the daemon's `BrainGoalState`, src/brain/events.ts),
