@@ -7,6 +7,7 @@ import { useBrainProcesses } from '../../lib/queries';
 import { elowenClient } from '../../lib/elowenClient';
 import { Modal } from '../../components/ui/Modal';
 import type { ProcessInfo } from '../../lib/types';
+import { isOwnProcess } from '../../lib/processScope';
 
 /** Live output of one background process, polled while it runs. Mirrors the terminal plugin's rolling
  *  buffer (read via GET /brain/processes/:id/output). Exported so the telemetry rail opens THIS detail
@@ -35,16 +36,17 @@ export function ProcessOutputModal({ proc, onClose }: { proc: ProcessInfo; onClo
   );
 }
 
-/** A panel next to the todos listing the background shell processes THIS conversation started. Each row
- *  opens a live-output modal on click and carries an ✕ to kill it. Hidden when there are none. The query
- *  is owner-wide (every process the user owns across sessions), so the transcript panel filters to the
- *  open conversation — a job from another chat, a channel or a sub-agent is noise here. The owner-wide
- *  view that finds and kills a service an orphaned delegate left behind stays in the telemetry rail. */
-export function ProcessPanel({ activeSessionId = null }: { activeSessionId?: string | null }) {
+/** A panel next to the todos listing the background shell processes THIS conversation started — including
+ *  those its delegated sub-agents started, which are its work too. Each row opens a live-output modal on
+ *  click and carries an ✕ to kill it. Hidden when there are none. The query is owner-wide (every process
+ *  the user owns across sessions), so the transcript panel narrows to the open conversation — a job from
+ *  another chat or a channel is noise here. Those stay reachable, and killable, in the telemetry rail's
+ *  separate "other processes" section, so an orphaned delegate's leftover service is never stranded. */
+export function ProcessPanel({ owned }: { owned: ReadonlySet<string> }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const { data: allProcesses = [] } = useBrainProcesses();
-  const procs = allProcesses.filter((p) => p.sessionId != null && p.sessionId === activeSessionId);
+  const procs = allProcesses.filter((p) => isOwnProcess(p, owned));
   // Track the open modal by id, not a click-time snapshot, so `proc.running` reflects the LIVE state from
   // the polled list — the modal stops polling once the process exits (and closes if it's pruned away).
   const [openId, setOpenId] = useState<string | null>(null);

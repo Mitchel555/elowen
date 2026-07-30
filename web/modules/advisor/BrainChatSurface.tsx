@@ -17,6 +17,7 @@ import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { AskQuestionCard } from './AskQuestionCard';
 import { ProcessPanel } from './ProcessPanel';
+import { ownedSessionIds } from '../../lib/processScope';
 import { AgentsTable } from './AgentsTable';
 import { StatsModal } from './StatsModal';
 import { PlanDecisionModal } from './PlanDecisionModal';
@@ -613,6 +614,8 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
 
   const active = sessions.data?.find((s) => s.active);
   const runningAgents = subagents.filter((agent) => agent.status === 'running').length;
+  // The sessions whose background processes this conversation owns — itself plus its delegated children.
+  const ownedProcessSessions = useMemo(() => ownedSessionIds(activeSessionId, subagents), [activeSessionId, subagents]);
   // Index of the first live (id-less) turn — the boundary between stored history and the live streaming tail
   // used to key the tail stably across a lazy-load prepend (see the transcript map below).
   const firstLiveTurn = turns.findIndex((turn) => !turn.id);
@@ -877,7 +880,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             gap flow exactly as before. `empty:hidden` drops the group when everything in it is null. */}
         <div className={variant === 'full' ? 'mt-4 flex flex-col gap-3 empty:hidden' : 'contents'}>
         {immersive ? null : todoCards.map((card) => <CardBlock key={card.id} card={card} />)}
-        {railOwnsLiveWork || immersive ? null : <ProcessPanel activeSessionId={activeSessionId} />}
+        {railOwnsLiveWork || immersive ? null : <ProcessPanel owned={ownedProcessSessions} />}
         {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). The
             table itself stays mounted below whatever the rail does — `agentsOpen` lives in the provider, so
             the rail's own agent row opens THIS instance. Only the chip is redundant beside an open rail. */}
