@@ -26,6 +26,7 @@ import { ModelPicker } from './ModelPicker';
 import { useBrainChat } from './BrainChatProvider';
 import { formatTokens, formatCost, formatDuration } from '../../lib/format';
 
+const FULLSCREEN_KEY = 'elowen.chat.fullscreen';
 const FULLSCREEN_VALUES = ['on', 'off'] as const;
 const STATUSLINE_VALUES = ['shown', 'hidden'] as const;
 
@@ -214,9 +215,6 @@ function ToolPills({ tools, full, live }: { tools: ToolItem[]; full?: boolean; l
   );
 }
 
-/** Live rolling tail of a running Bash (the `tool_progress` event): the last lines of its output
- *  as it streams, in a muted terminal block. Cleared once the final `output`/`diff` lands, so it never
- *  doubles the final dump. */
 /** A plan submitted through `ExitPlanMode`, rendered as a labelled panel in place of the tool row. It is
  *  the turn's actual deliverable — a document the user reads and decides on — so unlike a diff or a
  *  command output it is never collapsed behind a chevron. The body stays plain text: it comes off disk
@@ -270,6 +268,9 @@ function ReasoningBlock({ text, live, full }: { text: string; live: boolean; ful
   );
 }
 
+/** Live rolling tail of a running Bash (the `tool_progress` event): the last lines of its output
+ *  as it streams, in a muted terminal block. Cleared once the final `output`/`diff` lands, so it never
+ *  doubles the final dump. */
 function ProgressBlock({ text }: { text: string }) {
   return (
     <div className="my-1 overflow-hidden rounded-md bg-elevated/40 px-2.5 py-1.5 text-text-muted">
@@ -448,7 +449,6 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        aria-haspopup="true"
         aria-expanded={open}
         aria-label={t.chat.moreOptions}
         title={t.chat.moreOptions}
@@ -549,7 +549,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // draft and running turn survive the toggle. Only meaningful for the full /chat variant. Persisted
   // per device like the rail's width and the reasoning toggle: someone who reads in fullscreen wants it
   // on the next visit too, and re-entering it on every reload is exactly the chore they complained about.
-  const [fullscreenPref, setFullscreenPref] = usePersistentState<'on' | 'off'>('elowen.chat.fullscreen', 'off', FULLSCREEN_VALUES);
+  const [fullscreenPref, setFullscreenPref] = usePersistentState<'on' | 'off'>(FULLSCREEN_KEY, 'off', FULLSCREEN_VALUES);
   const fullscreen = fullscreenPref === 'on';
   // Whether the statusline row (model / context / tokens / cost) is shown is a per-device display choice
   // like fullscreen — it belongs to the screen you are on, not the user record. Collapsing it in-chat
@@ -733,12 +733,19 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     return () => root.classList.remove('chat-fullscreen-lock');
   }, [variant, fullscreen]);
 
-  // Auto-enter fullscreen ONCE on a phone so the conversation owns the whole viewport (the embedded /chat
-  // page is cramped there). The user can still toggle back out — an orientation change that re-crosses the
-  // breakpoint must NOT re-force it, so a ref gates the auto-enter to a single fire.
+  // Auto-enter fullscreen on a phone so the conversation owns the whole viewport (the embedded /chat page
+  // is cramped there) — but ONLY for someone who has never made the choice on this device. `fullscreenPref`
+  // cannot tell "never chose" from "chose off", since both read 'off', so the stored key is read directly:
+  // without that, leaving /chat and coming back remounts this component and forces fullscreen on again,
+  // overriding the user every single time. The ref additionally keeps an orientation change that re-crosses
+  // the breakpoint from re-firing within one mount.
   const autoFullscreenedRef = useRef(false);
   useEffect(() => {
-    if (variant === 'full' && mobile === true && !autoFullscreenedRef.current) { autoFullscreenedRef.current = true; setFullscreen(true); }
+    if (variant !== 'full' || mobile !== true || autoFullscreenedRef.current) return;
+    autoFullscreenedRef.current = true;
+    let chose = false;
+    try { chose = localStorage.getItem(FULLSCREEN_KEY) !== null; } catch { /* private mode — treat as unchosen */ }
+    if (!chose) setFullscreen(true);
   }, [variant, mobile, setFullscreen]);
 
   const newChat = () => { setPickerOpen(false); void switchSession({ fresh: true }).catch(() => toast(t.brainChat.searchOpenError, 'error')); };
@@ -1003,7 +1010,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
               {lineCfg.showContext && usage && usage.percent != null ? (
                 <span>{t.brainChat.context} {Math.round(usage.percent)}% ({formatTokens(usage.tokens ?? 0)}/{formatTokens(usage.contextWindow)})</span>
               ) : null}
-              {lineCfg.showTokens && usage ? <span>Σ {formatTokens(usage.totalTokens)} tok</span> : null}
+              {lineCfg.showTokens && usage ? <span>Σ {formatTokens(usage.totalTokens)} {t.sessionsPanel.tok}</span> : null}
               {lineCfg.showCost && usage ? <span>{formatCost(usage.cost, 2)}</span> : null}
             </>
           ) : null}

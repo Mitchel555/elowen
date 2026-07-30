@@ -327,12 +327,14 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
                       {t.processes[origin]}
                     </span>
                   ) : null}
+                  {/* A destructive control sitting directly beside a tappable row needs a finger-sized hit
+                      area of its own; the glyph stays small so the row keeps its quiet density. */}
                   <button
                     type="button"
                     onClick={() => void killProcess(proc.id)}
                     aria-label={t.processes.kill}
                     title={t.processes.kill}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-text-subtle transition-colors hover:text-danger"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-text-subtle transition-colors hover:text-danger"
                   >
                     <X size={11} aria-hidden />
                   </button>
@@ -397,7 +399,8 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
  *
  *  `column` is the desktop layout (a real sidebar beside the transcript); `drawer` is the mobile one,
  *  because a second column on a phone would squeeze the conversation off the screen. The host picks
- *  between them via `useMobile()` — this component never renders both.
+ *  between them via `useMobileViewport()` — this component never renders both, and neither is mounted
+ *  until the viewport has actually been measured.
  *
  *  Only the column is resizable, and the variant is the viewport decision: the host already made it, so
  *  the drag handle needs no media query of its own. A phone drawer has nothing to widen into anyway, and

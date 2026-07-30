@@ -1,6 +1,7 @@
 'use client';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Loader } from 'lucide-react';
+import Link from 'next/link';
+import { ArrowLeft, Loader } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
@@ -1108,8 +1109,9 @@ export function BrainChatProvider({ children }: { children: ReactNode }) {
 }
 
 /** Recovering a dropped stream: blur everything behind a centered spinner rather than let the user act on
- *  state that may be out of date. Only ever a RE-connect (never first load — `ready` owns the empty boot),
- *  so it does not flash on open. Rendered once at the provider so it can never double up across surfaces. */
+ *  state that may be out of date. Rendered once at the provider so it can never double up across surfaces.
+ *  It covers the whole viewport, including the navigation and the phone's history drawer, so it carries its
+ *  own way out: a daemon that stays down would otherwise lock the reader inside a chat they cannot leave. */
 function ReconnectOverlay() {
   const { t } = useTranslation();
   return (
@@ -1120,6 +1122,13 @@ function ReconnectOverlay() {
     >
       <Loader size={40} className="animate-spin text-text-muted" aria-hidden />
       <span className="text-base text-text-muted">{t.brainChat.reconnecting}</span>
+      <Link
+        href="/dash"
+        className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm text-text-muted transition-colors hover:bg-elevated hover:text-text"
+      >
+        <ArrowLeft size={16} aria-hidden />
+        <span>{t.nav.dashboard}</span>
+      </Link>
     </div>
   );
 }

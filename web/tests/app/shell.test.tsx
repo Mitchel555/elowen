@@ -6,6 +6,7 @@ import { onUnhandledRequest } from '../msw';
 let pathname = '/dash';
 vi.mock('next/navigation', () => ({ usePathname: () => pathname, useRouter: () => ({ push: () => {}, replace: () => {} }), useSearchParams: () => new URLSearchParams() }));
 import { Shell, resolveNav } from '../../components/shell/Shell';
+import { MOBILE_MAX_WIDTH } from '../../lib/useMobile';
 
 class FakeES { onmessage = null; addEventListener() {} close() {} constructor(public url: string) {} }
 (globalThis as unknown as { EventSource: typeof FakeES }).EventSource = FakeES;
@@ -57,16 +58,18 @@ describe('Shell', () => {
     // The region is window − dock, so keying the bar off it let a docked desktop window drop the bar AND
     // its hamburger while ChatView's replacement link (keyed off the viewport) stayed away — no way off
     // /chat at all. A CSS breakpoint reads the same viewport ChatView does, and needs no measurement.
+    // The value is asserted in PIXELS on purpose: Tailwind's `md` is 48rem, which drifts away from the
+    // hook's pixel media query as soon as the browser font is not 16px, reopening that same gap.
     pathname = '/chat';
     render(<Shell><span>page-body</span></Shell>);
     const bar = await screen.findByTestId('future-page-header');
-    expect(bar.parentElement).toHaveClass('max-md:hidden');
+    expect(bar.parentElement).toHaveClass(`max-[${MOBILE_MAX_WIDTH}px]:hidden`);
   });
 
   it('leaves the global bar unconditional off /chat', async () => {
     pathname = '/dash';
     render(<Shell><span>page-body</span></Shell>);
     const bar = await screen.findByTestId('future-page-header');
-    expect(bar.parentElement).not.toHaveClass('max-md:hidden');
+    expect(bar.parentElement).not.toHaveClass(`max-[${MOBILE_MAX_WIDTH}px]:hidden`);
   });
 });

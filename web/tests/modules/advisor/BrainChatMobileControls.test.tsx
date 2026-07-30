@@ -105,4 +105,24 @@ describe('conversation bar controls', () => {
     await waitFor(() => expect(transcript.className).toContain('overflow-y-auto'));
     expect(transcript.className).not.toContain('chat-scroll-hide');
   });
+
+  // The auto-enter fires per MOUNT, and leaving /chat and coming back is a remount — so a phone user who
+  // deliberately left fullscreen was dragged straight back into it on their next visit, permanently. The
+  // stored preference is what separates "never chose" from "chose off"; both read 'off' in state.
+  it('respects a phone user who has already turned fullscreen off', async () => {
+    localStorage.setItem(STORAGE_KEY, 'off');
+    setViewport(true);
+    renderSurface();
+
+    await screen.findByTestId('chat-transcript');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'More options' })).toBeTruthy());
+    expect(localStorage.getItem(STORAGE_KEY)).toBe('off');
+  });
+
+  it('still auto-enters for a phone user who has never chosen', async () => {
+    setViewport(true);
+    renderSurface();
+
+    await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBe('on'));
+  });
 });

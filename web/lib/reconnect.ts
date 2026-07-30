@@ -24,8 +24,9 @@ export interface ReconnectOptions {
   random?: () => number;
   /** Notified true when a recovery attempt is in flight (scheduled or running) and false once the stream is
    *  healthy again or the controller stops — lets a surface show a "reconnecting" overlay without keeping
-   *  its own copy of the busy bookkeeping. Fires only on a real change, never on the first connect (that
-   *  path does not go through the controller). */
+   *  its own copy of the busy bookkeeping. Fires only on a real change. It does NOT stay silent for the
+   *  first connect: a snapshot that times out or errors on load is retried through this controller like any
+   *  other, so a surface can show the overlay before the stream has ever been healthy. */
   onActive?: (active: boolean) => void;
 }
 

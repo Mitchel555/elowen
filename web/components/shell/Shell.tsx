@@ -119,10 +119,13 @@ function ShellLayout({ children }: { children: ReactNode }) {
               (window − dock), so a docked desktop window could fall under DRAWER_MAX while the viewport
               stayed wide. The bar and its hamburger then vanished, while ChatView's replacement "back"
               link — keyed off the VIEWPORT — never appeared, stranding the reader on /chat with no way
-              out. `max-md` is the same 768px boundary ChatView reads, so the two cannot disagree; and
-              being CSS it holds from the first paint instead of flashing the bar before the first
-              measurement resolves. */}
-          <div className={onChat ? 'max-md:hidden' : undefined}>
+              out. Being CSS it also holds from the first paint instead of flashing the bar before the
+              first measurement resolves.
+              The pixel value is deliberate and must stay in step with MOBILE_MAX_WIDTH (web/lib/useMobile.ts):
+              Tailwind's own `md` is 48rem, so a reader whose browser font is not 16px would push the CSS
+              boundary away from the pixel media query the hook runs — reopening exactly the gap with no
+              bar and no back link that this suppression exists to avoid. */}
+          <div className={onChat ? 'max-[767px]:hidden' : undefined}>
             <TopBar
               onMenuClick={mode === 'drawer' ? () => setDrawerOpen(true) : undefined}
               showLocation={false}
