@@ -815,10 +815,11 @@ export function createChatComposition(
     // Project context yields only when the active-goal progress would otherwise be truncated. It remains
     // visible in the telemetry rail or returns automatically as soon as the terminal is wide enough.
     promptMeta.setRight(activeGoal && visibleWidth(metaLeftLine()) + visibleWidth(metaRight) + 1 > chatWidth() ? '' : metaRight);
-    // Drop the terminal plugin's pinned `bg-processes` card only while the dedicated right rail is
-    // actually visible. Narrow terminals cannot fit that rail; retaining the compact card there avoids
-    // making background work disappear entirely while still preventing duplicates on wide layouts.
-    cardPanel.set(focusedCards().filter((c) => c.id !== 'bg-processes' || !panelVisible()));
+    // The terminal plugin pins a `bg-processes` card, but its real home is the ProcessPanel in the right
+    // rail — keeping it above the composer only put running background shells in two places at once. Drop
+    // it from the card panel unconditionally so it shows ONLY in the rail. (On a terminal too narrow to
+    // fit the rail the running list is not surfaced above the input, by design.)
+    cardPanel.set(focusedCards().filter((c) => c.id !== 'bg-processes'));
     subPanel.set(panelAvailable() ? [] : agents);
     subPanel.setSelected(rt.childView?.sessionId ?? null);
     // Pending mid-turn queue strip above the composer (with the remove-last keybind hint when bound).
