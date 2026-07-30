@@ -111,11 +111,16 @@ function ShellLayout({ children }: { children: ReactNode }) {
             floating short of the window edge with dead space behind it, which reads as a bug rather than
             as breathing room. Routes that ARE documents keep the cap. */}
         <div className={`mx-auto flex w-full flex-col ${onChat ? '' : CONTENT_MAX}`}>
-          {/* Frameless page heading + global actions. In drawer mode it also opens mobile navigation. */}
-          <TopBar
-            onMenuClick={mode === 'drawer' ? () => setDrawerOpen(true) : undefined}
-            showLocation={false}
-          />
+          {/* Frameless page heading + global actions. In drawer mode it also opens mobile navigation. On
+              /chat at phone width the whole global bar is suppressed: the conversation already carries its
+              own bar, and stacking a second one above it (avatar, bell, search) crowds the small screen.
+              The way back into the rest of the app moves into the history drawer's "← dashboard" link. */}
+          {onChat && mode === 'drawer' ? null : (
+            <TopBar
+              onMenuClick={mode === 'drawer' ? () => setDrawerOpen(true) : undefined}
+              showLocation={false}
+            />
+          )}
           <div className="px-2 pb-8"><RouteTransition>{children}</RouteTransition></div>
         </div>
       </main>

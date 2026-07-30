@@ -62,7 +62,10 @@ export function ChatView() {
           />
         </div>
         {mobile === false && railShown ? <TelemetryPanel variant="column" onOpenWorkflow={openDag} /> : null}
-        <ChatHistoryRail variant="drawer" open={historyOpen} onClose={() => setHistoryOpen(false)} />
+        {/* On a phone the global TopBar is gone (see Shell), so the drawer that lists conversations is also
+            the only way back to the rest of the app — it carries a "← dashboard" link. Desktop keeps the
+            TopBar, so the link would be redundant there. */}
+        <ChatHistoryRail variant="drawer" open={historyOpen} onClose={() => setHistoryOpen(false)} homeLink={mobile === true} />
         {mobile === true ? (
           <TelemetryPanel variant="drawer" open={telemetryOpen} onClose={() => setTelemetryOpen(false)} onOpenWorkflow={openDag} />
         ) : null}

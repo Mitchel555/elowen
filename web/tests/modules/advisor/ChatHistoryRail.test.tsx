@@ -58,6 +58,15 @@ describe('ChatHistoryRail', () => {
     }
   });
 
+  it('shows a back-to-dashboard link only when homeLink is set (phone /chat has no TopBar)', () => {
+    const { wrapper: Wrapper } = createWrapper();
+    const linkName = /Přehled|Dashboard|Prehľad/i;
+    const { rerender } = render(<Wrapper><ToastProvider><ChatHistoryRail variant="drawer" open /></ToastProvider></Wrapper>);
+    expect(screen.queryByRole('link', { name: linkName })).not.toBeInTheDocument();
+    rerender(<Wrapper><ToastProvider><ChatHistoryRail variant="drawer" open homeLink /></ToastProvider></Wrapper>);
+    expect(screen.getByRole('link', { name: linkName })).toHaveAttribute('href', '/dash');
+  });
+
   it('starts a new conversation via switchSession({ fresh: true })', () => {
     renderRail('rail');
     fireEvent.click(screen.getByRole('button', { name: /New chat|Nová konverzace/i }));
