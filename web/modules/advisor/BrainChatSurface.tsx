@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Loader, Brain, Activity, Pencil } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
@@ -461,7 +461,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   const { toast } = useToast();
   const c = useBrainChat();
   const {
-    turns, busy, ready, reconnecting, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
+    turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
     usage, lineCfg, currentModel, subagents, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
     ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
@@ -636,19 +636,6 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
       style={variant === 'full' && fullscreen ? { height: 'calc(100dvh / var(--ui-scale, 1))' } : undefined}
       data-variant={variant}
     >
-      {/* Recovering a dropped stream: blur the stale conversation behind a centered spinner rather than let
-          the user act on state that may be out of date. Only ever a RE-connect (never first load — `ready`
-          owns the empty boot), so the overlay does not flash on open. */}
-      {reconnecting ? (
-        <div
-          className="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-4 bg-bg/60 backdrop-blur-md"
-          role="status"
-          aria-live="polite"
-        >
-          <Loader size={40} className="animate-spin text-text-muted" aria-hidden />
-          <span className="text-base text-text-muted">{t.brainChat.reconnecting}</span>
-        </div>
-      ) : null}
       {/* Conversation bar. Compact (dock): title + picker dropdown + new chat. Full (/chat): a light
           header — the shared history rail owns the session list, so here it is only the title, a mobile
           drawer toggle and new chat. Space is reserved for the model picker (Fáze 3), terminal

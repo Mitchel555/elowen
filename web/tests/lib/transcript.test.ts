@@ -273,10 +273,14 @@ describe('web transcript reducer', () => {
     expect(view.thinking).toBe(false);
   });
 
-  it('leaves a you-turn in place when discard_user names a different turn', () => {
+  it('leaves a you-turn AND its spinner in place when discard_user names a different turn', () => {
     let view = reduce(emptyView(), { type: 'user', text: 'kept', durableId: 'dur-1' });
+    expect(view.thinking).toBe(true);
     view = reduce(view, { type: 'discard_user', durableId: 'other-id', text: 'kept' });
     expect(view.turns.some((t) => t.role === 'you' && t.id === 'dur-1')).toBe(true);
+    // A no-match must NOT settle the spinner: a duplicate discard (double Esc) would otherwise kill the
+    // spinner of a turn the user has meanwhile resent.
+    expect(view.thinking).toBe(true);
   });
 
   it('rehydrates durable child state and patches done after parent idle without a new spinner turn', () => {

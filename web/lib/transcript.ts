@@ -320,7 +320,10 @@ export function reduce(view: ChatView, e: TranscriptEvent): ChatView {
       // The daemon cancelled this user turn before it produced output: drop the matching 'you' bubble and
       // stop the spinner. The composer restore is the provider's job (it owns the input state).
       const index = turns.findIndex((turn) => turn.role === 'you' && turn.id === e.durableId);
-      if (index !== -1) turns.splice(index, 1);
+      // No match — a duplicate discard (double Esc) or a turn already gone. Leave the view untouched:
+      // forcing thinking:false here would kill the spinner of a turn the user has meanwhile resent.
+      if (index === -1) return view;
+      turns.splice(index, 1);
       return { turns, thinking: false, notice: undefined };
     }
     case 'idle': {

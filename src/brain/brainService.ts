@@ -320,6 +320,9 @@ export class BrainService {
           ...(run.background === true ? { background: true } : {}),
           ...(run.autoDeliver === true ? { autoDeliver: true } : {}),
         };
+        // No timeline marker here on purpose: this runs at boot before any client attaches, so there is no
+        // live replay to publish to and the marker is display-only (never persisted to session events). The
+        // panel reflects the terminal status on next read; the marker is for finishes that happen live.
         if (!this.d.store.upsertSubagentRun(sessionId, terminal)) continue;
         if (run.autoDeliver !== true) continue;
         this.d.store.enqueueSubagentResult(sessionId, {
@@ -389,12 +392,22 @@ export class BrainService {
     // keep the turn, so this deliberately lives here and not in abortFenced/abortLive.
     const discard = !b.turnProducedOutput ? b.lastAdmitted : undefined;
     if (discard) b.discardingUserTurn = discard.durableId;
-    await this.abortFenced(b);
-    if (discard) {
-      this.d.store.deleteMessage(b.sessionId, discard.durableId);
-      b.replay.publish({ type: 'discard_user', durableId: discard.durableId, text: discard.text });
-      b.discardingUserTurn = undefined;
-      b.lastAdmitted = undefined;
+    try {
+      await this.abortFenced(b);
+      if (discard) {
+        // Delete the user row AND any partial assistant output the aborted turn's agent_end persisted:
+        // projectEvent runs synchronously while abortFenced tears the run down, so a token that raced the
+        // cancel can leave a fragment in the store. Removing only the user row would surface that fragment
+        // as an answer with no question after a reconnect. deleteMessagesFrom clears the row and everything
+        // after it in this turn.
+        this.d.store.deleteMessagesFrom(b.sessionId, discard.durableId);
+        b.replay.publish({ type: 'discard_user', durableId: discard.durableId, text: discard.text });
+      }
+    } finally {
+      // Always release the guard, even if abortFenced threw — otherwise the reducer would keep dropping
+      // every future content event (discardingUserTurn stays armed) and the session would go mute until a
+      // respawn, and a stale lastAdmitted could let a later abort delete a turn that already has output.
+      if (discard) { b.discardingUserTurn = undefined; b.lastAdmitted = undefined; }
     }
   }
 

@@ -1179,6 +1179,50 @@ describe('BrainService', () => {
     expect(d.store.getMessages('brain-1').some((m) => m.id === durableId)).toBe(false);
   });
 
+  it('discards the aborted turn AND any partial assistant fragment its agent_end persisted', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string }));
+    d.session.prompt = vi.fn(async (_t: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+    });
+    await svc.send({ userId: 1, text: 'discard me', display: 'discard me' });
+    const durableId = seen.find((e) => e.type === 'user')?.durableId;
+    if (!durableId) throw new Error('expected a durable user row');
+    // A token that raced the cancel: agent_end persisted a partial assistant row AFTER the user row.
+    d.store.appendMessage({ id: 'frag', sessionId: 'brain-1', parentId: durableId, role: 'assistant', content: { text: 'partial answer' } });
+    expect(d.store.getMessages('brain-1').some((m) => m.id === 'frag')).toBe(true);
+
+    await svc.abort(1);
+
+    // Both the user row AND the orphan fragment are gone — never an answer left without its question.
+    expect(d.store.getMessages('brain-1').length).toBe(0);
+  });
+
+  it('releases the discard guard even when the abort teardown throws (session must not go mute)', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string }));
+    d.session.prompt = vi.fn(async (_t: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+    });
+    await svc.send({ userId: 1, text: 'discard me', display: 'discard me' });
+
+    // The teardown throws AFTER the guard is armed; the finally must still release the guard + lastAdmitted.
+    d.session.clearQueue = vi.fn(() => { throw new Error('teardown boom'); });
+    await expect(svc.abort(1)).rejects.toThrow('teardown boom');
+
+    // Guard released: a follow-up abort finds nothing to discard (lastAdmitted was cleared), so it emits NO
+    // discard_user. A stuck guard would have left lastAdmitted armed and let this second abort fire one.
+    d.session.clearQueue = vi.fn();
+    await svc.abort(1);
+    expect(seen.filter((e) => e.type === 'discard_user').length).toBe(0);
+  });
+
   it('keeps the user turn when the turn has already settled — nothing to discard', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

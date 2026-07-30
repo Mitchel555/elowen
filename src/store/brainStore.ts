@@ -256,6 +256,19 @@ export class BrainStore {
       .run(messageId, sessionId).changes > 0;
   }
 
+  /** Delete a message AND every message after it in the same session (by rowid, the canonical transcript
+   *  order). Used to discard a whole aborted user turn: the user row plus any partial assistant output its
+   *  agent_end persisted before the abort landed — deleting only the user row would leave an answer
+   *  fragment with no question after a reconnect. Returns the number of rows removed (0 if the id is
+   *  unknown / in another session). */
+  deleteMessagesFrom(sessionId: string, fromId: string): number {
+    const row = this.db.prepare('SELECT rowid FROM brain_messages WHERE id = ? AND session_id = ?')
+      .get(fromId, sessionId) as { rowid: number } | undefined;
+    if (!row) return 0;
+    return this.db.prepare('DELETE FROM brain_messages WHERE session_id = ? AND rowid >= ?')
+      .run(sessionId, row.rowid).changes;
+  }
+
   /** Mirror ONE message the moment PI finishes it, so a daemon restart mid-turn no longer discards the
    *  whole run. Provisional by construction: these rows never outlive their turn — `persistAgentRun`
    *  drops every pending row in the same transaction that writes the settled run in PI's real execution

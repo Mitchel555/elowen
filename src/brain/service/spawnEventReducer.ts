@@ -34,8 +34,11 @@ function publicProviderError(message: string, sessionId: string, provider: strin
 
 /** BrainEvent types that count as the turn actually producing output — the signal that flips a just-sent
  *  user turn from "discardable on Esc" to "keep, only abort the run". Deliberately excludes
- *  user/idle/step/queue/session-event/card and the like: those are not the model doing work. */
-const TURN_OUTPUT_EVENTS = new Set<string>(['text', 'reasoning', 'tool', 'tool_authoring', 'diff', 'tool_output', 'subagent', 'workflow']);
+ *  user/idle/step/queue/session-event/card and the like: those are not the model doing work. Only events
+ *  this reducer actually publishes belong here (they pass through `toBrainEvent`); `subagent`/`workflow`
+ *  are emitted directly via emitSubagent/emitWorkflow and never reach this seam, and the Delegate/Workflow
+ *  tool CALL that starts them is itself a `tool` event, which already sets the flag. */
+const TURN_OUTPUT_EVENTS = new Set<string>(['text', 'reasoning', 'tool', 'tool_authoring', 'diff', 'tool_output']);
 
 /** Every local the spawner's `session.subscribe` callback captured, threaded explicitly so the reducer's
  * behavior stays byte-for-byte identical to the inline closure. `getLive` is a thunk because the

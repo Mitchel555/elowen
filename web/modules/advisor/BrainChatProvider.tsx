@@ -1,5 +1,6 @@
 'use client';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Loader } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
@@ -1079,5 +1080,30 @@ export function BrainChatProvider({ children }: { children: ReactNode }) {
   // `value` is rebuilt each render — like today's single BrainChat component, whose consumers all re-render
   // together on any state change. A useMemo over its identity was dead (the nested handlers/slash literal are
   // fresh every render), so the value is passed straight through; single-mount + single-SSE is what matters.
-  return <BrainChatContext.Provider value={value}>{children}</BrainChatContext.Provider>;
+  // The reconnect overlay lives HERE, not in BrainChatSurface: a phone with the dock open on /chat mounts
+  // two surfaces sharing this one provider, and a per-surface fixed-fullscreen overlay would then render
+  // twice (doubled backdrop, two aria-live "reconnecting" announcements). One provider → one overlay.
+  return (
+    <BrainChatContext.Provider value={value}>
+      {children}
+      {value.reconnecting ? <ReconnectOverlay /> : null}
+    </BrainChatContext.Provider>
+  );
+}
+
+/** Recovering a dropped stream: blur everything behind a centered spinner rather than let the user act on
+ *  state that may be out of date. Only ever a RE-connect (never first load — `ready` owns the empty boot),
+ *  so it does not flash on open. Rendered once at the provider so it can never double up across surfaces. */
+function ReconnectOverlay() {
+  const { t } = useTranslation();
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-4 bg-bg/60 backdrop-blur-md"
+      role="status"
+      aria-live="polite"
+    >
+      <Loader size={40} className="animate-spin text-text-muted" aria-hidden />
+      <span className="text-base text-text-muted">{t.brainChat.reconnecting}</span>
+    </div>
+  );
 }

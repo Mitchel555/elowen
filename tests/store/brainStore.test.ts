@@ -441,6 +441,27 @@ describe('BrainStore', () => {
     expect(JSON.parse(msgs[0]!.content)).toEqual({ text: 'hi' });
   });
 
+  it('deleteMessagesFrom removes a row and every message after it, keeping earlier ones', () => {
+    store.createSession({ id: 's1', userId: 7, model: 'm' });
+    store.appendMessage({ id: 'a1', sessionId: 's1', parentId: null, role: 'assistant', content: { text: 'earlier reply' } });
+    store.appendMessage({ id: 'u1', sessionId: 's1', parentId: null, role: 'user', content: { text: 'aborted question' } });
+    store.appendMessage({ id: 'frag', sessionId: 's1', parentId: 'u1', role: 'assistant', content: { text: 'partial answer' } });
+
+    // Discarding the aborted turn: from the user row onward (the row + its partial assistant fragment).
+    expect(store.deleteMessagesFrom('s1', 'u1')).toBe(2);
+    expect(store.getMessages('s1').map((m) => m.id)).toEqual(['a1']);
+  });
+
+  it('deleteMessagesFrom returns 0 for an unknown id or a foreign session, deleting nothing', () => {
+    store.createSession({ id: 's1', userId: 7, model: 'm' });
+    store.createSession({ id: 's2', userId: 7, model: 'm' });
+    store.appendMessage({ id: 'u1', sessionId: 's1', parentId: null, role: 'user', content: { text: 'q' } });
+    expect(store.deleteMessagesFrom('s1', 'nope')).toBe(0);
+    // The id exists but in another session — the session guard must stop it deleting across sessions.
+    expect(store.deleteMessagesFrom('s2', 'u1')).toBe(0);
+    expect(store.getMessages('s1').map((m) => m.id)).toEqual(['u1']);
+  });
+
   it('scopes sessions per user', () => {
     store.createSession({ id: 'a', userId: 1, model: 'm' });
     store.createSession({ id: 'b', userId: 2, model: 'm' });
