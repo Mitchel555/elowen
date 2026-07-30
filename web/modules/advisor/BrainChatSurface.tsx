@@ -7,7 +7,7 @@ import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
 import type { LocaleDict } from '../../lib/i18n/types';
-import { useMobile } from '../../lib/useMobile';
+import { useMobileViewport } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
 import type { BrainCard, BrainWorkMode } from '../../lib/types';
 import { groupToolItems, type ChatTurn, type SessionEventItem, type ToolItem } from '../../lib/transcript';
@@ -448,7 +448,7 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-expanded={open}
         aria-label={t.chat.moreOptions}
         title={t.chat.moreOptions}
@@ -456,8 +456,12 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
       >
         <MoreHorizontal size={18} aria-hidden />
       </button>
+      {/* A plain popover, NOT `role="menu"`: that role promises menuitem children and arrow-key roving
+          focus, and this popover leads with the model picker — a composite control, not a menu row — so
+          the promise was one a screen reader could not cash. `data-chat-popover` is what the fullscreen
+          Escape guard looks for, since there is no longer a role to key off. */}
       {open ? (
-        <div role="menu" className="absolute right-0 z-20 mt-1 flex w-60 flex-col gap-0.5 rounded-lg border border-border bg-elevated p-1.5 shadow-lg">
+        <div data-chat-popover className="absolute right-0 z-20 mt-1 flex w-60 flex-col gap-0.5 rounded-lg border border-border bg-elevated p-1.5 shadow-lg">
           {/* The picker is the menu's heading — it is a control, not a menu row, so it reads wrong pushed
               below one. Plain rows follow it. */}
           <div className="px-1 pb-1"><ModelPicker variant="full" /></div>
@@ -561,12 +565,22 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // and a phone where the rail is a drawer), so only an actually-visible rail takes ownership; hidden or
   // absent hands the reporting back to the transcript rather than dropping it.
   const railOwnsLiveWork = telemetryShown === true;
-  const mobile = useMobile();
+  // `undefined` until the viewport has actually been measured. Every branch below therefore tests `=== true`
+  // or `=== false` and renders NOTHING in between: the boolean-returning hook reports `false` first, which
+  // on a phone painted one frame of the desktop controls (inline picker, mode pill, thoughts toggle,
+  // fullscreen button) plus the TODO card and process panel before swapping them for the ⋯ menu. A bar that
+  // is briefly missing a control is quieter than one that visibly rearranges itself. Same approach as
+  // ChatView, which reads this hook for its own layout.
+  const mobile = useMobileViewport();
   // Phone fullscreen is an immersive view of the conversation: the bar stays (it is the only way back out
   // of fullscreen), but the inline TODO card, the background-process panel and the sub-agent chip would
   // just pile clutter above the composer on a small screen, so they leave the transcript there. Outside
   // fullscreen they stay — that layout reads fine. Desktop fullscreen is untouched.
   const immersive = mobile === true && fullscreen;
+  // The transcript's out-of-band extras (TODO cards, process panel, agents chip) wait for the measurement
+  // too: rendering them while the viewport is still unknown paints them once on a phone, only to pull them
+  // straight back out when the immersive view resolves a frame later.
+  const transcriptExtras = mobile !== undefined && !immersive;
   // TODO cards with open work (CardBlock hides a card whose every item is done). The transcript copy is
   // out of the immersive phone view, so the ⋯ menu opens them in a dialog instead.
   const todoCards = cards.filter((cd) => {
@@ -698,9 +712,10 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (slashOpen) return;
-      // A menu (ModelPicker) or a modal drawer/dialog (the history rail) owns Escape first — its own
-      // handler closes it on this same keystroke, so fullscreen must not also collapse.
-      if (document.querySelector('[role="listbox"],[role="dialog"],[aria-modal="true"]')) return;
+      // A picker listbox, a modal drawer/dialog (the history rail) or the bar's ⋯ popover owns Escape
+      // first — its own handler closes it on this same keystroke, so fullscreen must not also collapse.
+      // The popover was missing from this list, so one Escape closed the menu AND dropped fullscreen.
+      if (document.querySelector('[role="listbox"],[role="dialog"],[aria-modal="true"],[data-chat-popover]')) return;
       setFullscreen(false);
     };
     document.addEventListener('keydown', onKey);
@@ -723,7 +738,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // breakpoint must NOT re-force it, so a ref gates the auto-enter to a single fire.
   const autoFullscreenedRef = useRef(false);
   useEffect(() => {
-    if (variant === 'full' && mobile && !autoFullscreenedRef.current) { autoFullscreenedRef.current = true; setFullscreen(true); }
+    if (variant === 'full' && mobile === true && !autoFullscreenedRef.current) { autoFullscreenedRef.current = true; setFullscreen(true); }
   }, [variant, mobile, setFullscreen]);
 
   const newChat = () => { setPickerOpen(false); void switchSession({ fresh: true }).catch(() => toast(t.brainChat.searchOpenError, 'error')); };
@@ -785,7 +800,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           {/* On a phone the model picker, work-mode pill and thoughts toggle fold into the ⋯ menu below; on
               desktop they stay inline. The pill is a security indicator (plan/workflow), so it also shows
               inline on desktop and, when non-build, inside the ⋯ menu on mobile. */}
-          {!mobile ? (
+          {mobile === false ? (
             <>
               <WorkModePill mode={workMode} full />
               <ModelPicker variant="full" />
@@ -818,7 +833,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           </button>
           {/* A phone is auto-fullscreen (see the mount effect), so the inline fullscreen toggle is desktop-
               only; on mobile it lives inside the ⋯ menu alongside the model/mode/thoughts controls. */}
-          {!mobile ? (
+          {mobile === false ? (
             <button
               type="button"
               onClick={() => setFullscreen(!fullscreen)}
@@ -829,7 +844,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             >
               {fullscreen ? <Minimize2 size={18} aria-hidden /> : <Maximize2 size={18} aria-hidden />}
             </button>
-          ) : (
+          ) : mobile === true ? (
             <BarOverflowMenu
               workMode={workMode}
               showThoughts={showThoughts}
@@ -839,7 +854,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
               hasTodos={todoCards.length > 0}
               onOpenTodos={() => setTodosOpen(true)}
             />
-          )}
+          ) : null}
         </div>
       )}
 
@@ -847,7 +862,11 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           turns stack with NO container gap — each segment carries its own margin, so tool rows keep one
           uniform rhythm across turn boundaries and only a speaker change opens a block break. The compact
           dock keeps its own internal scroll and per-turn gap. */}
-      <div ref={scrollRef} data-testid="chat-transcript" className={`flex flex-1 flex-col ${variant === 'full' ? `chat-gutter py-4${fullscreen ? ' min-h-0 overflow-y-auto chat-scroll-hide' : ''}` : 'gap-3 min-h-0 overflow-y-auto p-3'}`}>
+      {/* The scrollbar is hidden only in the immersive PHONE view, where a permanent gutter stripe reads as
+          chrome the small screen cannot spare and touch scrolling needs no visible track. Desktop
+          fullscreen keeps its scrollbar: a mouse user has no other cue to where they are in a long
+          conversation. */}
+      <div ref={scrollRef} data-testid="chat-transcript" className={`flex flex-1 flex-col ${variant === 'full' ? `chat-gutter py-4${fullscreen ? ` min-h-0 overflow-y-auto${immersive ? ' chat-scroll-hide' : ''}` : ''}` : 'gap-3 min-h-0 overflow-y-auto p-3'}`}>
         {turns.length === 0 && ready ? (
           variant === 'full' ? (
             <div className="m-auto flex max-w-md flex-col items-center gap-2 text-center">
@@ -885,12 +904,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             spacing group under the flush transcript; in the dock `contents` keeps them in the parent's
             gap flow exactly as before. `empty:hidden` drops the group when everything in it is null. */}
         <div className={variant === 'full' ? 'mt-4 flex flex-col gap-3 empty:hidden' : 'contents'}>
-        {immersive ? null : todoCards.map((card) => <CardBlock key={card.id} card={card} />)}
-        {railOwnsLiveWork || immersive ? null : <ProcessPanel owned={ownedProcessSessions} />}
+        {transcriptExtras ? todoCards.map((card) => <CardBlock key={card.id} card={card} />) : null}
+        {transcriptExtras && !railOwnsLiveWork ? <ProcessPanel owned={ownedProcessSessions} /> : null}
         {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). The
             table itself stays mounted below whatever the rail does — `agentsOpen` lives in the provider, so
             the rail's own agent row opens THIS instance. Only the chip is redundant beside an open rail. */}
-        {subagents.length > 0 && !railOwnsLiveWork && !immersive ? (
+        {subagents.length > 0 && !railOwnsLiveWork && transcriptExtras ? (
           <button
             type="button"
             onClick={() => setAgentsOpen(true)}
