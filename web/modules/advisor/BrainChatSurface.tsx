@@ -546,6 +546,11 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // absent hands the reporting back to the transcript rather than dropping it.
   const railOwnsLiveWork = telemetryShown === true;
   const mobile = useMobile();
+  // Phone fullscreen is an immersive view of the conversation: the bar stays (it is the only way back out
+  // of fullscreen), but the inline TODO card, the background-process panel and the sub-agent chip would
+  // just pile clutter above the composer on a small screen, so they leave the transcript there. Outside
+  // fullscreen they stay — that layout reads fine. Desktop fullscreen is untouched.
+  const immersive = mobile === true && fullscreen;
   const fileRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -725,7 +730,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           <ChatHistoryRail variant="dropdown" open={pickerOpen} onClose={() => setPickerOpen(false)} />
         </div>
       ) : (
-        <div className="chat-gutter sticky top-0 z-10 flex items-center gap-1.5 bg-bg py-2">
+        <div className={`chat-gutter ${fullscreen ? '' : 'sticky top-0 '}z-10 flex shrink-0 items-center gap-1.5 bg-bg py-2`}>
           {/* No hairline under the sticky bar — a soft fade separates it from the scrolling transcript. */}
           <div aria-hidden className="pointer-events-none absolute inset-x-0 top-full h-4 bg-gradient-to-b from-bg to-transparent" />
           {onOpenHistory ? (
@@ -841,12 +846,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             spacing group under the flush transcript; in the dock `contents` keeps them in the parent's
             gap flow exactly as before. `empty:hidden` drops the group when everything in it is null. */}
         <div className={variant === 'full' ? 'mt-4 flex flex-col gap-3 empty:hidden' : 'contents'}>
-        {cards.filter((cd) => cd.id !== 'bg-processes').map((card) => <CardBlock key={card.id} card={card} />)}
-        {railOwnsLiveWork ? null : <ProcessPanel activeSessionId={activeSessionId} />}
+        {immersive ? null : cards.filter((cd) => cd.id !== 'bg-processes').map((card) => <CardBlock key={card.id} card={card} />)}
+        {railOwnsLiveWork || immersive ? null : <ProcessPanel activeSessionId={activeSessionId} />}
         {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). The
             table itself stays mounted below whatever the rail does — `agentsOpen` lives in the provider, so
             the rail's own agent row opens THIS instance. Only the chip is redundant beside an open rail. */}
-        {subagents.length > 0 && !railOwnsLiveWork ? (
+        {subagents.length > 0 && !railOwnsLiveWork && !immersive ? (
           <button
             type="button"
             onClick={() => setAgentsOpen(true)}
