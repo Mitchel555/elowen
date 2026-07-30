@@ -12,6 +12,17 @@ export type { DelegatedChildSummary };
  *  reading their stored final replies, and continuing one of them. Every operation is keyed on the parent
  *  session the HOST resolves from the live turn — never on anything the plugin supplies — so a plugin
  *  cannot address another conversation's children. */
+/** Low-frequency progress of a sub-agent turn — the subset of a BrainEvent a delegating plugin distils
+ *  into its live progress row (tool starts, step/idle token usage, the child's session id). Passed to a
+ *  continuation so a follow-up surfaces as a running sub-agent exactly like the first delegation did. */
+export interface SubagentProgressEvent {
+  type: string;
+  name?: string;
+  detail?: string;
+  sessionId?: string;
+  usage?: { totalTokens?: number };
+}
+
 export interface DelegatedChildBridge {
   runs(parentSessionId: string, limit?: number): DelegatedChildSummary[];
   read(parentSessionId: string, childSessionId: string): string;
@@ -20,6 +31,7 @@ export interface DelegatedChildBridge {
     childSessionId: string,
     text: string,
     access: { admin: boolean; projectIds: number[]; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean },
+    onEvent?: (e: SubagentProgressEvent) => void,
   ): Promise<string>;
   stop(parentSessionId: string, childSessionId: string): Promise<{ stopped: boolean }>;
 }
@@ -478,8 +490,12 @@ export interface PluginContext {
    *  Rejects when the id is not a child of this conversation, when that child still has a turn in flight
    *  (two agents on one transcript is a race), or when its captured scope would now grant more than this
    *  conversation itself holds. A continuation replays the child's ORIGINAL immutable boundary, narrowed
-   *  by the caller's current denies — it can never widen access. */
-  continueSubagent(sessionId: string, text: string): Promise<string>;
+   *  by the caller's current denies — it can never widen access.
+   *
+   *  `onEvent` receives the child's live progress (tool starts, token usage) so the follow-up shows as a
+   *  running sub-agent in the CLI rail / web table, the same way the first delegation does — omit it and
+   *  the continuation still runs, just invisibly. */
+  continueSubagent(sessionId: string, text: string, onEvent?: (e: SubagentProgressEvent) => void): Promise<string>;
   /** Stop a DIRECT sub-agent listed by {@link subagentRuns} — a runaway or no-longer-needed one — without
    *  touching its parent or siblings. The host anchors the lookup to the current turn's session, exactly
    *  like {@link readSubagent}; the plugin supplies only the child id and cannot widen the parent scope.

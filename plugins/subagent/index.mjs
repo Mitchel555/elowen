@@ -696,12 +696,38 @@ export function register(ctx) {
       const message = typeof p.message === 'string' ? p.message.trim() : '';
       if (!message) return ok('Error: `message` was empty. Say what the sub-agent should do next.');
       if (!ctx.continueSubagent) return ok('Error: continuing a sub-agent is not wired up on this server.');
+      const childSessionId = String(p.id ?? '').trim();
+      // Mirror Delegate's live progress row so a follow-up shows as a RUNNING sub-agent in the rail, keyed
+      // on THIS tool call (with the child's session for drill-in), instead of running invisibly. The child
+      // already exists, so its session id is known up front — no `session` event needed to seed the row.
+      const state = {
+        id: `dlg-continue-${randomUUID()}`,
+        toolCallId: _id,
+        sessionId: childSessionId,
+        status: 'running',
+        task: clip(message, MAX_STORED_TASK_CHARS),
+        tools: 0,
+        detail: undefined,
+        tokens: undefined,
+        startedAt: Date.now(),
+        emit: ctx.subagentEmitter(),
+      };
+      const push = (status) => pushJob(state, status);
+      push('running');
+      const onEvent = (e) => {
+        if (e.type === 'tool' && e.name) { state.tools += 1; state.detail = e.detail ? `${e.name} ${e.detail}` : e.name; push('running'); }
+        else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { state.tokens = e.usage.totalTokens; push('running'); }
+      };
       try {
-        const reply = await ctx.continueSubagent(String(p.id ?? '').trim(), message);
+        const reply = await ctx.continueSubagent(childSessionId, message, onEvent);
+        state.status = 'done';
+        push('done');
         return ok(reply || '(the sub-agent returned nothing)');
       } catch (e) {
         // A refusal is self-correctable — the agent can wait for a busy child or pick another one — so it
         // comes back as a readable result, exactly like every other error this plugin surfaces.
+        state.status = 'error';
+        push('error');
         return ok(`Error: ${errorText(e)}`);
       }
     },

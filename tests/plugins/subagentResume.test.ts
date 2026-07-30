@@ -6,6 +6,8 @@ import { runWithPolicy, type TurnIdentity } from '../../src/plugins/policyContex
 import type { Policy } from '../../src/plugins/policy.js';
 import type { PluginRegistry } from '../../src/plugins/registry.js';
 import type { DelegatedChildSummary } from '../../src/store/brainDelegationStore.js';
+import type { SubagentProgressEvent } from '../../src/plugins/api.js';
+import type { SubagentUpdate } from '../../src/brain/events.js';
 
 const log = { info() {}, warn() {}, error() {} };
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -24,6 +26,9 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
   let asked: { parent: string; limit?: number }[];
   let read: { parent: string; child: string }[];
   let continued: { parent: string; child: string; text: string }[];
+  /** Progress the host feeds back through the callback the plugin now passes down — a test sets it to
+   *  drive one tool + token update before the continuation resolves. */
+  let continueProgress: ((onEvent?: (e: SubagentProgressEvent) => void) => void) | undefined;
   let readResult: string | Error;
   let reply: string | Error;
   let stopped: { parent: string; child: string }[];
@@ -34,6 +39,7 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
     asked = [];
     read = [];
     continued = [];
+    continueProgress = undefined;
     stopped = [];
     readResult = 'the stored final answer';
     reply = 'the sub-agent answered';
@@ -47,8 +53,9 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
           if (readResult instanceof Error) throw readResult;
           return readResult;
         },
-        continue: async (parent, childSessionId, text) => {
+        continue: async (parent, childSessionId, text, _access, onEvent) => {
           continued.push({ parent, child: childSessionId, text });
+          continueProgress?.(onEvent);
           if (reply instanceof Error) throw reply;
           return reply;
         },
@@ -208,6 +215,32 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       const res = await call('DelegateContinue', { id: 'brain-ch-subagent-x', message: '   ' }, 'brain-1');
       expect(res.content[0]!.text).toMatch(/^Error: /);
       expect(continued).toEqual([]);
+    });
+
+    // The bug: a continuation ran invisibly because no progress reached the parent, so the rail never
+    // showed it as a running sub-agent the way a first Delegate does. It must raise a running row keyed on
+    // THIS tool call, reflect the child's live tool/token progress, and settle to done.
+    it('surfaces the follow-up as a running sub-agent and fans its progress out to the host', async () => {
+      reply = 'refined and re-checked';
+      continueProgress = (onEvent) => {
+        onEvent?.({ type: 'tool', name: 'Read', detail: 'a.ts' });
+        onEvent?.({ type: 'idle', usage: { totalTokens: 500 } });
+      };
+      const updates: SubagentUpdate[] = [];
+      const tool = reg.tools.find((t) => t.name === 'DelegateContinue')!;
+      const res = await runWithPolicy(
+        adminPolicy,
+        () => (tool as unknown as { execute: (id: string, p: unknown) => Promise<{ content: { text: string }[] }> })
+          .execute('call-42', { id: 'brain-ch-subagent-x', message: 'refine it' }),
+        { identity: owner, sessionId: 'brain-1', emitSubagent: (u) => updates.push(u) },
+      );
+
+      expect(res.content[0]!.text).toBe('refined and re-checked');
+      // A running row appears up front, keyed on this call id and the child's session (drill-in target).
+      expect(updates[0]).toMatchObject({ id: 'call-42', sessionId: 'brain-ch-subagent-x', status: 'running' });
+      expect(updates.some((u) => u.status === 'running' && u.tools === 1 && u.detail === 'Read a.ts')).toBe(true);
+      expect(updates.some((u) => u.tokens === 500)).toBe(true);
+      expect(updates.at(-1)).toMatchObject({ status: 'done' });
     });
   });
 

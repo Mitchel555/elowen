@@ -353,12 +353,12 @@ export class PluginRegistry {
         }
         return delegatedChildren.read(parentSessionId, sessionId);
       },
-      continueSubagent: (sessionId, text) => {
+      continueSubagent: (sessionId, text, onEvent) => {
         const parentSessionId = currentSessionId();
         if (!parentSessionId || !delegatedChildren) {
           return Promise.reject(new Error('continuing a sub-agent is only available inside a conversation turn'));
         }
-        return delegatedChildren.continue(parentSessionId, sessionId, text, currentAccess());
+        return delegatedChildren.continue(parentSessionId, sessionId, text, currentAccess(), onEvent);
       },
       stopSubagent: (sessionId) => {
         const parentSessionId = currentSessionId();
