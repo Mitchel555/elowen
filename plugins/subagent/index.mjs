@@ -712,13 +712,19 @@ export function register(ctx) {
         emit: ctx.subagentEmitter(),
       };
       const push = (status) => pushJob(state, status);
-      push('running');
       const onEvent = (e) => {
         if (e.type === 'tool' && e.name) { state.tools += 1; state.detail = e.detail ? `${e.name} ${e.detail}` : e.name; push('running'); }
         else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { state.tokens = e.usage.totalTokens; push('running'); }
       };
       try {
-        const reply = await ctx.continueSubagent(childSessionId, message, onEvent);
+        // Start the continuation BEFORE raising the progress row. The host refuses a child that has a turn
+        // in flight by reading the very registry this row writes to (a `running` update registers the child
+        // as live), so raising it first made every continuation refuse ITSELF — the child was reported busy
+        // by the same call that was asking to continue it. continueSubagent runs all its guards
+        // synchronously before its first await, so they see the registry as it was.
+        const continuation = ctx.continueSubagent(childSessionId, message, onEvent);
+        push('running');
+        const reply = await continuation;
         state.status = 'done';
         push('done');
         return ok(reply || '(the sub-agent returned nothing)');

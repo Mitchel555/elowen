@@ -29,6 +29,10 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
   /** Progress the host feeds back through the callback the plugin now passes down — a test sets it to
    *  drive one tool + token update before the continuation resolves. */
   let continueProgress: ((onEvent?: (e: SubagentProgressEvent) => void) => void) | undefined;
+  /** Children the host currently considers live. In production this is LiveRegistry's child map, and the
+   *  SAME map a `running` progress update writes to — which is exactly how a continuation could end up
+   *  refused by its own progress row. The mock host below refuses a live child just as the real one does. */
+  let liveChildren: Set<string>;
   let readResult: string | Error;
   let reply: string | Error;
   let stopped: { parent: string; child: string }[];
@@ -40,6 +44,7 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
     read = [];
     continued = [];
     continueProgress = undefined;
+    liveChildren = new Set();
     stopped = [];
     readResult = 'the stored final answer';
     reply = 'the sub-agent answered';
@@ -54,6 +59,12 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
           return readResult;
         },
         continue: async (parent, childSessionId, text, _access, onEvent) => {
+          // The real host refuses a child with a turn in flight rather than steering it (two drivers on
+          // one transcript is a race with no owner). Its guards run synchronously before the first await,
+          // so this mock checks synchronously too.
+          if (liveChildren.has(childSessionId)) {
+            throw new Error('that sub-agent is still running — wait for it to finish before sending it more');
+          }
           continued.push({ parent, child: childSessionId, text });
           continueProgress?.(onEvent);
           if (reply instanceof Error) throw reply;
@@ -68,14 +79,27 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
     });
   });
 
-  const call = (name: string, params: Record<string, unknown>, sessionId?: string) => {
+  const call = (
+    name: string,
+    params: Record<string, unknown>,
+    sessionId?: string,
+    emitSubagent?: (u: SubagentUpdate) => void,
+  ) => {
     const tool = reg.tools.find((t) => t.name === name)!;
     return runWithPolicy(
       adminPolicy,
       () => (tool as unknown as { execute: (id: string, p: unknown) => Promise<{ content: { text: string }[]; details?: Record<string, unknown> }> })
         .execute('call', params),
-      { identity: owner, ...(sessionId ? { sessionId } : {}) },
+      { identity: owner, ...(sessionId ? { sessionId } : {}), ...(emitSubagent ? { emitSubagent } : {}) },
     );
+  };
+
+  /** The production emitter's one relevant effect: a `running` update marks the child live, a terminal one
+   *  clears it. Without an emitter bound (most tests here) the plugin's progress pushes are no-ops, which
+   *  is precisely why the self-refusal never showed up in this suite before. */
+  const registerLive = (u: SubagentUpdate): void => {
+    if (u.status === 'running') liveChildren.add(u.sessionId);
+    else liveChildren.delete(u.sessionId);
   };
 
   describe('DelegateList', () => {
@@ -203,6 +227,42 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       const res = await call('DelegateContinue', { id: 'brain-ch-subagent-busy', message: 'hi' }, 'brain-1');
       expect(res.content[0]!.text).toMatch(/^Error: /);
       expect(res.content[0]!.text).toMatch(/still running/);
+    });
+
+    // The progress row and the host's "is this child busy?" guard read and write the SAME live-child
+    // registry. Raising the row before asking the host therefore made every continuation report ITSELF as
+    // busy: the operator saw "that sub-agent is still running" for a child that had long finished.
+    it('does not report itself busy through the progress row it just raised', async () => {
+      reply = 'picked up where I left off';
+      const res = await call('DelegateContinue',
+        { id: 'brain-ch-subagent-sub-dlg-abc', message: 'now check the tests' }, 'brain-1', registerLive);
+
+      expect(res.content[0]!.text).toBe('picked up where I left off');
+      expect(continued).toEqual([{
+        parent: 'brain-1', child: 'brain-ch-subagent-sub-dlg-abc', text: 'now check the tests',
+      }]);
+    });
+
+    it('asks the host first, then raises the running row — and clears it when done', async () => {
+      // Pins the ordering the fix depends on, so it cannot be swapped back without a red test.
+      const order: string[] = [];
+      continueProgress = () => { order.push('host-asked'); };
+      await call('DelegateContinue', { id: 'brain-ch-subagent-sub-dlg-abc', message: 'go on' }, 'brain-1',
+        (u) => { order.push(`row:${u.status}`); registerLive(u); });
+
+      expect(order).toEqual(['host-asked', 'row:running', 'row:done']);
+      // The row still gets raised, so a live continuation is visible in the rail rather than running blind.
+      expect(liveChildren.has('brain-ch-subagent-sub-dlg-abc')).toBe(false);
+    });
+
+    it('still refuses a child that genuinely has a turn in flight', async () => {
+      // The guard must keep working: two agents driving one transcript is a race with no owner.
+      liveChildren.add('brain-ch-subagent-busy');
+      const res = await call('DelegateContinue', { id: 'brain-ch-subagent-busy', message: 'hi' }, 'brain-1', registerLive);
+
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/still running/);
+      expect(continued).toEqual([]);
     });
 
     it('refuses outside a conversation turn', async () => {
