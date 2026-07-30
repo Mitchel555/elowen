@@ -1614,6 +1614,8 @@ export const cs = {
     historyTitle: 'Konverzace',
     openHistory: 'Historie konverzací',
     moreOptions: 'Další možnosti',
+    showStats: 'Zobrazit statistiky',
+    hideStats: 'Skrýt statistiky',
     emptyHistory: 'Zatím žádné konverzace',
     emptyTitle: 'Začněte konverzaci',
     rename: 'Přejmenovat',

@@ -26,6 +26,7 @@ import { useBrainChat } from './BrainChatProvider';
 import { formatTokens, formatCost, formatDuration } from '../../lib/format';
 
 const FULLSCREEN_VALUES = ['on', 'off'] as const;
+const STATUSLINE_VALUES = ['shown', 'hidden'] as const;
 
 /** Sanitized-markdown block for one assistant text segment (marked + DOMPurify, no bubble). */
 function TextSegment({ text, className = '' }: { text: string; className?: string }) {
@@ -530,6 +531,11 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // on the next visit too, and re-entering it on every reload is exactly the chore they complained about.
   const [fullscreenPref, setFullscreenPref] = usePersistentState<'on' | 'off'>('elowen.chat.fullscreen', 'off', FULLSCREEN_VALUES);
   const fullscreen = fullscreenPref === 'on';
+  // Whether the statusline row (model / context / tokens / cost) is shown is a per-device display choice
+  // like fullscreen — it belongs to the screen you are on, not the user record. Collapsing it in-chat
+  // (a small chevron) is the quick alternative to the statusline plugin's settings toggles.
+  const [statuslinePref, setStatuslinePref] = usePersistentState<'shown' | 'hidden'>('elowen.chat.statusline', 'shown', STATUSLINE_VALUES);
+  const statuslineShown = statuslinePref === 'shown';
   // Stable identity on purpose: two effects below close over this, and a fresh function each render would
   // re-subscribe the Escape listener on every keystroke.
   const setFullscreen = useCallback((on: boolean): void => setFullscreenPref(on ? 'on' : 'off'), [setFullscreenPref]);
@@ -903,15 +909,32 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           <span className="italic opacity-80">{notice}</span>
         </div>
       ) : null}
-      {/* Statusline (the statusline plugin's toggles decide what shows; hidden when disabled). */}
+      {/* Statusline (the statusline plugin's toggles decide what shows; hidden when disabled). A leading
+          chevron collapses the whole row in-chat — the quick alternative to the plugin's settings, mainly
+          for a phone where the metrics crowd the composer. Collapsed leaves only the chevron to bring it
+          back. */}
       {lineCfg && (lineCfg.showModel || lineCfg.showContext || lineCfg.showTokens || lineCfg.showCost) ? (
         <div className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 py-1 font-mono text-text-muted ${variant === 'full' ? 'chat-gutter text-[0.6875rem]' : 'px-3 text-tiny'}`}>
-          {lineCfg.showModel && (currentModel || active?.model) ? <span>{currentModel || active?.model}</span> : null}
-          {lineCfg.showContext && usage && usage.percent != null ? (
-            <span>{t.brainChat.context} {Math.round(usage.percent)}% ({formatTokens(usage.tokens ?? 0)}/{formatTokens(usage.contextWindow)})</span>
+          <button
+            type="button"
+            onClick={() => setStatuslinePref(statuslineShown ? 'hidden' : 'shown')}
+            aria-expanded={statuslineShown}
+            aria-label={statuslineShown ? t.chat.hideStats : t.chat.showStats}
+            title={statuslineShown ? t.chat.hideStats : t.chat.showStats}
+            className="flex shrink-0 items-center rounded text-text-muted transition-colors hover:text-text"
+          >
+            <ChevronRight size={11} aria-hidden className={`opacity-60 transition-transform ${statuslineShown ? 'rotate-90' : ''}`} />
+          </button>
+          {statuslineShown ? (
+            <>
+              {lineCfg.showModel && (currentModel || active?.model) ? <span>{currentModel || active?.model}</span> : null}
+              {lineCfg.showContext && usage && usage.percent != null ? (
+                <span>{t.brainChat.context} {Math.round(usage.percent)}% ({formatTokens(usage.tokens ?? 0)}/{formatTokens(usage.contextWindow)})</span>
+              ) : null}
+              {lineCfg.showTokens && usage ? <span>Σ {formatTokens(usage.totalTokens)} tok</span> : null}
+              {lineCfg.showCost && usage ? <span>{formatCost(usage.cost, 2)}</span> : null}
+            </>
           ) : null}
-          {lineCfg.showTokens && usage ? <span>Σ {formatTokens(usage.totalTokens)} tok</span> : null}
-          {lineCfg.showCost && usage ? <span>{formatCost(usage.cost, 2)}</span> : null}
         </div>
       ) : null}
 

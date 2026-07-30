@@ -1614,6 +1614,8 @@ export const sk = {
     historyTitle: 'Konverzácie',
     openHistory: 'História konverzácií',
     moreOptions: 'Ďalšie možnosti',
+    showStats: 'Zobraziť štatistiky',
+    hideStats: 'Skryť štatistiky',
     emptyHistory: 'Zatiaľ žiadne konverzácie',
     emptyTitle: 'Začnite konverzáciu',
     rename: 'Premenovať',

@@ -1614,6 +1614,8 @@ export const en = {
     historyTitle: 'Conversations',
     openHistory: 'Conversation history',
     moreOptions: 'More options',
+    showStats: 'Show stats',
+    hideStats: 'Hide stats',
     emptyHistory: 'No conversations yet',
     emptyTitle: 'Start a conversation',
     rename: 'Rename',
