@@ -66,13 +66,13 @@ export class StreamCoordinator implements StreamCoordinatorPort {
 
   constructor(
     rt: ChatState,
-    resources: Pick<ChatApplicationResources, 'client'>,
+    resources: Pick<ChatApplicationResources, 'client' | 'editor'>,
     actions: Pick<ChatApplicationActions, 'render' | 'refreshMeta' | 'onTurnSettled' | 'onTurnActive' | 'invalidateAsyncState'>,
     flows: Flows,
     hydrator: SnapshotHydrator<BrainEvent>,
     hydrationNotices: HydrationNoticeOwner,
   ) {
-    const { client } = resources;
+    const { client, editor } = resources;
     const { render, refreshMeta, onTurnSettled, onTurnActive, invalidateAsyncState } = actions;
     let childGeneration = 0;
     let sessionGeneration = 0;
@@ -187,6 +187,10 @@ export class StreamCoordinator implements StreamCoordinatorPort {
         if (event.type === 'subagent' && event.status !== 'running') {
           void refreshMeta().then(() => { if (current() && lease.isCurrent()) render('metadata:subagent-settled'); });
         }
+        // Esc/Stop-before-output discard: the transcript apply below pulls the 'you' bubble; here restore
+        // its text to the composer for editing/resending — but only when the composer is empty, so a
+        // discard never clobbers a draft the user already started (mirror of onQueueRecall's "edit wins").
+        if (event.type === 'discard_user' && editor.getText().trim() === '') editor.setText(event.text);
         rt.transcript.apply(event);
         if (event.type === 'session') pendingSessionReset = null;
         render(`stream:${event.type}`);

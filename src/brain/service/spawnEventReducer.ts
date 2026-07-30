@@ -32,6 +32,11 @@ function publicProviderError(message: string, sessionId: string, provider: strin
   return 'Provider request failed after automatic retries. Please retry the turn.';
 }
 
+/** BrainEvent types that count as the turn actually producing output — the signal that flips a just-sent
+ *  user turn from "discardable on Esc" to "keep, only abort the run". Deliberately excludes
+ *  user/idle/step/queue/session-event/card and the like: those are not the model doing work. */
+const TURN_OUTPUT_EVENTS = new Set<string>(['text', 'reasoning', 'tool', 'tool_authoring', 'diff', 'tool_output', 'subagent', 'workflow']);
+
 /** Every local the spawner's `session.subscribe` callback captured, threaded explicitly so the reducer's
  * behavior stays byte-for-byte identical to the inline closure. `getLive` is a thunk because the
  * spawner assigns `live` AFTER subscribing (events only fire once the session is running, by which point
@@ -87,6 +92,7 @@ export function createSpawnEventReducer(deps: SpawnEventReducerDeps): (e: AgentS
     // state here so no client remains spinning and a genuine overflow failure is still visible.
     if (raw === 'agent_settled') {
       clearDeliveredUserEchoes(live);
+      live.lastAdmitted = undefined; // turn settled — a later cancel with no new turn must not discard it
       agentRunOpen = false;
       if (deferredCompacted && deferredOverflowError) {
         replay.publish({ type: 'compacted' });
@@ -215,8 +221,16 @@ export function createSpawnEventReducer(deps: SpawnEventReducerDeps): (e: AgentS
       be.usage = sessionUsageSnapshot(session, store, sessionId);
       be.model = model.id;
       terminalIdleDeferred = false;
+      live.lastAdmitted = undefined; // turn settled — a later cancel with no new turn must not discard it
     } // statusline data rides the idle event
     if (be.type === 'tool') be.icon = iconOf(be.name);
+    // First real output of the turn (see LiveBrain.turnProducedOutput): once set, a cancel keeps the turn
+    // instead of discarding it. And if abort() has already decided synchronously to discard this turn, drop
+    // a content event still in flight from PI — the cancel won the first-token race, its bubble is gone.
+    if (TURN_OUTPUT_EVENTS.has(be.type)) {
+      if (live.discardingUserTurn) return;
+      live.turnProducedOutput = true;
+    }
     replay.publish(be);
     if (emitFailedRecoveryIdle) {
       replay.publish({

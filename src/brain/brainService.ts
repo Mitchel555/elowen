@@ -381,7 +381,21 @@ export class BrainService {
   async abort(userId: number, session?: string): Promise<void> {
     const b = session ? this.sessions.get(this.lifecycle.ownedUserSession(userId, session)) : this.lifecycle.activeLive(userId);
     if (!b) throw new Error('brain not started');
+    // Esc/Stop before the turn produced any output discards the just-sent user turn: delete its durable
+    // row and tell clients to pull the bubble + restore its text to the composer. Decided synchronously,
+    // before the first await — JS is single-threaded, so turnProducedOutput cannot change under us between
+    // this read and arming the guard; a token still in flight is then dropped by the reducer's guard.
+    // Only abort() (the explicit Esc/Stop) does this — stopSession (client disconnect) and interruptQueued
+    // keep the turn, so this deliberately lives here and not in abortFenced/abortLive.
+    const discard = !b.turnProducedOutput ? b.lastAdmitted : undefined;
+    if (discard) b.discardingUserTurn = discard.durableId;
     await this.abortFenced(b);
+    if (discard) {
+      this.d.store.deleteMessage(b.sessionId, discard.durableId);
+      b.replay.publish({ type: 'discard_user', durableId: discard.durableId, text: discard.text });
+      b.discardingUserTurn = undefined;
+      b.lastAdmitted = undefined;
+    }
   }
 
   /** Interrupt the current PI run and immediately promote the oldest native queued message into a fresh

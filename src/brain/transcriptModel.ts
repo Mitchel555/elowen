@@ -241,10 +241,24 @@ export class TranscriptModel implements TranscriptRead {
         if (event.durableId) this.userIds.add(event.durableId);
         this.settleStreamingTail(); // this row displaces any streaming assistant tail — settle it first
         const index = this.turns.length;
-        this.turns.push({ role: 'you', text: event.text });
+        this.turns.push({ role: 'you', text: event.text, ...(event.durableId ? { id: event.durableId } : {}) });
         this.lastAssistant = '';
         this.thinkingState = true;
         this.publish({ kind: 'append', index });
+        return true;
+      }
+      case 'discard_user': {
+        // The daemon cancelled this user turn before it produced output (Esc/Stop). It is always the
+        // trailing turn — the output that would follow it was suppressed — so pop it, drop its dedup id and
+        // settle the spinner. The composer restore is bridged by the stream coordinator (the editor lives
+        // outside the model). A no-op if the trailing turn is not this exact 'you' row.
+        const last = this.turns[this.turns.length - 1];
+        if (!last || last.role !== 'you' || last.id !== event.durableId) return false;
+        this.turns.pop();
+        this.userIds.delete(event.durableId);
+        this.lastAssistant = '';
+        this.thinkingState = false;
+        this.publish({ kind: 'reset' });
         return true;
       }
       case 'session-event': {

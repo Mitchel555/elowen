@@ -262,6 +262,23 @@ describe('web transcript reducer', () => {
     expect(view.turns.at(-1)).toEqual({ role: 'you', text: 'queued follow-up' });
   });
 
+  // Esc/Stop before the turn produced output: the daemon deletes the row and sends discard_user; the fold
+  // pulls the matching you-bubble by durableId and stops the spinner. Composer restore is the provider's job.
+  it('discards the trailing you-turn on discard_user, by durableId', () => {
+    let view = reduce(emptyView(), { type: 'user', text: 'cancel before the reply', durableId: 'dur-1' });
+    expect(view.turns.at(-1)).toEqual({ role: 'you', text: 'cancel before the reply', id: 'dur-1' });
+    expect(view.thinking).toBe(true);
+    view = reduce(view, { type: 'discard_user', durableId: 'dur-1', text: 'cancel before the reply' });
+    expect(view.turns).toEqual([]);
+    expect(view.thinking).toBe(false);
+  });
+
+  it('leaves a you-turn in place when discard_user names a different turn', () => {
+    let view = reduce(emptyView(), { type: 'user', text: 'kept', durableId: 'dur-1' });
+    view = reduce(view, { type: 'discard_user', durableId: 'other-id', text: 'kept' });
+    expect(view.turns.some((t) => t.role === 'you' && t.id === 'dur-1')).toBe(true);
+  });
+
   it('rehydrates durable child state and patches done after parent idle without a new spinner turn', () => {
     let view = fromHistory([{ role: 'assistant', text: '', segments: [{
       kind: 'tool', id: 'delegate-1', name: 'Delegate', detail: 'inspect',

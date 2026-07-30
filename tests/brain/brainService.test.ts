@@ -1156,6 +1156,47 @@ describe('BrainService', () => {
     expect(d.session.abortBranchSummary).toHaveBeenCalledOnce();
   });
 
+  it('discards the just-sent user turn when Esc lands before the turn produces any output', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string; text?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string; text?: string }));
+    // A turn that admits (publishes the 'you' bubble + projects the durable row) but hangs before any
+    // output — the exact window Esc targets. No agent_end, so turnProducedOutput stays false.
+    d.session.prompt = vi.fn(async (_t: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+    });
+    await svc.send({ userId: 1, text: 'discard me', display: 'discard me' });
+    const durableId = seen.find((e) => e.type === 'user')?.durableId;
+    expect(durableId).toBeTruthy();
+    expect(d.store.getMessages('brain-1').some((m) => m.id === durableId)).toBe(true);
+
+    await svc.abort(1);
+
+    // The daemon deletes the durable row and tells clients to pull the bubble + restore the composer text.
+    expect(seen.find((e) => e.type === 'discard_user')).toMatchObject({ durableId, text: 'discard me' });
+    expect(d.store.getMessages('brain-1').some((m) => m.id === durableId)).toBe(false);
+  });
+
+  it('keeps the user turn when the turn has already settled — nothing to discard', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string }));
+    // The default fake prompt runs to agent_end → idle, which clears lastAdmitted: a later Esc has nothing
+    // to discard, so the settled turn's user row must survive.
+    await svc.send({ userId: 1, text: 'answered', display: 'answered' });
+    const durableId = seen.find((e) => e.type === 'user')?.durableId;
+    expect(durableId).toBeTruthy();
+
+    await svc.abort(1);
+
+    expect(seen.some((e) => e.type === 'discard_user')).toBe(false);
+    expect(d.store.getMessages('brain-1').some((m) => m.id === durableId)).toBe(true);
+  });
+
   it('queueRecall pops the LAST pending message by value and returns its text (the ↑-recall / ctrl+x pop)', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

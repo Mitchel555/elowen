@@ -128,6 +128,20 @@ export interface LiveBrain {
   /** Queue entries removed by PI immediately before their matching user `message_start`. Explicit queue
    * removal/abort clears this staging area, preventing a late callback from resurrecting a deleted row. */
   deliveringUserEchoes?: QueuedMsg[];
+  /** Esc/Stop-before-first-output discard (see brainService.abort). The three fields together let a cancel
+   *  that lands before the turn produced anything remove the just-sent user turn and hand its text back to
+   *  the composer, while a cancel after streaming began only aborts the run:
+   *  - `turnProducedOutput` — set true on the turn's first content event (spawnEventReducer); reset false
+   *    when a new immediate user turn is admitted (TurnAdmission.publishAccepted). abort() reads it
+   *    synchronously to decide whether there is anything to keep.
+   *  - `lastAdmitted` — the durable id + display text of the immediate user turn currently awaiting output,
+   *    so a discard need not scan history for the row to delete / the text to restore. Cleared when the
+   *    turn settles (idle/agent_settled), so a later cancel with no new turn cannot discard a settled row.
+   *  - `discardingUserTurn` — set synchronously in abort() before any await; while set, the reducer drops
+   *    a content event still in flight from PI (the cancel won the first-token race). */
+  turnProducedOutput?: boolean;
+  lastAdmitted?: { durableId: string; text: string };
+  discardingUserTurn?: string;
   /** Display-only chips for user messages typed while a MANUAL /compact runs. That compaction owns the
    *  session lock and ends idle, and PI's steer/follow-up queue only delivers inside a running turn — so the
    *  send below the compaction blocks on the lock with no PI queue entry and no chip. These surface the

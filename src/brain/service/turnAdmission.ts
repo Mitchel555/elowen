@@ -89,9 +89,15 @@ export class TurnAdmission {
       this.d.store.setTitle(this.input.live.sessionId, provisionalTitle);
       void this.d.titler.run(this.input.live.sessionId, this.input.text, provisionalTitle);
     }
+    // Arm the Esc/Stop-before-output discard for THIS turn: reset the output flag and remember the row a
+    // discard would delete + the text it would restore (the same text shown in the bubble). Set before the
+    // user event is published so a cancel racing the first token reads a consistent `turnProducedOutput`.
+    const displayText = this.input.display ?? persistText;
+    this.input.live.turnProducedOutput = false;
+    this.input.live.lastAdmitted = { durableId, text: displayText };
     this.input.live.replay.publish({
       type: 'user',
-      text: this.input.display ?? persistText,
+      text: displayText,
       durableId,
     });
     this.markAdmitted();

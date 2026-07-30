@@ -614,8 +614,17 @@ function useBrainChatController(): BrainChatValue {
     // delivery). The composer never echoes optimistically, so THIS folds the 'you' bubble — and the fold
     // marks the turn in flight, which is what raises the thinking indicator.
     onFrame('user', (e) => {
-      const { text } = JSON.parse((e as MessageEvent).data) as { text: string };
-      applyEvent({ type: 'user', text });
+      const { text, durableId } = JSON.parse((e as MessageEvent).data) as { text: string; durableId?: string };
+      applyEvent({ type: 'user', text, ...(durableId ? { durableId } : {}) });
+    });
+    // The daemon cancelled a just-sent user turn before it produced output (Esc/Stop): pull its 'you'
+    // bubble (the fold, by durableId) and restore the text to the composer for editing/resending — but only
+    // when the composer is empty, so a discard never clobbers a draft the user already started typing.
+    onFrame('discard_user', (e) => {
+      const { durableId, text } = JSON.parse((e as MessageEvent).data) as { durableId: string; text: string };
+      applyEvent({ type: 'discard_user', durableId, text });
+      setInput((current) => (current.trim() ? current : text));
+      bumpFocus();
     });
     // A context compaction was persisted server-side (manual /compact or the auto-compact path): the
     // stored transcript is now a "context compacted" divider + the kept tail. Refetch so the surface

@@ -150,6 +150,13 @@ export type BrainEvent =
    *  @mention/prompt expansion), else the persisted model-facing text. Internal goal kickoff/continuation
    *  turns are NOT user messages and emit nothing. Safe to ignore (the streamed reply still arrives). */
   | { type: 'user'; text: string; /** Store row replaced by this ordered live marker in snapshots. */ durableId?: string }
+  /** The DAEMON discarded a just-sent user turn: the user hit Esc/Stop before the turn produced any output,
+   *  so its durable row was deleted and clients must pull the matching `you` bubble (`durableId`) from the
+   *  transcript and restore `text` to the composer for editing/resending. Authoritative — a client never
+   *  decides this itself (it cannot tell a first token racing the cancel). Only ever fires between a user
+   *  turn's admission and its first output; safe to ignore (the row is already gone from the store, so a
+   *  reconnect snapshot is consistent without it). */
+  | { type: 'discard_user'; durableId: string; text: string }
   /** A FULL snapshot of the owner's background shell processes (the terminal plugin's
    *  `Bash(background:true)` children), pushed to the owner's live client streams whenever one
    *  spawns/exits/is killed — so the CLI/web process panel updates OUT of turn. Owner-only: a command
