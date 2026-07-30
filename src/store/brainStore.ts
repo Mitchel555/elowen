@@ -58,7 +58,7 @@ export type BrainGoalRow = BrainGoalState;
  *  the table's CHECK constraint in schema.sql — a kind the type allows but the boundary rejects writes
  *  fine and then vanishes on the next reload, which no compiler catches: the boundary narrows a `string`
  *  from SQLite, so a stale check there stays perfectly well-typed. */
-export const SESSION_EVENT_KINDS = ['model', 'mode', 'rename', 'reasoning', 'cwd'] as const;
+export const SESSION_EVENT_KINDS = ['model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent'] as const;
 export type SessionEventKind = typeof SESSION_EVENT_KINDS[number];
 /** Narrow a kind read back from SQLite. The stored value is only ever `string` to the type system. */
 const isSessionEventKind = (kind: string): kind is SessionEventKind =>

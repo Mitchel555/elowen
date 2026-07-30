@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  recordSessionEvent, drainSessionNotices,
+  recordSessionEvent, drainSessionNotices, recordSubagentFinishMarker,
   scheduleReasoningMarker, flushReasoningMarker, REASONING_MARKER_DEBOUNCE_MS,
 } from '../../src/brain/service/sessionEvents.js';
 import type { BrainStore, BrainSessionEvent, SessionEventKind } from '../../src/store/brainStore.js';
 import type { LiveBrain } from '../../src/brain/session/liveBrain.js';
-import type { BrainEvent } from '../../src/brain/events.js';
+import type { BrainEvent, SubagentUpdate } from '../../src/brain/events.js';
 
 function fakeLive(published: BrainEvent[]): LiveBrain {
   return {
@@ -78,6 +78,73 @@ describe('recordSessionEvent', () => {
     const store = fakeStore();
     recordSessionEvent(store, 's1', undefined, 'rename', 'Marker demo');
     expect(store.appended).toEqual([{ kind: 'rename', detail: 'Marker demo' }]);
+  });
+});
+
+// A delegated sub-agent's terminal state drops a DISPLAY-ONLY marker into the timeline (no model-facing
+// notice — the model gets the child's result separately). It must fire exactly once, on the transition
+// into a terminal state, and carry the child session id so a later DelegateContinue can address it.
+describe('recordSubagentFinishMarker', () => {
+  const subUpdate = (over: Partial<SubagentUpdate> = {}): SubagentUpdate => ({
+    id: 'call-1', sessionId: 'brain-ch-subagent-sub-dlg-abc', status: 'done', task: 'Explore the repo',
+    tools: 3, seconds: 12, ...over,
+  });
+
+  it('records one display marker on running→done, carrying the child id and task, with NO model notice', () => {
+    const published: BrainEvent[] = [];
+    const live = fakeLive(published);
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', (event) => live.replay.publish(event), 'running', subUpdate({ status: 'done' }));
+
+    const detail = JSON.stringify({ session: 'brain-ch-subagent-sub-dlg-abc', task: 'Explore the repo', status: 'done' });
+    expect(store.appended).toEqual([{ kind: 'subagent', detail }]);
+    expect(published).toEqual([{ type: 'session-event', id: 'evt-1', kind: 'subagent', detail, at: '2026-07-16T09:01:00.000Z' }]);
+    // Display-only: unlike recordSessionEvent it must never queue a "the user …" notice.
+    expect(live.pendingSessionNotices).toBeUndefined();
+  });
+
+  it('marks an error finish with status error', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ status: 'error' }));
+    const detail = JSON.stringify({ session: 'brain-ch-subagent-sub-dlg-abc', task: 'Explore the repo', status: 'error' });
+    expect(store.appended).toEqual([{ kind: 'subagent', detail }]);
+  });
+
+  it('never marks a running tick', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, undefined, subUpdate({ status: 'running' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  // upsertSubagentRun rewrites the row and returns true even for a repeated 'done', so a second terminal
+  // update must be recognised by its prior status and add nothing — else the timeline stacks duplicates.
+  it('is idempotent when the previous status was already terminal', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'done', subUpdate({ status: 'done' }));
+    recordSubagentFinishMarker(store, 's1', () => {}, 'error', subUpdate({ status: 'error' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  it('records nothing in a conversation that has no turns yet', () => {
+    const store = fakeStore(false);
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ status: 'done' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  it('clips a long task to its first non-empty line, bounded', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ task: `${'A'.repeat(200)}\nsecond line`, status: 'done' }));
+    const [entry] = store.appended;
+    const task = (JSON.parse(entry?.detail ?? '{}') as { task: string }).task;
+    expect(task.length).toBeLessThanOrEqual(80);
+    expect(task.endsWith('…')).toBe(true);
+  });
+
+  it('uses the first non-empty line of a multi-line task', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ task: '\n\n  Fix the bug  \nmore', status: 'done' }));
+    const [entry] = store.appended;
+    expect((JSON.parse(entry?.detail ?? '{}') as { task: string }).task).toBe('Fix the bug');
   });
 });
 

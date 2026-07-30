@@ -1581,6 +1581,8 @@ export const en = {
     eventMode: 'mode',
     eventRenamed: 'renamed',
     eventCwd: 'cwd',
+    eventSubagentDone: 'sub-agent done',
+    eventSubagentFailed: 'sub-agent failed',
     contextCompacted: 'Context compacted',
     proposedPlan: 'Proposed plan',
     planImplement: 'Implement plan',

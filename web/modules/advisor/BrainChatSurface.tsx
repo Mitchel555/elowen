@@ -288,6 +288,18 @@ function ContextDivider({ full }: { full?: boolean }) {
   );
 }
 
+/** A sub-agent finish marker's detail is small JSON (mirror of the daemon `parseSubagentMarker`). Parse
+ *  defensively: a malformed row falls back to the raw string rather than throwing on a render path. */
+function parseSubagentMarker(detail: string): { task: string; status: string } | null {
+  try {
+    const raw: unknown = JSON.parse(detail);
+    if (!raw || typeof raw !== 'object') return null;
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.status !== 'string') return null;
+    return { task: typeof obj.task === 'string' ? obj.task : '', status: obj.status };
+  } catch { return null; }
+}
+
 /** Phrase a session-change marker — mirror of the daemon `sessionEventLabel` (src/cli/chat/turnRenderer.ts).
  *  A `cwd` path is shortened to its last two segments (the web has no absolute-path context). */
 function eventLabel(kind: string, detail: string, t: LocaleDict): string {
@@ -297,6 +309,12 @@ function eventLabel(kind: string, detail: string, t: LocaleDict): string {
     case 'rename': return `${t.brainChat.eventRenamed} → "${detail}"`;
     case 'reasoning': return `reasoning → ${detail}`;
     case 'cwd': return `${t.brainChat.eventCwd} → …/${detail.split('/').filter(Boolean).slice(-2).join('/')}`;
+    case 'subagent': {
+      const marker = parseSubagentMarker(detail);
+      if (!marker) return detail;
+      const verb = marker.status === 'error' ? t.brainChat.eventSubagentFailed : t.brainChat.eventSubagentDone;
+      return marker.task ? `${verb} · ${marker.task}` : verb;
+    }
     default: return detail;
   }
 }

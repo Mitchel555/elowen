@@ -66,8 +66,20 @@ export function toolRowSpec(name: string, detail?: string): { glyph: string; tit
 
 const blockFill = (text: string, width: number): string => paintRow(chatTheme().modalBg, text, width);
 
-/** One-line description of a session-change marker (model/mode/rename/reasoning/cwd), rendered as a faint
- *  centered-ish row in the transcript. The verb varies by kind; the detail is the new value. */
+/** A sub-agent finish marker's detail is small JSON (see recordSubagentFinishMarker). Parse defensively:
+ *  a malformed row falls back to the raw string rather than throwing on a render path. */
+function parseSubagentMarker(detail: string): { task: string; status: string } | null {
+  try {
+    const raw: unknown = JSON.parse(detail);
+    if (!raw || typeof raw !== 'object') return null;
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.status !== 'string') return null;
+    return { task: typeof obj.task === 'string' ? obj.task : '', status: obj.status };
+  } catch { return null; }
+}
+
+/** One-line description of a session-change marker (model/mode/rename/reasoning/cwd/subagent), rendered as
+ *  a faint centered-ish row in the transcript. The verb varies by kind; the detail is the new value. */
 function sessionEventLabel(kind: string, detail: string): string {
   const value = terminalInlineText(detail);
   switch (kind) {
@@ -78,6 +90,13 @@ function sessionEventLabel(kind: string, detail: string): string {
     // The daemon stores the resolved absolute path; shorten it the same way the status row does, so the
     // marker and the chip below it never disagree about where the conversation is.
     case 'cwd': return `cwd → ${prettyCwd(value)}`;
+    case 'subagent': {
+      const marker = parseSubagentMarker(detail);
+      if (!marker) return value;
+      const verb = marker.status === 'error' ? 'sub-agent failed' : 'sub-agent done';
+      const task = terminalInlineText(marker.task);
+      return task ? `${verb} · ${task}` : verb;
+    }
     default: return value;
   }
 }

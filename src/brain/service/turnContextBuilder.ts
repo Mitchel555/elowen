@@ -2,7 +2,7 @@ import { PluginHookBus } from '../../plugins/hookBus.js';
 import type { PluginRegistry } from '../../plugins/registry.js';
 import { runWithPolicy } from '../../plugins/policyContext.js';
 import type { ToolPolicy } from '../../plugins/policyContext.js';
-import { drainSessionNotices } from './sessionEvents.js';
+import { drainSessionNotices, recordSubagentFinishMarker } from './sessionEvents.js';
 import type { HookAuditBuffer } from '../../shared/hookAudit.js';
 import type { BrainStore } from '../../store/brainStore.js';
 import type { BrainDeps } from '../brainDeps.js';
@@ -231,9 +231,16 @@ export class TurnContextBuilder {
       const enriched: SubagentUpdate = childLevel
         ? { ...update, thinkingLevel: childLevel, thinkingLabel: childBrain?.thinkingLabels?.[childLevel] ?? childLevel }
         : update;
+      // Read the child's prior status BEFORE the upsert, so the finish marker lands once on the
+      // running→terminal transition (upsertSubagentRun rewrites the row and returns true even for a
+      // repeated 'done'). Only a terminal update can ever produce a marker, so skip the read otherwise.
+      const prevStatus = update.status === 'done' || update.status === 'error'
+        ? this.d.store.getSubagentRuns(live.sessionId).find((run) => run.sessionId === update.sessionId)?.status
+        : undefined;
       if (!this.d.store.upsertSubagentRun(live.sessionId, enriched)) return;
       this.d.sessions.setChildRunning(live.sessionId, update.sessionId, update.status === 'running');
       live.replay.publish({ type: 'subagent', ...enriched });
+      recordSubagentFinishMarker(this.d.store, live.sessionId, (event) => live.replay.publish(event), prevStatus, update);
     };
     const emitSubagentCompletion = (completion: SubagentCompletion): void => {
       this.d.completeSubagent?.(live.sessionId, userId, completion);

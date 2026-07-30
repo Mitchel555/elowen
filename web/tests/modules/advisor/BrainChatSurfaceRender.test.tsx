@@ -75,6 +75,22 @@ describe('BrainChatSurface renders the daemon-parity rows without crashing', () 
     expect(await screen.findByText(/formatted a\.ts with prettier/)).toBeInTheDocument();
   });
 
+  it('renders a sub-agent finish marker parsed from its JSON detail', async () => {
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><ToastProvider><BrainChatProvider><BrainChat /></BrainChatProvider></ToastProvider></Wrapper>);
+    await waitFor(() => expect(FakeES.instances.length).toBe(1));
+    const detail = JSON.stringify({ session: 'brain-ch-subagent-sub-dlg-abc', task: 'Explore the repo', status: 'done' });
+    const [es] = FakeES.instances;
+    es?.emit('snapshot', {
+      type: 'snapshot', sessionId: 'brain-1',
+      history: [{ id: 's-evt', role: 'event', text: '', kind: 'subagent', detail }],
+      events: [], hasMore: false, nextBefore: null,
+    });
+    // The label parses the JSON detail; the "sub-agent" prefix is shared across cs/en, so this asserts the
+    // parse + label without pinning the test to a locale.
+    expect(await screen.findByText(/sub-agent.*· Explore the repo/)).toBeInTheDocument();
+  });
+
   it('lets the user expand a truncated tool output instead of promising a broken terminal link', async () => {
     // Regression for review-web-sol finding 6: the old markup rendered "Click to expand in terminal" on a
     // plain div with no handler. This asserts the affordance is now a real, working, translated toggle.

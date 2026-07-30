@@ -1581,6 +1581,8 @@ export const sk = {
     eventMode: 'režim',
     eventRenamed: 'premenované',
     eventCwd: 'cwd',
+    eventSubagentDone: 'sub-agent dokončený',
+    eventSubagentFailed: 'sub-agent zlyhal',
     contextCompacted: 'Kontext zhustený',
     proposedPlan: 'Navrhnutý plán',
     planImplement: 'Implementovať plán',

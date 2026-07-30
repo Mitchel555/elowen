@@ -8,6 +8,7 @@ import {
   type DelegatedExecutionScope,
 } from './delegatedScope.js';
 import type { AskQuestion, BrainEvent, BrainUsage, CompactResult, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from './events.js';
+import { recordSubagentFinishMarker } from './service/sessionEvents.js';
 import { runCompaction, withDescendantUsage, sessionUsageSnapshot } from './events.js';
 import type { ElicitationRegistry } from './elicitation.js';
 import { normalizeCard } from './cards.js';
@@ -373,9 +374,15 @@ export class ChannelSessionService {
         // Mirror owner-chat delegation tracking: the progress event is both the live UI seam and the
         // abort tree. A channel can delegate recursively, so every channel node owns its direct children.
         const emitSubagent = (u: SubagentUpdate) => {
+          // See turnContextBuilder.emitSubagent: read prior status before the upsert so the finish marker
+          // fires once on the running→terminal transition, mirrored here for channel-driven delegations.
+          const prevStatus = u.status === 'done' || u.status === 'error'
+            ? this.d.store.getSubagentRuns(ch.sessionId).find((run) => run.sessionId === u.sessionId)?.status
+            : undefined;
           if (!this.d.store.upsertSubagentRun(ch.sessionId, u)) return;
           this.d.registry.setChildRunning(ch.sessionId, u.sessionId, u.status === 'running');
           ch.replay.publish({ type: 'subagent', ...u });
+          recordSubagentFinishMarker(this.d.store, ch.sessionId, (event) => ch.replay.publish(event), prevStatus, u);
         };
         const emitSubagentCompletion = parentSessionId && this.d.completeSubagent
           ? (completion: SubagentCompletion) => { this.d.completeSubagent!(ch.sessionId, opts.ownerUserId, completion); }

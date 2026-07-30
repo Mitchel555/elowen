@@ -144,6 +144,7 @@ export function openDb(path: string): Db {
   dropPersonalityTables(db);
   makeUserIdsMonotonic(db);
   repairUserSequenceBelowReferences(db);
+  widenSessionEventKindsForSubagent(db);
   return db;
 }
 
@@ -285,6 +286,35 @@ function widenSessionEventKinds(db: Db): void {
         session_id TEXT NOT NULL,
         event_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd')),
+        detail TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (session_id, event_id)
+      );
+      INSERT INTO brain_session_events_new (session_id, event_id, kind, detail, created_at)
+        SELECT session_id, event_id, kind, detail, created_at FROM brain_session_events;
+      DROP TABLE brain_session_events;
+      ALTER TABLE brain_session_events_new RENAME TO brain_session_events;
+      CREATE INDEX IF NOT EXISTS idx_brain_session_events_session ON brain_session_events(session_id);
+    `);
+  });
+}
+
+/** v9 — let `brain_session_events.kind` also carry 'subagent' (a display-only "sub-agent finished"
+ *  marker, see sessionEvents.ts / recordSubagentFinishMarker).
+ *
+ *  Same rebuild rationale as v5 (widenSessionEventKinds): SQLite cannot alter a CHECK constraint and
+ *  `CREATE TABLE IF NOT EXISTS` in schema.sql leaves an existing DB on the old one, so an inserted
+ *  'subagent' marker would raise on every database that predates this while passing on a fresh one.
+ *
+ *  NUMBERED 9: versions 1-8 are all spent (see the runners above) — a migration numbered ≤8 would be
+ *  skipped in silence on exactly the databases that need it. */
+function widenSessionEventKindsForSubagent(db: Db): void {
+  runOnce(db, 9, () => {
+    db.exec(`
+      CREATE TABLE brain_session_events_new (
+        session_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent')),
         detail TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (session_id, event_id)
