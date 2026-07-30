@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, MoreHorizontal } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
@@ -422,6 +422,60 @@ function WorkModePill({ mode, full }: { mode: BrainWorkMode; full?: boolean }) {
   );
 }
 
+/** Phone-only overflow for the conversation bar: on a narrow screen the bar can't hold the model picker,
+ *  work-mode pill, thoughts toggle AND fullscreen inline without cramming, so they fold behind one ⋯ button.
+ *  A transient popover (outside-pointer / Escape dismiss, same grammar as ModelPicker), never a persistent
+ *  panel. Desktop keeps every control inline and never mounts this. */
+function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen, onToggleFullscreen }: {
+  workMode: BrainWorkMode; showThoughts: boolean; onToggleThoughts: () => void; fullscreen: boolean; onToggleFullscreen: () => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: PointerEvent) => { if (!rootRef.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('pointerdown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('pointerdown', onPointer); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  const rowClass = 'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-text transition-colors hover:bg-bg';
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t.chat.moreOptions}
+        title={t.chat.moreOptions}
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
+      >
+        <MoreHorizontal size={18} aria-hidden />
+      </button>
+      {open ? (
+        <div role="menu" className="absolute right-0 z-20 mt-1 flex w-60 flex-col gap-0.5 rounded-lg border border-border bg-elevated p-1.5 shadow-lg">
+          <div className="px-1 pb-1"><ModelPicker variant="full" /></div>
+          <button type="button" onClick={onToggleThoughts} aria-pressed={showThoughts} className={rowClass}>
+            <Brain size={16} className={showThoughts ? 'text-text' : 'text-text-muted'} aria-hidden />
+            <span>{showThoughts ? t.brainChat.hideThoughts : t.brainChat.showThoughts}</span>
+          </button>
+          <button type="button" onClick={onToggleFullscreen} aria-pressed={fullscreen} className={rowClass}>
+            {fullscreen ? <Minimize2 size={16} className="text-text-muted" aria-hidden /> : <Maximize2 size={16} className="text-text-muted" aria-hidden />}
+            <span>{fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}</span>
+          </button>
+          {workMode !== 'build' ? (
+            <div className="flex items-center gap-2 px-2 py-1.5 text-sm text-text-muted">
+              <span>{t.brainChat.workModeLabel}:</span><WorkModePill mode={workMode} full />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** The `/rename` dialog: the conversation's title prefilled, committed with Enter or the save button. The
  *  web twin of the CLI's rename prompt — the history rail renames inline, this renames the OPEN chat. */
 function RenameDialog({ current, onClose, onSubmit }: { current: string; onClose: () => void; onSubmit: (title: string) => void }) {
@@ -680,9 +734,16 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             </button>
           ) : null}
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{active?.title || t.brainChat.newChat}</span>
-          <WorkModePill mode={workMode} full />
-          <ModelPicker variant="full" />
-          <ThoughtsToggle full on={showThoughts} onToggle={() => setShowThoughts(!showThoughts)} />
+          {/* On a phone the model picker, work-mode pill and thoughts toggle fold into the ⋯ menu below; on
+              desktop they stay inline. The pill is a security indicator (plan/workflow), so it also shows
+              inline on desktop and, when non-build, inside the ⋯ menu on mobile. */}
+          {!mobile ? (
+            <>
+              <WorkModePill mode={workMode} full />
+              <ModelPicker variant="full" />
+              <ThoughtsToggle full on={showThoughts} onToggle={() => setShowThoughts(!showThoughts)} />
+            </>
+          ) : null}
           {onOpenTelemetry ? (
             <button
               type="button"
@@ -707,16 +768,28 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           >
             <Plus size={18} aria-hidden />
           </button>
-          <button
-            type="button"
-            onClick={() => setFullscreen(!fullscreen)}
-            aria-pressed={fullscreen}
-            aria-label={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
-            title={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
-          >
-            {fullscreen ? <Minimize2 size={18} aria-hidden /> : <Maximize2 size={18} aria-hidden />}
-          </button>
+          {/* A phone is auto-fullscreen (see the mount effect), so the inline fullscreen toggle is desktop-
+              only; on mobile it lives inside the ⋯ menu alongside the model/mode/thoughts controls. */}
+          {!mobile ? (
+            <button
+              type="button"
+              onClick={() => setFullscreen(!fullscreen)}
+              aria-pressed={fullscreen}
+              aria-label={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
+              title={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
+            >
+              {fullscreen ? <Minimize2 size={18} aria-hidden /> : <Maximize2 size={18} aria-hidden />}
+            </button>
+          ) : (
+            <BarOverflowMenu
+              workMode={workMode}
+              showThoughts={showThoughts}
+              onToggleThoughts={() => setShowThoughts(!showThoughts)}
+              fullscreen={fullscreen}
+              onToggleFullscreen={() => setFullscreen(!fullscreen)}
+            />
+          )}
         </div>
       )}
 

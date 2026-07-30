@@ -1613,6 +1613,7 @@ export const sk = {
   chat: {
     historyTitle: 'Konverzácie',
     openHistory: 'História konverzácií',
+    moreOptions: 'Ďalšie možnosti',
     emptyHistory: 'Zatiaľ žiadne konverzácie',
     emptyTitle: 'Začnite konverzáciu',
     rename: 'Premenovať',

@@ -1613,6 +1613,7 @@ export const en = {
   chat: {
     historyTitle: 'Conversations',
     openHistory: 'Conversation history',
+    moreOptions: 'More options',
     emptyHistory: 'No conversations yet',
     emptyTitle: 'Start a conversation',
     rename: 'Rename',
