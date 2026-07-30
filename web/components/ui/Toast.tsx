@@ -42,7 +42,7 @@ function ToastCard({ item, meta, dismissLabel, onDismiss }: { item: ToastItem; m
       role={item.tone === 'error' ? 'alert' : 'status'}
       onMouseEnter={() => { paused.current = true; }}
       onMouseLeave={() => { paused.current = false; }}
-      className="pointer-events-auto relative flex items-start gap-3 overflow-hidden rounded-lg py-3 pl-4 pr-3"
+      className="pointer-events-auto relative flex items-start gap-2.5 overflow-hidden rounded-lg py-2.5 pl-3 pr-2.5 sm:gap-3 sm:py-3 sm:pl-4 sm:pr-3"
       style={{
         boxShadow: 'var(--shadow-raised)',
         background: fill,
@@ -50,16 +50,16 @@ function ToastCard({ item, meta, dismissLabel, onDismiss }: { item: ToastItem; m
         animation: 'toast-in 200ms var(--ease-out)',
       }}
     >
-      <Icon size={20} aria-hidden className="mt-px shrink-0" style={{ color: accent }} />
+      <Icon size={18} aria-hidden className="mt-px shrink-0" style={{ color: accent }} />
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-semibold" style={{ color: accent }}>{title}</div>
-        <div className="mt-0.5 break-words text-sm leading-snug text-text">{item.message}</div>
+        <div className="text-[13px] font-semibold sm:text-sm" style={{ color: accent }}>{title}</div>
+        <div className="mt-0.5 break-words text-[13px] leading-snug text-text sm:text-sm">{item.message}</div>
       </div>
       <button
         type="button"
         aria-label={dismissLabel}
         onClick={onDismiss}
-        className="-mr-1 -mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
+        className="-mr-1 -mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text sm:h-7 sm:w-7"
       >
         <X size={15} aria-hidden />
       </button>
@@ -86,7 +86,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={ctx}>
       {children}
-      <div className="pointer-events-none fixed bottom-5 right-5 z-50 flex w-[28rem] max-w-[calc(100vw-2.5rem)] flex-col gap-2.5">
+      {/* Top-right, and mobile-first: on a phone the desktop 28rem card filled almost the whole screen and
+          sat at the bottom over the input. Narrow it with a small margin, tuck it to the top-right corner,
+          and step the size back up from `sm` onward. */}
+      <div className="pointer-events-none fixed top-3 right-3 z-50 flex w-[calc(100vw-1.5rem)] flex-col gap-2 sm:top-5 sm:right-5 sm:w-[26rem] sm:gap-2.5">
         {items.map((item) => (
           <ToastCard key={item.id} item={item} meta={TONE[item.tone]} dismissLabel={t.common.dismiss} onDismiss={() => dismiss(item.id)} />
         ))}
