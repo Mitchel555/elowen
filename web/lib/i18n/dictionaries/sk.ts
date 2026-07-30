@@ -1547,6 +1547,7 @@ export const sk = {
     searchPlaceholder: 'Hľadať v konverzáciách…',
     searchEmpty: 'Nič nenájdené',
     searchOpenError: 'Túto konverzáciu nemožno otvoriť',
+    reconnecting: 'Obnovujem spojenie…',
     sendError: 'Správu sa nepodarilo odoslať — návrh zostal v editore',
     freshConversation: 'Predchádzajúca konverzácia bola neaktívna — pokračujeme v novej',
     readOnly: 'História len na čítanie (Discord kanál alebo task relácia)',

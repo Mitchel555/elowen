@@ -22,6 +22,11 @@ export interface ReconnectOptions {
   maxMs?: number;
   /** Injectable for tests. */
   random?: () => number;
+  /** Notified true when a recovery attempt is in flight (scheduled or running) and false once the stream is
+   *  healthy again or the controller stops — lets a surface show a "reconnecting" overlay without keeping
+   *  its own copy of the busy bookkeeping. Fires only on a real change, never on the first connect (that
+   *  path does not go through the controller). */
+  onActive?: (active: boolean) => void;
 }
 
 const BASE_MS = 1_000;
@@ -34,12 +39,15 @@ export function createReconnectController(connect: () => void | Promise<void>, o
   const baseMs = opts.baseMs ?? BASE_MS;
   const maxMs = opts.maxMs ?? MAX_MS;
   const random = opts.random ?? Math.random;
+  const onActive = opts.onActive;
   let attempt = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
   let stopped = false;
+  let active = false;
 
   const busy = (): boolean => stopped || running || timer !== null;
+  const setActive = (v: boolean): void => { if (active === v) return; active = v; onActive?.(v); };
 
   const retry = (): void => {
     if (busy()) return;
@@ -47,6 +55,7 @@ export function createReconnectController(connect: () => void | Promise<void>, o
     attempt += 1;
     // Half the window plus jitter: several tabs waking together must not hammer the daemon in lockstep.
     timer = setTimeout(run, window / 2 + random() * (window / 2));
+    setActive(true);
   };
 
   function run(): void {
@@ -60,9 +69,9 @@ export function createReconnectController(connect: () => void | Promise<void>, o
   }
 
   return {
-    now: () => { if (busy()) return; attempt += 1; run(); },
+    now: () => { if (busy()) return; attempt += 1; setActive(true); run(); },
     retry,
-    succeeded: () => { attempt = 0; },
-    stop: () => { stopped = true; if (timer) { clearTimeout(timer); timer = null; } },
+    succeeded: () => { attempt = 0; setActive(false); },
+    stop: () => { stopped = true; if (timer) { clearTimeout(timer); timer = null; } setActive(false); },
   };
 }

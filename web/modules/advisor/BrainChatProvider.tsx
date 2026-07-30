@@ -94,6 +94,10 @@ export interface BrainChatValue {
   turns: ChatTurn[];
   busy: boolean;
   ready: boolean;
+  /** A dropped stream is being recovered (the reconnect controller has an attempt in flight). Distinct from
+   *  `ready`, which is also false on the very first load — this is only ever a RE-connect, so it drives the
+   *  blur-and-spinner overlay without flashing it on initial boot. */
+  reconnecting: boolean;
   notice: string;
   ask: Ask | null;
   cards: BrainCard[];
@@ -239,6 +243,7 @@ function useBrainChatController(): BrainChatValue {
   const historyEpochRef = useRef(0);
   const [input, setInput] = useState('');
   const [ready, setReady] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const [usage, setUsageState] = useState<BrainUsage | null>(null);
   // Usage now has several writers: the live stream (`step`, `idle`) and a handful of REST snapshots
   // (connect, a settled sub-agent, session-event, the stats modal). The stream is authoritative and
@@ -336,7 +341,7 @@ function useBrainChatController(): BrainChatValue {
   const reconnect = (): ReconnectController => (reconnectRef.current ??= createReconnectController(async () => {
     try { await connectRef.current(); }
     catch (e) { setReady(true); throw e; }
-  }));
+  }, { onActive: setReconnecting }));
 
   // The newest page bootstraps the transcript; older pages lazy-load on scroll-up. A full refetch (compaction
   // / model-switch markers) re-runs this, which correctly RESETS the lazy-load window to the tail — the
@@ -1042,7 +1047,7 @@ function useBrainChatController(): BrainChatValue {
   }, []);
 
   return {
-    turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued: visibleQueue, readOnly, activeSessionId,
+    turns, busy, ready, reconnecting, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued: visibleQueue, readOnly, activeSessionId,
     usage, telemetry, goal, subagents, workflows, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
