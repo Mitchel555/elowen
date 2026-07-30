@@ -457,6 +457,9 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
       </button>
       {open ? (
         <div role="menu" className="absolute right-0 z-20 mt-1 flex w-60 flex-col gap-0.5 rounded-lg border border-border bg-elevated p-1.5 shadow-lg">
+          {/* The picker is the menu's heading — it is a control, not a menu row, so it reads wrong pushed
+              below one. Plain rows follow it. */}
+          <div className="px-1 pb-1"><ModelPicker variant="full" /></div>
           {/* Fullscreen drops the inline TODO card, so the menu is the way to reach it there. */}
           {hasTodos ? (
             <button type="button" onClick={() => { setOpen(false); onOpenTodos(); }} className={rowClass}>
@@ -464,7 +467,6 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
               <span>{t.chat.todos}</span>
             </button>
           ) : null}
-          <div className="px-1 pb-1"><ModelPicker variant="full" /></div>
           <button type="button" onClick={onToggleThoughts} aria-pressed={showThoughts} className={rowClass}>
             <Brain size={16} className={showThoughts ? 'text-text' : 'text-text-muted'} aria-hidden />
             <span>{showThoughts ? t.brainChat.hideThoughts : t.brainChat.showThoughts}</span>
