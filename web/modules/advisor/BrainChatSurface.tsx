@@ -531,7 +531,13 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
     ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
     workMode, planDecision, implementPlan, dismissPlan, planSubmitting, renameOpen, closeRename, renameSession,
+    registerSurface,
   } = c;
+
+  // Tell the provider a chat is on screen. It sits above every route, so the reconnect overlay it owns
+  // must only cover the app while there is actually a conversation to protect — not while the reader is
+  // on the dashboard.
+  useEffect(() => registerSurface(), [registerSurface]);
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [slashIdx, setSlashIdx] = useState(0);

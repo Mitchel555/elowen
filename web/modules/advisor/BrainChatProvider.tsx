@@ -1,5 +1,5 @@
 'use client';
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Loader } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
@@ -99,6 +99,12 @@ export interface BrainChatValue {
    *  `ready`, which is also false on the very first load — this is only ever a RE-connect, so it drives the
    *  blur-and-spinner overlay without flashing it on initial boot. */
   reconnecting: boolean;
+  /** Called by a chat surface on mount; the returned cleanup runs on unmount. The provider sits above every
+   *  route, so without knowing whether any surface is actually on screen it blurred the whole app —
+   *  dashboard and tasks included — whenever the stream dropped. */
+  registerSurface: () => () => void;
+  /** Whether at least one chat surface is currently mounted. */
+  hasSurface: boolean;
   notice: string;
   ask: Ask | null;
   cards: BrainCard[];
@@ -245,6 +251,13 @@ function useBrainChatController(): BrainChatValue {
   const [input, setInput] = useState('');
   const [ready, setReady] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  // How many chat surfaces are mounted right now. The dock and /chat can both hold one, so this is a count
+  // rather than a flag — the second to unmount is what takes the overlay away.
+  const [surfaces, setSurfaces] = useState(0);
+  const registerSurface = useCallback(() => {
+    setSurfaces((n) => n + 1);
+    return () => setSurfaces((n) => n - 1);
+  }, []);
   const [usage, setUsageState] = useState<BrainUsage | null>(null);
   // Usage now has several writers: the live stream (`step`, `idle`) and a handful of REST snapshots
   // (connect, a settled sub-agent, session-event, the stats modal). The stream is authoritative and
@@ -1057,7 +1070,7 @@ function useBrainChatController(): BrainChatValue {
   }, []);
 
   return {
-    turns, busy, ready, reconnecting, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued: visibleQueue, readOnly, activeSessionId,
+    turns, busy, ready, reconnecting, registerSurface, hasSurface: surfaces > 0, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued: visibleQueue, readOnly, activeSessionId,
     usage, telemetry, goal, subagents, workflows, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
@@ -1083,10 +1096,13 @@ export function BrainChatProvider({ children }: { children: ReactNode }) {
   // The reconnect overlay lives HERE, not in BrainChatSurface: a phone with the dock open on /chat mounts
   // two surfaces sharing this one provider, and a per-surface fixed-fullscreen overlay would then render
   // twice (doubled backdrop, two aria-live "reconnecting" announcements). One provider → one overlay.
+  // But the provider spans every route, so it also needs to know a surface is actually on screen —
+  // otherwise a dropped stream blurred and froze the dashboard, tasks and settings, where there is no
+  // chat to protect from acting on stale state.
   return (
     <BrainChatContext.Provider value={value}>
       {children}
-      {value.reconnecting ? <ReconnectOverlay /> : null}
+      {value.reconnecting && value.hasSurface ? <ReconnectOverlay /> : null}
     </BrainChatContext.Provider>
   );
 }
