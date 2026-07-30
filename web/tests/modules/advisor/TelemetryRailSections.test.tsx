@@ -142,6 +142,19 @@ describe('telemetry rail — live work sections', () => {
     expect(screen.queryByTestId('telemetry-processes')).toBeNull();
   });
 
+  it('leaves out a background process that belongs to another conversation', async () => {
+    // The processes query is owner-wide, so a job from a different chat comes back too — but it is not
+    // THIS conversation's live work and must not surface in its rail (only brain-1 is on screen here).
+    processes = [
+      process1,
+      { ...process1, id: 'pX', command: 'python other.py', sessionId: 'brain-99' },
+    ];
+    await renderRail();
+    const section = await screen.findByTestId('telemetry-processes');
+    expect(section.textContent).toContain('npm run dev');
+    expect(section.textContent).not.toContain('python other.py');
+  });
+
   it('opens the existing process output modal from a rail row', async () => {
     processes = [process1];
     await renderRail();

@@ -161,8 +161,10 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
   // A terminal agent whose result the parent has not acknowledged is still live work (CLI parity).
   const liveAgents = subagents.filter((a) => a.status === 'running' || a.resultDelivery === 'pending');
   // A `foreground` handle is an in-flight Bash tool call that MAY still be detached, not a background
-  // job — listing it would flash every ordinary shell command through the rail.
-  const processes = allProcesses.filter((p) => p.running && p.completionMode !== 'foreground');
+  // job — listing it would flash every ordinary shell command through the rail. The query is owner-wide,
+  // so also scope to the open conversation: a background job from another chat or a sub-agent is not this
+  // conversation's live work and only confused the reader when it surfaced here.
+  const processes = allProcesses.filter((p) => p.running && p.completionMode !== 'foreground' && p.sessionId === activeSessionId);
   const openProcess = processes.find((p) => p.id === openProcessId) ?? null;
   const sections = [
     usage !== null,
