@@ -701,7 +701,6 @@ export function register(ctx) {
       // on THIS tool call (with the child's session for drill-in), instead of running invisibly. The child
       // already exists, so its session id is known up front — no `session` event needed to seed the row.
       const state = {
-        id: `dlg-continue-${randomUUID()}`,
         toolCallId: _id,
         sessionId: childSessionId,
         status: 'running',
