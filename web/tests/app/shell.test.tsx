@@ -3,7 +3,8 @@ import { render, screen } from '@testing-library/react';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 import { onUnhandledRequest } from '../msw';
-vi.mock('next/navigation', () => ({ usePathname: () => '/dash', useRouter: () => ({ push: () => {}, replace: () => {} }), useSearchParams: () => new URLSearchParams() }));
+let pathname = '/dash';
+vi.mock('next/navigation', () => ({ usePathname: () => pathname, useRouter: () => ({ push: () => {}, replace: () => {} }), useSearchParams: () => new URLSearchParams() }));
 import { Shell, resolveNav } from '../../components/shell/Shell';
 
 class FakeES { onmessage = null; addEventListener() {} close() {} constructor(public url: string) {} }
@@ -12,6 +13,9 @@ const server = setupServer(
   http.get('*/api/health', () => HttpResponse.json({ ok: true })),
   // A valid session: LoginGate's me() probe resolves → the shell chrome renders.
   http.get('*/api/auth/me', () => HttpResponse.json({ user: { id: 1, username: 'admin' } })),
+  // /chat mounts the chat provider, which reaches for these on open.
+  http.get('*/api/brain/sessions', () => HttpResponse.json([])),
+  http.get('*/api/brain/commands', () => HttpResponse.json({ commands: [] })),
 );
 beforeAll(() => server.listen({ onUnhandledRequest })); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
@@ -47,5 +51,22 @@ describe('Shell', () => {
     expect(screen.getByText('page-body')).toBeInTheDocument();
     expect(screen.getByTestId('future-page-header')).not.toHaveClass('sticky');
     expect(screen.getByTestId('future-page-header')).not.toHaveClass('border-b');
+  });
+
+  it('suppresses the global bar on /chat by breakpoint, never by the measured region', async () => {
+    // The region is window − dock, so keying the bar off it let a docked desktop window drop the bar AND
+    // its hamburger while ChatView's replacement link (keyed off the viewport) stayed away — no way off
+    // /chat at all. A CSS breakpoint reads the same viewport ChatView does, and needs no measurement.
+    pathname = '/chat';
+    render(<Shell><span>page-body</span></Shell>);
+    const bar = await screen.findByTestId('future-page-header');
+    expect(bar.parentElement).toHaveClass('max-md:hidden');
+  });
+
+  it('leaves the global bar unconditional off /chat', async () => {
+    pathname = '/dash';
+    render(<Shell><span>page-body</span></Shell>);
+    const bar = await screen.findByTestId('future-page-header');
+    expect(bar.parentElement).not.toHaveClass('max-md:hidden');
   });
 });

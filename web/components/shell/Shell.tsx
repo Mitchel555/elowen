@@ -115,12 +115,19 @@ function ShellLayout({ children }: { children: ReactNode }) {
               /chat at phone width the whole global bar is suppressed: the conversation already carries its
               own bar, and stacking a second one above it (avatar, bell, search) crowds the small screen.
               The way back into the rest of the app moves into the history drawer's "← dashboard" link. */}
-          {onChat && mode === 'drawer' ? null : (
+          {/* Suppressed by a CSS breakpoint rather than by the measured `mode`: `mode` follows the REGION
+              (window − dock), so a docked desktop window could fall under DRAWER_MAX while the viewport
+              stayed wide. The bar and its hamburger then vanished, while ChatView's replacement "back"
+              link — keyed off the VIEWPORT — never appeared, stranding the reader on /chat with no way
+              out. `max-md` is the same 768px boundary ChatView reads, so the two cannot disagree; and
+              being CSS it holds from the first paint instead of flashing the bar before the first
+              measurement resolves. */}
+          <div className={onChat ? 'max-md:hidden' : undefined}>
             <TopBar
               onMenuClick={mode === 'drawer' ? () => setDrawerOpen(true) : undefined}
               showLocation={false}
             />
-          )}
+          </div>
           <div className="px-2 pb-8"><RouteTransition>{children}</RouteTransition></div>
         </div>
       </main>
