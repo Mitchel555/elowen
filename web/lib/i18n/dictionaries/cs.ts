@@ -1616,6 +1616,7 @@ export const cs = {
     moreOptions: 'Další možnosti',
     showStats: 'Zobrazit statistiky',
     hideStats: 'Skrýt statistiky',
+    todos: 'Úkoly',
     emptyHistory: 'Zatím žádné konverzace',
     emptyTitle: 'Začněte konverzaci',
     rename: 'Přejmenovat',

@@ -1616,6 +1616,7 @@ export const sk = {
     moreOptions: 'Ďalšie možnosti',
     showStats: 'Zobraziť štatistiky',
     hideStats: 'Skryť štatistiky',
+    todos: 'Úlohy',
     emptyHistory: 'Zatiaľ žiadne konverzácie',
     emptyTitle: 'Začnite konverzáciu',
     rename: 'Premenovať',

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, MoreHorizontal } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, MoreHorizontal, ListChecks } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
@@ -427,8 +427,8 @@ function WorkModePill({ mode, full }: { mode: BrainWorkMode; full?: boolean }) {
  *  work-mode pill, thoughts toggle AND fullscreen inline without cramming, so they fold behind one ⋯ button.
  *  A transient popover (outside-pointer / Escape dismiss, same grammar as ModelPicker), never a persistent
  *  panel. Desktop keeps every control inline and never mounts this. */
-function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen, onToggleFullscreen }: {
-  workMode: BrainWorkMode; showThoughts: boolean; onToggleThoughts: () => void; fullscreen: boolean; onToggleFullscreen: () => void;
+function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen, onToggleFullscreen, hasTodos, onOpenTodos }: {
+  workMode: BrainWorkMode; showThoughts: boolean; onToggleThoughts: () => void; fullscreen: boolean; onToggleFullscreen: () => void; hasTodos: boolean; onOpenTodos: () => void;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -457,6 +457,13 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
       </button>
       {open ? (
         <div role="menu" className="absolute right-0 z-20 mt-1 flex w-60 flex-col gap-0.5 rounded-lg border border-border bg-elevated p-1.5 shadow-lg">
+          {/* Fullscreen drops the inline TODO card, so the menu is the way to reach it there. */}
+          {hasTodos ? (
+            <button type="button" onClick={() => { setOpen(false); onOpenTodos(); }} className={rowClass}>
+              <ListChecks size={16} className="text-text-muted" aria-hidden />
+              <span>{t.chat.todos}</span>
+            </button>
+          ) : null}
           <div className="px-1 pb-1"><ModelPicker variant="full" /></div>
           <button type="button" onClick={onToggleThoughts} aria-pressed={showThoughts} className={rowClass}>
             <Brain size={16} className={showThoughts ? 'text-text' : 'text-text-muted'} aria-hidden />
@@ -551,6 +558,14 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // just pile clutter above the composer on a small screen, so they leave the transcript there. Outside
   // fullscreen they stay — that layout reads fine. Desktop fullscreen is untouched.
   const immersive = mobile === true && fullscreen;
+  // TODO cards with open work (CardBlock hides a card whose every item is done). The transcript copy is
+  // out of the immersive phone view, so the ⋯ menu opens them in a dialog instead.
+  const todoCards = cards.filter((cd) => {
+    if (cd.id === 'bg-processes') return false;
+    const items = cd.items ?? [];
+    return items.length === 0 ? true : !items.every((i) => i.status === 'completed');
+  });
+  const [todosOpen, setTodosOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -799,6 +814,8 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
               onToggleThoughts={() => setShowThoughts(!showThoughts)}
               fullscreen={fullscreen}
               onToggleFullscreen={() => setFullscreen(!fullscreen)}
+              hasTodos={todoCards.length > 0}
+              onOpenTodos={() => setTodosOpen(true)}
             />
           )}
         </div>
@@ -846,7 +863,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             spacing group under the flush transcript; in the dock `contents` keeps them in the parent's
             gap flow exactly as before. `empty:hidden` drops the group when everything in it is null. */}
         <div className={variant === 'full' ? 'mt-4 flex flex-col gap-3 empty:hidden' : 'contents'}>
-        {immersive ? null : cards.filter((cd) => cd.id !== 'bg-processes').map((card) => <CardBlock key={card.id} card={card} />)}
+        {immersive ? null : todoCards.map((card) => <CardBlock key={card.id} card={card} />)}
         {railOwnsLiveWork || immersive ? null : <ProcessPanel activeSessionId={activeSessionId} />}
         {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). The
             table itself stays mounted below whatever the rail does — `agentsOpen` lives in the provider, so
@@ -875,6 +892,15 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
         ) : null}
         {statsOpen ? (
           <StatsModal onClose={() => setStatsOpen(false)} />
+        ) : null}
+        {todosOpen ? (
+          <Modal title={t.chat.todos} onClose={() => setTodosOpen(false)} size="md" icon={ListChecks}>
+            <ModalBody>
+              <div className="flex flex-col gap-3">
+                {todoCards.map((card) => <CardBlock key={card.id} card={card} />)}
+              </div>
+            </ModalBody>
+          </Modal>
         ) : null}
         {/* Plan mode's decision point: the model submitted a plan and the turn settled. The controller
             derives it from the DAEMON's answer, so it also appears for a plan submitted from the CLI and

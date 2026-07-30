@@ -1616,6 +1616,7 @@ export const en = {
     moreOptions: 'More options',
     showStats: 'Show stats',
     hideStats: 'Hide stats',
+    todos: 'Tasks',
     emptyHistory: 'No conversations yet',
     emptyTitle: 'Start a conversation',
     rename: 'Rename',
