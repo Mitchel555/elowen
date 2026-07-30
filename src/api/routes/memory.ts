@@ -243,7 +243,11 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (!store) return c.json({ error: 'memory unavailable' }, 400);
     const userId = c.get('user').id;
     const b = await parseBody(c, memoryCreateSchema);
-    return c.json(store.add(userId, { ...b, source: 'user' }, `user:${userId}`, 'created via API'), 201);
+    const row = store.add(userId, { ...b, source: 'user' }, `user:${userId}`, 'created via API');
+    // Same fire-and-forget the curator does. Without it a memory created from the web stayed
+    // uncategorized, since classification used to hang off the post-turn curator alone.
+    d.memoryCategorizer?.classifyNewMemory(userId, row.id, `user:${userId}`);
+    return c.json(row, 201);
   });
 
   // Read one of the caller's memories. Owner-scoped → a foreign id is 404.

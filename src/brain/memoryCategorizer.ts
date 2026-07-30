@@ -71,6 +71,15 @@ export class MemoryCategorizer {
     }
   }
 
+  /** Fire-and-forget classification of a memory that was JUST stored. Every write path goes through this
+   *  — the curator, the MemoryAdd tool and the API — so which path created a memory no longer decides
+   *  whether it gets a category at all. Deliberately not awaited: storing a fact must not wait on a model
+   *  round-trip. classifyMemory already swallows and logs its own failures; the catch only guarantees it
+   *  can never reject into a caller that is not awaiting it. */
+  classifyNewMemory(userId: number, memoryId: number, actor: string): void {
+    void this.classifyMemory(userId, memoryId, actor).catch(() => { /* best-effort */ });
+  }
+
   /** Batch (re)classify the user's active memories, capped at MAX_RECLASSIFY. By default only touches
    *  uncategorized rows (categoryId:null filter); `includeCategorized` re-tags everything. Each memory is
    *  best-effort — one failure is logged and skipped, never aborting the pass. Returns { scanned,

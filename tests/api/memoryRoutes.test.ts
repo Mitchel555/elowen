@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { TaskStore } from '../../src/store/taskStore.js';
 import { Readiness } from '../../src/store/readiness.js';
@@ -276,6 +276,18 @@ function setupCat(opts: { categorizeReply?: string; categorizationConfigured?: b
 }
 
 describe('memory category routes', () => {
+  it('categorizes a memory created through the API, not only ones the curator stored', async () => {
+    // Classification used to hang off the post-turn curator alone, so a memory created from the web (or
+    // by the agent's own MemoryAdd) stayed uncategorized however many categories existed.
+    const { app, memoryStore, amyId, amyTok } = setupCat({ categorizeReply: 'Práce' });
+    const cat = await (await app.request('/memory/categories', post(amyTok, { name: 'Práce', description: 'work stuff' }))).json();
+
+    const row = await (await app.request('/memory', post(amyTok, { body: 'stand-up je v 9:30' }))).json();
+
+    // Fire-and-forget on the write path: the response must not wait on a model round-trip.
+    await vi.waitFor(() => expect(memoryStore.get(amyId, row.id)?.category_id).toBe(cat.id));
+  });
+
   it('category CRUD roundtrip: create → list → patch, and a duplicate name → 409', async () => {
     const { app, amyTok } = setupCat();
     const created = await app.request('/memory/categories', post(amyTok, { name: 'Práce', description: 'work stuff', color: '#f00' }));
@@ -368,15 +380,23 @@ describe('memory category routes', () => {
     expect(await res.json()).toEqual({ error: 'categorization not configured' });
   });
 
-  it('POST /memory/reclassify tags the caller\'s uncategorized memories via the model', async () => {
-    const { app, amyTok } = setupCat({ categorizeReply: 'Práce' });
+  it('POST /memory/reclassify re-tags on demand, now that new memories arrive already sorted', async () => {
+    const { app, memoryStore, amyId, amyTok } = setupCat({ categorizeReply: 'Práce' });
     const cat = await (await app.request('/memory/categories', post(amyTok, { name: 'Práce', description: 'work' }))).json();
     await app.request('/memory', post(amyTok, { body: 'deadline on Friday' }));
     await app.request('/memory', post(amyTok, { body: 'standup at 9' }));
-    const res = await app.request('/memory/reclassify', post(amyTok, {}));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ scanned: 2, classified: 2 });
-    // Both memories now carry the category.
+    // Every write path classifies on its own now, so let that settle before asking for a manual pass —
+    // otherwise the two would race over the same rows and the counts below would be a coin toss.
+    await vi.waitFor(() => expect(memoryStore.list(amyId, { categoryId: cat.id })).toHaveLength(2));
+
+    // Nothing is left uncategorized, so the default pass has no work: exactly the point of the fix.
+    const none = await app.request('/memory/reclassify', post(amyTok, {}));
+    expect(none.status).toBe(200);
+    expect(await none.json()).toEqual({ scanned: 0, classified: 0 });
+
+    // `includeCategorized` still re-tags everything — the manual pass for after a category rename.
+    const all = await app.request('/memory/reclassify', post(amyTok, { includeCategorized: true }));
+    expect(await all.json()).toEqual({ scanned: 2, classified: 2 });
     const inCat = await (await app.request(`/memory?categoryId=${cat.id}`, auth(amyTok))).json();
     expect(inCat).toHaveLength(2);
   });
