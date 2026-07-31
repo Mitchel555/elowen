@@ -75,7 +75,16 @@ export class LiveSessionSpawner {
     const compactSel = settings?.compactModel && settings.compactModelProvider
       ? { provider: settings.compactModelProvider, model: settings.compactModel }
       : undefined;
-    const route = resolveBrainModelRoute(registry, cfg, opts.selection, compactSel);
+    // The owner's per-user chat-model choice fills in only when NO explicit selection is in play: an
+    // empty selection would otherwise resolve to cfg.providers[0].models[0] — the first model of the
+    // first provider in LIST order, not anyone's default — which once dropped a session on an
+    // image-only model that cannot hold a conversation. Both parts must be set together: model ids are
+    // not globally unique, so a bare model id could resolve under another provider's credentials.
+    const chatSel = settings?.model && settings.modelProvider
+      ? { provider: settings.modelProvider, model: settings.model }
+      : undefined;
+    const selection = opts.selection.provider || opts.selection.model ? opts.selection : chatSel;
+    const route = resolveBrainModelRoute(registry, cfg, selection, compactSel);
     const { model } = route;
     // Per-model auto-compact threshold: the user's override for THIS model (keyed providerId/model) wins
     // over the global percentage carried in opts. Each model's own contextWindow then turns the percentage
