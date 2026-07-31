@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 import { Activity, useCallback, useEffect, useState, useRef, useMemo, type ReactNode } from 'react';
-import { Bot, SlidersHorizontal, Plus, X, Pencil, Radio, Cpu, Gauge, Layers, Link2, KeyRound, FileText, Eye, Lock, Trash2, GitPullRequest, GitBranch, TerminalSquare, RefreshCw, RotateCcw, Sparkles, FlaskConical, Search, Server, CalendarClock, ScrollText } from 'lucide-react';
+import { Bot, SlidersHorizontal, Plus, X, Pencil, Radio, Cpu, Gauge, Layers, Link2, KeyRound, FileText, Eye, Lock, Trash2, RefreshCw, RotateCcw, Sparkles, FlaskConical, Search, Server, CalendarClock, ScrollText } from 'lucide-react';
 import { PROVIDERS, ProviderLogo } from '../../modules/settings/providers';
 import { ModelIcon } from '../../components/ui/ModelIcon';
 import { BackendPicker } from '../../components/ui/BackendPicker';
@@ -10,7 +10,7 @@ import { ModelCatalogField } from '../../components/ui/ModelCatalogField';
 import { ModelModal } from '../../modules/settings/ModelModal';
 import { ModelNoteModal } from '../../modules/settings/ModelNoteModal';
 import { ContextWindowModal } from '../../modules/settings/ContextWindowModal';
-import { GithubStatusBanner } from '../../modules/settings/GithubStatusBanner';
+import { GithubSection } from '../../modules/settings/GithubSection';
 import { PluginsSection } from '../../modules/settings/PluginsSection';
 import { BrainSection } from '../../modules/settings/BrainSection';
 import { MemorySection } from '../../modules/settings/MemorySection';
@@ -185,13 +185,6 @@ export default function SettingsPage() {
   const [reasoningMode, setReasoningMode] = useState<'relay' | 'agents'>('relay');
   const [reviewOnDone, setReviewOnDone] = useState(false);
   const [tddMode, setTddMode] = useState(false);
-  const [prEnabled, setPrEnabled] = useState(false);
-  const [prBaseBranch, setPrBaseBranch] = useState('');
-  const [prAutoOpen, setPrAutoOpen] = useState(false);
-  const [prVerifyCommand, setPrVerifyCommand] = useState('');
-  const [ghToken, setGhToken] = useState('');
-  // The GitHub text fields edit in one side drawer opened via pod orbs.
-  const [githubOpen, setGithubOpen] = useState(false);
   // Same pattern for the Autopilot free-text fields (models/endpoint/notes).
   const [autopilotOpen, setAutopilotOpen] = useState(false);
   const [apiUrl, setApiUrl] = useState('');
@@ -250,10 +243,6 @@ export default function SettingsPage() {
       setOverseerExec(config.data.autopilot.overseerExec ?? '');
       setReviewOnDone(config.data.autopilot.reviewOnDone ?? false);
       setTddMode(config.data.autopilot.tddMode ?? false);
-      setPrEnabled(config.data.autopilot.prEnabled ?? false);
-      setPrBaseBranch(config.data.autopilot.prBaseBranch ?? '');
-      setPrAutoOpen(config.data.autopilot.prAutoOpen ?? false);
-      setPrVerifyCommand(config.data.autopilot.prVerifyCommand ?? '');
       setReasoningMode((config.data.autopilot.pilotExec || config.data.autopilot.overseerExec) ? 'agents' : 'relay');
       setApiUrl(config.data.autopilot.apiUrl);
       setApProviderId(config.data.autopilot.providerId ?? '');
@@ -282,15 +271,6 @@ export default function SettingsPage() {
     } catch (error) { toast(String(error), 'error'); throw error; }
   };
 
-  // GitHub / PR-native settings live in their own section. The global prEnabled is the DEFAULT for new
-  // projects; each project can override it. The ghToken is write-only — sent only when freshly typed.
-  const saveGithub = async () => {
-    try {
-      await update.mutateAsync({ autopilot: { prEnabled, prBaseBranch, prAutoOpen, prVerifyCommand, ...(ghToken ? { ghToken } : {}) } });
-      if (ghToken) setGhToken('');
-    } catch (error) { toast(String(error), 'error'); throw error; }
-  };
-
   const saveProviders = async () => {
     try { await update.mutateAsync({ providers }); }
     catch (error) { toast(String(error), 'error'); throw error; }
@@ -315,10 +295,9 @@ export default function SettingsPage() {
   };
 
   // Auto-persist: every settings form saves itself shortly after a change (no Save buttons anywhere).
-  // Secrets (apiKey/ghToken) ride along only when freshly typed, exactly as with the old buttons.
+  // The apiKey secret rides along only when freshly typed, exactly as with the old buttons.
   const ready = seeded.current;
   const autopilotSave = useAutoSaveStatus([reasoningMode, pilotExec, overseerExec, reviewOnDone, tddMode, notes, model, overseerModel, apiUrl, apiKey, apProviderId], saveAutopilot, { ready });
-  const githubSave = useAutoSaveStatus([prEnabled, prBaseBranch, prAutoOpen, prVerifyCommand, ghToken], saveGithub, { ready });
   const providersSave = useAutoSaveStatus([providers], saveProviders, { ready });
   const defaultsSave = useAutoSaveStatus([defExec, defAutonomy, defMaxSessions, defTokenTtl], saveDefaults, { ready });
   // Per-model context windows auto-persist like every other model setting (no Save button).
@@ -349,7 +328,6 @@ export default function SettingsPage() {
   if (me.data?.user && !me.data.user.is_admin) return <ModuleShell moduleId="settings"><ModuleHeader title={t.page.settings} icon={SlidersHorizontal} /><EmptyState title={t.settings.adminOnly} description={t.settings.adminOnlyDesc} icon={Lock} /></ModuleShell>;
 
   const apiKeySet = config.data?.autopilot.apiKeySet;
-  const ghTokenSet = config.data?.autopilot.ghTokenSet;
 
   const resetForm = () => {
     setShowAddForm(false);
@@ -427,7 +405,7 @@ export default function SettingsPage() {
     models: combineSaveFeedback(modelsSave, windowsSave),
     providers: providersSave,
     autopilot: combineSaveFeedback(autopilotSave, defaultsSave),
-    github: githubSave,
+    github: sectionFeedback.github,
     system: combineSaveFeedback(autoUpdateSave, defaultsSave),
     brain: sectionFeedback.brain,
     memory: sectionFeedback.memory,
@@ -799,48 +777,7 @@ export default function SettingsPage() {
 
         <SettingsPanel id="github" active={category} visited={visitedCategories}>
           <ConstellationScope core={t.settings.github}>
-            {/* variant="classic": the status banner is not a label/control row. */}
-            <SettingsGroup variant="classic"><GithubStatusBanner /></SettingsGroup>
-            <SettingsGroup>
-            {/* The three text fields show as chips in the orbit and edit together in one side
-                drawer (opened via any of their pod orbs); toggles stay inline. */}
-            <SettingsRow label={t.settings.ghToken} description={ghTokenSet ? t.help.ghToken : t.help.ghTokenNotSet} icon={KeyRound}>
-              <span className="font-mono text-sm tracking-widest text-text-muted">{ghTokenSet || ghToken ? '••••••••' : '—'}</span>
-              <button type="button" data-selection-manage className="hidden" aria-label={t.settings.ghToken} onClick={() => setGithubOpen(true)} />
-            </SettingsRow>
-            <SettingsRow label={t.settings.prEnabled} description={t.help.prEnabled} icon={GitPullRequest}>
-              <Toggle checked={prEnabled} onChange={setPrEnabled} label={t.settings.prEnabled} />
-            </SettingsRow>
-            <SettingsRow label={t.settings.prBaseBranch} description={t.help.prBaseBranch} icon={GitBranch}>
-              <span className="max-w-full truncate font-mono text-sm text-text-muted">{prBaseBranch || t.settings.prBaseBranchPlaceholder}</span>
-              <button type="button" data-selection-manage className="hidden" aria-label={t.settings.prBaseBranch} onClick={() => setGithubOpen(true)} />
-            </SettingsRow>
-            <SettingsRow label={t.settings.prAutoOpen} description={t.help.prAutoOpen} icon={GitPullRequest}>
-              <Toggle checked={prAutoOpen} onChange={setPrAutoOpen} label={t.settings.prAutoOpen} />
-            </SettingsRow>
-            <SettingsRow label={t.settings.prVerifyCommand} description={t.help.prVerifyCommand} icon={TerminalSquare}>
-              <span className="max-w-full truncate font-mono text-sm text-text-muted">{prVerifyCommand || '—'}</span>
-              <button type="button" data-selection-manage className="hidden" aria-label={t.settings.prVerifyCommand} onClick={() => setGithubOpen(true)} />
-            </SettingsRow>
-            </SettingsGroup>
-            {githubOpen ? (
-              <WorkspaceDetailRail label={t.settings.github} closeLabel={t.common.close} onClose={() => setGithubOpen(false)}>
-                <div className="flex flex-col gap-5 py-2">
-                  <div className="flex flex-col gap-1.5">
-                    <span className="text-tiny font-semibold uppercase tracking-wide text-text-muted">{t.settings.ghToken}</span>
-                    <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} placeholder={ghTokenSet ? t.settings.apiKeySetPlaceholder : t.settings.ghTokenPlaceholder} className={inputClass} aria-label={t.settings.ghToken} />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <span className="text-tiny font-semibold uppercase tracking-wide text-text-muted">{t.settings.prBaseBranch}</span>
-                    <input value={prBaseBranch} onChange={(e) => setPrBaseBranch(e.target.value)} placeholder={t.settings.prBaseBranchPlaceholder} className={inputClass} aria-label={t.settings.prBaseBranch} />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <span className="text-tiny font-semibold uppercase tracking-wide text-text-muted">{t.settings.prVerifyCommand}</span>
-                    <input value={prVerifyCommand} onChange={(e) => setPrVerifyCommand(e.target.value)} placeholder={t.settings.prVerifyCommandPlaceholder} className={`${inputClass} font-mono text-xs`} aria-label={t.settings.prVerifyCommand} />
-                  </div>
-                </div>
-              </WorkspaceDetailRail>
-            ) : null}
+            <GithubSection onSaveState={reportSaveState} />
           </ConstellationScope>
         </SettingsPanel>
 

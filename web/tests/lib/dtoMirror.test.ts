@@ -1,0 +1,159 @@
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import ts from 'typescript';
+
+/** The web cannot import daemon types (src/ is off-limits to the web toolchain by design), so the
+ *  hand-mirrored DTOs in web/lib/types.ts are guarded by comparing them against the daemon's OWN
+ *  interface declarations, read as plain source data (not imported). This is what turned the real
+ *  /auth/me incident — the daemon grew `advisor_exec`/`advisor_autostart` and the web mirror lagged —
+ *  into a test failure instead of a silent `undefined` at runtime. */
+interface Member {
+  type: string;
+  optional: boolean;
+}
+
+/** One mirrored pair: the web DTO in web/lib/types.ts and the daemon interface it copies.
+ *  `exact` requires the member sets to be identical in both directions (User, MemoryCategory, ...);
+ *  `subset` allows the web to omit fields it never renders (Task drops base_sha/head_sha/created_by). */
+interface MirrorPair {
+  web: string;
+  daemonFile: string;
+  daemon: string;
+  mode: 'exact' | 'subset';
+}
+
+/** The web suite runs with cwd = web/, but never assume it: walk up until the repo root (the dir that
+ *  holds both src/ and web/) is found, so the daemon sources resolve regardless of how vitest started. */
+function repoRoot(): string {
+  let dir = process.cwd();
+  while (dir !== dirname(dir)) {
+    if (existsSync(join(dir, 'src')) && existsSync(join(dir, 'web/lib/types.ts'))) return dir;
+    dir = dirname(dir);
+  }
+  throw new Error('repo root (dir with src/ and web/) not found above ' + process.cwd());
+}
+
+const WEB_TYPES_FILE = join(repoRoot(), 'web/lib/types.ts');
+const DAEMON_ROOT = join(repoRoot(), 'src/');
+
+const PAIRS: MirrorPair[] = [
+  // The one that really drifted: GET /auth/me serves userStore.User (src/api/routes/auth.ts), and the
+  // web renders it through this mirror. Both are exact copies today.
+  { web: 'User', daemonFile: `${DAEMON_ROOT}store/userStore.ts`, daemon: 'User', mode: 'exact' },
+  { web: 'Task', daemonFile: `${DAEMON_ROOT}store/types.ts`, daemon: 'Task', mode: 'subset' },
+  { web: 'Memory', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryRow', mode: 'exact' },
+  { web: 'MemoryCategory', daemonFile: `${DAEMON_ROOT}store/memoryCategoryStore.ts`, daemon: 'MemoryCategoryRow', mode: 'exact' },
+  { web: 'MemoryEvent', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryEventRow', mode: 'exact' },
+  { web: 'BrainLimits', daemonFile: `${DAEMON_ROOT}store/configStore.ts`, daemon: 'BrainLimits', mode: 'exact' },
+  { web: 'BrainUsage', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainUsage', mode: 'exact' },
+  // The web keeps only the goal fields it renders; the daemon's BrainGoalState has more.
+  { web: 'BrainGoal', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainGoalState', mode: 'subset' },
+  { web: 'CommitFileChange', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitFileChange', mode: 'exact' },
+  { web: 'CommitLogEntry', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitLogEntry', mode: 'exact' },
+  // showThoughtsCli is optional on the web but always sent by the daemon — a tolerated relaxation.
+  { web: 'TerminalSettings', daemonFile: `${DAEMON_ROOT}store/terminalSettings.ts`, daemon: 'TerminalSettings', mode: 'exact' },
+];
+
+const normalize = (type: string): string => type.replace(/\s+/g, ' ').trim();
+
+/** Expand type-alias references (e.g. `TaskOutcome`, `TaskStatus`) to their literal bodies so a
+ *  change inside the alias — not just at the member site — also trips the mirror. */
+function resolveAliases(type: string, aliases: Map<string, string>): string {
+  const expanding = new Set<string>();
+  const resolve = (text: string): string => {
+    let out = text;
+    for (const [name, body] of aliases) {
+      if (expanding.has(name)) continue; // TS bans direct alias cycles; this is just a guard
+      const re = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+      if (re.test(out)) {
+        expanding.add(name);
+        out = out.replace(re, resolve(body));
+        expanding.delete(name);
+      }
+    }
+    return out;
+  };
+  return resolve(type);
+}
+
+function load(file: string): { sourceFile: ts.SourceFile; aliases: Map<string, string> } {
+  const text = readFileSync(file, 'utf8');
+  const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const aliases = new Map<string, string>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isTypeAliasDeclaration(stmt) && ts.isIdentifier(stmt.name)) {
+      aliases.set(stmt.name.text, stmt.type.getText(sourceFile));
+    }
+  }
+  return { sourceFile, aliases };
+}
+
+function interfaceMembers(parsed: ReturnType<typeof load>, name: string): Map<string, Member> {
+  const decl = parsed.sourceFile.statements.find(
+    (s): s is ts.InterfaceDeclaration => ts.isInterfaceDeclaration(s) && s.name.text === name,
+  );
+  if (!decl) throw new Error(`${name} interface not found in ${parsed.sourceFile.fileName}`);
+  const members = new Map<string, Member>();
+  for (const member of decl.members) {
+    if (!ts.isPropertySignature(member) || !ts.isIdentifier(member.name)) continue;
+    const typeText = member.type ? member.type.getText(parsed.sourceFile) : '';
+    members.set(member.name.text, {
+      type: normalize(resolveAliases(typeText, parsed.aliases)),
+      optional: Boolean(member.questionToken),
+    });
+  }
+  return members;
+}
+
+/** The web may narrow a daemon `string` to the closed set of values the daemon is documented to
+ *  produce (Memory.status, Task.outcome); every other mismatch is drift. */
+function typesCompatible(daemon: string, web: string): boolean {
+  if (daemon === web) return true;
+  const webIsLiteralUnion = web.split(' | ').every((p) => p === 'null' || (p.startsWith("'") && p.endsWith("'")));
+  if ((daemon === 'string' || daemon === 'string | null') && webIsLiteralUnion) {
+    return daemon.includes('null') === web.includes('null');
+  }
+  return false;
+}
+
+/** The web may treat a daemon-required field as optional (it tolerates absence), but never the
+ *  reverse: a web-required field the daemon may omit is `undefined` waiting to happen. */
+function optionalityCompatible(daemon: Member, web: Member): boolean {
+  return web.optional || !daemon.optional;
+}
+
+function comparePair(pair: MirrorPair): string[] {
+  const daemonParsed = load(pair.daemonFile);
+  const webParsed = load(WEB_TYPES_FILE);
+  const daemonMembers = interfaceMembers(daemonParsed, pair.daemon);
+  const webMembers = interfaceMembers(webParsed, pair.web);
+
+  const errors: string[] = [];
+  for (const [name, daemonMember] of daemonMembers) {
+    const webMember = webMembers.get(name);
+    if (!webMember) {
+      if (pair.mode === 'exact') errors.push(`daemon ${pair.daemon}.${name} missing on web ${pair.web}`);
+      continue;
+    }
+    if (!typesCompatible(daemonMember.type, webMember.type)) {
+      errors.push(`web ${pair.web}.${name}: ${webMember.type} does not accept daemon ${pair.daemon}.${name}: ${daemonMember.type}`);
+    }
+    if (!optionalityCompatible(daemonMember, webMember)) {
+      errors.push(`web ${pair.web}.${name} is required but daemon ${pair.daemon}.${name} is optional`);
+    }
+  }
+  for (const name of webMembers.keys()) {
+    if (!daemonMembers.has(name)) {
+      errors.push(`web ${pair.web}.${name} does not exist on daemon ${pair.daemon}`);
+    }
+  }
+  return errors;
+}
+
+describe('web DTO mirrors of daemon shapes', () => {
+  it.each(PAIRS.map((p) => [p.web, p] as const))('%s mirrors the daemon shape', (_webName, pair) => {
+    const errors = comparePair(pair);
+    expect(errors, errors.join('\n')).toEqual([]);
+  });
+});

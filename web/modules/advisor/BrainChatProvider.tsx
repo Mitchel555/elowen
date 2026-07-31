@@ -44,6 +44,19 @@ function planKey(plan: BrainPendingPlan | null): string | null {
   return plan ? plan.id ?? plan.plan : null;
 }
 
+/** localStorage slot: one decided-plan key per conversation id. Keyed by conversation because the fallback
+ *  key is the plan TEXT, which legitimately repeats across chats. */
+const PLAN_DECISIONS_KEY = 'elowen.chat.planDecided';
+
+/** Accept only a JSON object mapping session ids to string plan keys; anything else (a foreign app version,
+ *  a corrupt write) must not poison the decision state. */
+function isPlanDecisionsRecord(raw: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null && Object.values(parsed).every((v) => typeof v === 'string');
+  } catch { return false; }
+}
+
 /** How long a freshly opened stream may go without its guaranteed snapshot frame before it is retried. */
 const SNAPSHOT_TIMEOUT_MS = 15_000;
 
@@ -311,9 +324,14 @@ function useBrainChatController(): BrainChatValue {
   // 'build' on reload, which is exactly how the decision used to vanish from the page that had it.
   const [daemonMode, setDaemonMode] = useState<BrainWorkMode>('build');
   const [pendingPlan, setPendingPlan] = useState<BrainPendingPlan | null>(null);
-  /** The plan this tab has already decided on (implemented or dismissed), keyed like the CLI's
-   *  `planDecisionRaisedFor` so a re-hydration cannot raise the same decision twice. */
-  const [planDecided, setPlanDecided] = useState<string | null>(null);
+  /** The plans this tab has already decided on (implemented or dismissed), one per conversation, keyed like
+   *  the CLI's `planDecisionRaisedFor` so a re-hydration cannot raise the same decision twice. Persisted so
+   *  a reload remembers a decision the daemon still reports as pending; keyed by conversation so a decision
+   *  made in one chat can never suppress the same plan text in another. `usePersistentState` tolerates an
+   *  unavailable localStorage (private mode) — then the decision lives for the tab's lifetime, as before. */
+  const [planDecisionsRaw, setPlanDecisionsRaw] = usePersistentState<string>(PLAN_DECISIONS_KEY, '{}', isPlanDecisionsRecord);
+  const planDecisions = useMemo(() => JSON.parse(planDecisionsRaw) as Record<string, string>, [planDecisionsRaw]);
+  const planDecided = activeSessionId ? planDecisions[activeSessionId] ?? null : null;
   const [renameOpen, setRenameOpen] = useState(false);
   // Lives on the controller (mounted once) rather than the surface, so the choice survives the dock's
   // Chat↔Terminál toggle and every route change, exactly like the transcript itself.
@@ -414,8 +432,7 @@ function useBrainChatController(): BrainChatValue {
     setReady(false);
     setNotice(''); // a fresh connection (mount / session switch) starts without a stale runtime line
     setAsk(null); // drop any parked question from the previous conversation
-    setPendingPlan(null); // and any plan decision — it belongs to the conversation being left
-    setPlanDecided(null); // whose decided key would otherwise suppress the NEXT conversation's plan
+    setPendingPlan(null); // a pending plan belongs to the conversation being left; the decided key derives from the session id and follows the rehydration below
     setCards([]); // and any cards from the previous conversation
     setQueued([]); // and any pending mid-turn queue from the previous conversation
     setRemovingQueue(new Set()); // its in-flight removes name ids that mean something else here
@@ -461,6 +478,11 @@ function useBrainChatController(): BrainChatValue {
       es.close();
       reconnect().retry();
     }, SNAPSHOT_TIMEOUT_MS);
+    // The guaranteed first frame normally lands in milliseconds; until it does, the stream looks open but
+    // delivers nothing — say so instead of leaving an enabled composer silently waiting on data. The
+    // snapshot handler (the frame itself) retires the line; a daemon `notice` frame can only arrive after
+    // the snapshot, so it overwrites this safely.
+    setNotice(t.brainChat.reconnecting);
     // EVERY frame must prove it belongs to the stream that is still live before it touches anything.
     // `close()` does not unschedule a callback the browser already dispatched, so a frame from a superseded
     // conversation can still run after the next one is open — and these handlers share refs with it. Left
@@ -480,6 +502,7 @@ function useBrainChatController(): BrainChatValue {
     onFrame('snapshot', (e) => {
       lastFrameAtRef.current = Date.now();
       if (snapshotTimerRef.current) { clearTimeout(snapshotTimerRef.current); snapshotTimerRef.current = null; }
+      setNotice(''); // the first frame retires the "connecting" line armed with the stream
       reconnect().succeeded(); // a delivered first frame is the only proof the reconnect worked
       const snap = JSON.parse((e as MessageEvent).data) as BrainStreamSnapshotFrame;
       // An idle rollover this stream never saw retargeted the binding server-side; follow it, or the
@@ -903,7 +926,13 @@ function useBrainChatController(): BrainChatValue {
     : null;
   const [planSubmitting, setPlanSubmitting] = useState(false);
   const planInFlightRef = useRef(false);
-  const dismissPlan = (): void => setPlanDecided(openPlanKey);
+  /** Persist a decided plan under its conversation, so a reload does not re-raise it. The caller names the
+   *  session the plan belongs to — for implement that is the one captured at click time, not whatever a
+   *  mid-flight rollover switched to. */
+  const recordPlanDecision = (sessionId: string, key: string): void => {
+    setPlanDecisionsRaw(JSON.stringify({ ...planDecisions, [sessionId]: key }));
+  };
+  const dismissPlan = (): void => { if (openPlanKey && activeSessionId) recordPlanDecision(activeSessionId, openPlanKey); };
   const implementPlan = (): void => {
     // The mode follows the daemon's ACCEPTANCE, never the click. Switching to `build` up front removed the
     // decision row — the only control that can approve the plan — the instant a send failed, leaving the
@@ -911,8 +940,12 @@ function useBrainChatController(): BrainChatValue {
     if (planInFlightRef.current) return; // a ref, not the state: two fast clicks would race a setState
     planInFlightRef.current = true;
     setPlanSubmitting(true);
+    // Capture the plan and its conversation at click time: the send is async, and the conversation can
+    // roll over while it is in flight — the decision must land under the conversation the plan belonged to.
+    const key = openPlanKey;
+    const sessionId = activeSessionId;
     void elowenClient.brainSend(IMPLEMENT_PLAN_PROMPT, undefined, undefined, binding(), 'build')
-      .then(() => { setWorkMode('build'); setPlanDecided(openPlanKey); })
+      .then(() => { setWorkMode('build'); if (key && sessionId) recordPlanDecision(sessionId, key); })
       .catch(() => toast(t.brainChat.sendError, 'error'))
       .finally(() => { planInFlightRef.current = false; setPlanSubmitting(false); });
   };
