@@ -17,6 +17,23 @@
 
 import Database from 'better-sqlite3';
 import { scryptSync, randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+
+/** The schema version a migrated DB must end on: the highest migration db.ts declares.
+ *
+ *  DERIVED, not written down. A literal here means "whatever CURRENT was when someone last edited this
+ *  file", so every release that adds a migration breaks this test for a reason that has nothing to do
+ *  with migrations being broken — which is exactly what happened at v0.27.79, where three new migrations
+ *  left the fixture still demanding 6. The assertion is worth keeping (a skipped migration must fail
+ *  loudly), so it reads the source of truth instead of duplicating it. */
+function currentSchemaVersion() {
+  const source = readFileSync(new URL('../../../src/store/db.ts', import.meta.url), 'utf-8');
+  const versions = [...source.matchAll(/runOnce\(\s*db\s*,\s*(\d+)/g)].map((m) => Number(m[1]));
+  if (versions.length === 0) {
+    throw new Error('migration-e2e: found no `runOnce(db, N)` migrations in src/store/db.ts — the version probe needs updating');
+  }
+  return Math.max(...versions);
+}
 
 /** Mirror of hashPassword in src/store/userStore.ts — kept in lockstep so the seeded user is a real login. */
 function hashPassword(password) {
@@ -169,7 +186,7 @@ export function buildOldFixture(dbPath) {
 
   // What the migration is expected to yield — the runner asserts exactly these.
   return {
-    expectedUserVersion: 6,
+    expectedUserVersion: currentSchemaVersion(),
     expectedDisabledTools: 'Read,Bash',
     expectedPromptNames: ['elowen', 'elowen-platform'],
     expectedPermTools: { Read: 'deny', Bash: 'allow', Edit: 'ask' },

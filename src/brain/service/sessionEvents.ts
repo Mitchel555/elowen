@@ -54,7 +54,7 @@ export function recordSessionEvent(
  *  marker has no live-only side effect to guard: it is safe with or without a connected client (the row is
  *  what a reconnect reads). The empty-conversation guard is kept so a marker never stacks above the first
  *  message. */
-export function recordDisplayMarker(
+function recordDisplayMarker(
   store: BrainStore,
   sessionId: string,
   publish: (event: SessionEventFrame) => void,
