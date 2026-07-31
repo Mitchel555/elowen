@@ -948,12 +948,48 @@ export class BrainService {
 
   /** Delete one of the user's stored conversations (never a channel session, never someone else's).
    *  A live session is disposed first; deleting the active conversation just clears the pointer —
-   *  the next start() falls back to the most recent remaining one. */
-  deleteSession(userId: number, sessionId: string): void {
+   *  the next start() falls back to the most recent remaining one.
+   *
+   *  Serialized on the session lock, like every neighbouring path that mutates one conversation
+   *  (compact, stopSession, the idle reaper, bindChannelContext). Unserialized, the teardown interleaved
+   *  with a prompt() already running inside that lock: the delete disposed the live record and dropped
+   *  the row while the turn ran on, and that turn's own agent_end then persisted its output into a
+   *  conversation that no longer existed. The in-flight work is fenced and interrupted BEFORE queueing on
+   *  the lock — a running turn HOLDS it, so serializing first would make the delete wait out the very
+   *  turn it exists to destroy (the ordering stopSession uses, for the same reason). */
+  async deleteSession(userId: number, sessionId: string): Promise<void> {
     const row = this.d.store.getSession(sessionId);
     if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
-    this.teardownDeletedSession(userId, sessionId);
-    this.d.store.deleteSession(sessionId);
+    this.fenceDeletedSession(sessionId);
+    await this.serial(sessionId, async () => {
+      // Re-read under the lock: a concurrent delete of the same conversation may already have completed,
+      // and running the teardown a second time would tear down whatever took this id in the meantime.
+      if (!isOwnedUserSession(this.d.store.getSession(sessionId), userId, sessionId)) {
+        this.sessions.clearDisposing(sessionId); // teardown abandoned — don't pin a live record on the slow path
+        return;
+      }
+      this.teardownDeletedSession(userId, sessionId);
+      this.d.store.deleteSession(sessionId);
+    });
+  }
+
+  /** Fence a conversation whose delete is COMMITTED, in the same tick the caller reserves its session
+   *  lock. `markDisposing` is what keeps a concurrent ensureLive() from fast-pathing onto the record this
+   *  delete is about to throw away — it queues on the lock instead, where the row is already gone and
+   *  every bound entry point rejects the id. Releasing the parked question and interrupting PI's run is
+   *  what lets a turn holding that lock reach the end of it rather than run to completion first; a turn
+   *  parked on AskUserQuestion is not PI-level work, so no interrupt can unwind it (see stopSession).
+   *  Both are signals only, deliberately not awaited, so the lock is still reserved in this tick. */
+  private fenceDeletedSession(sessionId: string): void {
+    const live = this.sessions.get(sessionId);
+    if (!live) return;
+    this.sessions.markDisposing(sessionId);
+    this.elicitation.cancelForSession(sessionId, 'conversation deleted');
+    void abortSessionWork(live.session).catch((err: unknown) => {
+      // Nothing else reports this one: it runs before the lock and nothing awaits it, so a failed
+      // interrupt would silently turn the delete back into "wait out the turn".
+      logger('brain').warn(`delete ${sessionId}: interrupt failed — ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   /** Everything a conversation owns, released before its row is dropped — shared by the user-facing
@@ -965,7 +1001,7 @@ export class BrainService {
    *  tokens for an inbox that has ceased to exist. */
   private teardownDeletedSession(userId: number, id: string): void {
     // Tear down any chat terminal bound to this conversation FIRST (docs order: terminal, then session).
-    // Fire-and-forget — the delete paths are sync and the binding row outlives store.deleteSession
+    // Fire-and-forget — no delete path awaits it, and the binding row outlives store.deleteSession
     // (separate table), so the async teardown still resolves the row; the janitor is the backstop if
     // it's unwired. No-op when the conversation has no bound terminal (channel/task sessions never do).
     void this.terminalTeardown?.(userId, id).catch((e) => logger('brain').error(`terminal teardown failed for ${id}`, e));
@@ -987,7 +1023,7 @@ export class BrainService {
    *  the agent turns themselves.
    *
    *  Fired and logged rather than awaited: the workflow control lives behind the plugin registry (async)
-   *  while both delete entry points are synchronous — the same contract the terminal teardown above uses.
+   *  while neither delete entry point awaits it — the same contract the terminal teardown above uses.
    *  Cancel the engine BEFORE the children, or it relaunches a node the moment an aborted one settles. */
   private cancelDelegatedWorkFor(id: string): void {
     const children = this.sessions.childrenOf(id);

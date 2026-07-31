@@ -167,16 +167,58 @@ describe('deleting a conversation releases everything it owns', () => {
     // A delegated child running under this parent — its result has nowhere to land once the parent is gone.
     await svc.channelSend({ channelId: 'subagent-sub-dlg-1', ownerUserId: 1, policy: POLICY }, 'dig');
     internalsOf(svc).sessions.setChildRunning(sessionId, 'brain-ch-subagent-sub-dlg-1', true);
-    d.session.abort.mockClear(); // only the CHILD teardown aborts a PI turn from here on
+    d.session.abort.mockClear(); // count only the aborts the delete itself issues
 
-    svc.deleteSession(1, sessionId);
+    await svc.deleteSession(1, sessionId);
 
     await vi.waitFor(() => {
       // The DAG stops launching nodes into a deleted inbox — the parent's engine first, then the child's
       // own (the channel abort cascades the same cancel down the tree it tears down).
       expect(cancelled[0]).toBe(sessionId);
-      expect(d.session.abort).toHaveBeenCalled();   // the child's own turn is unwound, not just its processes
+      // A child is deregistered only once its own channel abort has RESOLVED, so this is what proves the
+      // child's turn itself was unwound rather than only the shell processes underneath it.
+      expect(internalsOf(svc).sessions.hasActiveChildren(sessionId)).toBe(false);
     });
-    expect(internalsOf(svc).sessions.hasActiveChildren(sessionId)).toBe(false);
+    expect(d.session.abort).toHaveBeenCalled();
+  });
+
+  it('does not race a turn that is already in flight on the deleted conversation', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+
+    const order: string[] = [];
+    const dropRows = d.store.deleteSession.bind(d.store);
+    vi.spyOn(d.store, 'deleteSession').mockImplementation((id: string) => { order.push(`dropped:${id}`); dropRows(id); });
+
+    // Park a turn inside PI's prompt(): it holds the session lock and has not persisted its reply yet.
+    const runPrompt = d.session.prompt.getMockImplementation();
+    let releaseTurn: (() => void) | undefined;
+    let admitTurn: () => void = () => {};
+    const inFlight = new Promise<void>((resolve) => { admitTurn = resolve; });
+    d.session.prompt.mockImplementation(async (text, options) => {
+      admitTurn();
+      await new Promise<void>((resolve) => { releaseTurn = resolve; });
+      await runPrompt?.(text, options);
+      order.push('turn settled');
+    });
+    // PI unwinds its run when the teardown interrupts it — and, in the unserialized delete this covers,
+    // when the record is disposed out from under the running turn.
+    d.session.abort.mockImplementation(async () => { releaseTurn?.(); });
+    d.session.dispose.mockImplementation(() => { releaseTurn?.(); });
+
+    const sending = svc.send({ userId: 1, text: 'mid-flight' });
+    await inFlight;
+
+    await svc.deleteSession(1, sessionId);
+    await expect(sending).resolves.toBeUndefined(); // interrupting the turn must not blow it up either
+
+    // The delete interrupts the turn and then WAITS for it, instead of tearing the conversation down
+    // underneath it: an unserialized delete dropped the row first, and the turn's own agent_end then
+    // persisted its reply into a conversation that no longer existed — an orphan row nothing collects,
+    // because brain_messages has no FK cascade onto brain_sessions.
+    expect(d.store.getSession(sessionId)).toBeUndefined();
+    expect(d.store.getMessages(sessionId)).toHaveLength(0);
+    expect(order).toEqual(['turn settled', `dropped:${sessionId}`]);
   });
 });

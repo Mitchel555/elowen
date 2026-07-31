@@ -2822,12 +2822,12 @@ describe('BrainService', () => {
     await svc.send({ userId: 1, text: 'ahoj' });
     const second = await svc.start(1, { fresh: true });
     await svc.send({ userId: 1, text: 'a second real conversation' });
-    svc.deleteSession(1, first.sessionId);
+    await svc.deleteSession(1, first.sessionId);
     expect(svc.listSessions(1).map((s) => s.id)).toEqual([second.sessionId]);
     expect(d.store.getMessages(first.sessionId)).toHaveLength(0);
     d.store.createSession({ id: 'brain-77', userId: 77, model: 'm' });
-    expect(() => svc.deleteSession(1, 'brain-77')).toThrow(/unknown session/);
-    expect(() => svc.deleteSession(1, 'brain-ch-x')).toThrow(/unknown session/);
+    await expect(svc.deleteSession(1, 'brain-77')).rejects.toThrow(/unknown session/);
+    await expect(svc.deleteSession(1, 'brain-ch-x')).rejects.toThrow(/unknown session/);
   });
 
   it('status exposes usage numbers for the active conversation', async () => {
@@ -4858,7 +4858,7 @@ describe('BrainService — background processes', () => {
     const other = fakeHandle('4', 'brain-2', 2);
     for (const handle of [parentProc, childProc, grandchildProc, other]) processRegistry.register(handle);
 
-    svc.deleteSession(1, sessionId);
+    await svc.deleteSession(1, sessionId);
 
     expect([parentProc.killed, childProc.killed, grandchildProc.killed]).toEqual([true, true, true]);
     expect(other.killed).toBe(false); // another user's conversation is untouched

@@ -218,8 +218,11 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     return c.json({ error: 'not found' }, 404);
   });
 
-  app.delete('/brain/sessions/:id', withBrain((c, brain) => {
-    try { brain.deleteSession(c.get('user').id, c.req.param('id')!); return c.json({ ok: true }); }
+  app.delete('/brain/sessions/:id', withBrain(async (c, brain) => {
+    // Awaited: the delete serializes on the conversation's session lock, so the 200 must not be sent
+    // before the teardown has actually run — a client that reloads its list on the response would
+    // otherwise still see the conversation it just deleted.
+    try { await brain.deleteSession(c.get('user').id, c.req.param('id')!); return c.json({ ok: true }); }
     catch { return c.json({ error: 'unknown session' }, 404); }
   }));
 
