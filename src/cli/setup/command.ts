@@ -3,6 +3,7 @@ import * as p from '../ui/prompts.js';
 import { defaultLifecycleDeps, runLifecycle } from '../commands.js';
 import { readInstallInfo } from '../installInfo.js';
 import { waitHealthy } from '../launcher.js';
+import { hasLiveMission } from '../missionGate.js';
 import { SERVICES, systemctl } from '../systemd.js';
 import { clearMarker, isOnboarded, readMarker } from './marker.js';
 import { runOnboarding } from './wizard.js';
@@ -128,6 +129,13 @@ async function bringUp(base: string, env: NodeJS.ProcessEnv, version: string): P
   // healthy local daemon over a box we cannot even reach.
   if (!isLocalBase(base)) {
     throw new Error(`${base} did not answer, and it is not this machine's daemon (ELOWEN_URL) — start it there, or unset ELOWEN_URL to set up the local one`);
+  }
+  // Both replacement paths below SIGTERM the agents the daemon is running, so they are withheld while a
+  // mission is live exactly like the updater withholds its restart (`update.ts`): an unhealthy /health is
+  // not worth throwing away a mission's in-flight work. Setup cannot defer the way the updater does — the
+  // wizard needs the daemon — so it stops and says why.
+  if (hasLiveMission(env)) {
+    throw new Error('a mission is live and restarting the daemon would kill its agents mid-run — wait for it to finish, then run `elowen setup` again');
   }
   if (readInstallInfo()) {
     // `restart`, not `start`: systemd considers a wedged unit active, so `start` is a no-op on the very

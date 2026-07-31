@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { openDb } from '../store/db.js';
 import { MissionStore } from '../store/missionStore.js';
 import { dbPath } from '../shared/paths.js';
@@ -5,9 +6,15 @@ import { dbPath } from '../shared/paths.js';
 /** Whether any mission is currently live (active or stalled), read FRESH from the daemon's DB — WAL lets
  *  a separate process read alongside the running daemon. The self-update path checks this TWICE: up front
  *  (the auto-update opt-in gate) and again right before the restart, so a mission that goes live during
- *  the npm install isn't killed by the restart. Single source for both checks. */
+ *  the npm install isn't killed by the restart. `elowen setup` asks the same question before it replaces
+ *  an unhealthy daemon. Single source for every one of those checks. */
 export function hasLiveMission(env: NodeJS.ProcessEnv): boolean {
-  const db = openDb(dbPath(env));
+  // openDb CREATES the DB (and its schema) when the file is missing. `elowen setup` asks this gate before
+  // the daemon has ever booted, usually as the invoking user rather than the service user, so opening it
+  // here would leave a wrongly-owned DB behind for the daemon. No DB means nothing has ever run: no mission.
+  const path = dbPath(env);
+  if (!existsSync(path)) return false;
+  const db = openDb(path);
   try {
     return new MissionStore(db).live().length > 0;
   } finally {
