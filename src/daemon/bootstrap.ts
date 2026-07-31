@@ -141,12 +141,16 @@ const BOOT_ANNOUNCE_DEBOUNCE_MS = 60_000;
 
 /** How long a shutdown waits for running work to finish before exiting anyway.
  *
- *  Bounded BELOW systemd's stop timeout on purpose. The unit does not set TimeoutStopSec, so it inherits
- *  DefaultTimeoutStopSec (90s), after which systemd sends SIGKILL — and a SIGKILL mid-turn is exactly the
- *  outcome this drain exists to avoid. Finishing our own wait first means the process always exits on its
- *  own terms, and `elowen down` waits slightly longer still (see its attempt budget) so it observes the
- *  exit rather than timing out on it. */
-const SHUTDOWN_DRAIN_MS = 60_000;
+ *  Ten minutes, because the work being waited for is a MODEL TURN: an agent thinking, or a sub-agent
+ *  researching, routinely runs for minutes, and the first version's 60s cut one off and lost its result.
+ *  A budget shorter than the work it is protecting is not a graceful shutdown, just a delayed kill.
+ *
+ *  MUST stay below the unit's TimeoutStopSec (set to 11 minutes in systemdUnits.ts), because when that
+ *  expires systemd sends SIGKILL — the exact outcome this drain exists to prevent. The two numbers are a
+ *  pair: raising this one without raising the unit's just moves the kill earlier. `elowen down` waits
+ *  longer still, so it observes the exit rather than timing out on it, and `--force` is the way out for
+ *  anyone who cannot wait. */
+const SHUTDOWN_DRAIN_MS = 600_000;
 const SHUTDOWN_POLL_MS = 500;
 
 /** Once the platforms are back up, announce that the daemon is running — for EVERY boot, not just a
@@ -194,23 +198,23 @@ export function installGracefulShutdown(
     }
     draining = true;
     void (async () => {
-      const at = brain?.busy() ?? { turns: 0, children: 0 };
-      const busy = at.turns > 0 || at.children > 0;
-      log.info(`${signal} — draining (${at.turns} turn(s), ${at.children} sub-agent(s) in flight)`);
+      const at = brain?.busy() ?? { turns: 0, children: 0, undelivered: 0 };
+      const busy = at.turns > 0 || at.children > 0 || at.undelivered > 0;
+      log.info(`${signal} — draining (${at.turns} turn(s), ${at.children} sub-agent(s), ${at.undelivered} undelivered result(s))`);
       if (opts?.notify !== false) {
         // Only worth a message when something is actually being waited for; an idle restart already
         // announces itself on the way back up, and saying it twice is noise.
         const text = busy
-          ? `🛑 **Stopping** — waiting for ${at.turns} turn(s) and ${at.children} sub-agent(s) to finish…`
+          ? `🛑 **Stopping** — waiting for ${at.turns} turn(s), ${at.children} sub-agent(s) and ${at.undelivered} undelivered result(s)…`
           : '🛑 **Stopping** — Elowen is shutting down.';
         await brain?.notify(text).catch(() => { /* best-effort: never block the exit on a chat API */ });
       }
       const deadline = Date.now() + drainMs;
       for (;;) {
-        const now = brain?.busy() ?? { turns: 0, children: 0 };
-        if (now.turns === 0 && now.children === 0) break;
+        const now = brain?.busy() ?? { turns: 0, children: 0, undelivered: 0 };
+        if (now.turns === 0 && now.children === 0 && now.undelivered === 0) break;
         if (Date.now() >= deadline) {
-          log.error(`drain budget expired with ${now.turns} turn(s) and ${now.children} sub-agent(s) still running — exiting anyway`);
+          log.error(`drain budget expired with ${now.turns} turn(s), ${now.children} sub-agent(s) and ${now.undelivered} undelivered result(s) — exiting anyway`);
           break;
         }
         await new Promise((r) => setTimeout(r, pollMs));

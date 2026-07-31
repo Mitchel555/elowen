@@ -521,6 +521,11 @@ export class BrainStore {
     return this.delegation.pendingSubagentResults(parentSessionId);
   }
 
+  /** @see BrainDelegationStore.countPendingDeliveries */
+  countPendingDeliveries(): number {
+    return this.delegation.countPendingDeliveries();
+  }
+
   acknowledgeSubagentResult(parentSessionId: string, resultId: string): boolean {
     return this.delegation.acknowledgeSubagentResult(parentSessionId, resultId);
   }

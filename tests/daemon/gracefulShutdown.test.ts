@@ -7,10 +7,11 @@ import type { BrainService } from '../../src/brain/brainService.js';
  *
  *  `reads` counts busy() calls, which is what actually proves the handler WAITED: asserting only on the
  *  exit code passes just as happily when the wait loop is deleted entirely. */
-const brainBusy = (sequence: { turns: number; children: number }[], sent?: string[]) => {
+type Busy = { turns: number; children: number; undelivered?: number };
+const brainBusy = (sequence: Busy[], sent?: string[]) => {
   const state = { reads: 0 };
   const brain = ({
-    busy: () => sequence[Math.min(state.reads++, sequence.length - 1)],
+    busy: () => ({ undelivered: 0, ...sequence[Math.min(state.reads++, sequence.length - 1)] }),
     notify: async (text: string) => { sent?.push(text); },
   }) as unknown as BrainService;
   return { brain, state };
@@ -57,6 +58,18 @@ describe('installGracefulShutdown — a stop waits for running work instead of c
       { turns: 0, children: 2 },
       { turns: 0, children: 1 },
       { turns: 0, children: 0 },
+    ]);
+    expect(await runSignal(brain)).toEqual([0]);
+    expect(state.reads).toBe(3);
+  });
+
+  // The regression Filip hit: the sub-agent had FINISHED, so turns and children both read zero, but its
+  // answer had not yet reached the parent turn. Exiting there loses a completed delegation's result.
+  it('waits for a finished sub-agent to actually hand its result to the parent', async () => {
+    const { brain, state } = brainBusy([
+      { turns: 0, children: 0, undelivered: 1 },
+      { turns: 0, children: 0, undelivered: 1 },
+      { turns: 0, children: 0, undelivered: 0 }, // parent turn took it
     ]);
     expect(await runSignal(brain)).toEqual([0]);
     expect(state.reads).toBe(3);

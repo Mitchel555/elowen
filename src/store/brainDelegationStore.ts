@@ -559,6 +559,18 @@ export class BrainDelegationStore {
     })();
   }
 
+  /** How many delegated results are still waiting to reach a parent turn, across every conversation.
+   *
+   *  Read by the daemon's shutdown drain. A finished sub-agent is NOT finished work: its answer only
+   *  counts once a parent turn has taken it, and exiting in that window is what left a completed
+   *  delegation undelivered — the child had already stopped running, so no other signal showed it. */
+  countPendingDeliveries(): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM brain_subagent_results WHERE delivery_state = 'pending'"
+    ).get() as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
   pendingSubagentResults(parentSessionId: string): BrainSubagentResult[] {
     const rows = this.db.prepare(
       `SELECT * FROM brain_subagent_results WHERE delivery_state = 'pending'

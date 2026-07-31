@@ -157,7 +157,7 @@ export async function stop(env: NodeJS.ProcessEnv, deps: StopDeps = {}): Promise
   // The daemon drains running turns before it exits (see installGracefulShutdown), so the default budget
   // has to outlast that drain — at 5s this reported a failure while the daemon was still finishing a turn
   // exactly as asked. `--force` skips the drain entirely, so it only needs long enough to confirm a kill.
-  const attempts = deps.attempts ?? (deps.force ? 10 : 140); // ~5s forced, ~70s draining
+  const attempts = deps.attempts ?? (deps.force ? 10 : 1360); // ~5s forced, ~11min draining
   // SIGKILL cannot be caught, so a forced stop never reaches the drain. That is the point: it is the
   // escape hatch for a wedged daemon, and it abandons whatever was running.
   const signal: NodeJS.Signals = deps.force ? 'SIGKILL' : 'SIGTERM';

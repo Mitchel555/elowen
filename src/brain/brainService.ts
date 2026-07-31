@@ -295,9 +295,14 @@ export class BrainService {
   }
 
   /** Work still in flight — see LiveSessionRegistry.busy. Read by the daemon's graceful shutdown so a
-   *  restart waits for running turns and delegated children instead of cutting them off mid-sentence. */
-  busy(): { turns: number; children: number } {
-    return this.sessions.busy();
+   *  restart waits for running turns and delegated children instead of cutting them off mid-sentence.
+   *
+   *  `undelivered` covers the gap the first version missed: a sub-agent that has FINISHED is not finished
+   *  work. Its answer still has to be picked up by a parent turn, and in that window the child is already
+   *  gone from the live registry — so turns and children can both read zero while a completed delegation
+   *  has still never reached the agent that asked for it. Exiting there is exactly how a result got lost. */
+  busy(): { turns: number; children: number; undelivered: number } {
+    return { ...this.sessions.busy(), undelivered: this.d.store.countPendingDeliveries() };
   }
 
   /** One-shot boot sweep for restart-zombie goals — see GoalLoopService.reconcileGoalsOnBoot. */

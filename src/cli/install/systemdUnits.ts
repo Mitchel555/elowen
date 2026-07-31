@@ -55,6 +55,10 @@ Environment=LANG=${UTF8_LOCALE}
 ExecStart=${p.nodePath} ${p.daemonEntry}
 Restart=on-failure
 RestartSec=3
+# The daemon drains running turns on SIGTERM (SHUTDOWN_DRAIN_MS, 10 min) before exiting. The default
+# stop timeout is 90s, which would SIGKILL it mid-drain and destroy the very work being waited for.
+# Keep this ABOVE that drain budget; the daemon always gives up on its own first.
+TimeoutStopSec=660
 
 [Install]
 WantedBy=multi-user.target
