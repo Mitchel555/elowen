@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { stripInlineReasoning, extractText, toolDetail, toolDisplay, toolOutputView, isThinkingOnlyReply, shapeBrainMessages, pendingSubmittedPlan, setToolOutputPolicy } from '../../src/brain/messageView.js';
+import { stripInlineReasoning, extractText, toolDetail, toolDisplay, toolOutputView, isThinkingOnlyReply, shapeBrainMessages, pendingSubmittedPlan, newestTurnStart, setToolOutputPolicy } from '../../src/brain/messageView.js';
 import { makeToolOutputPolicy } from '../../src/brain/toolOutput.js';
 
 describe('toolDisplay: skill loads', () => {
@@ -407,6 +407,22 @@ describe('tool output tone (needs attention)', () => {
       content: [{ type: 'text', text: 'Error: connect ECONNREFUSED' }],
     });
     expect(v?.tone).toBe('warning');
+  });
+});
+
+describe('newestTurnStart', () => {
+  it('puts the whole transcript in the newest turn when there is no user row', () => {
+    expect(newestTurnStart([])).toBe(0);
+    expect(newestTurnStart([{ role: 'assistant' }, { role: 'toolResult' }])).toBe(0);
+  });
+
+  it('starts the newest turn one past the LAST user row, ignoring earlier ones', () => {
+    expect(newestTurnStart([{ role: 'user' }, { role: 'assistant' }])).toBe(1);
+    expect(newestTurnStart([{ role: 'user' }, { role: 'assistant' }, { role: 'user' }, { role: 'toolResult' }])).toBe(3);
+  });
+
+  it('ends the newest turn at the transcript end when the last row is user', () => {
+    expect(newestTurnStart([{ role: 'assistant' }, { role: 'user' }])).toBe(2);
   });
 });
 

@@ -302,6 +302,32 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       expect(updates.some((u) => u.tokens === 500)).toBe(true);
       expect(updates.at(-1)).toMatchObject({ status: 'done' });
     });
+
+    // The host aborts an in-flight continuation exactly like any delegated send: requestPendingAbort
+    // makes the channel turn throw 'delegation aborted'. That must reach the parent as a readable result
+    // (it can wait, or pick another child) and settle the rail row it raised — never leave it claiming
+    // the child is still running.
+    it('surfaces an abort mid-continuation as a readable error and settles the progress row', async () => {
+      reply = new Error('delegation aborted');
+      continueProgress = (onEvent) => {
+        onEvent?.({ type: 'tool', name: 'Read', detail: 'a.ts' });
+      };
+      const updates: SubagentUpdate[] = [];
+      const tool = reg.tools.find((t) => t.name === 'DelegateContinue');
+      expect(tool).toBeDefined();
+      const executor = tool as unknown as { execute: (id: string, p: unknown) => Promise<{ content: { text: string }[] }> };
+      const res = await runWithPolicy(
+        adminPolicy,
+        () => executor.execute('call-43', { id: 'brain-ch-subagent-x', message: 'keep going' }),
+        { identity: owner, sessionId: 'brain-1', emitSubagent: (u) => updates.push(u) },
+      );
+
+      expect(res.content[0]?.text).toBe('Error: delegation aborted');
+      // The row was raised as running, mirrored the child's tool progress, then settled terminal.
+      expect(updates[0]).toMatchObject({ id: 'call-43', sessionId: 'brain-ch-subagent-x', status: 'running' });
+      expect(updates.some((u) => u.status === 'running' && u.tools === 1 && u.detail === 'Read a.ts')).toBe(true);
+      expect(updates.at(-1)).toMatchObject({ status: 'error' });
+    });
   });
 
   describe('DelegateStop', () => {

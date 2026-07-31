@@ -27,7 +27,9 @@ const transport = {
   edit: (a, jid, key, content) =>
     a.sock.sendMessage(jid, { text: content, edit: key }).then(() => true, () => false),
   hasImages: (a) => typeof a.resolveImageFiles === 'function' && typeof a.sendImages === 'function',
-  postImages: (a, jid, data) => a.sendImages(jid, data),
+  // Forward the trigger quote exactly like postWithImages does for text: the image reply keeps its link
+  // to the message it answers. The adapter quotes only the first image (matching sendText's first piece).
+  postImages: (a, jid, data, quoted) => a.sendImages(jid, data, quoted),
 };
 
 // WhatsApp renders plain text (nothing to escape for mentions/fences), `*bold*` titles, no strikethrough on

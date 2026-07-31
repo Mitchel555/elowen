@@ -85,6 +85,18 @@ export function submittedPlan(toolName: string, result: unknown): string | undef
   return typeof plan === 'string' && plan.trim() ? stripControl(plan) : undefined;
 }
 
+/** Index of the first row of the newest turn: one past the LAST user row, 0 when the session has no
+ *  user row. A user row is the single turn-boundary marker in the durable transcript — everything after
+ *  it belongs to the newest turn, so every consumer that cuts "the newest turn" out of stored rows must
+ *  cut on exactly this. BrainStore's `getLatestTurn` mirrors it in SQL (rowid > MAX(rowid) over
+ *  role='user') because that path must not load the whole history, and `persistAgentRun` verifies its
+ *  pre-projected user suffix against the same boundary from the tail — tests/store/turnBoundary.test.ts
+ *  holds the SQL mirror and this scan to the same data so one cannot drift from the other. */
+export function newestTurnStart(rows: readonly { role?: string }[]): number {
+  for (let i = rows.length - 1; i >= 0; i -= 1) if (rows[i]?.role === 'user') return i + 1;
+  return 0;
+}
+
 /** The plan the conversation is currently waiting on a decision for, rebuilt from its durable rows: the
  *  plan an `ExitPlanMode` call submitted in the NEWEST assistant turn, or null.
  *
@@ -98,11 +110,7 @@ export function submittedPlan(toolName: string, result: unknown): string | undef
  *  (a model/mode marker landing between the plan and the turn's end) live in their own table, so nothing
  *  in this row stream can hide the plan. */
 export function pendingSubmittedPlan(rows: readonly StoredTurnRow[]): BrainPendingPlan | null {
-  let start = 0;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (rows[i]?.role === 'user') { start = i + 1; break; }
-  }
-  const turn = rows.slice(start);
+  const turn = rows.slice(newestTurnStart(rows));
   const results = new Map<string, unknown>();
   for (const row of turn) {
     if (row.role !== 'toolResult') continue;

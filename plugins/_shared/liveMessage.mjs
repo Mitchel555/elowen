@@ -413,7 +413,10 @@ export function createLiveMessage({ transport, style, CHUNK, splitContent, postW
       let posted = false;
       if (names.size && transport.hasImages(this.a)) {
         const data = this.a.resolveImageFiles([...names]);
-        if (data.length) { await transport.postImages(this.a, this.channelId, data).catch(() => {}); posted = true; }
+        // Forward the trigger quote, exactly like the text path on line 428 does: an image answer that
+        // loses its link to the question reads as unprompted in a busy chat. Transports that declare only
+        // three parameters ignore the extra argument, so this stays safe on every surface.
+        if (data.length) { await transport.postImages(this.a, this.channelId, data, this.replyToId).catch(() => {}); posted = true; }
       }
       // Runtime footer (model · context %) rides the text message only, opt-out via config.
       const footer = this.a.cfg?.runtimeFooter !== false ? footerLine(this.idle) : '';

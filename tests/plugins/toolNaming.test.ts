@@ -1,12 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlugins, discoverPlugins } from '../../src/plugins/loader.js';
 import { builtinToolMetas, BUILTIN_TOOL_PLAN_SAFE } from '../../src/brain/tools/index.js';
-
-// Loading every bundled plugin imports each one's module graph; that costs ~1.9s idle against
-// vitest's 5s default, and under the full suite's parallel load it crossed the line and timed out.
-vi.setConfig({ testTimeout: 30_000 });
 
 const log = { info() {}, warn() {}, error() {} };
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -32,7 +28,11 @@ async function loadEveryBundledPlugin() {
 }
 
 describe('tool naming convention', () => {
-  it('every bundled plugin tool is TitleCase', async () => {
+  // This file's FIRST plugin load is the cold one: importing every bundled plugin's module graph costs
+  // ~1.9s idle and crossed vitest's 5s default under the full suite's parallel load. Later loads hit
+  // the module cache (~75ms), so only this test needs the headroom — a stuck test anywhere else now
+  // fails in 5s instead of burning the whole file's 30s.
+  it('every bundled plugin tool is TitleCase', { timeout: 30_000 }, async () => {
     const reg = await loadEveryBundledPlugin();
     // Guards the guard: a config/loader regression that registers nothing must fail loudly rather than
     // vacuously pass an empty list.

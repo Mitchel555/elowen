@@ -324,6 +324,10 @@ export class BrainStore {
       const rows = this.db.prepare(
         'SELECT id, session_id, parent_id, role, content, created_at FROM brain_messages WHERE session_id = ? ORDER BY rowid ASC'
       ).all(sessionId) as BrainMessageRow[];
+      // The pre-projected users must still be the transcript's trailing user rows — the same turn
+      // boundary `newestTurnStart` (../brain/messageView.js) cuts on, seen from the tail. Anything that
+      // landed after them would make this slice non-user and correctly fall back to the append path
+      // instead of splicing foreign rows into the run's order.
       const users = rows.slice(-userCount);
       if (users.length !== userCount || users.some((row) => row.role !== 'user')) return false;
 
@@ -374,7 +378,11 @@ export class BrainStore {
 
   /** The newest turn's rows only — everything after the last user message (or the whole session when it
    *  has none yet). Lets a hot status poll read a still-pending plan off durable history without loading
-   *  the entire conversation the way getMessages does. */
+   *  the entire conversation the way getMessages does.
+   *
+   *  This SQL is the mirror of `newestTurnStart` in ../brain/messageView.js, the canonical TS definition
+   *  of the same boundary; it must stay SQL so the poll never loads the whole history. Keep the two in
+   *  step — tests/store/turnBoundary.test.ts verifies they cut the same boundary for the same rows. */
   getLatestTurn(sessionId: string): BrainMessageRow[] {
     const floor = (this.db.prepare("SELECT MAX(rowid) AS r FROM brain_messages WHERE session_id = ? AND role = 'user'")
       .get(sessionId) as { r: number | null }).r ?? 0;

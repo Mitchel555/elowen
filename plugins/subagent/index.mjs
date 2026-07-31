@@ -3,6 +3,8 @@
 // progress and eventual result can be read without holding the parent turn open. The child inherits
 // EXACTLY the caller's access (ctx.currentAccess), so delegation can never widen a scoped session.
 import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
@@ -152,6 +154,48 @@ const buildCollectReminder = (finished, stillRunning) => {
 export function register(ctx) {
   let run = null; // the host's channel handler, captured on connect
   const jobs = new Map();
+  // A plugin reload replaces THIS closure wholesale (emitters, the `run` handler and the whole adapter
+  // behind them die with the old registry), so the job registry is reload-boundary durable: the hook
+  // below settles every running job terminal and snapshots the map to ctx.dataDir()/jobs.json, and this
+  // load restores the snapshot so DelegateStatus/DelegateResult keep accounting for those ids through
+  // the retention window instead of answering "may have expired". Only TERMINAL entries are restorable —
+  // a restored job has no captured emitter to push progress or deliver results through, and the snapshot
+  // is only ever written after every running job was settled.
+  const TERMINAL_STATUSES = new Set(['done', 'error']);
+  const restoreJob = (raw) => {
+    // The snapshot is external data (hand-editable) — validate the shape instead of trusting it.
+    if (!raw || typeof raw !== 'object') return undefined;
+    const { id, toolCallId, status, task, originSessionId, originPrincipal, startedAt } = raw;
+    if (typeof id !== 'string' || typeof toolCallId !== 'string' || typeof task !== 'string'
+      || typeof originSessionId !== 'string' || typeof originPrincipal !== 'string'
+      || typeof startedAt !== 'number' || !TERMINAL_STATUSES.has(status)
+      || typeof raw.finishedAt !== 'number') return undefined;
+    return {
+      id, toolCallId, status, task,
+      sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
+      tools: typeof raw.tools === 'number' ? raw.tools : 0,
+      detail: typeof raw.detail === 'string' ? raw.detail : undefined,
+      tokens: typeof raw.tokens === 'number' ? raw.tokens : undefined,
+      model: typeof raw.model === 'string' ? raw.model : undefined,
+      originSessionId, originPrincipal,
+      background: raw.background === true,
+      autoDeliver: raw.autoDeliver === true,
+      startedAt,
+      finishedAt: raw.finishedAt,
+      result: typeof raw.result === 'string' ? raw.result : undefined,
+      error: typeof raw.error === 'string' ? raw.error : undefined,
+    };
+  };
+  const jobsFile = join(ctx.dataDir(), 'jobs.json');
+  try {
+    const parsed = JSON.parse(readFileSync(jobsFile, 'utf8'));
+    if (Array.isArray(parsed)) {
+      for (const raw of parsed) {
+        const job = restoreJob(raw);
+        if (job) jobs.set(job.id, job);
+      }
+    }
+  } catch { /* absent or unreadable snapshot — start with an empty registry */ }
 
   // Keep terminal answers long enough for a later parent turn to collect them, while bounding both
   // age and count. Running entries are never evicted; when all slots are live, a new spawn is refused.
@@ -249,6 +293,32 @@ export function register(ctx) {
       });
     } catch (e) {
       ctx.logger.warn(`subagent progress fan-out failed: ${errorText(e)}`);
+    }
+  };
+
+  /** Deliver the terminal result of a detached/background job through the turn-captured durable sink,
+   *  shared by runChild and the reload hook. `completionDelivered` keeps the FIRST settlement
+   *  authoritative: after the reload hook settles a job as interrupted, runChild finishing later (the
+   *  host's abort cascade rejecting the child) must not deliver a second, contradicting completion. */
+  const deliverCompletion = (job) => {
+    if (!job.background || !job.emitCompletion || job.completionDelivered) return;
+    job.completionDelivered = true;
+    try {
+      job.emitCompletion({
+        id: job.id,
+        toolCallId: job.toolCallId,
+        sessionId: job.sessionId,
+        task: job.task,
+        status: job.status,
+        result: job.result,
+        error: job.error,
+        tools: job.tools,
+        tokens: job.tokens,
+        seconds: elapsedSeconds(job),
+        model: job.model,
+      });
+    } catch (e) {
+      ctx.logger.warn(`subagent completion persistence failed: ${errorText(e)}`);
     }
   };
 
@@ -438,7 +508,7 @@ export function register(ctx) {
           // and reports only what changed since the last one: jobs that finished, plus — on a wait timeout —
           // jobs still running. It stops as soon as an idle wait leaves nothing new to report.
           const reported = new Set();
-          for (let turn = 0; state.sessionId && turn < MAX_COLLECT_TURNS; turn += 1) {
+          for (let turn = 0; state.sessionId && !state.settledByReload && turn < MAX_COLLECT_TURNS; turn += 1) {
             // The host registers this child only for the duration of a channel turn, so `run()` returning
             // just deregistered it — yet the delegation is very much alive, and the wait below can hold it
             // here for minutes. Re-assert that the child is running: the parent's abort tree, its status
@@ -460,40 +530,29 @@ export function register(ctx) {
             raw = await run(collectSource, buildCollectReminder(finished, stillRunning), onEvent);
           }
           const reply = raw || '(the sub-agent returned nothing)';
-          if (reply.startsWith('Error:')) {
-            state.status = 'error';
-            state.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_STORED_RESULT_CHARS);
-          } else {
-            state.status = 'done';
-            // The ONE result the parent reads, foreground return and background delivery alike: keep its END.
-            // An error is left head-first on purpose — what an error says is in its first line, not its last.
-            state.result = clipTail(reply, MAX_STORED_RESULT_CHARS);
+          if (!state.settledByReload) {
+            // The reload hook may have settled this job terminal while the child was in flight (the host
+            // tears every child session down right after a reload). The child resolving afterwards — it
+            // either finished in the last instant or was aborted — must not flip that verdict.
+            if (reply.startsWith('Error:')) {
+              state.status = 'error';
+              state.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_STORED_RESULT_CHARS);
+            } else {
+              state.status = 'done';
+              // The ONE result the parent reads, foreground return and background delivery alike: keep its END.
+              // An error is left head-first on purpose — what an error says is in its first line, not its last.
+              state.result = clipTail(reply, MAX_STORED_RESULT_CHARS);
+            }
           }
         } catch (e) {
-          state.status = 'error';
-          state.error = clip(errorText(e), MAX_STORED_RESULT_CHARS);
+          if (!state.settledByReload) {
+            state.status = 'error';
+            state.error = clip(errorText(e), MAX_STORED_RESULT_CHARS);
+          }
         }
         state.finishedAt = Date.now();
         push(state.status);
-        if (state.background && state.emitCompletion) {
-          try {
-            state.emitCompletion({
-              id: state.id,
-              toolCallId: state.toolCallId,
-              sessionId: state.sessionId,
-              task: state.task,
-              status: state.status,
-              result: state.result,
-              error: state.error,
-              tools: state.tools,
-              tokens: state.tokens,
-              seconds: elapsedSeconds(state),
-              model: state.model,
-            });
-          } catch (e) {
-            ctx.logger.warn(`subagent completion persistence failed: ${errorText(e)}`);
-          }
-        }
+        deliverCompletion(state);
         return state.status === 'done' ? state.result : `Error: ${state.error}`;
       };
 
@@ -539,8 +598,10 @@ export function register(ctx) {
       // catch is defense-in-depth for a future state/reporting change so no detached rejection can turn
       // into a daemon-level unhandled rejection.
       void Promise.resolve().then(runChild).catch((e) => {
-        state.status = 'error';
-        state.error = clip(errorText(e), MAX_STORED_RESULT_CHARS);
+        if (!state.settledByReload) {
+          state.status = 'error';
+          state.error = clip(errorText(e), MAX_STORED_RESULT_CHARS);
+        }
         state.finishedAt = Date.now();
         push('error');
       });
@@ -710,7 +771,6 @@ export function register(ctx) {
       const state = {
         toolCallId: _id,
         sessionId: childSessionId,
-        status: 'running',
         task: clip(message, MAX_STORED_TASK_CHARS),
         tools: 0,
         detail: undefined,
@@ -732,13 +792,12 @@ export function register(ctx) {
         const continuation = ctx.continueSubagent(childSessionId, message, onEvent, model || undefined);
         push('running');
         const reply = await continuation;
-        state.status = 'done';
         push('done');
         return ok(reply || '(the sub-agent returned nothing)');
       } catch (e) {
         // A refusal is self-correctable — the agent can wait for a busy child or pick another one — so it
-        // comes back as a readable result, exactly like every other error this plugin surfaces.
-        state.status = 'error';
+        // comes back as a readable result, exactly like every other error this plugin surfaces. An abort
+        // mid-continuation (the host rejects with 'delegation aborted') lands here the same way.
         push('error');
         return ok(`Error: ${errorText(e)}`);
       }
@@ -767,6 +826,59 @@ export function register(ctx) {
       }
     },
   }));
+
+  // A plugin reload replaces THIS closure: the fresh instance registers its own empty `jobs` map, so
+  // anything still held here becomes unreachable — DelegateStatus/DelegateResult would answer "may have
+  // expired" for it, and the child session keeps running until the host tears it down right after this
+  // hook (resetChannels). The runtime state cannot simply be handed over: the captured emitters and the
+  // host `run` handler behind it die with the old registry, so a job left "running" would be a row
+  // nothing can settle. Make the boundary terminal instead — including BACKGROUND jobs, which normally
+  // outlive an abort: sparing one here would only orphan it.
+  ctx.registerHook?.({
+    name: 'plugin.reload.before',
+    run: () => {
+      const running = [];
+      for (const job of jobs.values()) {
+        if (job.status !== 'running') continue;
+        running.push(job);
+        job.status = 'error';
+        job.error = 'interrupted by plugin reload';
+        job.finishedAt = Date.now();
+        job.settledByReload = true;
+        pushJob(job, 'error');
+        deliverCompletion(job);
+      }
+      if (running.length) {
+        ctx.logger.warn(`subagent: ${running.length} delegation job(s) still running at plugin reload, interrupted: ${running.map((j) => j.id).join(', ')}`);
+      }
+      // Snapshot the terminal registry so the fresh instance keeps accounting for these ids during the
+      // retention window. Every running job was just settled above, so the file never holds a 'running'
+      // entry — a restored job could not emit, deliver or be cancelled (all captured functions died).
+      try {
+        writeFileSync(jobsFile, JSON.stringify([...jobs.values()].map((job) => ({
+          id: job.id,
+          toolCallId: job.toolCallId,
+          status: job.status,
+          task: job.task,
+          sessionId: job.sessionId,
+          tools: job.tools,
+          detail: job.detail,
+          tokens: job.tokens,
+          model: job.model,
+          originSessionId: job.originSessionId,
+          originPrincipal: job.originPrincipal,
+          background: job.background,
+          autoDeliver: job.autoDeliver,
+          startedAt: job.startedAt,
+          finishedAt: job.finishedAt,
+          result: job.result,
+          error: job.error,
+        }))));
+      } catch (e) {
+        ctx.logger.warn(`subagent job snapshot could not be persisted: ${errorText(e)}`);
+      }
+    },
+  });
 
   // Workflow tools reuse the SAME captured `run` handler and the delegate access primitives, so a
   // workflow node spawns exactly like a delegation (never Orca). `run` is captured lazily on connect;
