@@ -138,6 +138,9 @@ export interface StopDeps {
   /** ms between liveness/port polls and how many attempts before giving up on a signalled service. */
   pollMs?: number;
   attempts?: number;
+  /** Kill outright (SIGKILL) instead of asking the daemon to drain its running turns first. For a wedged
+   *  daemon, or when the caller genuinely cannot wait — it abandons whatever work was in flight. */
+  force?: boolean;
 }
 
 /** Stop both tracked services and forget them — but only once they are actually GONE: SIGTERM is not a
@@ -150,15 +153,21 @@ export async function stop(env: NodeJS.ProcessEnv, deps: StopDeps = {}): Promise
   const kill = deps.kill ?? ((pid: number, signal?: NodeJS.Signals | number) => process.kill(pid, signal));
   const fetchFn = deps.fetch ?? fetch;
   const isTracked = deps.isTracked ?? isTrackedService;
-  const pollMs = deps.pollMs ?? 200;
-  const attempts = deps.attempts ?? 25; // ~5s by default
+  const pollMs = deps.pollMs ?? 500;
+  // The daemon drains running turns before it exits (see installGracefulShutdown), so the default budget
+  // has to outlast that drain — at 5s this reported a failure while the daemon was still finishing a turn
+  // exactly as asked. `--force` skips the drain entirely, so it only needs long enough to confirm a kill.
+  const attempts = deps.attempts ?? (deps.force ? 10 : 140); // ~5s forced, ~70s draining
+  // SIGKILL cannot be caught, so a forced stop never reaches the drain. That is the point: it is the
+  // escape hatch for a wedged daemon, and it abandons whatever was running.
+  const signal: NodeJS.Signals = deps.force ? 'SIGKILL' : 'SIGTERM';
   const state = readState(env);
   if (!state) return;
 
   let pending: { mark: ServiceMark; svc: Svc; path: string }[] = [];
   for (const [svc, mark, path] of [[state.daemon, 'daemon', '/health'], [state.web, 'web', '/']] as const) {
     if (!isTracked(svc.pid, mark)) continue; // not our service — never signalled, never waited on
-    try { kill(svc.pid, 'SIGTERM'); } catch { /* raced to exit — still worth confirming below */ }
+    try { kill(svc.pid, signal); } catch { /* raced to exit — still worth confirming below */ }
     pending.push({ mark, svc, path });
   }
 

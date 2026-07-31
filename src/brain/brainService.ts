@@ -294,6 +294,12 @@ export class BrainService {
     return this.sessions.withLock(key, fn);
   }
 
+  /** Work still in flight — see LiveSessionRegistry.busy. Read by the daemon's graceful shutdown so a
+   *  restart waits for running turns and delegated children instead of cutting them off mid-sentence. */
+  busy(): { turns: number; children: number } {
+    return this.sessions.busy();
+  }
+
   /** One-shot boot sweep for restart-zombie goals — see GoalLoopService.reconcileGoalsOnBoot. */
   reconcileGoalsOnBoot(): void {
     this.goals.reconcileGoalsOnBoot();

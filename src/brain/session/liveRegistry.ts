@@ -110,6 +110,18 @@ export class LiveSessionRegistry<T extends { sessionId: string; session: { dispo
     for (const children of this.children.values()) if (children.has(sessionId)) return true;
     return false;
   }
+  /** Work still in flight, for the graceful-shutdown wait: serialized operations currently holding a
+   *  session lock (a running turn holds one for its whole duration) and delegated children still running.
+   *
+   *  Deliberately a COUNT of what is observably busy, not a promise to have caught everything — a lock is
+   *  released a microtask after its operation settles, so a zero here can trail reality by a tick. That is
+   *  the right trade for a shutdown gate: it can only ever make us wait a moment longer, never cut a turn
+   *  short, and the caller bounds the whole wait anyway. */
+  busy(): { turns: number; children: number } {
+    let children = 0;
+    for (const set of this.children.values()) children += set.size;
+    return { turns: this.locks.size, children };
+  }
   requestPendingAbort(sessionId: string): void { this.pendingAborts.add(sessionId); }
   /** Observe a pending child abort without consuming it. Fast owner-steering needs this so the original
    * prompt completion can still consume the marker and settle as aborted. */

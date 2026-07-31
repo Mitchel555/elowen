@@ -28,7 +28,7 @@ export interface LifecycleDeps {
   version: string;
   log: (s: string) => void;
   start: (env: NodeJS.ProcessEnv, deps: { version: string }) => Promise<RunState>;
-  stop: (env: NodeJS.ProcessEnv) => Promise<void>;
+  stop: (env: NodeJS.ProcessEnv, opts?: { force?: boolean }) => Promise<void>;
   status: (env: NodeJS.ProcessEnv) => Promise<{ daemon: SvcStatus; web: SvcStatus }>;
   update: (env: NodeJS.ProcessEnv, deps: { current: string }) => Promise<UpdateResult>;
 }
@@ -60,7 +60,11 @@ export function formatStatus(s: { daemon: SvcStatus; web: SvcStatus }, version?:
 /** Dispatch the install-lifecycle commands. Returns true when handled, false for anything else (the
  *  caller then falls through to the daemon-backed API CLI). Lifecycle commands manage the daemon
  *  themselves, so they deliberately skip the auto-start that the API commands use. */
-export async function runLifecycle(cmd: string | undefined, env: NodeJS.ProcessEnv, deps: LifecycleDeps): Promise<boolean> {
+export async function runLifecycle(
+  cmd: string | undefined, env: NodeJS.ProcessEnv, deps: LifecycleDeps,
+  /** The remaining argv, for the flags a lifecycle verb accepts (`down --force`). */
+  argv: readonly string[] = [],
+): Promise<boolean> {
   switch (cmd) {
     case 'up': {
       deps.log('Starting elowen…');
@@ -69,7 +73,9 @@ export async function runLifecycle(cmd: string | undefined, env: NodeJS.ProcessE
       return true;
     }
     case 'down': {
-      await deps.stop(env);
+      const force = argv.includes('--force') || argv.includes('-f');
+      if (!force) deps.log('Stopping elowen — waiting for running turns to finish (--force to kill now)…');
+      await deps.stop(env, { force });
       deps.log('elowen stopped');
       return true;
     }

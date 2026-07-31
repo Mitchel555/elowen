@@ -139,6 +139,16 @@ function describeEvent(e: { type: string } & Record<string, unknown>): string {
  *  RestartSec and far shorter than any plausible gap between two real deploys. */
 const BOOT_ANNOUNCE_DEBOUNCE_MS = 60_000;
 
+/** How long a shutdown waits for running work to finish before exiting anyway.
+ *
+ *  Bounded BELOW systemd's stop timeout on purpose. The unit does not set TimeoutStopSec, so it inherits
+ *  DefaultTimeoutStopSec (90s), after which systemd sends SIGKILL — and a SIGKILL mid-turn is exactly the
+ *  outcome this drain exists to avoid. Finishing our own wait first means the process always exits on its
+ *  own terms, and `elowen down` waits slightly longer still (see its attempt budget) so it observes the
+ *  exit rather than timing out on it. */
+const SHUTDOWN_DRAIN_MS = 60_000;
+const SHUTDOWN_POLL_MS = 500;
+
 /** Once the platforms are back up, announce that the daemon is running — for EVERY boot, not just a
  *  user-triggered `/restart`. A deploy, a crash and a host reboot all bring the daemon back without anyone
  *  being told, and the unattended restart is precisely the one worth hearing about.
@@ -154,6 +164,65 @@ const BOOT_ANNOUNCE_DEBOUNCE_MS = 60_000;
  *  confirmed however soon it follows another boot. Best-effort throughout — an announcement failure must
  *  never affect startup. Silent without a state dir (the `:memory:` test daemon), which also keeps the
  *  test suite from posting to real channels. */
+/** Drain and exit on SIGTERM/SIGINT instead of dying where we stand.
+ *
+ *  The daemon had NO signal handler, so a deploy's `systemctl restart` killed it at whatever instruction
+ *  it happened to be executing: a turn mid-stream, a sub-agent mid-task, both simply gone. This waits for
+ *  the work to finish first, and says so on the platforms — the stop is the half nobody was told about,
+ *  since only the following boot ever announced itself.
+ *
+ *  A SECOND signal exits immediately. Someone sending it twice is telling us they are not waiting, and
+ *  that is also the escape hatch if the drain itself ever wedges. `elowen down --force` skips straight to
+ *  SIGKILL and never reaches this code at all.
+ *
+ *  Handlers registered once, at boot. Exit code 0 throughout: a drained shutdown is a clean one, and
+ *  `Restart=on-failure` must not read a deliberate stop as a crash to bounce back from. */
+export function installGracefulShutdown(
+  brain: BrainService | undefined,
+  log: { info: (m: string) => void; error: (m: string, e?: unknown) => void },
+  opts?: { drainMs?: number; pollMs?: number; exit?: (code: number) => never; notify?: boolean },
+): void {
+  const drainMs = opts?.drainMs ?? SHUTDOWN_DRAIN_MS;
+  const pollMs = opts?.pollMs ?? SHUTDOWN_POLL_MS;
+  const exit = opts?.exit ?? ((code: number) => process.exit(code));
+  let draining = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (draining) {
+      log.info(`${signal} again — exiting now, without waiting for the remaining work`);
+      exit(0);
+      return;
+    }
+    draining = true;
+    void (async () => {
+      const at = brain?.busy() ?? { turns: 0, children: 0 };
+      const busy = at.turns > 0 || at.children > 0;
+      log.info(`${signal} — draining (${at.turns} turn(s), ${at.children} sub-agent(s) in flight)`);
+      if (opts?.notify !== false) {
+        // Only worth a message when something is actually being waited for; an idle restart already
+        // announces itself on the way back up, and saying it twice is noise.
+        const text = busy
+          ? `🛑 **Stopping** — waiting for ${at.turns} turn(s) and ${at.children} sub-agent(s) to finish…`
+          : '🛑 **Stopping** — Elowen is shutting down.';
+        await brain?.notify(text).catch(() => { /* best-effort: never block the exit on a chat API */ });
+      }
+      const deadline = Date.now() + drainMs;
+      for (;;) {
+        const now = brain?.busy() ?? { turns: 0, children: 0 };
+        if (now.turns === 0 && now.children === 0) break;
+        if (Date.now() >= deadline) {
+          log.error(`drain budget expired with ${now.turns} turn(s) and ${now.children} sub-agent(s) still running — exiting anyway`);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+      log.info('drained — exiting');
+      exit(0);
+    })();
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+}
+
 export async function announceBoot(
   brain: BrainService | undefined,
   restartMarker: string | undefined,
@@ -969,6 +1038,9 @@ export async function buildApp(opts: BuildOpts) {
     void brain?.startPlatforms(log)
       .then(() => announceBoot(brain, restartMarker, bootMarker, ELOWEN_VERSION))
       .catch((e) => log.error('startPlatforms failed', e));
+    // Registered only once the platforms are coming up, so a stop can actually announce itself. Skipped
+    // under the in-memory test DB, where installing process-wide signal handlers would leak across tests.
+    if (opts.dbPath !== ':memory:') installGracefulShutdown(brain, log);
     void reconcileOverseers().catch((e) => log.error('reconcileOverseers failed', e)); // re-park overseers for active missions / kill orphans
     // Self-heal the agent-workflow skill: (re)install the bundled `elowen-workflow` SKILL.md into every
     // present provider on boot. Best-effort — installAll catches its own per-provider errors and never

@@ -43,7 +43,7 @@ SETUP                             (setup = this machine, local · install = a sh
 SERVICE
   menu                            interactive launcher: start/stop/status/update in one place
   up                              start the daemon (:4400) and web UI (:4500) in the background
-  down                            stop the daemon and web UI
+  down [--force]                  stop the daemon and web UI (waits for running turns; --force kills now)
   status                          show which services are running and healthy
   update                          update to the latest npm release and restart in place
 
@@ -366,7 +366,7 @@ export async function main() {
   }
   // Install-lifecycle commands manage the daemon/web themselves — handle them BEFORE ensureDaemon so
   // they don't trigger the API-CLI's auto-spawn.
-  if (await runLifecycle(argv[0], process.env, defaultLifecycleDeps(version))) return;
+  if (await runLifecycle(argv[0], process.env, defaultLifecycleDeps(version), argv.slice(1))) return;
   // Only API commands may auto-start the daemon; an unknown verb errors out without spawning anything.
   if (!needsDaemon(argv[0])) { console.error(USAGE); process.exit(1); }
   await ensureDaemon();

@@ -187,6 +187,24 @@ describe('cli/launcher.stop', () => {
     await stop(env, { kill: () => { /* never signal ourselves */ }, isTracked, fetch: fetchFn, pollMs: 1, attempts: 25 });
     expect(readState(env)).toBeNull();
   });
+  it('asks the daemon to drain (SIGTERM) by default, so a stop does not cut a running turn off', async () => {
+    writeState(env, deadPids);
+    const signals: (NodeJS.Signals | number | undefined)[] = [];
+    const silent = (async () => new Response('', { status: 503 })) as unknown as typeof fetch;
+    let identity = 0;
+    await stop(env, { kill: (_pid, sig) => signals.push(sig), isTracked: () => ++identity <= 2, fetch: silent, pollMs: 1, attempts: 3 });
+    expect(signals).toEqual(['SIGTERM', 'SIGTERM']);
+  });
+
+  it('kills outright with --force, which is the point of it — SIGKILL cannot be caught, so nothing drains', async () => {
+    writeState(env, deadPids);
+    const signals: (NodeJS.Signals | number | undefined)[] = [];
+    const silent = (async () => new Response('', { status: 503 })) as unknown as typeof fetch;
+    let identity = 0;
+    await stop(env, { force: true, kill: (_pid, sig) => signals.push(sig), isTracked: () => ++identity <= 2, fetch: silent, pollMs: 1, attempts: 3 });
+    expect(signals).toEqual(['SIGKILL', 'SIGKILL']);
+  });
+
   it('is a no-op when nothing is running', async () => {
     const killed: number[] = [];
     await stop(env, { kill: (pid) => killed.push(pid) });
