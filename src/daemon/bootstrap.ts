@@ -26,6 +26,7 @@ import { Deriver } from '../deriver/deriver.js';
 import { EventBus } from '../api/sse.js';
 import { eventProjectId, type EventProjectDeps } from '../api/eventProject.js';
 import { createServer } from '../api/server.js';
+import { ELOWEN_VERSION } from '../api/version.js';
 import { createSkillService } from '../api/services/skillService.js';
 import { createTicketStore } from '../terminal/ticketStore.js';
 import { RealTmuxDriver } from '../tmux/driver.js';
@@ -133,16 +134,48 @@ function describeEvent(e: { type: string } & Record<string, unknown>): string {
   }
 }
 
-/** After a user-triggered `/restart` re-park: once the platforms are back up, echo "back online" — but
- *  ONLY for a restart that's actually RECENT. A stale marker (a failed restart whose cleanup didn't run,
- *  or a very old crash) must not make an ordinary later deploy falsely announce recovery. The marker holds
- *  the request timestamp. Best-effort throughout; always clears the marker so an ordinary boot stays quiet. */
-async function announceBackOnlineIfPending(brain: BrainService | undefined, restartMarker: string | undefined): Promise<void> {
-  if (!(restartMarker && existsSync(restartMarker))) return;
-  let fresh = false;
-  try { fresh = Date.now() - Number(readFileSync(restartMarker, 'utf8')) < 5 * 60_000; } catch { /* unreadable → treat as stale */ }
-  if (fresh) await brain?.notify('✅ **Back online** — Elowen restarted and is ready.').catch(() => { /* best-effort */ });
-  try { unlinkSync(restartMarker); } catch { /* already gone */ }
+/** A boot announced less than this ago suppresses the next one, so a crash-looping daemon reports the
+ *  first restart and then goes quiet instead of flooding the channel. Deliberately longer than systemd's
+ *  RestartSec and far shorter than any plausible gap between two real deploys. */
+const BOOT_ANNOUNCE_DEBOUNCE_MS = 60_000;
+
+/** Once the platforms are back up, announce that the daemon is running — for EVERY boot, not just a
+ *  user-triggered `/restart`. A deploy, a crash and a host reboot all bring the daemon back without anyone
+ *  being told, and the unattended restart is precisely the one worth hearing about.
+ *
+ *  The wording distinguishes the two, because they answer different questions: after `/restart` the
+ *  operator is waiting for a confirmation, while an unexpected boot needs to say WHICH build came up.
+ *
+ *  The `/restart` marker holds the request timestamp and is honoured only while RECENT — a stale marker
+ *  (a failed restart whose cleanup never ran) must not make a later boot claim to be that restart. It is
+ *  always cleared, so it can only ever be read once.
+ *
+ *  A user-triggered restart bypasses the crash-loop debounce: it was explicitly asked for, so it is
+ *  confirmed however soon it follows another boot. Best-effort throughout — an announcement failure must
+ *  never affect startup. Silent without a state dir (the `:memory:` test daemon), which also keeps the
+ *  test suite from posting to real channels. */
+export async function announceBoot(
+  brain: BrainService | undefined,
+  restartMarker: string | undefined,
+  bootMarker: string | undefined,
+  version: string,
+): Promise<void> {
+  if (!bootMarker) return;
+  let requested = false;
+  if (restartMarker && existsSync(restartMarker)) {
+    try { requested = Date.now() - Number(readFileSync(restartMarker, 'utf8')) < 5 * 60_000; } catch { /* unreadable → treat as stale */ }
+    try { unlinkSync(restartMarker); } catch { /* already gone */ }
+  }
+  if (!requested) {
+    try {
+      const last = Number(readFileSync(bootMarker, 'utf8'));
+      if (Number.isFinite(last) && Date.now() - last < BOOT_ANNOUNCE_DEBOUNCE_MS) return;
+    } catch { /* no previous announcement — this is the first */ }
+  }
+  try { writeFileSync(bootMarker, String(Date.now())); } catch { /* the guard is a nicety, not required */ }
+  await brain?.notify(requested
+    ? '✅ **Back online** — Elowen restarted and is ready.'
+    : `✅ **Back online** — the daemon started (v${version}).`).catch(() => { /* best-effort */ });
 }
 
 /** Janitor tick: reap finished agents' zombie tmux sessions. Log what it reaps so the trail shows when a
@@ -855,6 +888,9 @@ export async function buildApp(opts: BuildOpts) {
   // :memory: test DB has no config dir + no units). `setTimeout` lets the HTTP response flush before the
   // process is torn down. systemctl() self-elevates via sudo when not root (www-data has passwordless).
   const restartMarker = opts.dbPath !== ':memory:' ? join(dirname(opts.dbPath), '.restart-marker') : undefined;
+  // Timestamp of the last boot announcement — the crash-loop debounce in announceBoot. Same state dir,
+  // and likewise absent under the in-memory test DB so the suite never announces.
+  const bootMarker = opts.dbPath !== ':memory:' ? join(dirname(opts.dbPath), '.boot-announce') : undefined;
   const restartDaemon = restartMarker
     ? async (byUserId: number): Promise<void> => {
         log.info(`/restart requested by user ${byUserId}`);
@@ -927,11 +963,11 @@ export async function buildApp(opts: BuildOpts) {
     // One-shot: reap chat terminals + tokens orphaned while the daemon was down (tmux died / conversation
     // deleted), and kill stray `elowen-chat-*` panes with no binding. Periodic sweep is scheduled below.
     void brainTerminal?.sweep().catch((e) => log.error('brain terminal sweep failed', e));
-    // Bring up plugin platform channels (Discord bot, …). Fail-open per adapter. If this boot follows an
-    // operator `/restart`, announce "back online" once the platforms are connected, then clear the marker
-    // (so ordinary restarts/deploys stay quiet — only a user-triggered restart is echoed).
+    // Bring up plugin platform channels (Discord bot, …). Fail-open per adapter. Once they are connected,
+    // announce that the daemon is up — every boot, with the wording depending on whether an operator
+    // `/restart` asked for it.
     void brain?.startPlatforms(log)
-      .then(() => announceBackOnlineIfPending(brain, restartMarker))
+      .then(() => announceBoot(brain, restartMarker, bootMarker, ELOWEN_VERSION))
       .catch((e) => log.error('startPlatforms failed', e));
     void reconcileOverseers().catch((e) => log.error('reconcileOverseers failed', e)); // re-park overseers for active missions / kill orphans
     // Self-heal the agent-workflow skill: (re)install the bundled `elowen-workflow` SKILL.md into every
