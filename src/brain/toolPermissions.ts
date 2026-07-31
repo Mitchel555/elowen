@@ -109,11 +109,22 @@ const NON_DESTRUCTIVE_BASH_ALLOW: readonly string[] = [
  *   - `awk*system(*` — awk spawns a shell from its program text. awk/sed are full interpreters, so a
  *     determined model has other escapes (getline pipes, sed's `e` flag) no pattern list will close:
  *     this clamp is a guardrail against unguided destruction, not a sandbox. */
-const NON_DESTRUCTIVE_BASH_CLAWBACKS: readonly string[] = [
+/** Flags that turn a READING command into "run whatever I hand you". They are denied in every gated
+ *  context, because each one launders an already-denied command through a command that is allowed:
+ *  `git difftool --extcmd=X` runs X, and `GIT_PAGER=X git log` runs X.
+ *
+ *  Shared by the interactive defaults and the shell clamp, and in the clamp they are applied LAST — after
+ *  the read-only claw-backs — so that re-permitting `git config --list` cannot re-admit
+ *  `GIT_PAGER=sh git config --list` along with it. */
+const EXEC_ESCAPE_DENY: readonly string[] = [
   'git difftool*', 'git mergetool*', '*--ext-diff*', '*--extcmd*', '*GIT_EXTERNAL_DIFF*',
   '*GIT_CONFIG*=*', '*GIT_PAGER=*',
   'find*-delete*', 'find*-exec*', 'find*-ok*',
   'awk*system(*',
+];
+
+const NON_DESTRUCTIVE_BASH_CLAWBACKS: readonly string[] = [
+  ...EXEC_ESCAPE_DENY,
   // journalctl reads history — these three subcommands destroy it.
   'journalctl*--vacuum*', 'journalctl*--rotate*', 'journalctl*--flush*',
   // The loopback allow above is for PROBING a local service. These turn the same command into a write
@@ -144,10 +155,89 @@ const NON_DESTRUCTIVE_BASH_CLAWBACKS: readonly string[] = [
  *  run the project's own check has to guess whether its plan compiles.
  *  Shared by the unattended read-only agent boundary (brain/agents/readOnlyBoundary.ts) and by plan
  *  mode (brain/service/turnContextBuilder.ts), so the shell clamp has exactly ONE definition. */
+/** What a non-writing context may NOT run. This is a deny-list: everything else is permitted, so an
+ *  agent can build, test, install dependencies and reach the network like any other.
+ *
+ *  The list is what an agent asked to LOOK at a system has no business doing — destroying data, rewriting
+ *  history, taking the machine down or gaining privileges it was not given. Patterns are matched against
+ *  BOTH the verbatim command and its canonical form (path and `env`/`sudo`/`nice` wrappers stripped — see
+ *  segmentMatchValues), which is why `sudo*` catches a privilege escalation that would otherwise unwrap
+ *  into an innocent-looking `cat`.
+ *
+ *  It is a guardrail, not a sandbox, and cannot become one through a longer list: a shell has unbounded
+ *  ways to spell the same act (an interpreter, a script, a here-doc). What it removes is the unguided
+ *  destruction an agent stumbles into, not what a determined one could still reach. */
+const DESTRUCTIVE_BASH_DENY: readonly string[] = [
+  // Erase, overwrite or relocate data.
+  'rm *', 'rmdir *', 'shred *', 'truncate *', 'dd *', 'mv *',
+  // Filesystem and device surgery.
+  'mkfs*', 'fdisk*', 'parted*', 'mount *', 'umount *', 'swapoff*', 'losetup*',
+  // Ownership and access bits — a wrong chmod is as unrecoverable as a delete.
+  'chmod *', 'chown *', 'chgrp *', 'ln *',
+  // Git operations that rewrite, discard or PUBLISH work. Reading history stays open.
+  'git reset*', 'git checkout*', 'git restore*', 'git clean*', 'git push*', 'git commit*',
+  'git rebase*', 'git merge *', 'git revert*', 'git cherry-pick*', 'git am*', 'git apply*',
+  'git filter-branch*', 'git update-ref*', 'git gc*', 'git prune*', 'git reflog delete*',
+  'git reflog expire*', 'git branch -d*', 'git branch -D*', 'git branch --delete*',
+  'git tag -d*', 'git remote remove*', 'git remote set-url*',
+  'git worktree remove*', 'git worktree prune*', 'git submodule deinit*',
+  // Denied as a whole, then narrowed back to their reading forms in READ_ONLY_CLAWBACK_ALLOW. A bare
+  // `git stash` pockets the user's uncommitted work, and a bare `git config k v` writes — both are
+  // mutations wearing the same verb as `git stash list` and `git config --get`.
+  'git stash*', 'git config *',
+  // Privilege escalation. Matched on the verbatim form — the canonical one has the wrapper stripped.
+  'sudo*', 'su *', 'doas*', 'pkexec*',
+  // Service control. The read-only verbs (status/show/cat/list-*/is-*) stay available.
+  'systemctl start*', 'systemctl stop*', 'systemctl restart*', 'systemctl reload*',
+  'systemctl enable*', 'systemctl disable*', 'systemctl mask*', 'systemctl unmask*',
+  'systemctl kill*', 'systemctl daemon-reload*', 'systemctl isolate*', 'systemctl set-*',
+  'service *', 'initctl*', 'launchctl*', 'systemd-run*',
+  // Process termination — including this daemon and its own agents.
+  'kill *', 'kill-*', 'pkill*', 'killall*',
+  // Taking the host down.
+  'shutdown*', 'reboot*', 'halt*', 'poweroff*', 'init *', 'telinit*',
+  // Publishing is irreversible in a way installing is not: npm forbids reusing a version number.
+  'npm publish*', 'yarn publish*', 'pnpm publish*', 'npm unpublish*', 'npm deprecate*',
+  'npm owner*', 'npm access*', 'npm token*', 'cargo publish*', 'twine upload*', 'gem push*',
+  // Accounts, scheduled work and firewall state — persistent changes to the machine itself.
+  'useradd*', 'userdel*', 'usermod*', 'groupadd*', 'groupdel*', 'passwd*', 'chpasswd*',
+  'crontab *', 'at *', 'iptables*', 'ip6tables*', 'nft *', 'ufw *', 'firewall-cmd*',
+  // Destructive subcommands of otherwise readable tools.
+  'journalctl*--vacuum*', 'journalctl*--rotate*', 'journalctl*--flush*',
+  'docker rm*', 'docker system prune*', 'docker volume rm*', 'docker network rm*',
+  'docker kill*', 'docker stop*', 'docker-compose down*', 'docker compose down*',
+  // Elowen's own control plane: an inspecting agent must not stop the daemon it is running inside.
+  'elowen down*', 'elowen update*', 'elowen install*', 'elowen setup*',
+];
+
+/** The shell boundary for a context that must not CHANGE things: everything is permitted except the
+ *  destructive set above.
+ *
+ *  This was an allow-list until it proved to be the wrong shape. A read-only agent is not malicious — it
+ *  has been told to investigate and report — and enumerating in advance every command an investigation
+ *  might need is impossible. What the allow-list actually produced was agents blocked on ordinary work
+ *  (a build, a dependency install, fetching a page of documentation) that gave up and reported nothing
+ *  useful, while the genuinely dangerous commands were never the ones being reached for.
+ *
+ *  WHAT IT GUARANTEES: no deletion, no history rewrite, no privilege escalation, no service or host
+ *  control, no publishing. It does NOT prevent writing a file — redirection and `sed -i` were already
+ *  permitted before this change, so "read-only" has always named the toolset (no Write/Edit) rather than
+ *  an airtight write barrier.
+ *
+ *  Shared by the unattended read-only agent boundary (brain/agents/readOnlyBoundary.ts) and by plan mode
+ *  (brain/service/turnContextBuilder.ts), so the shell boundary has exactly ONE definition. Both layer
+ *  the operator's own DENY rules on afterwards, so a command an operator forbade stays forbidden. */
+/** Reading forms of commands DESTRUCTIVE_BASH_DENY had to deny wholesale, because the mutating and the
+ *  reading form share a verb. Applied after the denies, before the exec escapes. */
+const READ_ONLY_CLAWBACK_ALLOW: readonly string[] = [
+  'git stash list*', 'git config --get*', 'git config --list*', 'git config -l*',
+];
+
 export const NON_DESTRUCTIVE_BASH_RULES: readonly PermissionRule[] = [
-  { scope: 'bash', pattern: '*', action: 'deny' },
-  ...NON_DESTRUCTIVE_BASH_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
-  ...NON_DESTRUCTIVE_BASH_CLAWBACKS.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'deny' as const })),
+  { scope: 'bash', pattern: '*', action: 'allow' },
+  ...DESTRUCTIVE_BASH_DENY.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'deny' as const })),
+  ...READ_ONLY_CLAWBACK_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
+  ...EXEC_ESCAPE_DENY.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'deny' as const })),
 ];
 
 /** Built-in defaults, conservative but usable: everything not otherwise named is allowed (read-only

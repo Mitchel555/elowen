@@ -59,11 +59,23 @@ export interface TurnIdentity {
  *  set; deny is applied after allow. Undefined ToolPolicy = no restriction (every plugin tool). */
 export interface ToolPolicy { allow?: Set<string>; deny?: Set<string> }
 
+/** Whether an entry of a ToolPolicy list covers this tool name. Exact by default; a trailing `*` makes it
+ *  a prefix. The wildcard exists for tool families whose members are only known at runtime — bridged MCP
+ *  tools are named `mcp__<server>__<tool>`, so no static list can enumerate them. Applied to `deny` as
+ *  well as `allow`, because a wildcard that could only ever widen would be a way to slip past a deny. */
+function listCovers(list: ReadonlySet<string>, name: string): boolean {
+  if (list.has(name)) return true;
+  for (const entry of list) {
+    if (entry.endsWith('*') && name.startsWith(entry.slice(0, -1))) return true;
+  }
+  return false;
+}
+
 /** Whether a plugin tool name is permitted under a ToolPolicy (undefined policy → always permitted). */
 export function toolPermitted(name: string, tp: ToolPolicy | undefined): boolean {
   if (!tp) return true;
-  if (tp.allow && !tp.allow.has(name)) return false;
-  if (tp.deny && tp.deny.has(name)) return false;
+  if (tp.allow && !listCovers(tp.allow, name)) return false;
+  if (tp.deny && listCovers(tp.deny, name)) return false;
   return true;
 }
 

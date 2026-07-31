@@ -369,11 +369,12 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
   });
 
   it('throws when the call-level allow-list is disjoint from the type preset (empty intersection)', async () => {
-    // MemorySearch is not in READ_ONLY_AGENT_TOOLS, so preset ∩ ['MemorySearch'] = [] — the child would
-    // have no tool it could ever run. The host fails the spawn instead of muting it silently.
+    // Write is not in READ_ONLY_AGENT_TOOLS — and never can be, since withholding it is the whole point
+    // of the preset — so preset ∩ ['Write'] = [] and the child would have no tool it could ever run. The
+    // host fails the spawn instead of muting it silently.
     await expect(runTypedDelegate({
       admin: false, owner: true, projectIds: [3], parentSessionId: 'brain-owner',
-      agentType: 'explore', toolPolicy: { allow: ['MemorySearch'] }, permissionBoundary: null,
+      agentType: 'explore', toolPolicy: { allow: ['Write'] }, permissionBoundary: null,
     })).rejects.toThrow('delegated tool scope is empty');
   });
 

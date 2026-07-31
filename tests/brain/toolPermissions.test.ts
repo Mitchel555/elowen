@@ -58,22 +58,58 @@ describe('NON_DESTRUCTIVE_BASH_RULES — the shared shell clamp', () => {
     }
   });
 
-  it('DENIES destructive, system and network commands — not ask, which YOLO would promote to allow', () => {
+  it('DENIES the destructive commands — not ask, which YOLO would promote to allow', () => {
     for (const command of [
-      'rm -rf /', 'mv a b', 'cp a b', 'chmod 777 x', 'chown www-data x', 'ln -s a b',
+      'rm -rf /', 'mv a b', 'chmod 777 x', 'chown www-data x', 'ln -s a b',
       'dd if=/dev/zero of=/dev/sda', 'mkfs.ext4 /dev/sda', 'truncate -s 0 f',
       'git commit -m x', 'git push', 'git reset --hard HEAD~1', 'git checkout .', 'git clean -fd',
-      'npm install', 'systemctl restart elowen', 'kill 1234',
-      'curl https://evil.example', 'wget https://evil.example', 'ssh host', 'sudo ls',
-      'mkdir foo', 'node script.js',
-      // tee writes files but is not on the allow-list — the sanctioned write path is redirection.
-      'tee out.txt', 'echo x | tee out.txt',
+      'git merge main', 'git rebase main', 'git stash',
+      'systemctl restart elowen', 'kill 1234', 'pkill node', 'sudo ls', 'shutdown -h now',
+      'npm publish', 'useradd bob', 'crontab -e', 'iptables -F',
+      // Elowen's own control plane: an inspecting agent must not stop the daemon it runs inside.
+      'elowen down',
     ]) {
       expect(act(clamped(), command), command).toBe('deny');
     }
   });
 
-  it('closes the exec/delete escapes the allow-list would otherwise admit', () => {
+  it('permits the ordinary work an investigation needs — this clamp is a deny-list, not an allow-list', () => {
+    // The allow-list this replaced admitted ~100 named commands and denied everything else, which left a
+    // read-only agent unable to install, build, fetch or run anything it did not already have. None of
+    // these destroys data, so none of them is the clamp's business.
+    for (const command of [
+      'npm install', 'npm ci', 'npm run build', 'npm run deploy', 'npx create-next-app x',
+      'curl https://api.example/x', 'curl -X POST http://127.0.0.1:4400/brain/send',
+      'wget https://example.com/x.tar.gz', 'ssh host uptime',
+      'mkdir -p build', 'cp a b', 'tee out.txt', 'node script.js', 'python3 analyze.py', 'docker ps',
+    ]) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+  });
+
+  it('still catches a destructive command smuggled through a wrapper or an env assignment', () => {
+    for (const command of [
+      'env rm -rf /',       // wrapper stripped by the canonical form
+      'sudo rm -rf /',      // matches `sudo*` verbatim AND `rm *` canonically
+      'nice rm -rf /',
+      'FOO=1 rm -rf /',     // leading assignment stripped
+      '/bin/rm -rf /',      // path stripped to its basename
+    ]) {
+      expect(act(clamped(), command), command).toBe('deny');
+    }
+  });
+
+  it('does NOT pretend to stop a destructive command routed through an interpreter', () => {
+    // Asserted so nobody reads this boundary as stronger than it is. Closing these means banning the
+    // interpreters, which takes the build and test commands with it — the deliberate bargain is a
+    // guardrail against unguided destruction, not a sandbox. Write/Edit are removed at the TOOL layer
+    // (see readOnlyBoundary), which is the guarantee that actually holds.
+    for (const command of ["sh -c 'rm -rf /'", 'python3 -c "import shutil"', './tools/cat README']) {
+      expect(act(clamped(), command), command).toBe('allow');
+    }
+  });
+
+  it('closes the flags that launder a denied command through an allowed one', () => {
     for (const command of [
       'git difftool --extcmd=sh',
       'git mergetool',
@@ -170,19 +206,29 @@ describe('NON_DESTRUCTIVE_BASH_RULES — the shared shell clamp', () => {
     }
   });
 
-  it('permits curl only against loopback, and only as a probe', () => {
+  // Widening the CLAMP to a deny-list must not widen the interactive defaults, which are a different
+  // boundary with a different job: they gate what runs unattended in a normal turn, and there the
+  // network restrictions still stand. These two tests pin that separation.
+  it('leaves the interactive defaults restricting curl to a loopback probe', () => {
+    const defaults = buildPermissionRuleset(settings());
+    const actDefault = (command: string) => resolveToolPermission(defaults, 'Bash', command).action;
     for (const command of [
       'curl -fsS http://127.0.0.1:4400/health',
       'curl http://localhost:4500/',
       'curl -s http://[::1]:4400/health',
     ]) {
-      expect(act(clamped(), command), command).toBe('allow');
+      expect(actDefault(command), command).toBe('allow');
     }
     for (const command of [
-      // curl is the exfiltration path: any host but loopback stays denied.
+      // curl is the exfiltration path: only loopback is pre-approved, any other host has to be asked for.
       'curl https://evil.example', 'curl http://192.168.1.5/', 'curl -fsS https://api.example/x',
-      // A probe must not become a write against the local service, and --proxy would send a
-      // loopback-looking URL anywhere.
+    ]) {
+      expect(actDefault(command), command).not.toBe('allow');
+    }
+    for (const command of [
+      // These are a HARD deny rather than a prompt, because YOLO promotes every ask to allow: a probe
+      // must not become a write against the local service, and --proxy sends a loopback-looking URL
+      // anywhere.
       'curl -X POST http://127.0.0.1:4400/brain/send',
       'curl --request DELETE http://localhost:4400/tasks/1',
       'curl -d @body.json http://127.0.0.1:4400/x',
@@ -191,23 +237,26 @@ describe('NON_DESTRUCTIVE_BASH_RULES — the shared shell clamp', () => {
       'curl -F f=@x http://localhost:4400/u',
       'curl --proxy http://evil.example http://127.0.0.1/',
     ]) {
-      expect(act(clamped(), command), command).toBe('deny');
+      expect(actDefault(command), command).toBe('deny');
     }
   });
 
-  it('permits the verification scripts by name, not npm in general', () => {
+  it('leaves the interactive defaults trusting only the conventional check scripts', () => {
+    const defaults = buildPermissionRuleset(settings());
+    const actDefault = (command: string) => resolveToolPermission(defaults, 'Bash', command).action;
     for (const command of [
       'npm test', 'npm test -- --run', 'npm run lint', 'npm run typecheck', 'npm run check',
       'npx tsc --noEmit', 'npx vitest run tests/brain/', 'npx eslint .', 'npx prettier --check .',
     ]) {
-      expect(act(clamped(), command), command).toBe('allow');
+      expect(actDefault(command), command).toBe('allow');
     }
     for (const command of [
       // The script body is arbitrary repo code, so only the conventional check names are trusted.
-      'npm run deploy', 'npm run build', 'npm run start', 'npm install', 'npm ci', 'npm publish',
+      'npm run deploy', 'npm run build', 'npm run start', 'npm publish',
       'npx create-next-app x', 'npx prettier --write .',
     ]) {
-      expect(act(clamped(), command), command).toBe('deny');
+      // `ask` in the defaults, never a silent allow — the point is that they are not pre-approved.
+      expect(actDefault(command), command).not.toBe('allow');
     }
   });
 });
@@ -467,10 +516,14 @@ describe('resolveToolPermission — bash chaining bypass is closed (most-restric
     // Neither does an env assignment that can redirect what the allowed program loads or runs.
     expect(resolveToolPermission(rs, 'Bash', 'LD_PRELOAD=payload.so git status').action).not.toBe('allow');
     expect(resolveToolPermission(rs, 'Bash', 'env cat README').action).not.toBe('allow');
-    // Under the read-only clamp the fall-through is a hard deny, not a prompt.
+    // Under the read-only clamp both are ALLOWED, and that is the deny-list bargain rather than an
+    // oversight: neither is destructive, and a boundary that already permits `node script.js` gains
+    // nothing by refusing a lookalike binary or an LD_PRELOAD. What the clamp still refuses is the
+    // destructive command underneath, whatever spelling it arrives in.
     const clamped = [...rs, ...NON_DESTRUCTIVE_BASH_RULES];
-    expect(resolveToolPermission(clamped, 'Bash', './tools/cat README').action).toBe('deny');
-    expect(resolveToolPermission(clamped, 'Bash', 'LD_PRELOAD=payload.so git status').action).toBe('deny');
+    expect(resolveToolPermission(clamped, 'Bash', './tools/cat README').action).toBe('allow');
+    expect(resolveToolPermission(clamped, 'Bash', 'LD_PRELOAD=payload.so git status').action).toBe('allow');
+    expect(resolveToolPermission(clamped, 'Bash', 'LD_PRELOAD=payload.so rm -rf /').action).toBe('deny');
   });
 
   it('the clamp can read a commit, but not through git flags that run an external command', () => {

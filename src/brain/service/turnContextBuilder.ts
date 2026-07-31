@@ -273,7 +273,14 @@ export class TurnContextBuilder {
       ? base
       : {
         ...base,
-        ruleset: [...(base?.ruleset ?? []), ...NON_DESTRUCTIVE_BASH_RULES],
+        // The operator's own DENY rules are re-asserted LAST, the same ordering readOnlyBoundary uses.
+        // The shell boundary now opens with `bash * allow`, which would otherwise sit after — and so
+        // silently overturn — a command this operator had explicitly forbidden.
+        ruleset: [
+          ...(base?.ruleset ?? []),
+          ...NON_DESTRUCTIVE_BASH_RULES,
+          ...(base?.ruleset ?? []).filter((rule) => rule.action === 'deny'),
+        ],
         yolo: base?.yolo ?? false,
       };
     return {

@@ -18,7 +18,27 @@ import type { PluginLogger } from '../../plugins/api.js';
  *  unattended read-only agent needs to inspect; note the clamp denies the destructive set but still permits a
  *  redirection to write a file, so "read-only" here names the toolset, not an airtight write barrier. */
 export const READ_ONLY_AGENT_TOOLS: readonly string[] = [
-  'Read', 'Search', 'ListDir', 'FileInfo', 'GitStatus', 'CodebaseSearch', 'CodebaseStatus', 'Bash',
+  // Files and search.
+  'Read', 'Search', 'Grep', 'Glob', 'ListDir', 'FileInfo', 'GitStatus',
+  'CodebaseSearch', 'CodebaseStatus',
+  // Language server: type errors, definitions, references, symbols. Pure reads, and the difference
+  // between an agent that traces a call graph and one that greps for a name and guesses.
+  'LspDiagnostics', 'LspGoToDefinition', 'LspFindReferences', 'LspHover',
+  'LspDocumentSymbol', 'LspWorkspaceSymbol',
+  // Outside world and documentation.
+  'WebSearch', 'WebFetch', 'ElowenDocs', 'ScanCode',
+  // Control-plane and memory reads. Listed one by one rather than by prefix: the write halves of both
+  // families (ElowenCreateTask/UpdateTask/StopTask, MemoryAdd/Update/Delete/Merge) must stay out.
+  'ElowenListTasks', 'ElowenGetTask', 'ElowenTaskOutput', 'ElowenListMissions', 'ElowenListSessions',
+  'MemorySearch', 'MemoryListRecent', 'MemoryCategories',
+  // Its own checklist, and reading what earlier sub-agents concluded.
+  'TodoRead', 'TodoWrite', 'DelegateList', 'DelegateRead',
+  // Bridged MCP tools. A wildcard because the names are only known at runtime (they come from whichever
+  // servers the operator connected) and because there is no way to tell a reading MCP tool from a
+  // writing one by its name — this trusts the operator's choice of servers, as they already do when
+  // connecting one. ListMcpResources/ReadMcpResource are the read-only resource side.
+  'ListMcpResources', 'ReadMcpResource', 'mcp__*',
+  'Bash',
 ];
 
 /** How an agent's `tools:` frontmatter resolves. `read-only` → the read-only toolset above with a minted
