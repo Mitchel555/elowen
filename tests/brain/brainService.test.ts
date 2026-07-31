@@ -5354,6 +5354,40 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
     expect(opts.idleRolloverMs).toBe(Number.POSITIVE_INFINITY);
   });
 
+  // Regression: the continuation passed NO model selection, so a child whose channel had been evicted
+  // respawned on whatever an empty selection resolves to — the first configured provider's first model
+  // (providers.ts:342-346), which is list order and nobody's default. A sub-agent delegated to
+  // kimi-coding/k3 came back as an unrelated model, and the respawn wrote that over its session row.
+  it('resumes on the model the sub-agent actually ran on', async () => {
+    const { d, svc, sessionId, send } = await seed();
+    const child = 'brain-ch-subagent-sub-k3';
+    d.store.createSession({
+      id: child, userId: 1, model: 'k3', provider: 'kimi-coding',
+      parentSessionId: sessionId, delegatedAccess: SCOPE,
+    });
+    await svc.continueSubagent(sessionId, child, 'carry on', ADMIN_ACCESS);
+    const [opts] = send.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(opts.model).toEqual({ model: 'k3', provider: 'kimi-coding' });
+  });
+
+  it('omits the provider it never recorded, rather than inventing one', async () => {
+    const { d, svc, sessionId, send } = await seed();
+    const child = 'brain-ch-subagent-sub-noprov';
+    d.store.createSession({ id: child, userId: 1, model: 'k3', parentSessionId: sessionId, delegatedAccess: SCOPE });
+    await svc.continueSubagent(sessionId, child, 'carry on', ADMIN_ACCESS);
+    const [opts] = send.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(opts.model).toEqual({ model: 'k3' });
+  });
+
+  it('passes no selection for a legacy row with no model, leaving the old resolution in place', async () => {
+    const { d, svc, sessionId, send } = await seed();
+    const child = 'brain-ch-subagent-sub-legacy';
+    d.store.createSession({ id: child, userId: 1, model: '', parentSessionId: sessionId, delegatedAccess: SCOPE });
+    await svc.continueSubagent(sessionId, child, 'carry on', ADMIN_ACCESS);
+    const [opts] = send.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(opts.model).toBeUndefined();
+  });
+
   describe('a conversation can only reach its own children', () => {
     it('refuses a sub-agent belonging to a different conversation', async () => {
       const { d, svc, sessionId, send } = await seed();

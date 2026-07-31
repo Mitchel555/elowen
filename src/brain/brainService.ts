@@ -1247,7 +1247,9 @@ export class BrainService {
   /** Resolve the durable, immutable scope for an owner drill-in. Kept synchronous so the HTTP route can
    * reject a legacy/corrupt child before it fire-and-forgets the actual long-running continuation. */
   private delegatedContinuation(userId: number, sessionId: string): {
-    row: { id: string; user_id: number; parent_session_id: string | null };
+    // `model`/`provider` are carried because a continuation has to resume on the model the sub-agent
+    // actually ran on — see sendDelegated, where omitting them silently fell back to the account default.
+    row: { id: string; user_id: number; parent_session_id: string | null; model: string; provider: string };
     parentSessionId: string;
     scope: DelegatedExecutionScope;
   } {
@@ -1407,6 +1409,15 @@ export class BrainService {
       // a deny. A mid-run steer still executes under the already-running child's original turn scope.
       toolPolicy: delegatedToolPolicy(scope, deniedTools),
       identity: this.identity.forDelegatedTurn(scope, row.user_id),
+      // The child's OWN model, read back from its session row. Without this the continuation passed no
+      // selection at all, and a child whose channel had since been evicted respawned on whatever
+      // resolveBrainModelRoute picks from an EMPTY selection: the first configured provider's first
+      // model (providers.ts:342-346). That is list order, not anybody's default — in practice it meant a
+      // sub-agent delegated to kimi-coding/k3 came back as ai-coresynth-io/gpt-image-2, an image model
+      // that cannot hold a conversation at all. The respawn then WROTE that over the session row, so the
+      // original model was lost and a second continuation could not recover it either. A legacy row with
+      // no recorded model still falls through to the old behaviour, which is all that is left for it.
+      ...(row.model ? { model: { model: row.model, ...(row.provider ? { provider: row.provider } : {}) } } : {}),
       ownerSteer: true,
       idleRolloverMs: Number.POSITIVE_INFINITY,
       ...(opts?.internalSystem ? { internalSystem: opts.internalSystem } : {}),
