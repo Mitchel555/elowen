@@ -32,6 +32,7 @@ export interface DelegatedChildBridge {
     text: string,
     access: { admin: boolean; projectIds: number[]; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean },
     onEvent?: (e: SubagentProgressEvent) => void,
+    model?: string,
   ): Promise<string>;
   stop(parentSessionId: string, childSessionId: string): Promise<{ stopped: boolean }>;
 }
@@ -494,8 +495,11 @@ export interface PluginContext {
    *
    *  `onEvent` receives the child's live progress (tool starts, token usage) so the follow-up shows as a
    *  running sub-agent in the CLI rail / web table, the same way the first delegation does — omit it and
-   *  the continuation still runs, just invisibly. */
-  continueSubagent(sessionId: string, text: string, onEvent?: (e: SubagentProgressEvent) => void): Promise<string>;
+   *  the continuation still runs, just invisibly.
+   *
+   *  `model` optionally overrides the model the sub-agent runs on, as a `provider/model` string (value
+   *  from {@link listModels}); omit it to resume on the model recorded on the child's session row. */
+  continueSubagent(sessionId: string, text: string, onEvent?: (e: SubagentProgressEvent) => void, model?: string): Promise<string>;
   /** Stop a DIRECT sub-agent listed by {@link subagentRuns} — a runaway or no-longer-needed one — without
    *  touching its parent or siblings. The host anchors the lookup to the current turn's session, exactly
    *  like {@link readSubagent}; the plugin supplies only the child id and cannot widen the parent scope.

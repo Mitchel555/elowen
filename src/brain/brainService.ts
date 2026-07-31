@@ -43,11 +43,22 @@ import type { BrainDeps } from './brainDeps.js';
 import { processRegistry, type ProcessHandle, type ProcessInfo } from './processRegistry.js';
 import type { BrainStreamSnapshot } from './session/liveEventReplay.js';
 import { delegatedToolPolicy, scopeExceedsCurrentAccess, type DelegatedExecutionScope } from './delegatedScope.js';
+import type { BrainModelSelection } from './providers.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 import type { Model, Api } from '@earendil-works/pi-ai';
 import { CANONICAL_THINKING_LEVELS, canonicalThinkingLevel } from './modelCapabilities.js';
 
 export type { BrainDeps } from './brainDeps.js';
+
+/** Parse a `provider/model` spec into a brain model selection. Splits on the FIRST slash only — model
+ *  ids themselves may contain slashes (e.g. `ai-coresynth-io/deepseek/deepseek-v4-flash`), so a naive
+ *  `split('/')` would carve the model id in half. A bare id without a slash passes through as a model
+ *  with no provider, exactly like the stored-row form in sendDelegated. */
+function modelSelectionFromSpec(spec: string): BrainModelSelection {
+  const slash = spec.indexOf('/');
+  if (slash > 0) return { provider: spec.slice(0, slash), model: spec.slice(slash + 1) };
+  return { model: spec };
+}
 
 /** Per-user embedded brain lifecycle. Mirrors AdvisorService's shape so daemon wiring is familiar,
  *  but holds in-process PI AgentSessions (one per conversation) instead of spawning an external CLI.
@@ -1366,6 +1377,7 @@ export class BrainService {
     text: string,
     access: Parameters<typeof scopeExceedsCurrentAccess>[1],
     onEvent?: (e: BrainEvent) => void,
+    model?: string,
   ): Promise<string> {
     const row = this.d.store.getSession(childSessionId);
     if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
@@ -1381,6 +1393,7 @@ export class BrainService {
     return this.sendDelegated(row.user_id, childSessionId, text, {
       extraDeny: access.toolPolicy?.deny ?? [],
       ...(onEvent ? { onEvent } : {}),
+      ...(model ? { model } : {}),
     });
   }
 
@@ -1397,6 +1410,9 @@ export class BrainService {
       /** Additional tool denies from the CALLING turn, layered on the account's own. Only ever narrows;
        *  the captured allow-list stays authoritative (see ChannelSessionService.delegatedExecution). */
       extraDeny?: string[];
+      /** Explicit `provider/model` override for this continuation (from the tool's `model` argument).
+       *  Takes precedence over the model stored on the child's session row — see the send call below. */
+      model?: string;
       onEvent?: (e: BrainEvent) => void;
     },
   ): Promise<string> {
@@ -1428,7 +1444,12 @@ export class BrainService {
       // that cannot hold a conversation at all. The respawn then WROTE that over the session row, so the
       // original model was lost and a second continuation could not recover it either. A legacy row with
       // no recorded model still falls through to the old behaviour, which is all that is left for it.
-      ...(row.model ? { model: { model: row.model, ...(row.provider ? { provider: row.provider } : {}) } } : {}),
+      // An explicit `model` from the caller overrides the stored selection: the recorded model may have
+      // become unavailable since the child last ran, or the user consciously wants to switch. Without one
+      // the stored model stays authoritative — it is what the sub-agent originally ran on.
+      ...(opts?.model
+        ? { model: modelSelectionFromSpec(opts.model) }
+        : row.model ? { model: { model: row.model, ...(row.provider ? { provider: row.provider } : {}) } } : {}),
       ownerSteer: true,
       idleRolloverMs: Number.POSITIVE_INFINITY,
       ...(opts?.internalSystem ? { internalSystem: opts.internalSystem } : {}),

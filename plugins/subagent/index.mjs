@@ -691,12 +691,19 @@ export function register(ctx) {
         description: 'The follow-up. It is read by an agent that already has the task and its findings in '
           + 'context, so say what to do next — do not restate the original briefing.',
       }),
+      model: Type.Optional(Type.String({
+        description: 'Run the continuation on a DIFFERENT model (value from DelegateModels, e.g. '
+          + '"anthropic/claude-sonnet-5"). Omit it to resume on the model the sub-agent already ran on — '
+          + 'which is almost always what you want. Use it only when that model is unavailable or the user '
+          + 'explicitly asked to switch.',
+      })),
     }),
     execute: async (_id, p) => {
       const message = typeof p.message === 'string' ? p.message.trim() : '';
       if (!message) return ok('Error: `message` was empty. Say what the sub-agent should do next.');
       if (!ctx.continueSubagent) return ok('Error: continuing a sub-agent is not wired up on this server.');
       const childSessionId = String(p.id ?? '').trim();
+      const model = typeof p.model === 'string' ? p.model.trim() : '';
       // Mirror Delegate's live progress row so a follow-up shows as a RUNNING sub-agent in the rail, keyed
       // on THIS tool call (with the child's session for drill-in), instead of running invisibly. The child
       // already exists, so its session id is known up front — no `session` event needed to seed the row.
@@ -722,7 +729,7 @@ export function register(ctx) {
         // as live), so raising it first made every continuation refuse ITSELF — the child was reported busy
         // by the same call that was asking to continue it. continueSubagent runs all its guards
         // synchronously before its first await, so they see the registry as it was.
-        const continuation = ctx.continueSubagent(childSessionId, message, onEvent);
+        const continuation = ctx.continueSubagent(childSessionId, message, onEvent, model || undefined);
         push('running');
         const reply = await continuation;
         state.status = 'done';

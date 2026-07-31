@@ -5388,6 +5388,60 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
     expect(opts.model).toBeUndefined();
   });
 
+  describe('an explicit model override', () => {
+    it('overrides the model recorded on the session row', async () => {
+      const { d, svc, sessionId, send } = await seed();
+      const child = 'brain-ch-subagent-sub-switch';
+      d.store.createSession({
+        id: child, userId: 1, model: 'k3', provider: 'kimi-coding',
+        parentSessionId: sessionId, delegatedAccess: SCOPE,
+      });
+      await svc.continueSubagent(sessionId, child, 'carry on', ADMIN_ACCESS, undefined, 'anthropic/claude-sonnet-5');
+      const [opts] = send.mock.calls[0] as unknown as [Record<string, unknown>];
+      expect(opts.model).toEqual({ model: 'claude-sonnet-5', provider: 'anthropic' });
+    });
+
+    // Regression: the override is strictly opt-in. With no `model` argument the continuation must keep
+    // resuming on the model the sub-agent originally ran on, exactly as before this feature existed.
+    it('keeps the stored row model when none is given', async () => {
+      const { d, svc, sessionId, send } = await seed();
+      const child = 'brain-ch-subagent-sub-keep';
+      d.store.createSession({
+        id: child, userId: 1, model: 'k3', provider: 'kimi-coding',
+        parentSessionId: sessionId, delegatedAccess: SCOPE,
+      });
+      await svc.continueSubagent(sessionId, child, 'carry on', ADMIN_ACCESS);
+      const [opts] = send.mock.calls[0] as unknown as [Record<string, unknown>];
+      expect(opts.model).toEqual({ model: 'k3', provider: 'kimi-coding' });
+    });
+
+    // Model ids themselves may contain slashes — `ai-coresynth-io/deepseek/deepseek-v4-flash` splits into
+    // provider `ai-coresynth-io` and model `deepseek/deepseek-v4-flash`, not on every slash.
+    it('splits provider/model on the FIRST slash', async () => {
+      const { d, svc, sessionId, send } = await seed();
+      const child = 'brain-ch-subagent-sub-nested';
+      d.store.createSession({
+        id: child, userId: 1, model: 'k3', provider: 'kimi-coding',
+        parentSessionId: sessionId, delegatedAccess: SCOPE,
+      });
+      await svc.continueSubagent(sessionId, child, 'carry on', ADMIN_ACCESS, undefined, 'ai-coresynth-io/deepseek/deepseek-v4-flash');
+      const [opts] = send.mock.calls[0] as unknown as [Record<string, unknown>];
+      expect(opts.model).toEqual({ model: 'deepseek/deepseek-v4-flash', provider: 'ai-coresynth-io' });
+    });
+
+    it('passes a bare model id through with no provider', async () => {
+      const { d, svc, sessionId, send } = await seed();
+      const child = 'brain-ch-subagent-sub-bare';
+      d.store.createSession({
+        id: child, userId: 1, model: 'k3', provider: 'kimi-coding',
+        parentSessionId: sessionId, delegatedAccess: SCOPE,
+      });
+      await svc.continueSubagent(sessionId, child, 'carry on', ADMIN_ACCESS, undefined, 'claude-sonnet-5');
+      const [opts] = send.mock.calls[0] as unknown as [Record<string, unknown>];
+      expect(opts.model).toEqual({ model: 'claude-sonnet-5' });
+    });
+  });
+
   describe('a conversation can only reach its own children', () => {
     it('refuses a sub-agent belonging to a different conversation', async () => {
       const { d, svc, sessionId, send } = await seed();
