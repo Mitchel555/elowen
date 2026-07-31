@@ -9,6 +9,7 @@ import { defaultLifecycleDeps, runLifecycle, runApiCommand } from './commands.js
 import { callElowenApi } from '../shared/apiClient.js';
 import { menu } from './menu.js';
 import { interactiveLogin, launchChat } from './chat/launch.js';
+import { resolveToken } from './chat/token.js';
 import { urlHealthy, waitHealthy } from './launcher.js';
 import { flagValue as flag } from './flags.js';
 
@@ -101,6 +102,23 @@ const API_COMMANDS = new Set(['ls', 'ready', 'sessions', 'send', 'close', 'note'
 /** True only for verbs that need the daemon API up — the gate for ensureDaemon's auto-spawn. */
 export function needsDaemon(cmd: string | undefined): boolean {
   return cmd !== undefined && API_COMMANDS.has(cmd);
+}
+
+/** The env a dispatched command runs with, carrying the credential it will authenticate with.
+ *
+ *  Every task verb reaches the API through one token, resolved the same way `chat` and `run` already do:
+ *  the env first — the daemon injects ELOWEN_TOKEN into every agent it spawns, so an agent authenticates
+ *  exactly as before — and otherwise the token `elowen login` cached. Reading only the env is why a human
+ *  who HAD signed in still met a bare 401 on `elowen ls|api|ready`: nothing outside the chat path ever
+ *  consulted that cache, and the failure named neither the cause nor `elowen login`.
+ *
+ *  `chat` and `login` are exempt because they resolve — or create — their own credential. Gating them on
+ *  one already existing would make `elowen login` impossible to run without being logged in already. */
+export function cliEnvFor(
+  cmd: string | undefined, env: NodeJS.ProcessEnv, resolve: (e: NodeJS.ProcessEnv) => string = resolveToken,
+): NodeJS.ProcessEnv {
+  if (cmd === 'chat' || cmd === 'login') return env;
+  return { ...env, ELOWEN_TOKEN: resolve(env) };
 }
 
 async function ensureDaemon() {
@@ -352,8 +370,9 @@ export async function main() {
   // Only API commands may auto-start the daemon; an unknown verb errors out without spawning anything.
   if (!needsDaemon(argv[0])) { console.error(USAGE); process.exit(1); }
   await ensureDaemon();
-  const c = new ElowenClient(BASE, (process.env.ELOWEN_TOKEN));
-  await run(argv, c, process.env);
+  const env = cliEnvFor(argv[0], process.env);
+  const c = new ElowenClient(BASE, env.ELOWEN_TOKEN);
+  await run(argv, c, env);
 }
 
 // Run only when invoked as the binary, not when imported (e.g. by tests). A global npm install exposes
