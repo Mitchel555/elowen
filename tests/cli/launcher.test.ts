@@ -153,7 +153,10 @@ describe('cli/launcher.stop', () => {
     // "still answering" on the first probe of each target, silent from then on — proves stop() actually
     // waits for the port to go quiet instead of clearing state right after the SIGTERM.
     const fetchFn = (async () => { calls++; return calls <= 2 ? new Response('ok', { status: 200 }) : new Response('', { status: 503 }); }) as unknown as typeof fetch;
-    await stop(env, { kill: (pid) => killed.push(pid), isTracked: () => true, fetch: fetchFn, pollMs: 1, attempts: 5 });
+    // Ours for the two checks that pick whom to signal, gone from then on: the SIGTERM lands and the
+    // process exits. The port outliving the pid is exactly what this test is about.
+    let identity = 0;
+    await stop(env, { kill: (pid) => killed.push(pid), isTracked: () => ++identity <= 2, fetch: fetchFn, pollMs: 1, attempts: 5 });
     expect(killed.sort((a, b) => a - b)).toEqual([deadPids.web.pid, deadPids.daemon.pid].sort((a, b) => a - b));
     expect(readState(env)).toBeNull();
   });
@@ -161,8 +164,27 @@ describe('cli/launcher.stop', () => {
     writeState(env, deadPids); // daemon tracked; web recycled → disowned
     const killed: number[] = [];
     const fetchFn = (async () => new Response('', { status: 503 })) as unknown as typeof fetch; // nothing answers
-    await stop(env, { kill: (pid) => killed.push(pid), isTracked: (pid) => pid === deadPids.daemon.pid, fetch: fetchFn, pollMs: 1, attempts: 3 });
+    // The daemon is ours on the signalling check and gone once signalled; the web pid is disowned outright.
+    let seen = 0;
+    await stop(env, { kill: (pid) => killed.push(pid), isTracked: (pid) => pid === deadPids.daemon.pid && ++seen <= 1, fetch: fetchFn, pollMs: 1, attempts: 3 });
     expect(killed).toEqual([deadPids.daemon.pid]);
+    expect(readState(env)).toBeNull();
+  });
+  // The install-smoke regression. Every other test here uses pids that are never alive, so the wait loop
+  // hinged entirely on the injected port signal and a bare-liveness check could not be caught. Here the pid
+  // IS alive — as a zombie's is: it has exited, but the container's PID 1 is an ordinary script rather than
+  // an init, so nobody reaps it and `kill(pid, 0)` keeps succeeding. `down` must read identity, not
+  // liveness, or it waits out its whole budget against a service that died instantly.
+  it('stops waiting once the pid is no longer our service, even though the pid is still alive', async () => {
+    const zombie: RunState = { daemon: { pid: process.pid, port: 4400 }, web: { pid: 2147483645, port: 4500 }, version: '1.1.1', startedAt: '2026-06-22T00:00:00Z' };
+    writeState(env, zombie);
+    let checks = 0;
+    // Ours on the check that decides whom to signal, disowned from the next one on — a process that dies
+    // on the SIGTERM and leaves its pid number behind.
+    const isTracked: IsTracked = () => ++checks <= 1;
+    const fetchFn = (async () => new Response('', { status: 503 })) as unknown as typeof fetch;
+    // kill is a no-op on purpose: this test's pid is the test runner's own.
+    await stop(env, { kill: () => { /* never signal ourselves */ }, isTracked, fetch: fetchFn, pollMs: 1, attempts: 25 });
     expect(readState(env)).toBeNull();
   });
   it('is a no-op when nothing is running', async () => {
@@ -257,7 +279,8 @@ describe('cli/launcher.start', () => {
   it('spawns a fresh pair once stop() has cleared the wedged instance — the down→up recovery', async () => {
     writeState(env, deadPids);
     const silent = (async () => new Response('', { status: 503 })) as unknown as typeof fetch;
-    await stop(env, { kill: () => { /* already gone */ }, isTracked: () => true, fetch: silent, pollMs: 1, attempts: 3 });
+    let identity = 0;
+    await stop(env, { kill: () => { /* already gone */ }, isTracked: () => ++identity <= 2, fetch: silent, pollMs: 1, attempts: 3 });
     expect(readState(env)).toBeNull();
 
     const { spawn, fetch: fetchFn } = trackedHealthMock();

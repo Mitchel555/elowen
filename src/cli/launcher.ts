@@ -162,8 +162,14 @@ export async function stop(env: NodeJS.ProcessEnv, deps: StopDeps = {}): Promise
     pending.push({ mark, svc, path });
   }
 
-  const stillUp = async (t: { svc: Svc; path: string }): Promise<boolean> =>
-    isAlive(t.svc.pid) || await portHealthy(fetchFn, t.svc.port, t.path);
+  // IDENTITY, not bare liveness — the same predicate that decided to signal it, for the same reason one
+  // line up. `isAlive` is `kill(pid, 0)`, which SUCCEEDS on a zombie: a process that has exited but whose
+  // parent has not reaped it still owns its pid. That is the normal state of a detached daemon inside a
+  // container whose PID 1 is an ordinary script rather than an init, so `down` waited out its whole budget
+  // and then reported a daemon that had in fact died instantly. A zombie's /proc/<pid>/cmdline is empty,
+  // so the identity check reads it as "not ours" — correctly, since it is no longer running anything.
+  const stillUp = async (t: { mark: ServiceMark; svc: Svc; path: string }): Promise<boolean> =>
+    isTracked(t.svc.pid, t.mark) || await portHealthy(fetchFn, t.svc.port, t.path);
 
   for (let i = 0; i < attempts && pending.length; i++) {
     if (i > 0) await new Promise((r) => setTimeout(r, pollMs));
