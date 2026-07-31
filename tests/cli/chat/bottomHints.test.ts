@@ -3,7 +3,7 @@ import { visibleWidth } from '@earendil-works/pi-tui';
 import { createKeymap } from '../../../src/cli/chat/keys.js';
 import {
   bottomHintItems, fitSegments, fitVariants,
-} from '../../../src/cli/chat/chatComposition.js';
+} from '../../../src/cli/chat/composeLines.js';
 import { StatusBar } from '../../../src/cli/chat/components.js';
 
 const seg = (text: string, priority: number): { text: string; priority: number } => ({ text, priority });

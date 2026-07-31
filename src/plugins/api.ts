@@ -14,7 +14,9 @@ export type { DelegatedChildSummary };
  *  cannot address another conversation's children. */
 /** Low-frequency progress of a sub-agent turn — the subset of a BrainEvent a delegating plugin distils
  *  into its live progress row (tool starts, step/idle token usage, the child's session id). Passed to a
- *  continuation so a follow-up surfaces as a running sub-agent exactly like the first delegation did. */
+ *  continuation so a follow-up surfaces as a running sub-agent exactly like the first delegation did. The
+ *  host narrows every child BrainEvent onto this exact shape at the boundary (see
+ *  DelegatedSessionService), so the plugin never observes a raw event that outgrew this contract. */
 export interface SubagentProgressEvent {
   type: string;
   name?: string;

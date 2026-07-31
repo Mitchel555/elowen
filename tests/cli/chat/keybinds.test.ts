@@ -3,8 +3,11 @@ import {
   chordFromInput, createKeymap, createLeaderState, keybindDefault, keybindRows, parseKeybind, KEYBIND_ACTIONS,
 } from '../../../src/cli/chat/keys.js';
 import {
-  bottomHintItems, escalationPress, INTERRUPT_CONFIRM_MS, interruptPress, noticeAction, startScreenHintItems, quitHint, modelMetaLine,
+  escalationPress, INTERRUPT_CONFIRM_MS, interruptPress, noticeAction,
 } from '../../../src/cli/chat/chatComposition.js';
+import {
+  bottomHintItems, modelMetaLine, quitHint, startScreenHintItems,
+} from '../../../src/cli/chat/composeLines.js';
 
 // The live footer/start screen render through `*Items` + `fitSegments`; these mirror the removed
 // convenience joiners so the content assertions below still exercise the keymap-driven item builders.

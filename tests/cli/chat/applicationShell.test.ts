@@ -1083,6 +1083,42 @@ describe('chat application shell ownership', () => {
     composition.dispose();
   });
 
+  it('keeps the background-process card when the rail cannot fit (narrow terminal)', async () => {
+    const h = compositionHarness({ columns: 100, rows: 24, turns: 4 });
+    h.rt.cards = [{
+      id: 'bg-processes', title: 'Background processes (2)', pinned: true,
+      items: [
+        { text: 'sleep 300 &', status: 'in_progress' },
+        { text: 'npm run dev &', status: 'in_progress' },
+      ],
+    }];
+    const composition = makeComposition(h);
+    composition.resume();
+    composition.renderForced('test:bg-processes-narrow');
+    await vi.runOnlyPendingTimersAsync();
+
+    const frame = renderMountedRoot(h).map(terminalPlainText).join('\n');
+    expect(frame).toContain('Background processes');
+    expect(frame).toContain('sleep 300');
+    composition.dispose();
+  });
+
+  it('drops the background-process card while the telemetry rail is on screen', async () => {
+    const h = compositionHarness({ columns: 120, rows: 24, turns: 4 });
+    h.rt.cards = [{
+      id: 'bg-processes', title: 'Background processes (2)', pinned: true,
+      items: [{ text: 'sleep 300 &', status: 'in_progress' }],
+    }];
+    const composition = makeComposition(h);
+    composition.resume();
+    composition.renderForced('test:bg-processes-wide');
+    await vi.runOnlyPendingTimersAsync();
+
+    const frame = renderMountedRoot(h).map(terminalPlainText).join('\n');
+    expect(frame).not.toContain('Background processes');
+    composition.dispose();
+  });
+
   it('shows compaction as active work in the composer row until the daemon closes it', async () => {
     const h = compositionHarness({ columns: 100, rows: 24, turns: 6 });
     h.rt.transcript.apply({ type: 'idle' });

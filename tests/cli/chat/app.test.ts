@@ -517,7 +517,7 @@ describe('mode toggle key', () => {
 
 describe('statusline', () => {
   it('renders only the toggled parts and hides entirely when the plugin is off', async () => {
-    const { statusline } = await import('../../../src/cli/chat/chatComposition.js');
+    const { statusline } = await import('../../../src/cli/chat/composeLines.js');
     const usage = { tokens: 34_500, contextWindow: 200_000, percent: 17.25, totalTokens: 1_234_567, cost: 0.4218 };
     expect(statusline(null, usage, 'opus')).toBe('');
     expect(statusline({}, usage, 'opus')).toBe('');

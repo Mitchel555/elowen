@@ -4,6 +4,7 @@ import { realpathSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BrainService } from '../../src/brain/brainService.js';
+import type { SubagentProgressEvent } from '../../src/plugins/api.js';
 import { currentSubagentEmitter, currentTurnModel, currentWorkDir } from '../../src/plugins/policyContext.js';
 import { personalityText } from '../../src/brain/personality.js';
 import { NO_REPLY_NUDGE } from '../../src/brain/messageView.js';
@@ -5352,6 +5353,28 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
     expect(opts.delegatedAccess).toMatchObject({ admin: true, owner: true });
     // Never roll the transcript over: continuing IS the reason it is still around.
     expect(opts.idleRolloverMs).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  // The plugin contract promises only type/name/detail/sessionId/usage.totalTokens — the child's full
+  // BrainEvent stream (icons, step counters, costs, …) must never cross the boundary. The host narrows
+  // every event onto the declared shape, so a BrainEvent that outgrew the contract cannot leak a field
+  // the plugin never declared (and a future BrainEvent change breaks the narrowing's typecheck instead).
+  it('narrows the child BrainEvent stream onto the declared progress contract before the plugin callback sees it', async () => {
+    const { svc, sessionId, child, send } = await seed();
+    const received: SubagentProgressEvent[] = [];
+    const continuation = svc.continueSubagent(sessionId, child, 'watch', ADMIN_ACCESS, (e) => { received.push(e); });
+    const [opts] = send.mock.calls[0] as unknown as [{ onEvent?: (e: unknown) => void }];
+    opts.onEvent?.({ type: 'tool', name: 'Bash', detail: 'ls -la', icon: 'x', id: 'call-1', command: 'ls' });
+    opts.onEvent?.({ type: 'step', step: 3, maxSteps: 10, usage: { totalTokens: 42, cost: 0.1 } });
+    opts.onEvent?.({ type: 'session', sessionId: 'brain-ch-subagent-sub-1' });
+    opts.onEvent?.({ type: 'text', delta: 'ignored by the plugin' });
+    await continuation;
+    expect(received).toEqual([
+      { type: 'tool', name: 'Bash', detail: 'ls -la' },
+      { type: 'step', usage: { totalTokens: 42 } },
+      { type: 'session', sessionId: 'brain-ch-subagent-sub-1' },
+      { type: 'text' },
+    ]);
   });
 
   // Regression: the continuation passed NO model selection, so a child whose channel had been evicted
