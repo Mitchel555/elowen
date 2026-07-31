@@ -341,8 +341,15 @@ export async function buildApp(opts: BuildOpts) {
   const cliArgv = (process.env.ELOWEN_CLI) ? process.env.ELOWEN_CLI.split(' ') : ['node', cliPath];
   // Reuse the existing agent token across restarts so a daemon restart doesn't 401 in-flight agents
   // mid-task (they hold the token they were spawned with); only mints fresh when none is valid.
-  const serviceToken = users.count() > 0 ? users.ensureAgentToken(users.list()[0]!.id) : '';
-  const elowenCli = { cli, url: `http://localhost:${(process.env.ELOWEN_PORT) ?? 4400}`, token: serviceToken };
+  const serviceUserId = users.count() > 0 ? users.list()[0]?.id ?? null : null;
+  const serviceToken = serviceUserId !== null ? users.ensureAgentToken(serviceUserId) : '';
+  // Per-task agent credential: a worker is spawned with a token bound to the task it was spawned for,
+  // so the API can refuse it on any other task — one shared token cannot tell two workers apart inside
+  // the same project. Only ids that are REAL task rows bind; the overseer (`overseer-<mission>`), the
+  // pilot (a plan job id) and the advisor have no task row and keep the unbound service token.
+  const tokenForTask = (taskId: string): string | undefined =>
+    serviceUserId !== null && tasks.get(taskId) ? users.ensureAgentTokenForTask(serviceUserId, taskId) : undefined;
+  const elowenCli = { cli, url: `http://localhost:${(process.env.ELOWEN_PORT) ?? 4400}`, token: serviceToken, tokenForTask };
   const spawn = new SpawnService({ tmux, agents, elowen: elowenCli, providers: (program) => config.get().providers[program], prompts, tddMode: () => config.get().autopilot.tddMode });
   const bus = new EventBus();
   const events = new EventStore(db);

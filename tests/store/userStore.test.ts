@@ -48,8 +48,25 @@ describe('UserStore', () => {
     const u = users.create('a', 'x');
     const full = users.issueToken(u.id);                       // default scope
     const agent = users.issueToken(u.id, 'agent');
-    expect(users.principalForToken(full)).toEqual({ user: expect.objectContaining({ id: u.id }), scope: 'full' });
+    expect(users.principalForToken(full)).toEqual({ user: expect.objectContaining({ id: u.id }), scope: 'full', taskId: null });
     expect(users.principalForToken(agent)?.scope).toBe('agent');
+  });
+  it('binds a per-task agent token to its task and keeps it apart from the shared service token', () => {
+    const u = users.create('a', 'x');
+    const shared = users.ensureAgentToken(u.id);
+    const forA = users.ensureAgentTokenForTask(u.id, 'task-a');
+    const forB = users.ensureAgentTokenForTask(u.id, 'task-b');
+    expect(new Set([shared, forA, forB]).size).toBe(3);
+    expect(users.principalForToken(forA)).toMatchObject({ scope: 'agent', taskId: 'task-a' });
+    expect(users.principalForToken(shared)?.taskId).toBeNull();
+    // Reused within TTL, so a re-spawn / daemon restart keeps the same worker credential valid.
+    expect(users.ensureAgentTokenForTask(u.id, 'task-a')).toBe(forA);
+    // A boot-time ensureAgentToken must neither return nor sweep away a live worker's bound token.
+    expect(users.ensureAgentToken(u.id)).toBe(shared);
+    users.revokeToken(shared);
+    expect(users.ensureAgentToken(u.id)).not.toBe(forA);
+    expect(users.principalForToken(forA)?.taskId).toBe('task-a');
+    expect(users.principalForToken(forB)?.taskId).toBe('task-b');
   });
   it('ensureAgentToken reuses an existing valid agent token across restarts, mints when absent', () => {
     const u = users.create('a', 'x');

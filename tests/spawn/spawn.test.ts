@@ -27,6 +27,18 @@ describe('SpawnService', () => {
     expect(tmux.commandFor('elowen-Nova')).not.toContain('s3cr3t-tok');
   });
 
+  it('hands a worker the token minted for ITS task, and a reasoning agent the shared one', async () => {
+    const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
+    const agents = new AgentStore(db); const tmux = new FakeTmuxDriver();
+    // Only real task ids bind; an overseer/pilot id has no task row, so the resolver returns undefined.
+    const tokenForTask = (taskId: string) => taskId === 'elowen-7' ? 'tok-for-7' : undefined;
+    const svc = new SpawnService({ tmux, agents, elowen: { cli: 'elowen', url: 'http://x', token: 'shared-tok', tokenForTask } });
+    await svc.launch({ projectId: 1, projectPath: '/o', taskId: 'elowen-7', agentName: 'Nova', spec: { program: 'opencode', model: 'm' } });
+    expect(tmux.spawnEnvFor('elowen-Nova')?.ELOWEN_TOKEN).toBe('tok-for-7');
+    await svc.launch({ projectId: 1, projectPath: '/o', taskId: 'overseer-m1', agentName: 'overseer-m1', spec: { program: 'claude-code', model: 'opus' }, rawPrompt: 'WATCH' });
+    expect(tmux.spawnEnvFor('elowen-overseer-m1')?.ELOWEN_TOKEN).toBe('shared-tok');
+  });
+
   it('merges caller extraEnv into the tmux session env (reasoning agents: ELOWEN_PLAN_JOB etc.)', async () => {
     const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
     const agents = new AgentStore(db); const tmux = new FakeTmuxDriver();

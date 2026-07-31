@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS auth_tokens (
   token TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
   scope TEXT NOT NULL DEFAULT 'full',
+  -- The task an 'agent'-scoped token was minted for; NULL for every other token (see db.ts).
+  task_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS user_projects (

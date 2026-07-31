@@ -61,6 +61,10 @@ export function openDb(path: string): Db {
   // Token scope: spawned agents get a 'agent'-scoped token (worker/overseer/pilot verbs only),
   // never the admin's full token. Pre-existing rows default to 'full' (interactive user sessions).
   addColumn(db, 'auth_tokens', 'scope', "TEXT NOT NULL DEFAULT 'full'");
+  // The task an 'agent'-scoped token was minted for. A worker spawned on task A must not be able to
+  // mutate task B through the API, and project-level gating cannot see an intra-project crossing.
+  // NULL = unbound (interactive tokens, and the shared service token the overseer/pilot still use).
+  addColumn(db, 'auth_tokens', 'task_id', 'TEXT');
   // Timeline drill-down: events carry the project they belong to (derived from the task at write
   // time) so the UI can scope/link an event to its repo. Nullable — mission/signal events have none.
   // The index is created here (not in schema.sql) so it runs *after* the column exists on migrated DBs.

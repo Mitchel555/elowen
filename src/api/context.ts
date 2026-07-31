@@ -20,8 +20,9 @@ import type { Context, Hono } from 'hono';
 import type { User, TokenScope } from '../store/userStore.js';
 import type { ServerDeps } from './deps.js';
 
-/** The per-request Hono variables the auth middleware sets — the single source for `c.get('user')` etc. */
-type ElowenVariables = { user: User; token: string; tokenScope: TokenScope };
+/** The per-request Hono variables the auth middleware sets — the single source for `c.get('user')` etc.
+ *  `agentTask` is the task an agent token was minted for (null for every unbound token). */
+type ElowenVariables = { user: User; token: string; tokenScope: TokenScope; agentTask: string | null };
 
 /** The daemon's Hono app, typed with the per-request variables the auth middleware sets. Shared by
  *  `createServer` and every route-family registrar so they all agree on `c.get('user')` etc. */

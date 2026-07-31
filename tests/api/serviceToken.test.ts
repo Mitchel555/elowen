@@ -30,7 +30,7 @@ function setup() {
     users, projects: new ProjectStore(db), userProjects: new UserProjectStore(db), planJobs,
   });
   return {
-    app, tasks, tmux, planJobs,
+    app, tasks, tmux, planJobs, users, admin,
     adminTok: users.issueToken(admin.id),
     agentTok: users.ensureAgentToken(admin.id), // agent-scoped token owned by the (admin) service user
   };
@@ -122,6 +122,57 @@ describe('S51 — spawned agent service token is capability-scoped, not admin', 
   it('the same admin user with a FULL token still reaches the admin surface', async () => {
     const { app, adminTok } = setup();
     expect((await app.request('/users', auth(adminTok))).status).toBe(200);
+  });
+});
+
+describe('an agent token is bound to the task it was spawned for', () => {
+  /** Two live workers in the SAME project — the crossing the project gate structurally cannot see. */
+  function twoWorkers() {
+    const s = setup();
+    for (const [id, agent] of [['task-a', 'Alpha'], ['task-b', 'Beta']] as const) {
+      s.tasks.create({ id, project_id: 1, title: id });
+      s.tasks.setAgent(id, agent);
+      s.tasks.setStatus(id, 'in_progress');
+    }
+    return { ...s, aTok: s.users.ensureAgentTokenForTask(s.admin.id, 'task-a') };
+  }
+
+  it('refuses every task verb aimed at a sibling task in the same project', async () => {
+    const { app, tasks, aTok } = twoWorkers();
+    expect((await app.request('/tasks/task-b', patch(aTok, { status: 'closed', outcome: 'ok' }))).status).toBe(403);
+    expect((await app.request('/tasks/task-b/ask', post(aTok, { text: 'hijack' }))).status).toBe(403);
+    expect((await app.request('/tasks/task-b/guide', auth(aTok))).status).toBe(403);
+    expect(tasks.get('task-b')?.status).toBe('in_progress'); // the sibling really is untouched
+  });
+
+  it('still allows everything the worker legitimately does on its OWN task', async () => {
+    const { app, tasks, aTok } = twoWorkers();
+    expect((await app.request('/tasks/task-a/guide', auth(aTok))).status).toBe(200);
+    expect((await app.request('/tasks/task-a/ask', post(aTok, { text: 'A or B?' }))).status).toBe(200);
+    expect((await app.request('/tasks/task-a/ask/bogus?timeoutMs=1', auth(aTok))).status).not.toBe(403);
+    // read-only listings carry no task id and stay reachable (`elowen ls` / `ready` / `sessions`)
+    expect((await app.request('/tasks', auth(aTok))).status).toBe(200);
+    expect((await app.request('/tasks/ready', auth(aTok))).status).toBe(200);
+    expect((await app.request('/sessions', auth(aTok))).status).toBe(200);
+    expect((await app.request('/tasks/task-a', patch(aTok, { status: 'closed', outcome: 'ok' }))).status).toBe(200);
+    expect(tasks.get('task-a')?.status).toBe('closed');
+  });
+
+  it('lets a mission phase close its own parent epic, but not another epic', async () => {
+    const s = setup();
+    s.tasks.create({ id: 'epic-1', project_id: 1, title: 'mine', type: 'epic' });
+    s.tasks.create({ id: 'epic-2', project_id: 1, title: 'someone else', type: 'epic' });
+    s.tasks.create({ id: 'phase-1', project_id: 1, title: 'final phase', parent_id: 'epic-1' });
+    s.tasks.setAgent('phase-1', 'Alpha');
+    s.tasks.setStatus('phase-1', 'in_progress');
+    const tok = s.users.ensureAgentTokenForTask(s.admin.id, 'phase-1');
+    expect((await s.app.request('/tasks/epic-2', patch(tok, { status: 'closed', outcome: 'ok' }))).status).toBe(403);
+    expect((await s.app.request('/tasks/epic-1', patch(tok, { status: 'closed', outcome: 'ok' }))).status).toBe(200);
+  });
+
+  it('leaves the unbound service token (overseer/pilot) reaching what it did before', async () => {
+    const { app, agentTok } = twoWorkers();
+    expect((await app.request('/tasks/task-b', patch(agentTok, { status: 'closed', outcome: 'ok' }))).status).toBe(200);
   });
 });
 

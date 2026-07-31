@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ZodError } from 'zod';
-import type { User, TokenScope } from '../store/userStore.js';
 import { createRouteContext, type ElowenApp } from './context.js';
 import { registerRoutes } from './routes/index.js';
 import { bodyLimitBytes, formatZodError } from './validation.js';
@@ -19,10 +18,10 @@ const MAX_LOGIN_BODY_BYTES = 16 * 1024;
  *  `/setup`), then register every route family through {@link registerRoutes} (which installs the
  *  auth/tenancy guards first). All per-server state and access helpers live on the shared route
  *  context; the families themselves are in src/api/routes/*. */
-export function createServer(d: ServerDeps): Hono<{ Variables: { user: User; token: string; tokenScope: TokenScope } }> {
+export function createServer(d: ServerDeps): ElowenApp {
   const ctx = createRouteContext(d);
   const { log } = ctx;
-  const app: ElowenApp = new Hono<{ Variables: { user: User; token: string; tokenScope: TokenScope } }>();
+  const app: ElowenApp = new Hono();
   app.use('*', cors());
   app.use('/auth/login', bodyLimitBytes(MAX_LOGIN_BODY_BYTES));
   // Single source of truth for malformed-body handling: most POST/PATCH routes call `c.req.json()`
