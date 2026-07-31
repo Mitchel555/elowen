@@ -50,6 +50,26 @@ describe('ProjectsView', () => {
     expect(screen.getByTestId('spatial-workspace-layout')).not.toContainElement(screen.getByRole('dialog', { name: 'Code editor' }));
   });
 
+  // The row's hover menu and the right-click menu are two renderings of ONE action list. They used to be two
+  // hand-maintained copies, so an action added to one silently went missing from the other.
+  it('offers the same project actions in the row menu and the right-click menu', async () => {
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><ToastProvider><ProjectsView /></ToastProvider></Wrapper>);
+    const row = (await screen.findByText('elowen')).closest('[role="row"]');
+    if (!row) throw new Error('project row not rendered');
+
+    fireEvent.click(screen.getByRole('button', { name: 'elowen: Actions' }));
+    const hoverActions = (await screen.findAllByRole('menuitem')).map((item) => item.textContent);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryAllByRole('menuitem')).toHaveLength(0));
+
+    fireEvent.contextMenu(row);
+    const contextActions = (await screen.findAllByRole('menuitem')).map((item) => item.textContent);
+
+    expect(hoverActions).toEqual(['Open editor', 'Edit project', 'Copy path', 'Remove project']);
+    expect(contextActions).toEqual(hoverActions);
+  });
+
   it('filters the project register without losing the workspace layout', async () => {
     server.use(http.get('*/api/projects', () => HttpResponse.json([
       { id: 1, slug: 'elowen', path: '/var/www/elowen', notes: '', icon: '', pr_enabled: null },
