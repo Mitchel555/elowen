@@ -1,6 +1,7 @@
 import type { Db } from './db.js';
 import type { WorkflowNode, WorkflowUpdate } from '../brain/events.js';
 import { isSubagentSession } from '../brain/sessionId.js';
+import { logger } from '../shared/logger.js';
 
 /** Validated latest UI state of one delegated child. The child id is a first-class indexed column in
  *  brain_subagent_runs; this JSON state contains only bounded display data. */
@@ -458,6 +459,27 @@ export class BrainDelegationStore {
     return rows.map((row) => row.id);
   }
 
+  /** Terminalize the `running` rows of one parent whose child relation no longer resolves — the child
+   *  session is gone, changed hands, or is no longer a direct child of this parent. Such a row is
+   *  invisible to getSubagentRuns (which JOINs the live relation), so the boot reconcile's per-run sweep
+   *  cannot reach it, and upsertSubagentRun would refuse to repair it for exactly the same reason: the
+   *  delegation would claim `running` in the DB forever. Only the status is rewritten, so the rest of the
+   *  recorded state survives. `json_valid` guards the rewrite — `json_set` on a malformed row yields NULL,
+   *  which would destroy the state instead of repairing it. Returns how many rows were repaired. */
+  terminalizeOrphanedSubagentRuns(parentSessionId: string): number {
+    return this.db.prepare(
+      `UPDATE brain_subagent_runs
+          SET state = json_set(state, '$.status', 'error'), updated_at = datetime('now')
+        WHERE parent_session_id = ?
+          AND json_valid(state) AND json_extract(state, '$.status') = 'running'
+          AND NOT EXISTS (
+            SELECT 1 FROM brain_sessions p
+              JOIN brain_sessions c ON c.id = brain_subagent_runs.child_session_id
+             WHERE p.id = brain_subagent_runs.parent_session_id
+               AND c.parent_session_id = p.id AND c.user_id = p.user_id)`
+    ).run(parentSessionId).changes;
+  }
+
   /** Persist a terminal child result before any attempt to wake the parent. Stable result/tool ids make
    * duplicate plugin callbacks idempotent; the durable direct-child relation is revalidated here. */
   enqueueSubagentResult(parentSessionId: string, raw: unknown): boolean {
@@ -547,8 +569,16 @@ export class BrainDelegationStore {
       // `null` throws and kills the WHOLE drain, leaving every pending result of this parent undelivered
       // over one bad row. Only an object payload is usable; anything else drops just its own row.
       let parsed: unknown;
-      try { parsed = JSON.parse(String(row.payload)); } catch { return []; }
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+      try { parsed = JSON.parse(String(row.payload)); } catch { parsed = undefined; }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        // The row stays pending but can never be delivered, so without this line the parent simply never
+        // hears back and nothing distinguishes that from a child still working. Mirrors the ingress-side
+        // "dropped sub-agent result" error in turnRunner: a lost result is never silent.
+        logger('brain-store').warn(
+          `unusable payload for pending delegated result ${String(row.result_id)} (parent ${parentSessionId}, tool ${String(row.tool_call_id)}) — dropped from the drain`
+        );
+        return [];
+      }
       const payload = parsed as Record<string, unknown>;
       // A workflow row has no child session and a whole-DAG summary body, so it is read directly rather
       // than through the sub-agent validator (which requires a non-empty child sessionId).

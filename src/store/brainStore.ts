@@ -470,6 +470,12 @@ export class BrainStore {
     return this.delegation.runningDelegationParentSessionIds();
   }
 
+  /** Boot-reconcile fallback for `running` rows whose child relation no longer resolves — see
+   *  {@link BrainDelegationStore.terminalizeOrphanedSubagentRuns}. */
+  terminalizeOrphanedSubagentRuns(parentSessionId: string): number {
+    return this.delegation.terminalizeOrphanedSubagentRuns(parentSessionId);
+  }
+
   /** Append a display-only session-event marker (model/mode/rename/reasoning change). Insertion order
    *  (rowid) is the timeline; the marker never touches brain_messages, so it stays out of model context. */
   appendSessionEvent(sessionId: string, kind: SessionEventKind, detail: string): BrainSessionEvent {

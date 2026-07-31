@@ -4211,6 +4211,26 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-orphan')?.status).toBe('error');
   });
 
+  it('boot reconcile terminalizes a running row whose child session no longer resolves', async () => {
+    // getSubagentRuns only returns a row backed by a LIVE direct same-owner child, and upsertSubagentRun
+    // revalidates the same relation before writing. A row whose child vanished (or changed hands) is
+    // therefore invisible to the per-run sweep and unwritable through it — it claimed `running` forever.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: 'brain-ch-subagent-vanished', userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.upsertSubagentRun(sessionId, { id: 'delegate-vanished', sessionId: 'brain-ch-subagent-vanished', status: 'running', task: 'watch', tools: 2, seconds: 4 });
+    // Straight at the row, not via deleteSession: that path cleans the run rows up, which is exactly the
+    // invariant a legacy row or an externally modified DB does not carry.
+    d.db.prepare("DELETE FROM brain_sessions WHERE id = 'brain-ch-subagent-vanished'").run();
+
+    new BrainService(d as never).reconcileDelegationsOnBoot();
+
+    const state = d.db.prepare("SELECT state FROM brain_subagent_runs WHERE tool_call_id = 'delegate-vanished'")
+      .get() as { state: string } | undefined;
+    expect(JSON.parse(state?.state ?? '{}')).toMatchObject({ status: 'error', task: 'watch', tools: 2, seconds: 4 });
+  });
+
   it('leaves a running delegation alone when a client merely reconnects', async () => {
     // Opening the web chat calls start() again in the SAME process. The running row looks exactly like the
     // orphan above — no live child registration this call can see — but the delegation is alive and well.

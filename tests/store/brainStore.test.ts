@@ -364,6 +364,27 @@ describe('BrainStore', () => {
       expect(pending.map((row) => row.id)).toEqual(['dlg-1']);
       expect(pending[0]).toMatchObject({ result: 'clear' });
     });
+
+    // Dropping the row is right, dropping it SILENTLY is not: the parent is simply never woken, which is
+    // indistinguishable from a delegate still working. The warning is the only trace such a loss leaves.
+    it('warns about the result it drops so the loss is traceable', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        store.createSession({ id: 'root', userId: 1, model: 'm' });
+        store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wf-call', status: 'running', nodes: [] });
+        db.prepare(
+          `INSERT INTO brain_subagent_results
+             (result_id, parent_session_id, tool_call_id, child_session_id, kind, workflow_id, status, task, payload)
+           VALUES ('wf-1', 'root', 'wf-call', '', 'workflow', 'wf-1', 'done', 'dag', '{oops')`
+        ).run();
+
+        expect(store.pendingSubagentResults('root')).toEqual([]);
+        expect(warn.mock.calls.map((call) => String(call[0])).join('\n'))
+          .toMatch(/unusable payload for pending delegated result wf-1 .*parent root.*tool wf-call/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   it('reassigns and deletes sub-agent sidecars with their session tree', () => {

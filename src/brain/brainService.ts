@@ -334,6 +334,13 @@ export class BrainService {
           seconds: run.seconds, model: run.model,
         });
       }
+      // The loop above can only repair what getSubagentRuns returns, and that read requires a live direct
+      // same-owner child. A row whose child session vanished or changed hands is skipped by it AND rejected
+      // by upsertSubagentRun, so it would keep claiming `running` for good. Repair it straight on the row.
+      const orphaned = this.d.store.terminalizeOrphanedSubagentRuns(sessionId);
+      if (orphaned > 0) {
+        logger('brain').warn(`boot reconcile terminalized ${orphaned} delegation row(s) of ${sessionId} whose child session no longer resolves`);
+      }
       // Same restart concern for workflows, minus the delivery half: WorkflowStart BLOCKS, so a restart
       // killed the tool call and its whole turn — there is no result anyone is still waiting on, and no
       // completion inbox to weave into. The row only has to stop claiming the DAG is still running.
