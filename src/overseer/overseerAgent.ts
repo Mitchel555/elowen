@@ -31,9 +31,13 @@ export interface OverseerController {
  *  is inert (the relay fallback in bootstrap handles decisions inline). The agent is parked: it
  *  long-polls and sits idle (0 tokens) until the engine/deriver enqueue a decision. */
 export function makeOverseer(deps: { spawn: SpawnService; tmux: TmuxDriver; config: ConfigStore; queue: DecisionQueue; cli?: string; missionGit?: { worktreeFor(missionId: string): string | null }; missions?: { get(id: string): { created_by: number | null; overseer_exec?: string } | null }; prompts?: PromptService }): OverseerController {
+  // In-flight park per mission. The guard below is a check-then-act across an await, and engage, the
+  // mission tick and the watchdog all call park concurrently — without serialization both callers observe
+  // the session missing and launch, and the second `tmux new-session` throws "duplicate session".
+  const inflight = new Map<string, Promise<void>>();
   // Single source for the launch — every caller (engage/resume start, the tick watchdog's ensure,
   // the reconcile sweep) routes through here, so the idempotency guard lives here too.
-  const park = async (missionId: string, projectId: number, projectPath: string): Promise<void> => {
+  const parkOnce = async (missionId: string, projectId: number, projectPath: string): Promise<void> => {
     const mission = deps.missions?.get(missionId);
     const exec = mission?.overseer_exec || deps.config.get().autopilot.overseerExec;
     if (!exec) return; // relay fallback — no parked agent
@@ -56,6 +60,16 @@ export function makeOverseer(deps: { spawn: SpawnService; tmux: TmuxDriver; conf
       projectId, projectPath: cwd, taskId: `overseer-${missionId}`, agentName: `overseer-${missionId}`, spec,
       rawPrompt: overseerPrompt(missionId, deps.cli, renderPrompt), extraEnv: { ELOWEN_MISSION: missionId }, ownerId,
     });
+  };
+  // Queue behind whatever park is already running for this mission, so the second caller re-reads the
+  // session list AFTER the first has launched. A failed park settles the chain (the error reaches its own
+  // caller) instead of poisoning the next attempt; the entry is dropped once the chain drains.
+  const park = (missionId: string, projectId: number, projectPath: string): Promise<void> => {
+    const queued = (inflight.get(missionId) ?? Promise.resolve())
+      .catch(() => { /* a previous caller's failure is theirs to handle */ })
+      .then(() => parkOnce(missionId, projectId, projectPath));
+    inflight.set(missionId, queued);
+    return queued.finally(() => { if (inflight.get(missionId) === queued) inflight.delete(missionId); });
   };
   return {
     start: park,

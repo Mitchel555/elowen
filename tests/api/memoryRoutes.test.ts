@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { TaskStore } from '../../src/store/taskStore.js';
 import { Readiness } from '../../src/store/readiness.js';
@@ -48,7 +48,7 @@ function setup(opts: { fetchImpl?: typeof fetch; embeddingConfigured?: boolean }
   });
   const up = new UserProjectStore(db);
   up.assign(bob.id, 1); // let bob's per-user surface through the project gate
-  return { app, memoryStore, config, users, amyId: amy.id, bobId: bob.id, amyTok: users.issueToken(amy.id), bobTok: users.issueToken(bob.id) };
+  return { app, db, memoryStore, config, users, amyId: amy.id, bobId: bob.id, amyTok: users.issueToken(amy.id), bobTok: users.issueToken(bob.id) };
 }
 
 const auth = (t: string) => ({ headers: { authorization: `Bearer ${t}` } });
@@ -138,6 +138,36 @@ describe('memory routes', () => {
     // Only the merged row is active now.
     const list = await (await app.request('/memory', auth(amyTok))).json();
     expect(list.map((m: { id: number }) => m.id)).toEqual([mRow.id]);
+  });
+
+  it('batch purge hard-deletes the caller\'s rows and skips a foreign id', async () => {
+    const { app, amyTok, bobTok } = setup();
+    const a = await (await app.request('/memory', post(amyTok, { body: 'a' }))).json();
+    const b = await (await app.request('/memory', post(amyTok, { body: 'b' }))).json();
+    const bobRow = await (await app.request('/memory', post(bobTok, { body: 'bob secret' }))).json();
+    const res = await app.request('/memory/purge', post(amyTok, { ids: [a.id, bobRow.id, b.id] }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ purged: 2 });
+    expect(await (await app.request('/memory', auth(amyTok))).json()).toEqual([]);
+    expect((await app.request(`/memory/${bobRow.id}`, auth(bobTok))).status).toBe(200); // untouched
+  });
+
+  it('batch purge is all-or-nothing — a row failing mid-batch leaves the earlier ones intact', async () => {
+    const { app, db, amyTok } = setup();
+    const a = await (await app.request('/memory', post(amyTok, { body: 'a' }))).json();
+    const b = await (await app.request('/memory', post(amyTok, { body: 'boom' }))).json();
+    const c = await (await app.request('/memory', post(amyTok, { body: 'c' }))).json();
+    // A hard purge is irreversible: purging id-by-id (a transaction each) commits the batch's prefix
+    // before the failure surfaces, so the user loses rows the request reported as failed.
+    db.prepare(
+      `CREATE TRIGGER fail_on_boom BEFORE DELETE ON memories WHEN OLD.body = 'boom'
+       BEGIN SELECT RAISE(ABORT, 'no'); END`
+    ).run();
+
+    const res = await app.request('/memory/purge', post(amyTok, { ids: [a.id, b.id, c.id] }));
+    expect(res.status).toBe(500);
+    const left = await (await app.request('/memory', auth(amyTok))).json() as { id: number }[];
+    expect(left.map((m) => m.id).sort()).toEqual([a.id, b.id, c.id].sort());
   });
 
   it('events feed: per-memory trail and whole-user feed', async () => {
@@ -246,6 +276,18 @@ function setupCat(opts: { categorizeReply?: string; categorizationConfigured?: b
 }
 
 describe('memory category routes', () => {
+  it('categorizes a memory created through the API, not only ones the curator stored', async () => {
+    // Classification used to hang off the post-turn curator alone, so a memory created from the web (or
+    // by the agent's own MemoryAdd) stayed uncategorized however many categories existed.
+    const { app, memoryStore, amyId, amyTok } = setupCat({ categorizeReply: 'Práce' });
+    const cat = await (await app.request('/memory/categories', post(amyTok, { name: 'Práce', description: 'work stuff' }))).json();
+
+    const row = await (await app.request('/memory', post(amyTok, { body: 'stand-up je v 9:30' }))).json();
+
+    // Fire-and-forget on the write path: the response must not wait on a model round-trip.
+    await vi.waitFor(() => expect(memoryStore.get(amyId, row.id)?.category_id).toBe(cat.id));
+  });
+
   it('category CRUD roundtrip: create → list → patch, and a duplicate name → 409', async () => {
     const { app, amyTok } = setupCat();
     const created = await app.request('/memory/categories', post(amyTok, { name: 'Práce', description: 'work stuff', color: '#f00' }));
@@ -338,15 +380,23 @@ describe('memory category routes', () => {
     expect(await res.json()).toEqual({ error: 'categorization not configured' });
   });
 
-  it('POST /memory/reclassify tags the caller\'s uncategorized memories via the model', async () => {
-    const { app, amyTok } = setupCat({ categorizeReply: 'Práce' });
+  it('POST /memory/reclassify re-tags on demand, now that new memories arrive already sorted', async () => {
+    const { app, memoryStore, amyId, amyTok } = setupCat({ categorizeReply: 'Práce' });
     const cat = await (await app.request('/memory/categories', post(amyTok, { name: 'Práce', description: 'work' }))).json();
     await app.request('/memory', post(amyTok, { body: 'deadline on Friday' }));
     await app.request('/memory', post(amyTok, { body: 'standup at 9' }));
-    const res = await app.request('/memory/reclassify', post(amyTok, {}));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ scanned: 2, classified: 2 });
-    // Both memories now carry the category.
+    // Every write path classifies on its own now, so let that settle before asking for a manual pass —
+    // otherwise the two would race over the same rows and the counts below would be a coin toss.
+    await vi.waitFor(() => expect(memoryStore.list(amyId, { categoryId: cat.id })).toHaveLength(2));
+
+    // Nothing is left uncategorized, so the default pass has no work: exactly the point of the fix.
+    const none = await app.request('/memory/reclassify', post(amyTok, {}));
+    expect(none.status).toBe(200);
+    expect(await none.json()).toEqual({ scanned: 0, classified: 0 });
+
+    // `includeCategorized` still re-tags everything — the manual pass for after a category rename.
+    const all = await app.request('/memory/reclassify', post(amyTok, { includeCategorized: true }));
+    expect(await all.json()).toEqual({ scanned: 2, classified: 2 });
     const inCat = await (await app.request(`/memory?categoryId=${cat.id}`, auth(amyTok))).json();
     expect(inCat).toHaveLength(2);
   });

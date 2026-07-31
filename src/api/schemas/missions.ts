@@ -1,11 +1,18 @@
 import { z } from 'zod';
 
+/** Upper bound on a mission's concurrent agents. Every session is a real spawned agent (a tmux session
+ *  plus a model), so an unbounded value lets a single request exhaust the machine. */
+const MAX_MISSION_SESSIONS = 20;
+
 /** Engage a mission on an epic. epicId is required (an absent one would spawn a zombie `m-undefined`);
- *  the engage params are defaulted in the handler so a partial body never reaches the engine undefined. */
+ *  the engage params are defaulted in the handler so a partial body never reaches the engine undefined.
+ *  maxSessions is the scheduler's slot count: zero or negative deadlocks it (`running >= max_sessions`
+ *  holds before anything spawns, so the mission never progresses and never completes), and a fractional
+ *  value would compare against a non-integer slot count — hence a bounded positive integer. */
 export const engageMissionSchema = z.object({
   epicId: z.string().min(1),
   autonomy: z.string().optional(),
-  maxSessions: z.number().optional(),
+  maxSessions: z.number().int().min(1).max(MAX_MISSION_SESSIONS).optional(),
 });
 
 /** Mission control action. Optional so an unknown/absent action is a no-op (returns the mission

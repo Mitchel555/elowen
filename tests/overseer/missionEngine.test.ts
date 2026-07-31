@@ -294,29 +294,52 @@ describe('MissionEngine', () => {
     expect(engine.isActive(m.id)).toBe(false); // paused, not active
   });
 
-  it('stopRunning reverts every in_progress child even if a tmux.kill throws (O3)', async () => {
+  /** Two parallel in_progress children whose sessions are live; `kill` misbehaves for `elowen-a` per
+   *  the injected `killA` (which may or may not actually end the session). */
+  async function stopRunningSetup(killA: (base: FakeTmuxDriver) => void | Promise<void>) {
     const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
     const tasks = new TaskStore(db);
     tasks.create({ id: 'epic', project_id: 1, title: 'E', type: 'epic' });
     tasks.create({ id: 'a', project_id: 1, title: 'a', parent_id: 'epic' });
     tasks.create({ id: 'b', project_id: 1, title: 'b', parent_id: 'epic' });
-    // Two parallel in_progress children; the first session's kill rejects (it exited already).
     for (const id of ['a', 'b']) { tasks.setAgent(id, id); tasks.setStatus(id, 'in_progress'); }
     const base = new FakeTmuxDriver();
     await base.spawn('elowen-a', { cwd: '/o', command: 'x' });
     await base.spawn('elowen-b', { cwd: '/o', command: 'x' });
-    // Minimal driver: the first kill rejects (session exited between list() and kill); the rest delegate.
-    const tmux = { list: () => base.list(), kill: (s: string) => { if (s === 'elowen-a') throw new Error('already gone'); return base.kill(s); } } as never;
+    const tmux = {
+      list: () => base.list(),
+      kill: async (s: string) => { if (s === 'elowen-a') return killA(base); return base.kill(s); },
+    } as never;
     const engine = new MissionEngine({
       tasks, readiness: new Readiness(db), missions: new MissionStore(db),
       spawn: new SpawnService({ tmux, agents: new AgentStore(db) }), tmux, bus: new EventBus(),
       projects: new ProjectStore(db), fallback: { program: 'claude-code', model: 'sonnet' },
       nameAgent: () => 'AgentX', clock: new SystemClock(),
     });
+    return { tasks, base, engine };
+  }
+
+  it('stopRunning reverts a child whose session really did exit, even if its kill threw (O3)', async () => {
+    // The session exited between list() and kill, so the driver rejects — the agent is genuinely gone.
+    const { tasks, engine } = await stopRunningSetup(async (base) => {
+      await base.kill('elowen-a');
+      throw new Error('already gone');
+    });
     const stopped = await engine.stopRunning('epic');
     expect(stopped).toBe(2);
     expect(tasks.get('a')!.status).toBe('open'); // a throwing kill did NOT strand the rest in_progress
     expect(tasks.get('b')!.status).toBe('open');
+  });
+
+  it('stopRunning leaves a child in_progress when its session survived the kill', async () => {
+    // The kill failed for real (tmux unreachable): the agent is STILL writing in the checkout, so
+    // advertising the task as 'open' would let a resume put a second agent on the same files.
+    const { tasks, base, engine } = await stopRunningSetup(() => { throw new Error('tmux unreachable'); });
+    const stopped = await engine.stopRunning('epic');
+    expect(stopped).toBe(1);
+    expect(await base.list()).toContain('elowen-a');
+    expect(tasks.get('a')!.status).toBe('in_progress'); // not reverted while its agent is alive
+    expect(tasks.get('b')!.status).toBe('open');        // the healthy sibling is still stopped
   });
 
   it('disengage and pause are idempotent — a repeat call emits no second event (O6)', async () => {

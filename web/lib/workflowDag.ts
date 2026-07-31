@@ -7,12 +7,30 @@ import type { WorkflowState } from './transcript';
 
 /** Node box in SVG user units. Wide enough for an id plus a short task line at the modal's font size. */
 export const DAG_NODE_W = 184;
-export const DAG_NODE_H = 62;
+/** A node is drawn one of two ways, exactly as the CLI canvas does it (workflowCanvas.ts:99): the node
+ *  that is RUNNING or SELECTED earns a full card carrying its live activity and vitals, everything else
+ *  collapses to a single titled row. Uniform boxes are what made the web graph read as a flat grid — with
+ *  24 nodes, 24 identical rectangles say nothing about where the work actually is. */
+const DAG_NODE_H = 66;
+const DAG_NODE_H_COMPACT = 28;
 const COLUMN_GAP = 72;
-const ROW_GAP = 20;
+const ROW_GAP = 14;
 const PADDING = 16;
+/** Edge routing inside the gutter between two columns: how far in the first vertical track sits, how far
+ *  apart the tracks are, and how many exist before they repeat. Four tracks span 33px of the 72px gutter,
+ *  which keeps every one of them clear of both the source's right edge and the target's arrowhead. */
+const GUTTER_INSET = 20;
+const GUTTER_LANE_GAP = 11;
+const GUTTER_LANES = 4;
+/** Corner rounding of an orthogonal edge — enough to read as a curve, small enough to keep the run straight. */
+const CORNER_R = 9;
 
-export interface DagNodeInput { id: string; deps: readonly string[] }
+export interface DagNodeInput {
+  id: string;
+  deps: readonly string[];
+  /** Draw this one as a full card rather than a compact row (running, or currently selected). */
+  full?: boolean;
+}
 
 interface PlacedDagNode {
   id: string;
@@ -22,6 +40,9 @@ interface PlacedDagNode {
   /** Top-left corner of the node box. */
   x: number;
   y: number;
+  /** Box height for this node — the caller paints it, so it never has to re-derive the card/row choice. */
+  height: number;
+  full: boolean;
 }
 
 /** One dependency drawn as a cubic curve from the source's right edge into the target's left edge. */
@@ -76,24 +97,37 @@ export function layoutDag(nodes: readonly DagNodeInput[]): DagLayout {
   const columns = waves(nodes);
   if (columns.length === 0) return { nodes: [], edges: [], width: 0, height: 0 };
 
-  const columnHeight = (count: number): number => count * DAG_NODE_H + Math.max(0, count - 1) * ROW_GAP;
-  const tallest = Math.max(...columns.map((column) => columnHeight(column.length)));
+  const heightOf = (node: DagNodeInput): number => (node.full === true ? DAG_NODE_H : DAG_NODE_H_COMPACT);
+  const columnHeight = (column: readonly DagNodeInput[]): number =>
+    column.reduce((sum, node) => sum + heightOf(node), 0) + Math.max(0, column.length - 1) * ROW_GAP;
+  const tallest = Math.max(...columns.map(columnHeight));
   const placed: PlacedDagNode[] = [];
   columns.forEach((column, columnIndex) => {
-    const top = PADDING + Math.round((tallest - columnHeight(column.length)) / 2);
+    // Columns mix card and row heights, so each one is stacked with a running cursor and centred against
+    // the tallest — a fixed per-row pitch would leave gaps wherever a column has no full card.
+    let cursor = PADDING + Math.round((tallest - columnHeight(column)) / 2);
     column.forEach((node, row) => {
+      const height = heightOf(node);
       placed.push({
         id: node.id,
         column: columnIndex,
         row,
         x: PADDING + columnIndex * (DAG_NODE_W + COLUMN_GAP),
-        y: top + row * (DAG_NODE_H + ROW_GAP),
+        y: cursor,
+        height,
+        full: node.full === true,
       });
+      cursor += height + ROW_GAP;
     });
   });
 
   const at = new Map(placed.map((p) => [p.id, p]));
   const edges: PlacedDagEdge[] = [];
+  // Every edge entering a column gets its OWN vertical track in the gutter before it, the way the CLI
+  // canvas assigns gutter lanes. Giving them all the same bend is what turns a busy graph into a tangle:
+  // the vertical runs land on top of each other precisely where the edges are densest. Lanes are per
+  // target column, so two columns can reuse the same offsets without ever sharing a line.
+  const laneOf = new Map<number, number>();
   for (const node of nodes) {
     const target = at.get(node.id);
     if (!target) continue;
@@ -103,11 +137,25 @@ export function layoutDag(nodes: readonly DagNodeInput[]): DagLayout {
       // only produce a curve looping back over the graph.
       if (!source || source.column >= target.column) continue;
       const sx = source.x + DAG_NODE_W;
-      const sy = source.y + DAG_NODE_H / 2;
+      const sy = source.y + source.height / 2;
       const tx = target.x;
-      const ty = target.y + DAG_NODE_H / 2;
-      const bend = Math.round((tx - sx) / 2);
-      edges.push({ from: dep, to: node.id, d: `M${sx} ${sy} C${sx + bend} ${sy}, ${tx - bend} ${ty}, ${tx} ${ty}` });
+      const ty = target.y + target.height / 2;
+      if (sy === ty) {
+        // Same row: a straight shot needs no gutter track and no corners.
+        edges.push({ from: dep, to: node.id, d: `M${sx} ${sy} L${tx} ${ty}` });
+        continue;
+      }
+      const lane = laneOf.get(target.column) ?? 0;
+      laneOf.set(target.column, lane + 1);
+      const track = tx - COLUMN_GAP + GUTTER_INSET + (lane % GUTTER_LANES) * GUTTER_LANE_GAP;
+      const down = ty > sy ? 1 : -1;
+      // Corners stay circular by capping the radius at half of each leg they have to turn through.
+      const radius = Math.min(CORNER_R, Math.abs(ty - sy) / 2, Math.abs(track - sx), Math.abs(tx - track));
+      const d = radius > 0
+        ? `M${sx} ${sy} L${track - radius} ${sy} Q${track} ${sy} ${track} ${sy + down * radius}`
+          + ` L${track} ${ty - down * radius} Q${track} ${ty} ${track + radius} ${ty} L${tx} ${ty}`
+        : `M${sx} ${sy} L${track} ${sy} L${track} ${ty} L${tx} ${ty}`;
+      edges.push({ from: dep, to: node.id, d });
     }
   }
 

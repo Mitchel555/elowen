@@ -173,6 +173,14 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
  *  `reasoning_effort`. The official OpenAI endpoint is unaffected: it registers as `openai-responses`. */
 const RELAY_SAFE_COMPAT = { supportsDeveloperRole: false } as const;
 
+/** Whether a provider entry needs the relay-safe compat above. Asked here by EVERY caller that registers
+ *  a provider, because registerProvider REPLACES the provider on the shared runtime — a caller computing
+ *  this differently would strip `system`-role safety for every session on that provider, not just its
+ *  own. Only plain Chat-Completions entries need it; `openai-responses` and Anthropic do not. */
+function relaySafeCompatFor(entry: Pick<BrainProviderEntry, 'type' | 'api' | 'baseUrl'>): typeof RELAY_SAFE_COMPAT | undefined {
+  return entry.type === 'openai' && openAiApiFor(entry) === 'openai-completions' ? RELAY_SAFE_COMPAT : undefined;
+}
+
 function modelEntry(provider: string, id: string, contextWindow?: number, compat?: Model<Api>['compat']) {
   const capabilities = descriptorCapabilities(provider, id);
   // Declare vision unless the catalog KNOWS this model is text-only (see the descriptor-defaults note above).
@@ -229,7 +237,7 @@ export function buildBrainRegistry(cfg: BrainRuntimeConfig, runtime: ModelRuntim
   for (const p of cfg.providers) {
     if (p.type === 'openai') {
       const api = openAiApiFor(p);
-      const compat = api === 'openai-completions' ? RELAY_SAFE_COMPAT : undefined;
+      const compat = relaySafeCompatFor(p);
       registry.registerProvider(registryProviderName(p), {
         name: p.label,
         api,
@@ -295,10 +303,10 @@ function resolveEntryModel(
   const model = registry.find(providerName, modelId);
   if (model) return model;
   if (entry.type === 'openai' || entry.type === 'anthropic') {
-    // Not in the advertised list — register it ad hoc so a hand-typed model id still works. Mirror
-    // buildBrainRegistry's relay-safe compat: registerProvider REPLACES the provider on the shared runtime,
-    // so omitting it here would strip `system`-role safety for THIS and every other session on that provider.
-    const compat = entry.type === 'openai' && openAiApiFor(entry) === 'openai-completions' ? RELAY_SAFE_COMPAT : undefined;
+    // Not in the advertised list — register it ad hoc so a hand-typed model id still works. The compat
+    // comes from the same helper buildBrainRegistry uses, so the two registration paths cannot decide it
+    // differently (see relaySafeCompatFor for why that would reach beyond this session).
+    const compat = relaySafeCompatFor(entry);
     registry.registerProvider(providerName, {
       name: entry.label,
       api: entry.type === 'openai' ? openAiApiFor(entry) : 'anthropic-messages',

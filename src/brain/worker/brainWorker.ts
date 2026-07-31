@@ -126,6 +126,10 @@ function sessionUsage(session: AgentSession): TokenUsage {
  */
 export class BrainWorkerService {
   private live = new Map<string, LiveWorker>();
+  /** In-flight launches per session name. The liveness guard in launchExclusive and the `live.set()` that
+   *  follows it are separated by awaits (plugin registry, session factory), so two concurrent launches for
+   *  one name would both pass the guard and leave the first session running with nothing tracking it. */
+  private launching = new Map<string, Promise<{ session: string }>>();
   private watchdog: ReturnType<typeof setInterval> | undefined;
   /** Shared session assembly — the same factory the chat brain uses. */
   private factory: BrainSessionFactory;
@@ -140,11 +144,29 @@ export class BrainWorkerService {
 
   private now(): number { return this.d.now?.() ?? Date.now(); }
 
+  /** Launch a worker for a task, serialized per session name so the liveness guard below can't be
+   *  observed by two callers at once. */
   async launch(input: BrainWorkerLaunchInput): Promise<{ session: string }> {
+    const sessionName = `elowen-${input.agentName}`;
+    const queued = (this.launching.get(sessionName) ?? Promise.resolve())
+      .catch(() => { /* a previous launch's failure is its own caller's to handle */ })
+      .then(() => this.launchExclusive(sessionName, input));
+    this.launching.set(sessionName, queued);
+    return queued.finally(() => { if (this.launching.get(sessionName) === queued) this.launching.delete(sessionName); });
+  }
+
+  private async launchExclusive(sessionName: string, input: BrainWorkerLaunchInput): Promise<{ session: string }> {
+    // Idempotent ONLY for the same task. A different task under an already-live agent name gets no worker
+    // of its own, so reporting success would leave it in_progress behind a session that belongs to another
+    // task — which the stuck detector reads as alive, forever. The tmux path already fails here (`tmux
+    // new-session` rejects a duplicate name) and every caller reverts the task on a failed launch.
+    const existing = this.live.get(sessionName);
+    if (existing) {
+      if (existing.taskId === input.taskId) return { session: sessionName };
+      throw new Error(`agent name ${input.agentName} is already running task ${existing.taskId}`);
+    }
     const cfg = this.d.config();
     if (!cfg) throw new Error('elowen exec engine: no brain provider configured');
-    const sessionName = `elowen-${input.agentName}`;
-    if (this.live.has(sessionName)) return { session: sessionName }; // idempotent re-launch
 
     const registry = buildBrainRegistry(cfg, this.d.runtime);
     const route = resolveBrainModelRoute(registry, cfg, selectionFor(cfg, input.spec.model));
@@ -193,8 +215,10 @@ export class BrainWorkerService {
       execute: async (_id: string, p: { summary: string; outcome: 'ok' | 'fail' }) => {
         const r = await callElowenApi('PATCH', `/tasks/${input.taskId}`, { status: 'closed', result_summary: p.summary, outcome: p.outcome }, { url: this.d.url, token: this.d.token, fetchImpl: this.d.fetchImpl });
         if (r.ok) {
+          // Match the task too: once this worker is gone the name can belong to a later task's worker,
+          // which a late close call would otherwise mark closed and bill for.
           const w = this.live.get(sessionName);
-          if (w) { w.closed = true; this.recordUsage(w); }
+          if (w?.taskId === input.taskId) { w.closed = true; this.recordUsage(w); }
         }
         return { content: [{ type: 'text' as const, text: r.ok ? 'Task closed.' : `Elowen API error HTTP ${r.status}: ${r.text}` }], details: {} };
       },
@@ -216,7 +240,9 @@ export class BrainWorkerService {
     // The shared assembly (store row + rehydrate + resource loader + PI session + persistence
     // subscription) — identical to the chat brain's, so the two can never drift.
     const { session } = await this.factory.create({
-      sessionId, ownerUserId: input.ownerId ?? 0, runtime: this.d.runtime, model,
+      // providerId travels with the model: omitting it makes touchSession clear a previously stored
+      // entry id, leaving a model with no provider behind on every task-session respawn.
+      sessionId, ownerUserId: input.ownerId ?? 0, runtime: this.d.runtime, model, providerId: route.providerId,
       compactionFallbackModel: route.compactionFallback, cwd,
       systemPrompt, appendSystemPrompt: append, skills,
       tools: [closeTool, ...pluginTools],

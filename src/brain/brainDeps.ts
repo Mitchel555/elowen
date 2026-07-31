@@ -106,4 +106,8 @@ export interface BrainDeps {
   /** Injected for tests; builds the resource loader that carries the Elowen system prompt. A test passes
    *  `() => undefined` so no disk-touching loader is constructed. */
   resourceLoaderFactory?: (o: BrainResourceLoaderOptions) => ResourceLoader | undefined;
+  /** Fired once an owner-chat turn the user started FROM THE WEB has fully settled — the daemon wires it
+   *  to a phone push so someone who left the browser learns Elowen is done. Kept as an opaque callback so
+   *  this seam never depends on the push module; CLI/internal turns never call it (they see it live). */
+  notifyTurnComplete?: (userId: number, title: string) => void;
 }

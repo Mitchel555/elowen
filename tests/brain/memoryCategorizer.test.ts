@@ -99,3 +99,62 @@ describe('MemoryCategorizer.suggestIcon', () => {
     expect(inf.decide).not.toHaveBeenCalled();
   });
 });
+
+describe('MemoryCategorizer.classifyMemory', () => {
+  /** Fake memory store over a single row, recording every setCategory write. */
+  function fakeMemories(categoryId: number | null) {
+    const row = { id: 7, user_id: 1, body: 'daemon běží na portu 4400', status: 'active', category_id: categoryId };
+    const writes: { categoryId: number | null; model: string | null }[] = [];
+    const store = {
+      get: () => ({ ...row }),
+      setCategory: (_u: number, _i: number, catId: number | null, _a: string, _r: string, model: string | null) => {
+        writes.push({ categoryId: catId, model });
+        row.category_id = catId;
+      },
+    } as unknown as MemoryStore;
+    return { store, writes, row };
+  }
+
+  it('files an uncategorized memory under the model\'s answer, auditing the model that decided', async () => {
+    const mem = fakeMemories(null);
+    const c = new MemoryCategorizer({
+      categories: fakeCategories(CATS), memories: mem.store, inference: () => fakeInference('Infrastruktura'),
+    });
+
+    await c.classifyMemory(1, 7, 'test');
+
+    expect(mem.writes).toEqual([{ categoryId: 10, model: 'fake-model' }]);
+  });
+
+  // The round-trip takes long enough for the owner to file the memory by hand in the UI meanwhile. The
+  // categorizer re-reads before writing, so a deliberate human choice is never replaced by a guess.
+  it('abandons the write when the category changed under it during the round-trip', async () => {
+    const mem = fakeMemories(null);
+    const inference: InferenceClient = {
+      model: 'fake-model',
+      decide: vi.fn(async () => {
+        mem.row.category_id = 20; // the user picked "Preference" while the model was thinking
+        return { text: 'Infrastruktura' };
+      }),
+    };
+    const c = new MemoryCategorizer({
+      categories: fakeCategories(CATS), memories: mem.store, inference: () => inference,
+    });
+
+    await c.classifyMemory(1, 7, 'test');
+
+    expect(mem.writes).toEqual([]);
+    expect(mem.row.category_id).toBe(20);
+  });
+
+  it('never rejects into a caller that is not awaiting it', async () => {
+    const mem = fakeMemories(null);
+    const c = new MemoryCategorizer({
+      categories: fakeCategories(CATS), memories: mem.store,
+      inference: () => ({ model: 'm', decide: vi.fn(async () => { throw new Error('relay down'); }) }),
+    });
+
+    await expect(c.classifyMemory(1, 7, 'test')).resolves.toBeUndefined();
+    expect(mem.writes).toEqual([]);
+  });
+});

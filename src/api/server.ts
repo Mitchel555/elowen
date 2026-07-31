@@ -1,24 +1,29 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ZodError } from 'zod';
-import type { User, TokenScope } from '../store/userStore.js';
 import { createRouteContext, type ElowenApp } from './context.js';
 import { registerRoutes } from './routes/index.js';
-import { formatZodError } from './validation.js';
+import { bodyLimitBytes, formatZodError } from './validation.js';
 import type { ServerDeps } from './deps.js';
 import { ELOWEN_VERSION } from './version.js';
 
 export type { ServerDeps };
 
+/** A login body is a username and a password — anything larger is not a login attempt. Capped here
+ *  because `/auth/login` is public: without a hard pre-parse limit an unauthenticated caller can make
+ *  the daemon buffer an unbounded chunked body before the schema ever rejects it. */
+const MAX_LOGIN_BODY_BYTES = 16 * 1024;
+
 /** Build the daemon's REST app: wire the global error handler and the two public probes (`/health`,
  *  `/setup`), then register every route family through {@link registerRoutes} (which installs the
  *  auth/tenancy guards first). All per-server state and access helpers live on the shared route
  *  context; the families themselves are in src/api/routes/*. */
-export function createServer(d: ServerDeps): Hono<{ Variables: { user: User; token: string; tokenScope: TokenScope } }> {
+export function createServer(d: ServerDeps): ElowenApp {
   const ctx = createRouteContext(d);
   const { log } = ctx;
-  const app: ElowenApp = new Hono<{ Variables: { user: User; token: string; tokenScope: TokenScope } }>();
+  const app: ElowenApp = new Hono();
   app.use('*', cors());
+  app.use('/auth/login', bodyLimitBytes(MAX_LOGIN_BODY_BYTES));
   // Single source of truth for malformed-body handling: most POST/PATCH routes call `c.req.json()`
   // without a per-route catch, and Hono throws a SyntaxError on invalid JSON. Convert that to a clean
   // 400 instead of leaking a default 500 with no useful body.

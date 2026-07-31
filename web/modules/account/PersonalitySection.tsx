@@ -14,6 +14,7 @@ import { Modal, ModalFooter } from '../../components/ui/Modal';
 import { ChoiceField } from '../../components/ui/ChoiceField';
 import { AutoSaveStatus } from '../../components/ui/AutoSaveStatus';
 import { Button } from '../../components/ui/Button';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 
 const EDIT_OPTIONS = {
   fontSize: 13, minimap: { enabled: false }, scrollBeyondLastLine: false, automaticLayout: true,
@@ -60,6 +61,11 @@ export function PersonalitySection({ onSaveState }: { onSaveState?: (section: st
     { value: 'concise', label: t.personality.styleConcise },
     { value: 'detailed', label: t.personality.styleDetailed },
   ];
+
+  // Both fields come from cli-settings, so a failed load must not render the editor at all — with no
+  // data seeded, editing here would look live while the autosave (`ready: seeded`) can never fire.
+  if (cli.isError) return <ErrorState message={t.common.daemonUnreachable} onRetry={() => cli.refetch()} />;
+  if (cli.isLoading || !cli.data) return <LoadingState />;
 
   const hasBody = personalityBody.trim().length > 0;
 

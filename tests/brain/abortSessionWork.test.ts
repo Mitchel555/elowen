@@ -58,7 +58,7 @@ describe('abortSessionWork', () => {
       abort: vi.fn(async () => undefined),
       agent: { state: { messages: [], model: {}, thinkingLevel: 'high' } },
     };
-    installTurnBoundaryAutoCompaction(session as never, { getBranch: () => [] } as never, false);
+    installTurnBoundaryAutoCompaction(session as never, { getBranch: () => [] } as never, () => false);
 
     const prompt = (async () => {
       await session._checkCompaction({ role: 'assistant' } as never, false);

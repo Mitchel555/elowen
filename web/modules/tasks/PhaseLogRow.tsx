@@ -26,7 +26,7 @@ function StateGlyph({ state, isActive }: { state: PhaseState; isActive: boolean 
   return <Circle size={16} className="shrink-0 text-border-strong" aria-hidden />;
 }
 
-export interface PhaseLogRowProps {
+interface PhaseLogRowProps {
   phase: Task;
   index: number;
   running: boolean;

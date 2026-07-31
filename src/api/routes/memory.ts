@@ -79,14 +79,13 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
   });
 
   // Hard-delete a batch of the caller's memories by id (any status) — a real DELETE, not a soft flip.
-  // Owner-scoped in the store (a foreign id is skipped). Registered before `/memory/:id`.
+  // Owner-scoped in the store (a foreign id is skipped), and atomic: the batch is one transaction, so a
+  // failure part-way through can't leave its prefix irreversibly deleted. Registered before `/memory/:id`.
   app.post('/memory/purge', async (c) => {
     if (!store) return c.json({ error: 'memory unavailable' }, 400);
     const userId = c.get('user').id;
     const { ids } = await parseBody(c, memoryPurgeSchema);
-    let purged = 0;
-    for (const id of ids) { if (store.purge(userId, id, `user:${userId}`, 'purged via API')) purged += 1; }
-    return c.json({ purged });
+    return c.json({ purged: store.purgeMany(userId, ids, `user:${userId}`, 'purged via API') });
   });
 
   // Empty the trash: hard-delete ALL of the caller's soft-deleted memories. Owner-scoped, atomic.
@@ -244,7 +243,11 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (!store) return c.json({ error: 'memory unavailable' }, 400);
     const userId = c.get('user').id;
     const b = await parseBody(c, memoryCreateSchema);
-    return c.json(store.add(userId, { ...b, source: 'user' }, `user:${userId}`, 'created via API'), 201);
+    const row = store.add(userId, { ...b, source: 'user' }, `user:${userId}`, 'created via API');
+    // Same fire-and-forget the curator does. Without it a memory created from the web stayed
+    // uncategorized, since classification used to hang off the post-turn curator alone.
+    d.memoryCategorizer?.classifyNewMemory(userId, row.id, `user:${userId}`);
+    return c.json(row, 201);
   });
 
   // Read one of the caller's memories. Owner-scoped → a foreign id is 404.

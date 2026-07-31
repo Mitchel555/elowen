@@ -12,8 +12,9 @@ const CONFIG = {
     agentName: 'Elowen',
     maxSteps: 20,
     limits: {
-      toolOutputMaxLines: 80, toolOutputMaxChars: 12000, elicitationTimeoutMs: 300000,
+      toolOutputMaxLines: 80, toolOutputMaxChars: 30000, elicitationTimeoutMs: 300000,
       memoryRecallCount: 6, memoryRecallChars: 1500, goalTurnBudget: 8, goalMaxTurns: 64, channelSessionCap: 32,
+      delegateContextChars: 20000,
     },
     providers: [] as unknown[],
   },
@@ -34,35 +35,45 @@ const renderBrain = () => {
   return render(<Wrapper><ToastProvider><BrainSection /></ToastProvider></Wrapper>);
 };
 
-describe('BrainSection limits — collapsed into a modal (no longer an inline 8-field grid)', () => {
-  it('renders a trigger, not the inline limit inputs', async () => {
+describe('BrainSection limits — collapsed into a drawer', () => {
+  it('renders a trigger, not the inline limit sliders', async () => {
     renderBrain();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Edit limits' })).toBeTruthy());
-    // The eight numeric fields must NOT be inline anymore — they only exist inside the modal.
-    expect(screen.queryByLabelText('Memory recall — count')).toBeNull();
+    expect(screen.queryByRole('slider', { name: 'Memory recall — count' })).toBeNull();
   });
 
-  it('opens the modal with the 8 limit fields and closes on Escape', async () => {
+  it('opens the drawer with all limit sliders and closes on Escape', async () => {
     renderBrain();
     const trigger = await screen.findByRole('button', { name: 'Edit limits' });
     fireEvent.click(trigger);
-    // All eight fields present, keyed by their aria-labels.
-    for (const label of ['Tool output — lines', 'Tool output — characters', 'Question timeout (ms)', 'Memory recall — count', 'Memory recall — characters', 'Goal turn budget', 'Goal safety ceiling', 'Live channel sessions']) {
-      expect(screen.getByLabelText(label)).toBeTruthy();
+    for (const label of ['Tool output — lines', 'Tool output — tokens', 'Question timeout', 'Memory recall — count', 'Memory recall — tokens', 'Goal turn budget', 'Goal safety ceiling', 'Live channel sessions', 'Sub-agent context']) {
+      expect(screen.getByRole('slider', { name: label })).toBeTruthy();
     }
+    expect(screen.getByText('5 min')).toBeTruthy();
+    expect(screen.getByText('≈ 7.5k tokens')).toBeTruthy();
     fireEvent.keyDown(window, { key: 'Escape' });
-    await waitFor(() => expect(screen.queryByLabelText('Memory recall — count')).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('slider', { name: 'Memory recall — count' })).toBeNull());
   });
 
-  it('still autosaves live: editing a field inside the modal PUTs brain.limits (no Save button)', async () => {
+  it('autosaves the canonical count from a slider without a Save button', async () => {
     renderBrain();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit limits' }));
-    const field = screen.getByLabelText('Memory recall — count') as HTMLInputElement;
-    // No manual Save in the modal — edits flow straight to the autosaving `limits` state.
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
-    fireEvent.change(field, { target: { value: '12' } });
+    fireEvent.change(screen.getByRole('slider', { name: 'Memory recall — count' }), { target: { value: '9' } });
     await waitFor(
-      () => expect((putBody as { brain: { limits: { memoryRecallCount: number } } })?.brain?.limits?.memoryRecallCount).toBe(12),
+      () => expect((putBody as { brain: { limits: { memoryRecallCount: number } } })?.brain?.limits?.memoryRecallCount).toBe(9),
+      { timeout: 3000 },
+    );
+  });
+
+  // The daemon clamps every limit to its bound and answers with the config it actually stored. Here it
+  // answers 6 to a slider set to 9 — the state that used to leave the operator believing the change stuck.
+  it('says which value the daemon kept when a save comes back clamped', async () => {
+    renderBrain();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit limits' }));
+    fireEvent.change(screen.getByRole('slider', { name: 'Memory recall — count' }), { target: { value: '9' } });
+    await waitFor(
+      () => expect(screen.getByText('Saved as 6 — the value you set was outside the allowed range.')).toBeTruthy(),
       { timeout: 3000 },
     );
   });

@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
+import { clipTail } from './lib/results.mjs';
 import {
   CONTEXT_HEADER,
   MAX_CONTEXT_CHUNK_CHARS,
@@ -18,6 +19,10 @@ const MAX_BACKGROUND_JOBS = 64;
 const JOB_RETENTION_MS = 60 * 60_000;
 const MAX_STORED_RESULT_CHARS = 100_000;
 const MAX_STORED_TASK_CHARS = 2_000;
+// Match workflow result bodies: 8k is useful for reports while leaving headroom under the default 12k
+// tool-output display cap for range metadata and the explicit next-page instruction.
+const DEFAULT_READ_CHARS = 8_000;
+const MAX_READ_CHARS = 50_000;
 // A child that starts background work gets a bounded number of extra collect turns to read the output
 // and produce the real conclusion, each waiting at most this long for the session's jobs to go idle.
 const MAX_COLLECT_TURNS = 8;
@@ -274,7 +279,7 @@ export function register(ctx) {
   const agentTypeLine = agentTypes.length
     ? ' You may run the sub-agent as a named TYPE via subagent_type — each carries its own role prompt and toolset. Available types: '
       + agentTypes.map((t) => `"${t.name}" (${t.description})`).join('; ')
-      + '. A read-only type (e.g. explore/plan) gets read-only tools plus read-only shell no matter what you hold. Omit subagent_type for a generic sub-agent that inherits your own tools.'
+      + '. A read-only type (e.g. explore/plan) gets read-only tools plus the non-destructive shell clamp no matter what you hold. Omit subagent_type for a generic sub-agent that inherits your own tools.'
     : '';
 
   ctx.registerTool(defineTool({
@@ -284,7 +289,7 @@ export function register(ctx) {
       'Delegate when the subtask is self-contained and only the conclusion matters, not the exploration trail; when answering would mean reading across many files and you want the summary rather than the file dumps; or when you have independent work to run in parallel. Do NOT delegate a single-fact lookup where you already know the file or symbol, work that needs nuanced judgment about the user\'s intent, or anything so small that spawning an agent costs more than doing it.',
       'By default the call BLOCKS and returns the sub-agent\'s final result. Set background=true for an independent side-quest: it returns a job id immediately and the result is delivered to you in a NEW turn — do other work meanwhile, then end your turn. You are woken when it lands, so never poll DelegateStatus in a loop.',
       'To launch several independent sub-agents, put multiple delegate calls in ONE response so they run concurrently; do not serialize them. Once you have delegated a search, do not also run it yourself.',
-      'Use read_only=true when the sub-agent only needs to look (explore, search, report) — it then gets read-only tools plus a read-only shell (inspect commands only) and cannot write, mutate or delegate further. Use `tools` to hand it an exact toolset. Either way you can only ever narrow what you already hold.',
+      'Use read_only=true when the sub-agent only needs to look (explore, search, report) — it then gets read-only TOOLS (no Write/Edit) plus a shell clamped to non-destructive commands, and cannot delegate further. The shell clamp is a guardrail, not a sandbox: redirection and `sed -i` are permitted, so the child can still write files the daemon user can reach; what it cannot run is rm/mv/chmod, git commit/push/reset, npm, systemctl, kill, curl/wget/ssh or sudo. Use `tools` to hand it an exact toolset. Either way you can only ever narrow what you already hold.',
       'The sub-agent inherits your model; pass `model` only when the user explicitly asked for a different one. Its final message comes back to you, not to the user — relay what matters. A sub-agent that already ran is NOT gone: its transcript is kept, so before delegating something that builds on earlier work, check DelegateList and send that sub-agent a follow-up with DelegateContinue instead — it resumes with its full context, where a fresh one would have to rediscover everything.'
       + agentTypeLine,
     ].join(' '),
@@ -304,13 +309,13 @@ export function register(ctx) {
         description: 'Start asynchronously and return a stable job id immediately. Omit or false to wait for the result.',
       })),
       read_only: Type.Optional(Type.Boolean({
-        description: 'Give the sub-agent read-only tools plus a read-only shell (look-only commands like ls/cat/grep/git status) — it can inspect and run safe shell, but cannot write, mutate or delegate further. Use it for any task that just explores and reports.',
+        description: 'Give the sub-agent read-only tools (no Write/Edit) plus a shell clamped to non-destructive commands — inspection (ls/cat/grep/find/git status) and data transforms, but not rm/mv/chmod, git commit/push, npm, systemctl, curl/wget or sudo. It cannot delegate further. Note the clamp still allows writing a file through redirection, so it is not a sandbox. Use it for any task that just explores and reports.',
       })),
       tools: Type.Optional(Type.Array(Type.String(), {
         description: 'Give the sub-agent EXACTLY these tools and nothing else. Names must match your own toolset. Combined with read_only, it narrows further (the intersection). You can only narrow your own access, never widen it.',
       })),
       subagent_type: Type.Optional(Type.String({
-        description: 'Run the sub-agent as a named TYPE (see the list in this tool\'s description) — it supplies the role prompt and toolset. Omit for a generic sub-agent. The type governs the toolset (a read-only type already includes read-only shell), so read_only is redundant with it; an explicit `tools` list still narrows further on top.',
+        description: 'Run the sub-agent as a named TYPE (see the list in this tool\'s description) — it supplies the role prompt and toolset. Omit for a generic sub-agent. The type governs the toolset (a read-only type already includes the non-destructive shell clamp), so read_only is redundant with it; an explicit `tools` list still narrows further on top.',
       })),
     }),
     execute: async (id, p) => {
@@ -460,7 +465,9 @@ export function register(ctx) {
             state.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_STORED_RESULT_CHARS);
           } else {
             state.status = 'done';
-            state.result = clip(reply, MAX_STORED_RESULT_CHARS);
+            // The ONE result the parent reads, foreground return and background delivery alike: keep its END.
+            // An error is left head-first on purpose — what an error says is in its first line, not its last.
+            state.result = clipTail(reply, MAX_STORED_RESULT_CHARS);
           }
         } catch (e) {
           state.status = 'error';
@@ -622,6 +629,53 @@ export function register(ctx) {
   }));
 
   ctx.registerTool(defineTool({
+    name: 'DelegateRead', label: 'Read sub-agent result',
+    description: 'Read the final stored assistant text from a finished sub-agent listed by DelegateList. '
+      + 'Use offset and limit to recover a long result across calls. Every response states the total length, '
+      + 'the exact returned range, and the next offset when more remains. The host scopes the id to this '
+      + 'conversation; another conversation\'s sub-agent is never readable.',
+    parameters: Type.Object({
+      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+      limit: Type.Optional(Type.Number({
+        description: `Maximum characters to return (default ${DEFAULT_READ_CHARS}, capped at ${MAX_READ_CHARS}).`,
+      })),
+      offset: Type.Optional(Type.Number({ description: 'Character offset to start from (default 0).' })),
+    }),
+    execute: async (_id, p) => {
+      if (!ctx.readSubagent) return ok('Error: reading a sub-agent is not wired up on this server.');
+      try {
+        const text = ctx.readSubagent(String(p.id ?? '').trim());
+        const requestedLimit = typeof p.limit === 'number' && Number.isFinite(p.limit)
+          ? Math.floor(p.limit)
+          : DEFAULT_READ_CHARS;
+        const limit = Math.min(MAX_READ_CHARS, Math.max(1, requestedLimit));
+        const offset = typeof p.offset === 'number' && Number.isFinite(p.offset)
+          ? Math.max(0, Math.floor(p.offset))
+          : 0;
+        const totalLength = text.length;
+        if (offset > totalLength) {
+          return ok(`Error: offset ${offset} is beyond the final assistant text (${totalLength} characters total). Use an offset from 0 to ${totalLength}.`);
+        }
+        const end = Math.min(totalLength, offset + limit);
+        const slice = text.slice(offset, end);
+        const hasMore = end < totalLength;
+        const next = hasMore
+          ? ` More remains; fetch the next part with DelegateRead({"id":"${String(p.id ?? '').trim()}","offset":${end},"limit":${limit}}).`
+          : ' This is the complete remaining text.';
+        return ok(
+          `Sub-agent final assistant text: ${totalLength} characters total; returned range [${offset}, ${end}) (${slice.length} characters).${next}\n\n${slice}`,
+          {
+            sessionId: String(p.id ?? '').trim(), offset, limit, end, totalLength,
+            returnedLength: slice.length, hasMore, ...(hasMore ? { nextOffset: end } : {}),
+          },
+        );
+      } catch (e) {
+        return ok(`Error: ${errorText(e)}`);
+      }
+    },
+  }));
+
+  ctx.registerTool(defineTool({
     name: 'DelegateContinue', label: 'Continue a sub-agent',
     description: 'Send a follow-up to a sub-agent that already ran (id from DelegateList) and get its '
       + 'reply. The sub-agent resumes its OWN conversation with full context preserved, so write a '
@@ -642,12 +696,66 @@ export function register(ctx) {
       const message = typeof p.message === 'string' ? p.message.trim() : '';
       if (!message) return ok('Error: `message` was empty. Say what the sub-agent should do next.');
       if (!ctx.continueSubagent) return ok('Error: continuing a sub-agent is not wired up on this server.');
+      const childSessionId = String(p.id ?? '').trim();
+      // Mirror Delegate's live progress row so a follow-up shows as a RUNNING sub-agent in the rail, keyed
+      // on THIS tool call (with the child's session for drill-in), instead of running invisibly. The child
+      // already exists, so its session id is known up front — no `session` event needed to seed the row.
+      const state = {
+        toolCallId: _id,
+        sessionId: childSessionId,
+        status: 'running',
+        task: clip(message, MAX_STORED_TASK_CHARS),
+        tools: 0,
+        detail: undefined,
+        tokens: undefined,
+        startedAt: Date.now(),
+        emit: ctx.subagentEmitter(),
+      };
+      const push = (status) => pushJob(state, status);
+      const onEvent = (e) => {
+        if (e.type === 'tool' && e.name) { state.tools += 1; state.detail = e.detail ? `${e.name} ${e.detail}` : e.name; push('running'); }
+        else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { state.tokens = e.usage.totalTokens; push('running'); }
+      };
       try {
-        const reply = await ctx.continueSubagent(String(p.id ?? '').trim(), message);
+        // Start the continuation BEFORE raising the progress row. The host refuses a child that has a turn
+        // in flight by reading the very registry this row writes to (a `running` update registers the child
+        // as live), so raising it first made every continuation refuse ITSELF — the child was reported busy
+        // by the same call that was asking to continue it. continueSubagent runs all its guards
+        // synchronously before its first await, so they see the registry as it was.
+        const continuation = ctx.continueSubagent(childSessionId, message, onEvent);
+        push('running');
+        const reply = await continuation;
+        state.status = 'done';
+        push('done');
         return ok(reply || '(the sub-agent returned nothing)');
       } catch (e) {
         // A refusal is self-correctable — the agent can wait for a busy child or pick another one — so it
         // comes back as a readable result, exactly like every other error this plugin surfaces.
+        state.status = 'error';
+        push('error');
+        return ok(`Error: ${errorText(e)}`);
+      }
+    },
+  }));
+
+  ctx.registerTool(defineTool({
+    name: 'DelegateStop', label: 'Stop a sub-agent',
+    description: 'Stop a DIRECT sub-agent from DelegateList that is running away, looping, or is simply no '
+      + 'longer needed — without touching the parent conversation or any sibling. Stopping one also tears '
+      + 'down whatever IT itself delegated, so a foreground DelegateContinue call stuck waiting on a stuck '
+      + 'grandchild comes down together with it in one call; there is no way to reach past a direct child '
+      + 'to kill only a deeper descendant. A background sub-agent keeps running and its result stays '
+      + 'available until it is actually stopped — this is the only way to end one early other than waiting '
+      + 'it out. Resolves "nothing to stop" rather than erroring when the child already finished.',
+    parameters: Type.Object({
+      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+    }),
+    execute: async (_id, p) => {
+      if (!ctx.stopSubagent) return ok('Error: stopping a sub-agent is not wired up on this server.');
+      try {
+        const { stopped } = await ctx.stopSubagent(String(p.id ?? '').trim());
+        return ok(stopped ? 'Stopped.' : 'Nothing to stop — that sub-agent already finished (or never started).');
+      } catch (e) {
         return ok(`Error: ${errorText(e)}`);
       }
     },

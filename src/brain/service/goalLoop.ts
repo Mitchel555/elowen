@@ -76,6 +76,31 @@ export class GoalLoopService {
     }
   }
 
+  /** After a SAME-ID respawn (model switch, restart, vision hop) completes successfully: if the goal is
+   *  still `active`, give it a driver again. Its continuation timer died with the disposed runtime, and
+   *  because the row still reads `active` the idle reaper would never notice (it skips exactly what looks
+   *  running) — every same-id respawn site must call this once, right after the fresh live is registered.
+   *  No-op when the goal is absent, or was paused/cleared/completed during the respawn window. */
+  resumeAfterRespawn(userId: number, sessionId: string): void {
+    const row = this.d.store.getGoal(sessionId);
+    if (row?.status === 'active') this.scheduleGoalContinuation(userId, sessionId, 100);
+  }
+
+  /** The same-id respawn that would have carried an active goal forward failed outright (the spawn
+   *  threw). The durable goal must not stay `active` with its timer already cancelled and no reschedule
+   *  coming — pause it with the failure as the reason, mirroring the continuation timer's own catch
+   *  handler (`scheduleGoalContinuation`). No-op when the goal is absent or not `active`. */
+  pauseForRespawnFailure(sessionId: string, error: unknown): void {
+    const row = this.d.store.getGoal(sessionId);
+    if (row?.status === 'active') {
+      this.updateGoal(sessionId, {
+        status: 'paused',
+        last_verdict: 'error',
+        paused_reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /** One-shot boot sweep: every goal the DB still marks `active` is a restart zombie (in-memory timers
    *  don't survive the process), so pause them all. Runs once at daemon startup — NOT lazily per start() —
    *  which is why start()/reconnect no longer has to guess whether a timer-less goal is a zombie. */

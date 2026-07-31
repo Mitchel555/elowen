@@ -2,6 +2,8 @@ import { CURSOR_MARKER, ProcessTerminal, SelectList, TUI, decodeKittyPrintable, 
 import type { Component, Focusable, SelectItem } from '@earendil-works/pi-tui';
 import { color, chatTheme, paintRow } from '../chat/theme.js';
 import { MASCOT_ART } from '../chat/mascot.js';
+import { loadPrefs } from '../chat/prefs.js';
+import { terminalInlineText, terminalSafeAnsi, terminalSafeComponent } from './text.js';
 
 const CANCEL: symbol = Symbol('elowen-prompt-cancel');
 
@@ -64,7 +66,9 @@ export function mascot(): void {
  *  runtime decoding) plus a spacer — or nothing while unarmed, when the viewport is narrower than the art
  *  (it would hard-wrap into garbage), or too short to fit art + prompt without pushing the prompt off. */
 export function mascotHeaderLines(width: number): string[] {
-  if (!mascotArmed || width < 28 || termHeight() < 30) return [];
+  // Respect the CLI-wide `/maskot` preference so a user who hid the flame in chat does not meet it again
+  // over the setup/menu modals. Default (unset) stays shown.
+  if (!mascotArmed || loadPrefs().showMascot === false || width < 28 || termHeight() < 30) return [];
   const pad = ' '.repeat(Math.max(0, Math.floor((width - 28) / 2)));
   return [...MASCOT_ART.map((line) => pad + line), ''];
 }
@@ -114,18 +118,22 @@ export function printableInput(data: string): string {
  *  (body or title), clamped to [minWidth, termWidth() - margin]; pass `width` to force an exact size. An
  *  optional `title` sits in the top rule. Returns raw framed rows; callers center as needed. */
 export function box(body: string[], opts: { title?: string; width?: number; minWidth?: number; margin?: number } = {}): string[] {
+  // Dynamic content (model ids, provider notes, ...) crosses the ANSI safety boundary before it is
+  // measured/wrapped, and every wrapped line crosses it again before it reaches the terminal — a final
+  // defense in case wrapping ever reflows something past the first pass.
+  const safeBody = body.map(terminalSafeAnsi);
   const cap = termWidth() - (opts.margin ?? MODAL_MARGIN);
   const minWidth = Math.min(opts.minWidth ?? 44, cap);
   const titleText = opts.title ? ` ${color.bold(color.text(opts.title))} ` : '';
   const titleWidth = visibleWidth(titleText);
-  const bodyWidth = body.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+  const bodyWidth = safeBody.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
   const desired = opts.width ?? Math.max(bodyWidth, titleWidth) + 4;
   const width = Math.max(minWidth, Math.min(desired, cap));
   const inner = Math.max(16, width - 4);
   const rule = Math.max(0, inner - titleWidth);
   return [
     `${color.accent('╭')}${color.faint('─'.repeat(rule))}${titleText}${color.accent('╮')}`,
-    ...body.flatMap((line) => wrapTextWithAnsi(line, inner).map((wrapped) => `${color.accent('│')}${bg(wrapped, inner)}${color.accent('│')}`)),
+    ...safeBody.flatMap((line) => wrapTextWithAnsi(line, inner).map((wrapped) => `${color.accent('│')}${bg(terminalSafeAnsi(wrapped), inner)}${color.accent('│')}`)),
     `${color.accent('╰')}${color.faint('─'.repeat(inner))}${color.accent('╯')}`,
   ];
 }
@@ -143,8 +151,9 @@ function frame(title: string, body: string[]): string[] {
  *  size to its content (clamped by modalWidth) instead of a hard-coded width. */
 function optionsContentWidth<T extends Primitive>(message: string, options: Option<T>[]): number {
   const widest = options.reduce((max, option) => {
-    const hint = option.hint ?? option.description ?? '';
-    return Math.max(max, visibleWidth(option.label ?? String(option.value)) + (hint ? visibleWidth(hint) + 2 : 0));
+    const label = terminalInlineText(option.label ?? String(option.value));
+    const hint = terminalInlineText(option.hint ?? option.description ?? '');
+    return Math.max(max, visibleWidth(label) + (hint ? visibleWidth(hint) + 2 : 0));
   }, 0);
   return Math.max(visibleWidth(message), widest + 4); // + selection prefix / checkbox gutter
 }
@@ -203,7 +212,9 @@ function logLine(kind: ProgressKind, message: string): void {
       : kind === 'warn' ? color.warning('●')
         : kind === 'step' ? color.accent('●')
           : color.faint('●');
-  process.stdout.write(`  ${dot} ${message}\n`);
+  // Direct stdout writes bypass box()'s ANSI boundary, so a one-line log message (e.g. an OAuth error or
+  // URL echoed straight from a provider) gets the same control-stripping treatment here.
+  process.stdout.write(`  ${dot} ${terminalInlineText(message)}\n`);
 }
 
 export const log = {
@@ -270,7 +281,11 @@ function promptModal<T>(componentFactory: (finish: (value: MaybeCancel<T>) => vo
       process.stdout.write('\n');
       resolve(value);
     };
-    const component = componentFactory(finish);
+    // Final render-boundary defense (mirrors the chat TUI's root sanitization): whatever the component
+    // composed from dynamic content (model ids, provider notes, ...) into its rows is scrubbed one more
+    // time right before it reaches the terminal. Wrap once and reuse the SAME instance for addChild/
+    // setFocus so input routing and the `focused` getter/setter stay consistent with pi-tui's identity checks.
+    const component = terminalSafeComponent(componentFactory(finish));
     tui.addChild({ invalidate(): void { /* stateless */ }, render: (width: number) => mascotHeaderLines(width) });
     tui.addChild(component);
     tui.setFocus(component);
@@ -292,11 +307,16 @@ class SelectPrompt<T extends Primitive> implements Component, Focusable {
     private readonly note: SelectOptions<T>['note'],
     private readonly finish: (value: MaybeCancel<T>) => void,
   ) {
-    const items: SelectItem[] = options.map((option) => ({
-      value: String(option.value),
-      label: option.label ?? String(option.value),
-      description: option.hint ?? option.description,
-    }));
+    // Labels/descriptions can be dynamic content (e.g. model ids fetched from an external provider's
+    // /models endpoint), so they cross the ANSI safety boundary before SelectList measures/renders them.
+    const items: SelectItem[] = options.map((option) => {
+      const hint = option.hint ?? option.description;
+      return {
+        value: String(option.value),
+        label: terminalInlineText(option.label ?? String(option.value)),
+        description: hint !== undefined ? terminalInlineText(hint) : undefined,
+      };
+    });
     this.list = new SelectList(items, 11, {
       selectedPrefix: (text) => color.selected(text),
       selectedText: (text) => color.selected(text),
@@ -358,7 +378,7 @@ class SelectPrompt<T extends Primitive> implements Component, Focusable {
     if (!this.note?.body.trim()) return [];
     const title = this.note.title ? color.accent(this.note.title) : color.accent('Result');
     const wrapped = this.note.body.trim().split('\n')
-      .flatMap((line) => wrapTextWithAnsi(`  ${color.dim(line)}`, Math.max(1, width)));
+      .flatMap((line) => wrapTextWithAnsi(`  ${color.dim(terminalSafeAnsi(line))}`, Math.max(1, width)));
     const budget = Math.max(4, termHeight() - 18);
     const overflow = wrapped.length - budget;
     const shown = overflow > 0
@@ -395,8 +415,8 @@ class MultiSelectPrompt<T extends Primitive> implements Component, Focusable {
       const i = start + offset;
       const checked = this.selected.has(String(option.value));
       const marker = checked ? color.success('☑') : color.faint('☐');
-      const label = option.label ?? String(option.value);
-      const desc = option.hint ?? option.description ?? '';
+      const label = terminalInlineText(option.label ?? String(option.value));
+      const desc = terminalInlineText(option.hint ?? option.description ?? '');
       const row = `${marker} ${truncateToWidth(label, 24, '…', true)} ${color.dim(truncateToWidth(desc, Math.max(1, inner - 30), '…'))}`;
       lines.push(i === this.index ? color.selected(row) : row);
     }
@@ -443,22 +463,56 @@ export function newFieldState(initial: string): FieldState {
   return { value: initial, cursor: initial.length, touched: false };
 }
 
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** The grapheme cluster boundary at or before `pos` (a UTF-16 offset) — where the caret lands after moving
+ *  left, or where a backspace-at-`pos` should start deleting from. Mirrors `inputWindow`'s own segmentation
+ *  so the caret and the deleted span always agree on where a cluster (surrogate pair, combining sequence)
+ *  starts. */
+function graphemeBoundaryBefore(value: string, pos: number): number {
+  let last = 0;
+  for (const { segment } of graphemeSegmenter.segment(value)) {
+    const end = last + segment.length;
+    if (end >= pos) return last;
+    last = end;
+  }
+  return last;
+}
+
+/** The grapheme cluster boundary at or after `pos` — where the caret lands after moving right, or where a
+ *  delete-at-`pos` should stop deleting. */
+function graphemeBoundaryAfter(value: string, pos: number): number {
+  let offset = 0;
+  for (const { segment } of graphemeSegmenter.segment(value)) {
+    offset += segment.length;
+    if (offset > pos) return offset;
+  }
+  return value.length;
+}
+
 /** Pure reducer for the hand-rolled text field, shared by the text and password prompts (single source of
  *  truth). Handles type-over of an untouched prefill plus in-place editing: cursor navigation
  *  (left/right/home/end), delete-at-cursor and backspace-at-cursor. Returns the next state, or null for
  *  input it doesn't own (submit/cancel keys the caller handles). Any interaction marks the field touched,
- *  so once the user has moved the caret or edited, further typing inserts rather than type-overs. */
+ *  so once the user has moved the caret or edited, further typing inserts rather than type-overs.
+ *
+ *  Cursor movement and deletion step by grapheme CLUSTER, not UTF-16 code unit: a caret always sits on a
+ *  cluster boundary, so a backspace/delete next to an emoji or a combining sequence removes the whole
+ *  cluster instead of one surrogate half (which would leave a lone surrogate — rendered as `�`, corrupting
+ *  a typed password or submitting a different value than the user typed). */
 export function editField(state: FieldState, data: string): FieldState | null {
-  if (matchesKey(data, 'left')) return { ...state, cursor: Math.max(0, state.cursor - 1), touched: true };
-  if (matchesKey(data, 'right')) return { ...state, cursor: Math.min(state.value.length, state.cursor + 1), touched: true };
+  if (matchesKey(data, 'left')) return { ...state, cursor: graphemeBoundaryBefore(state.value, state.cursor), touched: true };
+  if (matchesKey(data, 'right')) return { ...state, cursor: graphemeBoundaryAfter(state.value, state.cursor), touched: true };
   if (matchesKey(data, 'home')) return { ...state, cursor: 0, touched: true };
   if (matchesKey(data, 'end')) return { ...state, cursor: state.value.length, touched: true };
   if (matchesKey(data, 'backspace')) {
     if (state.cursor === 0) return { ...state, touched: true };
-    return { value: state.value.slice(0, state.cursor - 1) + state.value.slice(state.cursor), cursor: state.cursor - 1, touched: true };
+    const start = graphemeBoundaryBefore(state.value, state.cursor);
+    return { value: state.value.slice(0, start) + state.value.slice(state.cursor), cursor: start, touched: true };
   }
   if (matchesKey(data, 'delete')) {
-    return { value: state.value.slice(0, state.cursor) + state.value.slice(state.cursor + 1), cursor: state.cursor, touched: true };
+    const end = graphemeBoundaryAfter(state.value, state.cursor);
+    return { value: state.value.slice(0, state.cursor) + state.value.slice(end), cursor: state.cursor, touched: true };
   }
   const printable = printableInput(data);
   if (!printable) return null;
@@ -467,8 +521,6 @@ export function editField(state: FieldState, data: string): FieldState | null {
   if (!state.touched) return { value: printable, cursor: printable.length, touched: true };
   return { value: state.value.slice(0, state.cursor) + printable + state.value.slice(state.cursor), cursor: state.cursor + printable.length, touched: true };
 }
-
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 /** Grapheme- and width-aware horizontal scroll window for the text-field input line (single source for the
  *  text + password prompts). The value is split into grapheme CLUSTERS so a slice can never fall through a

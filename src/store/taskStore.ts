@@ -119,31 +119,68 @@ export class TaskStore {
     return { task: this.get(taskId)! };
   }
 
-  /** Wipe ALL tasks, their dependency edges and every mission — the operational data reset used by
-   *  the admin cleanup. Projects/users/config are untouched. Returns the row counts removed. */
+  /** Wipe ALL tasks, their dependency edges, every mission and its PR record — the operational data
+   *  reset used by the admin cleanup. mission_pr has no FK cascade (same as the epic-delete cascade in
+   *  cascade.ts), so it must be cleared explicitly or a wiped mission leaves an orphan PR/worktree
+   *  record behind. Projects/users/config are untouched. Returns the row counts removed. */
   deleteAll(): { tasks: number; missions: number } {
     return this.db.transaction(() => {
       const missions = (this.db.prepare('SELECT COUNT(*) c FROM missions').get() as { c: number }).c;
       this.db.prepare('DELETE FROM task_deps').run();
+      this.db.prepare('DELETE FROM mission_pr').run();
       this.db.prepare('DELETE FROM missions').run();
       const r = this.db.prepare('DELETE FROM tasks').run();
       return { tasks: r.changes, missions };
     })();
   }
-  addDep(taskId: string, dependsOnId: string): void {
-    if (!dependsOnId || dependsOnId === taskId) return; // no self-reference
-    if (this.wouldCycle(taskId, dependsOnId)) return; // adding dep would create a cycle
-    this.db.prepare('INSERT OR IGNORE INTO task_deps (task_id, depends_on_id) VALUES (?, ?)').run(taskId, dependsOnId);
+
+  /** Every mission id currently in the `missions` table, in no particular order — used by the admin
+   *  cleanup route to free each mission's on-disk worktree (missionGit.cleanup is a no-op for one with
+   *  none) before deleteAll() wipes the row, so a paused or naturally-completed mission — which the
+   *  live-only disengage sweep never reaches — doesn't leak its worktree. */
+  listMissionIds(): string[] {
+    return (this.db.prepare('SELECT id FROM missions').all() as { id: string }[]).map((r) => r.id);
   }
 
-  /** Replace this task's dependencies with the given set. Self-references are dropped and any edge
-   *  that would introduce a cycle (incl. mutual deps within the incoming set) is rejected. */
+  /** Run a sequence of this store's own writes as ONE atomic transaction. Not a generic repository or
+   *  unit-of-work layer — it exists so a caller that composes several of THIS store's own calls (e.g.
+   *  plan persistence: create the epic, create every phase, wire every dependency edge) can make the
+   *  whole sequence atomic without reaching into a raw `Db` handle it was never given. Rolls back
+   *  everything written inside `fn` if it throws. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /** Add a dependency edge task→dependsOn. Refuses (returns false, no write) a self-reference, an edge
+   *  that would create a cycle, a dangling endpoint (either id doesn't exist) or a cross-project edge —
+   *  readiness resolves a dep's status by joining through `tasks`, so a missing task would otherwise
+   *  read as vacuously satisfied (letting the dependent start early on a typo) and a foreign project's
+   *  task would drive this one's scheduling and leak its status across the tenancy boundary. Returns
+   *  true once the edge exists (freshly added, or already present). */
+  addDep(taskId: string, dependsOnId: string): boolean {
+    if (!dependsOnId || dependsOnId === taskId) return false; // no self-reference
+    const task = this.get(taskId);
+    const dependsOn = this.get(dependsOnId);
+    if (!task || !dependsOn || task.project_id !== dependsOn.project_id) return false;
+    if (this.wouldCycle(taskId, dependsOnId)) return false; // adding dep would create a cycle
+    this.db.prepare('INSERT OR IGNORE INTO task_deps (task_id, depends_on_id) VALUES (?, ?)').run(taskId, dependsOnId);
+    return true;
+  }
+
+  /** Replace this task's dependencies with the given set. Self-references, cycle-forming edges (incl.
+   *  mutual deps within the incoming set), a dangling id (no such task) and a cross-project id are all
+   *  silently dropped — the same "best effort" contract this bulk replace already had for self/cycle
+   *  now also closes the dangling/cross-project gap addDep rejects (see its doc comment for why). */
   setDeps(taskId: string, dependsOnIds: string[]): void {
+    const task = this.get(taskId);
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM task_deps WHERE task_id = ?').run(taskId);
+      if (!task) return; // taskId itself doesn't exist — nothing valid to wire
       const stmt = this.db.prepare('INSERT OR IGNORE INTO task_deps (task_id, depends_on_id) VALUES (?, ?)');
       for (const dep of dependsOnIds) {
         if (!dep || dep === taskId) continue;
+        const dependsOn = this.get(dep);
+        if (!dependsOn || dependsOn.project_id !== task.project_id) continue;
         if (this.wouldCycle(taskId, dep)) continue;
         stmt.run(taskId, dep);
       }

@@ -188,6 +188,7 @@ const clampMaxSteps = (next: number | undefined, fallback: number): number =>
 export interface BrainLimits {
   toolOutputMaxLines: number;
   toolOutputMaxChars: number;
+  toolResultInlineBytes: number;
   elicitationTimeoutMs: number;
   memoryRecallCount: number;
   memoryRecallChars: number;
@@ -198,28 +199,60 @@ export interface BrainLimits {
 }
 export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   toolOutputMaxLines: 80,
-  toolOutputMaxChars: 12000,
+  // Matches Claude Code's BASH_MAX_OUTPUT_DEFAULT (30 000 chars).
+  toolOutputMaxChars: 30_000,
+  // Matches Claude Code's DEFAULT_MAX_RESULT_SIZE_CHARS — a single result above this is spilled to disk
+  // and the model gets a placeholder instead (toolResultClearing's size trigger).
+  toolResultInlineBytes: 50_000,
   elicitationTimeoutMs: 300_000,
   memoryRecallCount: 6,
-  memoryRecallChars: 1500,
-  goalTurnBudget: 8,
+  // ~1500 tokens. Spread over memoryRecallCount hits that is ~1000 chars per memory, enough for one to
+  // arrive whole; the previous 1500 total left ~250 each and cut most of them off mid-sentence.
+  memoryRecallChars: 6000,
+  // A goal worth starting autonomously routinely needs tens of turns — see goalMaxTurns (its ceiling).
+  goalTurnBudget: 24,
   goalMaxTurns: 64,
   channelSessionCap: 32,
   delegateContextChars: 20_000,
 };
+
+/** Adjustable range of a tuning knob: its default ±50%, derived from the default so raising a default
+ *  later carries its bound with it instead of leaving the two to drift apart. `maxOverride` exists for
+ *  the one knob whose ceiling is set by a downstream cap rather than by this rule. */
+const band = (key: keyof BrainLimits, maxOverride?: number): [min: number, max: number] => {
+  const def = DEFAULT_BRAIN_LIMITS[key];
+  return [Math.round(def / 2), maxOverride ?? Math.round(def * 1.5)];
+};
+
 const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> = {
-  toolOutputMaxLines: [20, 400],
-  toolOutputMaxChars: [2000, 50_000],
-  elicitationTimeoutMs: [30_000, 1_800_000],
-  memoryRecallCount: [1, 20],
-  memoryRecallChars: [300, 8000],
-  goalTurnBudget: [1, 50],
+  // The four ceilings below are raised past the ±50% rule at the instance owner's request: the rule
+  // sizes a tuning margin around a sensible default, but these are the knobs an operator reaches for
+  // when a single tool result or a recalled memory genuinely needs more room than the default allows.
+  // In the editor's own unit (4 chars per token) that is ~20k tokens of tool output and ~5k of recall.
+  toolOutputMaxLines: band('toolOutputMaxLines', 200),
+  toolOutputMaxChars: band('toolOutputMaxChars', 80_000),
+  // Plain ±50% rule (25 000–75 000): unlike the transcript-preview caps this is what the model actually
+  // receives inline, so its tuning margin is the default band rather than a raised operator ceiling.
+  toolResultInlineBytes: band('toolResultInlineBytes'),
+  // memoryRecallChars is the budget these hits SHARE, so raising the count alone makes each hit smaller:
+  // at the 6000-char default, 20 memories leave ~300 chars each and most get cut mid-sentence. An
+  // operator who wants many memories wants the char budget raised with it — hence both ceilings.
+  memoryRecallCount: band('memoryRecallCount', 20),
+  memoryRecallChars: band('memoryRecallChars', 20_000),
+  // Raised past the ±50% rule at the owner's request to ~20k tokens. The ceiling is bounded by
+  // MAX_PROMPT_TOTAL_CHARS (brain/delegatedScope.ts), the budget packDelegatedPromptAppend fair-shares
+  // with the child's role prompt — that budget was raised to 120 000 alongside this, so the value here
+  // is now reachable rather than trimmed straight back off.
+  delegateContextChars: band('delegateContextChars', 80_000),
+  // Deliberately exempt from the ±50% rule: for these four the wide range is load-bearing, not a tuning
+  // margin. The elicitation ceiling was raised to 6 hours by the instance owner — a question may
+  // legitimately wait out a whole working day, not just a session. A busy channel may hold many more
+  // live sessions than a quiet one, and the two goal knobs are one family — a per-goal budget that could
+  // not approach its own ceiling would make the ceiling unreachable, so both span the same range.
+  elicitationTimeoutMs: [30_000, 21_600_000],
+  goalTurnBudget: [4, 500],
   goalMaxTurns: [8, 500],
   channelSessionCap: [4, 256],
-  // The maximum stays under the delegated-scope prompt total (32 000 chars in brain/delegatedScope.ts),
-  // leaving room for the child's role prompt — a scope over that bound is rejected wholesale and the
-  // delegation fails closed.
-  delegateContextChars: [2_000, 26_000],
 };
 /** Merge a (possibly partial, possibly malformed) limits patch onto `fallback`, clamping each field to
  *  its bound and rounding to a whole number; a missing/invalid field keeps the fallback value. */
@@ -249,6 +282,32 @@ function sanitizeContextWindows(input: unknown): Record<string, number> {
 /** Keep only the non-empty string members of a stored/patched list, dropping any malformed entries. */
 function sanitizeStringList(input: unknown): string[] {
   return Array.isArray(input) ? input.filter((v): v is string => typeof v === 'string' && v.length > 0) : [];
+}
+
+/** Keep only well-formed custom-model entries ({ label, exec }, both non-empty strings). A malformed
+ *  entry — e.g. a numeric `exec` from a hand-edited row or a loose PUT — is dropped rather than
+ *  persisted, since a model picker would otherwise render it as a broken/undefined option. */
+function sanitizeCustomModels(input: unknown): { label: string; exec: string }[] {
+  if (!Array.isArray(input)) return [];
+  const out: { label: string; exec: string }[] = [];
+  for (const v of input) {
+    if (!v || typeof v !== 'object') continue;
+    const { label, exec } = v as Partial<{ label: unknown; exec: unknown }>;
+    if (typeof label === 'string' && label && typeof exec === 'string' && exec) out.push({ label, exec });
+  }
+  return out;
+}
+
+/** Keep only the string-valued entries of a model-notes map. A non-string value (e.g. a stray number
+ *  from a hand-edited row or a loose PUT) would otherwise reach `modelsBlock()`'s `.trim()` and throw,
+ *  breaking auto-model planning until the row is repaired by hand (review-api-store-sol, finding 7). */
+function sanitizeModelNotes(input: unknown): Record<string, string> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
 }
 
 const DEFAULT_CONFIG: ElowenConfig = {
@@ -389,12 +448,14 @@ export class ConfigStore {
       // wrong runtime shape (e.g. allowedExecs as a string), which would crash callers that .map it.
       // So each typed field is shape-checked; a bad value falls back to its default.
       return {
-        allowedExecs: Array.isArray(p.allowedExecs) ? p.allowedExecs : d.allowedExecs,
-        customModels: Array.isArray(p.customModels) ? p.customModels : [],
-        hiddenPresets: Array.isArray(p.hiddenPresets) ? p.hiddenPresets : [],
+        // Element-level sanitisers, not just an Array.isArray check: a database written by an older
+        // build (or hand-edited) can hold an array whose elements are the wrong runtime type.
+        allowedExecs: Array.isArray(p.allowedExecs) ? sanitizeStringList(p.allowedExecs) : d.allowedExecs,
+        customModels: sanitizeCustomModels(p.customModels),
+        hiddenPresets: Array.isArray(p.hiddenPresets) ? sanitizeStringList(p.hiddenPresets) : [],
         // Seed built-in notes under any stored notes so known models always carry a description,
         // while user edits (including an explicit '' to clear one) take precedence.
-        modelNotes: (p.modelNotes && typeof p.modelNotes === 'object' && !Array.isArray(p.modelNotes)) ? { ...d.modelNotes, ...(p.modelNotes as Record<string, string>) } : { ...d.modelNotes },
+        modelNotes: (p.modelNotes && typeof p.modelNotes === 'object' && !Array.isArray(p.modelNotes)) ? { ...d.modelNotes, ...sanitizeModelNotes(p.modelNotes) } : { ...d.modelNotes },
         autopilot: mergeAutopilot(p.autopilot, d.autopilot),
         providers: { ...d.providers, ...sanitizeProviders(p.providers) },
         apiKey: typeof p.apiKey === 'string' ? p.apiKey : null,
@@ -415,8 +476,8 @@ export class ConfigStore {
         // "no plugins" decision, never the fresh-install defaults). Absent block → legacyEmptyPlugins().
         plugins: (p.plugins && typeof p.plugins === 'object' && !Array.isArray(p.plugins))
           ? {
-              enabled: Array.isArray(p.plugins.enabled) ? p.plugins.enabled : [],
-              removed: Array.isArray(p.plugins.removed) ? p.plugins.removed : [],
+              enabled: Array.isArray(p.plugins.enabled) ? sanitizeStringList(p.plugins.enabled) : [],
+              removed: Array.isArray(p.plugins.removed) ? sanitizeStringList(p.plugins.removed) : [],
               config: (p.plugins.config && typeof p.plugins.config === 'object' && !Array.isArray(p.plugins.config))
                 ? (p.plugins.config as Record<string, Record<string, unknown>>) : {},
             }
@@ -515,15 +576,17 @@ export class ConfigStore {
     // The pilot/overseer/default exec must resolve to a real program — mirror the API's
     // allowedExecs guard so an admin can't persist a bare bogus spec (e.g. 'foo') that
     // resolveExecutor would silently turn into a non-existent claude-code model (audit O22).
-    const allowed = patch.allowedExecs ?? cur.allowedExecs;
+    // Element-level sanitised regardless of source: a stored value is already clean (idempotent), a
+    // patched one might not be — the API's Zod schema is the first gate, this is the second.
+    const allowed = sanitizeStringList(patch.allowedExecs ?? cur.allowedExecs);
     const pilotExec = this.normalizeExec(patch.autopilot?.pilotExec, cur.autopilot.pilotExec, allowed, '');
     const overseerExec = this.normalizeExec(patch.autopilot?.overseerExec, cur.autopilot.overseerExec, allowed, '');
     const defaultExec = this.normalizeExec(patch.defaults?.exec, cur.defaults.exec, allowed, cur.defaults.exec);
     this.write({
       allowedExecs: allowed,
-      customModels: patch.customModels ?? cur.customModels,
-      hiddenPresets: patch.hiddenPresets ?? cur.hiddenPresets,
-      modelNotes: patch.modelNotes ?? cur.modelNotes,
+      customModels: sanitizeCustomModels(patch.customModels ?? cur.customModels),
+      hiddenPresets: sanitizeStringList(patch.hiddenPresets ?? cur.hiddenPresets),
+      modelNotes: sanitizeModelNotes(patch.modelNotes ?? cur.modelNotes),
       // Merge the plain fields, then override the two exec fields with their allow-list-validated values.
       autopilot: { ...mergeAutopilot(patch.autopilot, cur.autopilot), pilotExec, overseerExec },
       providers: patch.providers ? { ...cur.providers, ...sanitizeProviders(patch.providers) } : cur.providers,
@@ -541,8 +604,8 @@ export class ConfigStore {
       lspEnabled: typeof patch.lspEnabled === 'boolean' ? patch.lspEnabled : cur.lspEnabled,
       webPush: cur.webPush, // VAPID keys are managed via setWebPushKeys, never through the config patch
       plugins: {
-        enabled: patch.plugins?.enabled ?? cur.plugins.enabled,
-        removed: patch.plugins?.removed ?? cur.plugins.removed,
+        enabled: sanitizeStringList(patch.plugins?.enabled ?? cur.plugins.enabled),
+        removed: sanitizeStringList(patch.plugins?.removed ?? cur.plugins.removed),
         // Merge per-plugin config so a patch touching one plugin never wipes another's slice.
         config: patch.plugins?.config ? { ...cur.plugins.config, ...patch.plugins.config } : cur.plugins.config,
       },

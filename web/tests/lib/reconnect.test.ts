@@ -89,4 +89,42 @@ describe('createReconnectController', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(connect).not.toHaveBeenCalled();
   });
+
+  // The chat provider tears this controller down from its unmount cleanup and keeps no "still mounted" flag
+  // of its own. That is only safe because stop() silences the onActive channel for good: a late signal would
+  // land as a setState on an unmounted component.
+  it('never signals active again after stop', async () => {
+    const states: boolean[] = [];
+    const c = createReconnectController(() => Promise.reject(new Error('daemon down')), { random: () => 0, onActive: (v) => states.push(v) });
+    c.now();
+    c.stop(); // torn down with the attempt still in flight — its rejection would normally re-arm the backoff
+    await vi.advanceTimersByTimeAsync(60_000);
+    c.now();
+    c.retry();
+    c.succeeded();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(states).toEqual([true, false]);
+  });
+
+  // The overlay ("reconnecting…") is driven off onActive, so it must go true the moment recovery starts and
+  // false only when the stream is healthy again — not on every internal busy transition.
+  it('signals active while recovering and inactive once a frame confirms health', async () => {
+    const states: boolean[] = [];
+    const c = createReconnectController(() => Promise.resolve(), { random: () => 0, onActive: (v) => states.push(v) });
+    c.retry();
+    expect(states).toEqual([true]); // an attempt is scheduled
+    await vi.advanceTimersByTimeAsync(60_000); // it runs and resolves, but a bare resolve is not proof of health
+    expect(states).toEqual([true]);
+    c.succeeded(); // the first delivered frame is
+    expect(states).toEqual([true, false]);
+  });
+
+  it('coalesces duplicate triggers into one active signal and clears it on stop', () => {
+    const states: boolean[] = [];
+    const c = createReconnectController(() => new Promise<void>(() => {}), { onActive: (v) => states.push(v) });
+    c.now();
+    c.now(); // busy → no second signal
+    c.stop();
+    expect(states).toEqual([true, false]);
+  });
 });

@@ -1,7 +1,8 @@
 // A real (SDK-backed) MCP stdio server used by tests/plugins/mcpPlugin.test.ts. It exposes one `echo`
 // tool and — to exercise orphan cleanup — spawns a long-lived grandchild in its own process group,
 // writing that grandchild's pid to $GRANDCHILD_PID_FILE. Killing the server's process group must reap
-// the grandchild too.
+// the grandchild too. If $SERVER_PID_FILE is set, it also writes its OWN pid there, letting a test kill
+// the server itself to simulate an unexpected crash (as opposed to a deliberate plugin cleanup).
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -14,6 +15,9 @@ if (pidFile) {
   const gc = spawn(process.execPath, ['-e', 'setInterval(() => {}, 100000)'], { stdio: 'ignore' });
   writeFileSync(pidFile, String(gc.pid));
 }
+
+const serverPidFile = process.env.SERVER_PID_FILE;
+if (serverPidFile) writeFileSync(serverPidFile, String(process.pid));
 
 const server = new McpServer({ name: 'mock-mcp', version: '0.0.1' });
 server.registerTool('echo', { description: 'Echo the text back', inputSchema: { text: z.string() } }, async ({ text }) => ({

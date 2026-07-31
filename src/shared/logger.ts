@@ -74,7 +74,14 @@ function emit(level: LogLevel, scope: string, message: string, extra?: unknown):
   const now = new Date();
   const line = `${stamp(now)}  ${level.toUpperCase().padEnd(5)}  [${scope}]  ${message}${fmtExtra(extra)}`;
   // Console first — the durable channel (systemd journal). Match severity to the right stream.
-  (level === 'error' ? console.error : level === 'warn' ? console.warn : console.log)(line);
+  // Guarded like the file sink below: a closed/broken pipe makes this throw, and since the daemon's
+  // uncaughtException handler logs, an unguarded throw here turns one dead pipe into an endless
+  // log→EPIPE→log loop. The file sink underneath still records the line.
+  try {
+    (level === 'error' ? console.error : level === 'warn' ? console.warn : console.log)(line);
+  } catch {
+    /* console is gone (EPIPE on a detached parent) — the file sink below is still the record */
+  }
   // Mirror into the optional sink (bounded ring buffer, …). Best-effort: a sink fault must never
   // break logging. Fed the logical message + extra so downstream matching sees the full record.
   if (sink) {

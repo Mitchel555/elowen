@@ -54,8 +54,13 @@ export function registerMissionRoutes(app: ElowenApp, ctx: RouteContext): void {
     // Validate the epic up front: an absent/unknown epicId would otherwise create a zombie mission
     // (id `m-undefined`, no epic to tick) that reports `active` over SSE but never progresses.
     const b = await parseBody(c, engageMissionSchema);
-    if (!d.tasks.get(b.epicId)) return c.json({ error: 'epic not found' }, 404);
+    const target = d.tasks.get(b.epicId);
+    if (!target) return c.json({ error: 'epic not found' }, 404);
     if (!missionAccessible(c, b.epicId)) return c.json({ error: 'forbidden' }, 403);
+    // Only an epic can carry a mission: the engine spawns and completes the target's CHILD phases, and
+    // a plain task has none. Such a mission spawns nothing and never reaches the "all children closed"
+    // completion branch — it keeps ticking and holds a parked overseer until a human disengages it.
+    if (target.type !== 'epic') return c.json({ error: 'task is not an epic' }, 400);
     // Default the engage params (mirrors /tasks/plan) so a partial body can't reach the engine with
     // undefined autonomy/maxSessions.
     return c.json(await d.engine.engage({

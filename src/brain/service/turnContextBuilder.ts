@@ -2,7 +2,7 @@ import { PluginHookBus } from '../../plugins/hookBus.js';
 import type { PluginRegistry } from '../../plugins/registry.js';
 import { runWithPolicy } from '../../plugins/policyContext.js';
 import type { ToolPolicy } from '../../plugins/policyContext.js';
-import { drainSessionNotices } from './sessionEvents.js';
+import { drainSessionNotices, recordSubagentFinishMarker } from './sessionEvents.js';
 import type { HookAuditBuffer } from '../../shared/hookAudit.js';
 import type { BrainStore } from '../../store/brainStore.js';
 import type { BrainDeps } from '../brainDeps.js';
@@ -16,7 +16,7 @@ import { applyToolVisibility } from '../session/capabilities.js';
 import type { LiveBrain } from '../session/liveBrain.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
 import { isPromptCommand } from '../slashCommands.js';
-import { summarizePermissions, READ_ONLY_BASH_RULES } from '../toolPermissions.js';
+import { summarizePermissions, NON_DESTRUCTIVE_BASH_RULES } from '../toolPermissions.js';
 import { xmlEscape } from '../../shared/xml.js';
 import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
@@ -49,7 +49,7 @@ interface TurnContextBuilderDeps {
  *  these does, so they are admitted here — beside the mode that clamps them — rather than by claiming
  *  something untrue in a manifest. Admitting a tool here WITHOUT its clamp hands plan mode a way to
  *  mutate, so the two must always move together:
- *   - `Bash` — `scopeOptions` below narrows the turn's shell rules to READ_ONLY_BASH_RULES.
+ *   - `Bash` — `scopeOptions` below narrows the turn's shell rules to NON_DESTRUCTIVE_BASH_RULES.
  *   - `Delegate` — `scopeOptions` puts the turn's mode on the AsyncLocalStorage, and
  *     pathGuard.currentAccess stamps `readOnly` on every delegation a planning turn makes, which the
  *     host bakes into the child's toolset and permission boundary (brain/platforms.ts).
@@ -100,11 +100,11 @@ export class TurnContextBuilder {
 
   async build(request: TurnRequest, live: LiveBrain): Promise<PreparedTurnContext> {
     const mode: TurnMode = request.mode ?? 'build';
-    // Captured before the overwrite below: entering a mode must restate it in full, and that is the
-    // only way to tell entry from continuation (mode is client-stamped per send, with no daemon event).
+    // The mode of the last turn that actually REACHED the model: entering a mode must restate it in full,
+    // and that is the only way to tell entry from continuation (mode is client-stamped per send, with no
+    // daemon event). It is overwritten only by the commit below, once the prompt has been accepted —
+    // admission rolls a rejected turn's user row back, so its mode must roll back with it.
     const previousMode = live.lastTurnMode;
-    // Remember it for the host-initiated turns that carry no request of their own (buildScope).
-    live.lastTurnMode = mode;
     const memSettings = this.d.userSettings?.(request.userId);
     const memoryBlock = await this.memoryBlock(request.userId, request.text, memSettings?.autoRecall !== false);
     const hookBlock = await this.hookBlock(request.text);
@@ -119,15 +119,23 @@ export class TurnContextBuilder {
       autoSaveMemory: memSettings?.autoSave !== false,
       run: <T>(operation: (prompt: string) => Promise<T>): Promise<T> => runWithPolicy(live.policy, async () => {
         let prompt = request.text;
-        // Assigned by the drain below and called only once the prompt has actually reached the provider.
+        // Assigned by the drains below and called only once the prompt has actually reached the provider —
+        // an error or abort before that must leave the notice/orientation pending, not consumed.
         let commitOrientation = (): void => {};
+        let commitSessionNotices = (): void => {};
+        // Both halves of the mode state (the mode itself and its reminder cadence) are claims about what
+        // the model has ALREADY been shown, so they are committed with the drains above — only once the
+        // prompt has reached the provider. A turn rejected before that showed the model nothing.
+        let commitMode = (): void => { live.lastTurnMode = mode; };
         if (!isPromptCommand(request.text, live.session)) {
           const turnContext = live.turnContext();
           // One-shot notice of any session-state change (model/mode/rename/reasoning) since the last reply —
-          // drained + cleared here so the agent is told exactly once. Rides under the user message like the
-          // mode reminder (volatile per-turn context, cache-friendly), so it is composed only for a real
-          // prompt turn — never on the prompt-command path, which would drain it without showing it.
-          const sessionChanges = drainSessionNotices(live);
+          // prepared here so the agent is told exactly once, committed (see below) only after delivery.
+          // Rides under the user message like the mode reminder (volatile per-turn context, cache-friendly),
+          // so it is composed only for a real prompt turn — never on the prompt-command path, which would
+          // drain it without showing it.
+          const { block: sessionChanges, commit: commitNotices } = drainSessionNotices(live);
+          commitSessionNotices = commitNotices;
           // A compaction just destroyed the messages holding the agreed plan and every trace of which
           // files were open. Re-orient the model exactly once, next to the other one-shot notices.
           const { block: postCompaction, compacted, commit } = drainPostCompactionContext(this.d.store, live);
@@ -145,16 +153,19 @@ export class TurnContextBuilder {
           // plan-mode shell clamp denies `mkdir -p`, so telling the model to write somewhere that does
           // not exist would hand it an ENOENT it has no tool to resolve.
           if (mode === 'plan') ensurePlanDir(live.sessionId);
-          const modeReminder = modeTemplate
-            ? this.d.prompts.render(
-              this.modeTemplateFor(modeTemplate, mode, previousMode, live, compacted),
+          let modeReminder = '';
+          if (modeTemplate) {
+            const reminder = this.modeTemplateFor(modeTemplate, mode, previousMode, live, compacted);
+            commitMode = (): void => { live.lastTurnMode = mode; reminder.commit(); };
+            modeReminder = this.d.prompts.render(
+              reminder.template,
               {
                 planFile: planFilePath(process.env, live.sessionId),
                 planState: mode === 'plan' ? planStateLine(live.sessionId) : '',
               },
               request.userId,
-            )
-            : '';
+            );
+          }
           // The mode directive is volatile per-turn content (it flips when the user switches mode), so it
           // rides UNDER the user message as a <system-reminder> — alongside runningSubagents — rather than
           // prefixing the user's words. Keeps the user message body stable/contiguous across mode switches
@@ -169,6 +180,8 @@ export class TurnContextBuilder {
         }
         const result = await operation(prompt);
         commitOrientation();
+        commitSessionNotices();
+        commitMode();
         return result;
       }, scope),
     };
@@ -182,14 +195,18 @@ export class TurnContextBuilder {
    *  planning session — precisely the session most likely to hit a compaction. Periodic full repeats
    *  still exist because a directive that scrolled far enough back stops steering behaviour.
    *
-   *  Mutates the counter on `live`, so it must be called exactly once per turn. */
-  private modeTemplateFor(template: string, mode: TurnMode, previousMode: TurnMode | undefined, live: LiveBrain, reoriented: boolean): string {
+   *  Returns the chosen template plus the `commit` that advances the counter. The counter is what makes
+   *  the sparse line's "the full instructions are earlier in this conversation" true, so it may only move
+   *  for a turn the model actually received — hence the commit rather than a write here. */
+  private modeTemplateFor(template: string, mode: TurnMode, previousMode: TurnMode | undefined, live: LiveBrain, reoriented: boolean): { template: string; commit: () => void } {
     // A compaction counts as entering the mode again: it deleted the full directive along with everything
     // else, so the cadence has to restart from a turn the model can actually still read.
     const entering = previousMode !== mode || reoriented;
     const seen = entering ? 0 : (live.modeReminderTurns ?? 0) + 1;
-    live.modeReminderTurns = seen;
-    return seen % MODE_REMINDER_FULL_EVERY === 0 ? template : `${template}-sparse`;
+    return {
+      template: seen % MODE_REMINDER_FULL_EVERY === 0 ? template : `${template}-sparse`,
+      commit: (): void => { live.modeReminderTurns = seen; },
+    };
   }
 
   /** The exact PI identity/policy/permission/emitter scope for an owner-chat turn on `live` — everything
@@ -214,9 +231,16 @@ export class TurnContextBuilder {
       const enriched: SubagentUpdate = childLevel
         ? { ...update, thinkingLevel: childLevel, thinkingLabel: childBrain?.thinkingLabels?.[childLevel] ?? childLevel }
         : update;
+      // Read the child's prior status BEFORE the upsert, so the finish marker lands once on the
+      // running→terminal transition (upsertSubagentRun rewrites the row and returns true even for a
+      // repeated 'done'). Only a terminal update can ever produce a marker, so skip the read otherwise.
+      const prevStatus = update.status === 'done' || update.status === 'error'
+        ? this.d.store.getSubagentRuns(live.sessionId).find((run) => run.sessionId === update.sessionId)?.status
+        : undefined;
       if (!this.d.store.upsertSubagentRun(live.sessionId, enriched)) return;
       this.d.sessions.setChildRunning(live.sessionId, update.sessionId, update.status === 'running');
       live.replay.publish({ type: 'subagent', ...enriched });
+      recordSubagentFinishMarker(this.d.store, live.sessionId, (event) => live.replay.publish(event), prevStatus, update);
     };
     const emitSubagentCompletion = (completion: SubagentCompletion): void => {
       this.d.completeSubagent?.(live.sessionId, userId, completion);
@@ -236,19 +260,20 @@ export class TurnContextBuilder {
     const workDir = turnWorkDir(live.policy, clientCwd ?? live.workDir, this.d.projectPath);
     const base = this.d.permissions.turnPermissions(userId, live, true);
     // The other half of admitting Bash in plan mode: narrow the turn's shell rules to the shared
-    // read-only clamp. Appended LAST so last-match-wins puts it over the user's own rules — a planning
-    // turn must not mutate even for someone who allowed `rm *` in Settings. `deny` also survives YOLO
-    // (which only promotes `ask`), so plan mode keeps its promise with auto-approval switched on.
+    // non-destructive clamp. Appended LAST so last-match-wins puts it over the user's own rules — a
+    // planning turn must not run destructive commands even for someone who allowed `rm *` in Settings.
+    // `deny` also survives YOLO (which only promotes `ask`), so plan mode keeps its promise with
+    // auto-approval switched on.
     // Synthesized when there is no base, rather than skipped. A turn with no TurnPermissions leaves the
-    // permission gate inert, so making the clamp conditional on one would mean plan mode's read-only
-    // promise holds only when permissions happen to be configured — the same conditional the write clamp
-    // was deliberately moved out of. The defaults here are the resolver's own: no YOLO, and `ask`
+    // permission gate inert, so making the clamp conditional on one would mean plan mode's shell
+    // restriction holds only when permissions happen to be configured — the same conditional the write
+    // clamp was deliberately moved out of. The defaults here are the resolver's own: no YOLO, and `ask`
     // allowed, which is what an unattended turn already does.
     const permissions = mode !== 'plan'
       ? base
       : {
         ...base,
-        ruleset: [...(base?.ruleset ?? []), ...READ_ONLY_BASH_RULES],
+        ruleset: [...(base?.ruleset ?? []), ...NON_DESTRUCTIVE_BASH_RULES],
         yolo: base?.yolo ?? false,
       };
     return {
@@ -278,8 +303,8 @@ export class TurnContextBuilder {
   buildScope(userId: number, live: LiveBrain): PreparedTurnContext {
     // The session's own mode, NOT 'build'. Plan mode admits Delegate, so a background delegation started
     // while planning delivers its result through here — and hard-coding 'build' rebuilt that follow-up turn
-    // without the read-only shell clamp and re-advertised the withheld tools, so the model could mutate
-    // mid-plan. The mode a delivery inherits must be the one the user is actually in.
+    // without the shell clamp and re-advertised the withheld tools, so the model could run destructive
+    // commands mid-plan. The mode a delivery inherits must be the one the user is actually in.
     const scope = this.scopeOptions(userId, live, live.lastTurnMode ?? 'build');
     return {
       autoSaveMemory: false,

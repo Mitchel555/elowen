@@ -27,6 +27,27 @@ describe('chat transcript model', () => {
     expect(model.thinking).toBe(true);
   });
 
+  // Esc/Stop before the turn produced output: the daemon sends discard_user; the model pops the trailing
+  // you-turn (by durableId) and settles the spinner. Composer restore is the stream coordinator's job.
+  it('pops the trailing you-turn on discard_user, by durableId', () => {
+    const model = new TranscriptModel();
+    model.apply({ type: 'user', text: 'zrušit', durableId: 'dur-1' });
+    expect(model.turnCount).toBe(1);
+    const changed = model.apply({ type: 'discard_user', durableId: 'dur-1', text: 'zrušit' });
+    expect(changed).toBe(true);
+    expect(model.turnCount).toBe(0);
+    expect(model.thinking).toBe(false);
+  });
+
+  it('ignores discard_user once output has arrived (the you-turn is no longer trailing)', () => {
+    const model = new TranscriptModel();
+    model.apply({ type: 'user', text: 'ponechat', durableId: 'dur-1' });
+    model.apply({ type: 'text', delta: 'odpoveď' });
+    const changed = model.apply({ type: 'discard_user', durableId: 'dur-1', text: 'ponechat' });
+    expect(changed).toBe(false);
+    expect(model.turnCount).toBe(2);
+  });
+
   it('groups consecutive tool calls into one tools segment', () => {
     const model = new TranscriptModel();
     model.apply({ type: 'tool', name: 'grep' });

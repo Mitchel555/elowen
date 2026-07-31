@@ -37,6 +37,9 @@ export interface TelemetryState {
   /** Eased vertical drift of the flame (in panel rows) while the transcript is being scrolled; 0 at
    *  rest. The flame floats within a reserved ±{@link FLOAT_BAND} band so the Context section never moves. */
   floatOffset: number;
+  /** User's `/maskot` preference. When false the flame is hidden and its animation timer never arms.
+   *  Optional so structural callers/tests default to shown (the product default). */
+  showMascot?: boolean;
 }
 
 const PANEL_BAR_MARGIN = 2;
@@ -84,6 +87,7 @@ export class TelemetryPanel implements Component {
   /** Cheap panel-local capability check used by the animation owner. Decorative movement is allowed
    * only when the complete current functional rail and the full fixed mascot band both fit. */
   canRenderMascot(width: number): boolean {
+    if (this.getState().showMascot === false) return false;
     if (this.maxRows === 0) return false;
     const functional = this.composeSections(this.sections(this.getState(), width));
     return this.maxRows == null || panelLogo(width).length + 2 + functional.rows.length <= this.maxRows;
@@ -133,12 +137,20 @@ export class TelemetryPanel implements Component {
   private chevron(id: TelemetrySectionId): string {
     return this.collapsedSections.has(id) ? '▸' : '▾';
   }
+  /** Content width inside the rail: the same PANEL_BAR_MARGIN gutter on both sides, so every row —
+   *  header, data line, meter — ends at the same column and never touches the right edge. Single source
+   *  for all five width calculations that used to disagree. */
+  private contentWidth(width: number): number {
+    return Math.max(1, width - PANEL_BAR_MARGIN * 2);
+  }
   render(width: number): string[] {
     const st = this.getState();
     const sections = this.sections(st, width);
     const full = this.composeSections(sections);
-    const mascotRows = ['', ...panelLogo(width, st.floatOffset), ''];
-    const showMascot = this.maxRows == null || mascotRows.length + full.rows.length <= this.maxRows;
+    // A hidden mascot contributes no rows AND never lets the animation timer arm (canRenderMascot).
+    const mascotEnabled = st.showMascot !== false;
+    const mascotRows = mascotEnabled ? ['', ...panelLogo(width, st.floatOffset), ''] : [];
+    const showMascot = mascotEnabled && (this.maxRows == null || mascotRows.length + full.rows.length <= this.maxRows);
     const functional = showMascot ? full : this.compactSections(sections, this.maxRows ?? full.rows.length, width);
     const rows = showMascot ? [...mascotRows, ...functional.rows] : [...functional.rows];
     this.processTop = functional.processTop < 0
@@ -166,29 +178,32 @@ export class TelemetryPanel implements Component {
     const usage = st.usage;
     const pct = usage?.percent != null ? `${Math.round(usage.percent)}%` : '—';
     const tokens = usage ? `${formatK(usage.tokens ?? 0)} / ${formatK(usage.contextWindow)}` : '—';
+    // Nested panels render inside the rail, so they get the same gutter-narrowed width as every other
+    // section — they add only their own left indent, never a right margin, so the edge is not doubled.
+    const inner = this.contentWidth(width);
     this.processPanel.set(st.processes ?? []);
     this.processPanel.setMaxRows(PROCESS_ROWS_SHOWN);
-    const processRows = this.processPanel.render(width);
+    const processRows = this.processPanel.render(inner);
     this.subagentPanel.set(st.subagents ?? []);
     this.subagentPanel.setSelected(st.focusedSubagent ?? null);
     this.subagentPanel.setMaxRows(SUBAGENT_ROWS_SHOWN);
-    const subagentRows = this.subagentPanel.render(width);
+    const subagentRows = this.subagentPanel.render(inner);
     this.workflowPanel.set(st.workflows ?? []);
     this.workflowPanel.setMaxRows(WORKFLOW_ROWS_SHOWN);
-    const workflowRows = this.workflowPanel.render(width);
+    const workflowRows = this.workflowPanel.render(inner);
     // A folded section keeps just its header; the chevron mirrors the Sub-agents/Processes panels and
     // a one-value meta (context %, branch, LSP state) keeps the folded row informative.
     const contextCollapsed = this.collapsedSections.has('context');
     const contextHeader = sectionHeaderRow(
       sectionHeaderContent(this.chevron('context'), 'Context', contextCollapsed ? `· ${pct}` : ''),
-      width,
+      this.contentWidth(width),
     );
     const sections: TelemetrySection[] = [
       {
         id: 'context', minimumRows: 3,
         rows: contextCollapsed ? [contextHeader] : [
           contextHeader,
-          `  ${color.text(tokens)} ${color.faint('tokens')} ${color.faint(`· ${pct}`)}${usage ? ` ${color.faint(`· $${usage.cost.toFixed(2)}`)}` : ''}`,
+          `  ${truncateToWidth(`${color.text(tokens)} ${color.faint('tokens')} ${color.faint(`· ${pct}`)}${usage ? ` ${color.faint(`· $${usage.cost.toFixed(2)}`)}` : ''}`, this.contentWidth(width), '…')}`,
           `${' '.repeat(PANEL_BAR_MARGIN)}${this.contextBar(usage?.percent ?? 0, width)}`,
         ],
       },
@@ -213,14 +228,14 @@ export class TelemetryPanel implements Component {
     const projectCollapsed = this.collapsedSections.has('project');
     const projectHeader = sectionHeaderRow(
       sectionHeaderContent(this.chevron('project'), 'Project', projectCollapsed ? `· ${inlineText(st.branch || 'unknown')}` : ''),
-      width,
+      this.contentWidth(width),
     );
     sections.push({
       id: 'project', minimumRows: 3,
       rows: projectCollapsed ? [projectHeader] : [
         projectHeader,
-        `  ${color.text(truncateToWidth(inlineText(st.cwd), Math.max(1, width - 4), '…'))}`,
-        `  ${color.faint('branch')} ${color.accent(inlineText(st.branch || 'unknown'))}`,
+        `  ${color.text(truncateToWidth(inlineText(st.cwd), this.contentWidth(width), '…'))}`,
+        `  ${color.faint('branch')} ${color.accent(truncateToWidth(inlineText(st.branch || 'unknown'), Math.max(1, this.contentWidth(width) - 'branch '.length), '…'))}`,
       ],
     });
     const mcpRows = this.mcpRows(st.mcp, width);
@@ -297,12 +312,12 @@ export class TelemetryPanel implements Component {
     const subagents = sections.find((section) => section.id === 'subagents');
     if (subagents) {
       this.subagentPanel.setMaxRows(counts.get('subagents') ?? 0);
-      subagents.rows = this.subagentPanel.render(width);
+      subagents.rows = this.subagentPanel.render(this.contentWidth(width));
     }
     const workflow = sections.find((section) => section.id === 'workflow');
     if (workflow) {
       this.workflowPanel.setMaxRows(counts.get('workflow') ?? 0);
-      workflow.rows = this.workflowPanel.render(width);
+      workflow.rows = this.workflowPanel.render(this.contentWidth(width));
     }
     return this.composeSections(sections, counts);
   }
@@ -312,13 +327,18 @@ export class TelemetryPanel implements Component {
   private rateLimitRows(limits: BrainRateLimits | null, width: number): string[] {
     if (!limits || limits.windows.length === 0) return [];
     const meta = [limits.planType, limits.stale ? 'stale' : ''].filter(Boolean).map((value) => inlineText(String(value))).join(' · ');
-    const header = sectionHeaderRow(sectionHeaderContent(this.chevron('limits'), 'Limits', meta), width);
+    const header = sectionHeaderRow(sectionHeaderContent(this.chevron('limits'), 'Limits', meta), this.contentWidth(width));
     if (this.collapsedSections.has('limits')) return [header];
     const rows = [header];
     // Size every window's bar identically — to the width left by the widest reset label — so both meters
-    // and the trailing % / reset columns line up regardless of per-window reset text length.
+    // and the trailing % / reset columns line up regardless of per-window reset text length. The row after
+    // its two-space indent is `label(7) bar(cells) ' ' pct(4) ' ' reset`, so the fixed overhead beside the
+    // bar is 13 columns; the bar fills whatever the shared content width leaves.
     const resetWidth = Math.max(...limits.windows.map((w) => visibleWidth(this.rateLimitReset(w.resetsAt, w.windowMinutes))));
-    const cells = Math.max(4, width - 15 - resetWidth);
+    // The floor keeps a bar present rather than pretty: at the 36-column minimum panel a long reset
+    // label ("↻ Sat 01:40 PM") leaves it only a few cells. Raising the floor would buy legibility with
+    // the right gutter, which the rail guarantees at every width — so the meter yields, not the margin.
+    const cells = Math.max(4, this.contentWidth(width) - 13 - resetWidth);
     for (const window of limits.windows) rows.push(this.rateLimitWindowRow(window, cells));
     return rows;
   }
@@ -326,9 +346,9 @@ export class TelemetryPanel implements Component {
   private goalRows(goal: GoalView | null, width: number): string[] {
     if (goal?.status !== 'active') return [];
     const budget = goal.turn_budget > 0 ? `${goal.turns_used}/${goal.turn_budget} turns` : `${goal.turns_used} turns`;
-    const title = truncateToWidth(inlineText(goal.goal), Math.max(1, width - 4), '…');
+    const title = truncateToWidth(inlineText(goal.goal), this.contentWidth(width), '…');
     const rows = [
-      sectionHeaderRow(sectionHeaderContent(this.chevron('goal'), 'Goal', budget), width),
+      sectionHeaderRow(sectionHeaderContent(this.chevron('goal'), 'Goal', budget), this.contentWidth(width)),
     ];
     if (this.collapsedSections.has('goal')) return rows;
     rows.push(`  ${color.accent('◆')} ${color.text('Active')} ${color.faint(`· ${formatDuration(goalElapsedSeconds(goal))}`)}`);
@@ -399,7 +419,7 @@ export class TelemetryPanel implements Component {
     if (!mcp) return [];
     const connected = mcp.filter((s) => s.status === 'connected');
     if (connected.length === 0) return [];
-    const rows = [sectionHeaderRow(sectionHeaderContent(this.chevron('mcp'), 'MCP', `${connected.length}/${mcp.length} active`), width)];
+    const rows = [sectionHeaderRow(sectionHeaderContent(this.chevron('mcp'), 'MCP', `${connected.length}/${mcp.length} active`), this.contentWidth(width))];
     if (this.collapsedSections.has('mcp')) return rows;
     for (const server of connected.slice(0, MCP_NAMES_SHOWN)) {
       rows.push(`  ${color.success('●')} ${color.text(truncateToWidth(inlineText(server.name), Math.max(1, width - 6), '…'))}`);
@@ -414,7 +434,7 @@ export class TelemetryPanel implements Component {
     const state = lspEnabled ? 'Active' : 'Inactive';
     const header = sectionHeaderRow(
       sectionHeaderContent(this.chevron('lsp'), 'LSP', collapsed ? `· ${state}` : ''),
-      width,
+      this.contentWidth(width),
     );
     if (collapsed) return [header];
     return [

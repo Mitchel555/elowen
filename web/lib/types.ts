@@ -50,6 +50,7 @@ export interface ElowenConfig {
 export interface BrainLimits {
   toolOutputMaxLines: number;
   toolOutputMaxChars: number;
+  toolResultInlineBytes: number;
   elicitationTimeoutMs: number;
   memoryRecallCount: number;
   memoryRecallChars: number;
@@ -83,9 +84,6 @@ export interface BrainModelOption {
   fastAvailable?: boolean;
   default?: boolean;
 }
-/** The work mode a turn is sent in (mirror of the daemon's `mode` on POST /brain/send). Session-scoped
- *  client state on every surface: the client stamps it per send, the daemon keeps none. */
-export type BrainWorkMode = 'build' | 'plan' | 'workflow';
 /** One brain conversation in the session picker (web chat + CLI). */
 export interface BrainSessionInfo { id: string; title: string; model: string; updated_at: string; running: boolean; active: boolean }
 /** A row in the admin session-management panel (all brain sessions the operator anchors). */
@@ -101,9 +99,10 @@ export interface BrainSearchHit { sessionId: string; sessionTitle: string; role:
  *  daemon's `BrainMessageView`. */
 import type {
   ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef, AskQuestion, BrainStreamControl,
+  BrainWorkMode, BrainPendingPlan,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
-export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion };
+export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan };
 export type BrainMessage = BrainMessageView;
 
 /** One backwards page of chat history (lazy-load). `nextBefore` is the cursor for the next older page —
@@ -145,12 +144,13 @@ export interface AskAnswer { header: string; selected: string[]; other?: string 
 interface BrainCardItem { text: string; status?: 'pending' | 'in_progress' | 'completed' }
 export interface BrainCard { id: string; title?: string; items?: BrainCardItem[]; body?: string; pinned?: boolean }
 
-/** One background shell process (terminal plugin's `Bash(background:true)`) — the process panel
- *  next to the todos lists these, reads output for the modal, and kills on demand. */
-/** `sessionId` is the brain session the process was started in — the panel derives the origin badge
- *  (sub-agent / channel) from it; null when the process has no session. `completionMode` is `foreground`
- *  while a still-in-flight `Bash` call can still be detached — not a background job yet, so live panels
- *  leave those out. */
+/** One background shell process (terminal plugin's `Bash(background:true)`). The transcript panel next to
+ *  the todos lists the ones the open conversation owns; the telemetry rail lists those plus, in a separate
+ *  section, everything it does not. Both read output for the modal and kill on demand. `sessionId` is the
+ *  brain session it was started in, or null when it has none — the rail names the origin (sub-agent,
+ *  channel, another chat) from it, and lib/processScope.ts decides ownership. `completionMode` is
+ *  `foreground` while a still-in-flight `Bash` call can still be detached — not a background job yet, so
+ *  live panels leave those out. */
 export interface ProcessInfo { id: string; command: string; cwd: string; startedAt: string; sessionId: string | null; running: boolean; exitCode: number | null; completionMode?: 'job' | 'service' | 'foreground' }
 
 /** Durable state of one autonomous goal (mirror of the daemon's `BrainGoalState`, src/brain/events.ts),
@@ -179,7 +179,7 @@ export interface StatuslineConfig { showModel?: boolean; showContext?: boolean; 
 export interface BrainProject { cwd: string | null; branch: string | null }
 /** One MCP server of this daemon. `mcp: null` (non-admin, or the plugin is off) hides the section. */
 export interface McpServerStatus { name: string; status: string }
-export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean; project?: BrainProject; lspEnabled?: boolean; mcp?: McpServerStatus[] | null }
+export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; workMode?: BrainWorkMode; pendingPlan?: BrainPendingPlan | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean; project?: BrainProject; lspEnabled?: boolean; mcp?: McpServerStatus[] | null }
 /** One subscription rate-limit window of a connected OAuth account (mirrors the daemon's providerUsage). */
 interface UsageWindow { usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
 /** A connected OAuth account's usage rail: its windows (ordered shortest-first) plus plan/freshness meta. */
@@ -209,18 +209,7 @@ export interface ConfigPatch {
   /** Wholesale brain provider list; an entry may carry `apiKey` to (re)set that provider's secret. */
   brain?: { providers?: (Omit<BrainProvider, 'apiKeySet'> & { apiKey?: string })[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
 }
-interface MissionTask { id: string; title: string; status: TaskStatus; type: string; parent_id: string | null; labels?: string[]; outcome?: TaskOutcome | null }
-interface MissionProgress { total: number; open: number; inProgress: number; blocked: number; closed: number; cancelled: number }
-interface MissionDeps { taskId: string; dependsOnId: string }
 interface MissionPrInfo { branch: string; prNumber: number | null; prUrl: string | null; prState: string | null; fixRounds: number; lastFeedback: string | null }
-export interface MissionDetail {
-  mission: Mission;
-  epic: MissionTask | null;
-  tasks: MissionTask[];
-  deps: MissionDeps[];
-  progress: MissionProgress;
-  pr?: MissionPrInfo | null;
-}
 export interface User { id: number; username: string; created_at: string; is_admin: boolean; allowed_execs: string[]; disabled_tools: string[]; name: string; email: string; avatar: string; default_exec: string; advisor_exec: string; advisor_autostart: boolean }
 export interface UserPatch { is_admin?: boolean; allowed_execs?: string[]; disabled_tools?: string[] }
 export interface ProfilePatch { name?: string; email?: string; default_exec?: string }
@@ -483,8 +472,9 @@ export interface WhatsAppPairing { qrImage: string | null; code: string | null; 
 /** One markdown skill of the skills plugin (GET /plugins/skills/list). Bundled skills ship with the
  *  install and are read-only; user skills are created at runtime and can be edited or deleted.
  *  `disableModelInvocation` mirrors PI's `disable-model-invocation` frontmatter flag — when set the
- *  skill is hidden from progressive disclosure and reachable only via `/skill:name`. */
-export interface PluginSkill { name: string; description: string; source: 'bundled' | 'user'; disableModelInvocation: boolean; content?: string }
+ *  skill is hidden from progressive disclosure and reachable only via `/skill:name`. `version` mirrors
+ *  the optional `metadata.version` frontmatter field (null when the skill carries none). */
+export interface PluginSkill { name: string; description: string; source: 'bundled' | 'user'; disableModelInvocation: boolean; version?: number | null; content?: string }
 /** One typed sub-agent of the subagent plugin (GET /plugins/agents/list). Built-in explore/plan ship
  *  with the install and are read-only; user agents are one `.md` each and can be edited or deleted.
  *  `tools` is the frontmatter spec: a preset keyword (`read-only`/`all`/`inherit`) or an explicit tool
@@ -501,7 +491,7 @@ interface GitStatus { branch: string; ahead: number; behind: number; dirty: numb
 interface GitBranch { name: string; current: boolean }
 interface GitCommit { hash: string; subject: string; author: string; relative: string }
 export interface ProjectGit { isRepo: boolean; status: GitStatus | null; branches: GitBranch[]; commits: GitCommit[] }
-export interface CommitFileChange { path: string; added: number; deleted: number }
+interface CommitFileChange { path: string; added: number; deleted: number }
 export interface CommitLogEntry { hash: string; subject: string; author: string; timestamp: number; files: CommitFileChange[] }
 /** A handoff note one agent left for later agents on the same mission. */
 export interface Note { id: number; scope: string; target: string; author: string; body: string; created_at: string }

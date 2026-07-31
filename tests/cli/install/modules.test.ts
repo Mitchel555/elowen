@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { AGENT_CLIS, detectAgentClis, installCommand } from '../../../src/cli/install/agentClis.js';
 import { preflight, preflightBlockers } from '../../../src/cli/install/preflight.js';
 import { currentUser, userHome, ensureServiceUser } from '../../../src/cli/install/serviceUser.js';
-import { ensureTerminalStreaming } from '../../../src/cli/install/index.js';
+import { ensureTerminalStreaming, planFromArgs } from '../../../src/cli/install/index.js';
 import { isIpAddress } from '../../../src/cli/provision/deployment.js';
 import type { Runner, ExecResult } from '../../../src/cli/install/runner.js';
 
@@ -11,7 +11,6 @@ function runner(over: Partial<Runner> = {}): Runner {
     exec: async (): Promise<ExecResult> => ({ code: 0, stdout: '', stderr: '' }),
     which: async () => null,
     writeFile: async () => {},
-    exists: async () => false,
     ...over,
   };
 }
@@ -109,7 +108,6 @@ describe('install/ensureTerminalStreaming', () => {
       exec: async (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: '', stderr: '' }; },
       which: async (cmd) => (present.includes(cmd) ? `/usr/bin/${cmd}` : null),
       writeFile: async () => {},
-      exists: async () => false,
     };
     return { r, calls };
   }
@@ -152,6 +150,100 @@ describe('install/isIpAddress (no Let’s Encrypt for IPs)', () => {
   });
   it('treats domain names as non-IP', () => {
     for (const d of ['elowen.example.com', 'example.com', 'my-host.dev']) expect(isIpAddress(d)).toBe(false);
+  });
+});
+
+describe('install/planFromArgs (unattended flags)', () => {
+  // getent finds nobody, so the plan always resolves mode=create — keeps these focused on parsing.
+  const noUsers = runner({ exec: async () => ({ code: 2, stdout: '', stderr: '' }) });
+
+  it('reads the flags it is given', async () => {
+    const plan = await planFromArgs(noUsers, ['--unattended', '--user', 'deploy', '--agents', 'claude,codex', '--admin-user', 'root', '--admin-pass', 'hunter2']);
+    expect(plan.user).toEqual({ mode: 'create', username: 'deploy' });
+    expect(plan.agents).toEqual(['claude', 'codex']);
+    expect(plan.admin?.username).toBe('root');
+    expect(plan.admin?.password).toBe('hunter2');
+  });
+
+  // Every flag the help declares as taking a value. A valueless one used to read as absent, so
+  // `--user --agents all` provisioned the DEFAULT user, `--domain --no-tls` quietly demoted the box to
+  // localhost and half an admin pair skipped account creation — all reported as a successful install.
+  // Nobody is watching an unattended run, so the parse has to die instead.
+  const VALUE_FLAGS = [
+    '--user', '--agents', '--domain', '--ip', '--host', '--proxy', '--email',
+    '--admin-user', '--admin-pass', '--autopilot-cli', '--autopilot-model',
+    '--llm-url', '--llm-key', '--llm-model',
+  ];
+
+  it.each(VALUE_FLAGS)('rejects %s when it is written without a value', async (flag) => {
+    await expect(planFromArgs(noUsers, ['--unattended', flag])).rejects.toThrow(`missing value for ${flag}`);
+    // …and when the "value" is the next flag rather than the end of argv
+    await expect(planFromArgs(noUsers, ['--unattended', flag, '--no-tmux'])).rejects.toThrow(`missing value for ${flag}`);
+  });
+
+  it('names every offending flag at once', async () => {
+    await expect(planFromArgs(noUsers, ['--unattended', '--user', '--agents', '--email', 'a@b.c']))
+      .rejects.toThrow('missing value for --user, --agents');
+  });
+
+  it('requires --admin-user and --admin-pass together, and creates no admin when neither is given', async () => {
+    await expect(planFromArgs(noUsers, ['--unattended', '--admin-user', 'root'])).rejects.toThrow(/must be given together/);
+    await expect(planFromArgs(noUsers, ['--unattended', '--admin-pass', 'hunter2'])).rejects.toThrow(/must be given together/);
+    expect((await planFromArgs(noUsers, ['--unattended'])).admin).toBeNull();
+  });
+
+  // The swallow guard makes a value starting with `--` unreachable in the `--flag value` form; without
+  // this escape a password like `--secret` simply could not be passed to an unattended install.
+  it('accepts a value starting with -- through the `--flag=value` form', async () => {
+    const plan = await planFromArgs(noUsers, ['--unattended', '--admin-user=root', '--admin-pass=--secret']);
+    expect(plan.admin?.username).toBe('root');
+    expect(plan.admin?.password).toBe('--secret');
+  });
+
+  it('reads the autopilot and hosted-LLM flags into the admin answers', async () => {
+    const plan = await planFromArgs(noUsers, [
+      '--unattended', '--admin-user', 'root', '--admin-pass', 'hunter2',
+      '--llm-url', 'https://llm.example/v1', '--llm-key', 'sk-test', '--llm-model', 'gpt-5',
+    ]);
+    expect(plan.admin).toMatchObject({ apiUrl: 'https://llm.example/v1', apiKey: 'sk-test', model: 'gpt-5' });
+
+    const viaCli = await planFromArgs(noUsers, [
+      '--unattended', '--admin-user', 'root', '--admin-pass', 'hunter2',
+      '--autopilot-cli', 'opencode', '--autopilot-model', 'anthropic/claude-sonnet-4-5',
+    ]);
+    expect(viaCli.admin?.pilotExec).toBe('opencode:anthropic/claude-sonnet-4-5');
+  });
+
+  it('--no-tmux is the only way to skip tmux', async () => {
+    expect((await planFromArgs(noUsers, ['--unattended'])).installTmux).toBe(true);
+    expect((await planFromArgs(noUsers, ['--unattended', '--no-tmux'])).installTmux).toBe(false);
+  });
+
+  describe.skipIf(process.platform === 'darwin')('deployment flags', () => {
+    it('--host and its documented --ip alias both select direct port mode', async () => {
+      // `--ip` is in the help and in the macOS warning, but deploymentFromArgs only ever read --host:
+      // a documented `--ip 203.0.113.9` install silently came up on localhost.
+      for (const flag of ['--host', '--ip']) {
+        const plan = await planFromArgs(noUsers, ['--unattended', flag, '203.0.113.9']);
+        expect(plan.deploy).toMatchObject({ mode: 'ip', host: '203.0.113.9' });
+      }
+    });
+
+    it('--domain selects domain mode with its proxy, TLS and email flags', async () => {
+      const plan = await planFromArgs(noUsers, ['--unattended', '--domain', 'elowen.example.com', '--proxy', 'apache', '--email', 'ops@example.com']);
+      expect(plan.deploy).toMatchObject({ mode: 'domain', domain: 'elowen.example.com', proxyPreference: 'apache', tls: true, email: 'ops@example.com' });
+      const noTls = await planFromArgs(noUsers, ['--unattended', '--domain', 'elowen.example.com', '--no-tls']);
+      expect(noTls.deploy).toMatchObject({ mode: 'domain', tls: false, proxyPreference: 'nginx' });
+    });
+
+    it('a --domain that is really an IP becomes direct port mode (Let’s Encrypt cannot certify an IP)', async () => {
+      expect((await planFromArgs(noUsers, ['--unattended', '--domain', '203.0.113.9'])).deploy).toMatchObject({ mode: 'ip' });
+    });
+
+    it('--localhost and no deployment flag at all both mean localhost', async () => {
+      expect((await planFromArgs(noUsers, ['--unattended'])).deploy.mode).toBe('localhost');
+      expect((await planFromArgs(noUsers, ['--unattended', '--localhost', '--domain', 'elowen.example.com'])).deploy.mode).toBe('localhost');
+    });
   });
 });
 

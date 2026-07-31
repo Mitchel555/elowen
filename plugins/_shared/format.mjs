@@ -33,14 +33,17 @@ export function extractImageRefs(text) {
 
 /** Strip inline chain-of-thought (`<think>…</think>` / `<thinking>…</thinking>`) that some vision-fallback
  *  models emit into the text stream instead of a separate reasoning channel. Mirrors the daemon's
- *  `stripInlineReasoning` so an adapter's text-fallback path never leaks reasoning into the visible answer. */
+ *  `stripInlineReasoning` so an adapter's text-fallback path never leaks reasoning into the visible answer.
+ *  The unclosed-trailing and leading-close rules are anchored to a line boundary for the reason spelled out
+ *  in the daemon copy: unanchored, they silently truncate any prose that merely mentions a reasoning tag.
+ *  tests/contract/inlineReasoningParity.test.ts holds this copy and the daemon's to the same corpus. */
 export function stripThinking(text) {
   const s = String(text ?? '');
   if (!/<\/?think(?:ing)?\b/i.test(s)) return s;
   let out = s
     .replace(/<think(?:ing)?\b[^>]*>[\s\S]*?<\/think(?:ing)?>/gi, '')
-    .replace(/<think(?:ing)?\b[^>]*>[\s\S]*$/i, '');
-  const lead = /^[\s\S]*?<\/think(?:ing)?>/i.exec(out);
+    .replace(/^[ \t]*<think(?:ing)?\b[^>]*>[\s\S]*$/im, '');
+  const lead = /^[\s\S]*?<\/think(?:ing)?>[ \t]*(?:\n|$)/i.exec(out);
   if (lead) out = out.slice(lead[0].length);
   return out.trim();
 }

@@ -100,13 +100,19 @@ export class PluginRegistry {
   readonly toolPlanSafe = new Set<string>();
 
   /** Absorb another registry's contributions (the loader stages each plugin and merges on success).
-   *  Controls + commands are name-keyed and drive admin routes / the slash menu, so a later plugin must
-   *  not silently hijack a name a prior plugin owns. This join is the ONLY place two plugins' registries
-   *  meet (each registers into its own staging registry), so cross-plugin collisions are enforced HERE —
-   *  first-writer-wins, with `warn` surfacing the drop. */
+   *  Tools, controls + commands are name-keyed and drive tool dispatch / admin routes / the slash menu, so
+   *  a later plugin must not silently hijack a name a prior plugin owns. This join is the ONLY place two
+   *  plugins' registries meet (each registers into its own staging registry), so cross-plugin collisions
+   *  are enforced HERE — first-writer-wins, with `warn` surfacing the drop. */
   merge(other: PluginRegistry, warn?: (msg: string) => void): void {
-    this.tools.push(...other.tools);
-    for (const [k, v] of other.toolOwner) this.toolOwner.set(k, v);
+    for (const t of other.tools) {
+      const owner = other.toolOwner.get(t.name) ?? '?';
+      const prior = this.toolOwner.get(t.name);
+      // A dropped tool must not be pushed either: `toolOwner` drives per-role filtering AND the
+      // contribution report, so keeping the definition would attribute it to the wrong plugin.
+      if (prior && prior !== owner) { warn?.(`tool "${t.name}" from "${owner}" ignored — already registered by "${prior}"`); continue; }
+      this.tools.push(t); this.toolOwner.set(t.name, owner);
+    }
     this.skills.push(...other.skills);
     this.promptFragments.push(...other.promptFragments);
     this.hooks.push(...other.hooks);
@@ -334,18 +340,32 @@ export class PluginRegistry {
       currentIdentity,
       currentSessionId,
       // The parent anchor is read from the HOST's own turn scope, never taken from the plugin: that is
-      // the whole scoping boundary for both calls. Outside a prompt turn there is no conversation to
-      // scope to, so listing is empty and continuing is refused rather than falling back to "any parent".
+      // the whole scoping boundary for all three calls. Outside a prompt turn there is no conversation to
+      // scope to, so listing is empty and reading/continuing are refused rather than using "any parent".
       subagentRuns: (limit) => {
         const parentSessionId = currentSessionId();
         return parentSessionId && delegatedChildren ? delegatedChildren.runs(parentSessionId, limit) : [];
       },
-      continueSubagent: (sessionId, text) => {
+      readSubagent: (sessionId) => {
+        const parentSessionId = currentSessionId();
+        if (!parentSessionId || !delegatedChildren) {
+          throw new Error('reading a sub-agent is only available inside a conversation turn');
+        }
+        return delegatedChildren.read(parentSessionId, sessionId);
+      },
+      continueSubagent: (sessionId, text, onEvent) => {
         const parentSessionId = currentSessionId();
         if (!parentSessionId || !delegatedChildren) {
           return Promise.reject(new Error('continuing a sub-agent is only available inside a conversation turn'));
         }
-        return delegatedChildren.continue(parentSessionId, sessionId, text, currentAccess());
+        return delegatedChildren.continue(parentSessionId, sessionId, text, currentAccess(), onEvent);
+      },
+      stopSubagent: (sessionId) => {
+        const parentSessionId = currentSessionId();
+        if (!parentSessionId || !delegatedChildren) {
+          return Promise.reject(new Error('stopping a sub-agent is only available inside a conversation turn'));
+        }
+        return delegatedChildren.stop(parentSessionId, sessionId);
       },
       currentWorkDir,
       // Reads the turn-bound elicitor off the same AsyncLocalStorage as currentIdentity — no dependency

@@ -302,6 +302,23 @@ describe('PluginRegistry', () => {
       expect(warns.some((w) => w.includes('dup'))).toBe(true);
     });
 
+    it('enforces first-writer-wins for a cross-plugin tool-name collision at merge()', () => {
+      const warns: string[] = [];
+      const base = new PluginRegistry();
+      const a = new PluginRegistry();
+      a.contextFor('a', {}, noopLog).registerTool({ name: 'Dup', description: 'A' } as never);
+      const b = new PluginRegistry();
+      b.contextFor('b', {}, noopLog).registerTool({ name: 'Dup', description: 'B' } as never);
+      base.merge(a);
+      base.merge(b, (m) => warns.push(m));
+      // The loser's definition must not be kept either: two entries under one name would be dispatched
+      // and reported as the winner's.
+      expect(base.tools).toHaveLength(1);
+      expect(base.tools[0]?.description).toBe('A');
+      expect(base.toolOwner.get('Dup')).toBe('a');
+      expect(warns.some((w) => w.includes('Dup'))).toBe(true);
+    });
+
     it('enforces first-writer-wins for a cross-plugin control collision at merge()', () => {
       const warns: string[] = [];
       const base = new PluginRegistry();

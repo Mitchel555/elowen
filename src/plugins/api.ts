@@ -9,16 +9,31 @@ import type { DelegatedChildSummary } from '../store/brainDelegationStore.js';
 export type { DelegatedChildSummary };
 
 /** The host's bridge to the DURABLE side of delegation: which sub-agents a conversation already ran,
- *  and continuing one of them. Both are keyed on the parent session the HOST resolves from the live turn
- *  — never on anything the plugin supplies — so a plugin cannot address another conversation's children. */
+ *  reading their stored final replies, and continuing one of them. Every operation is keyed on the parent
+ *  session the HOST resolves from the live turn — never on anything the plugin supplies — so a plugin
+ *  cannot address another conversation's children. */
+/** Low-frequency progress of a sub-agent turn — the subset of a BrainEvent a delegating plugin distils
+ *  into its live progress row (tool starts, step/idle token usage, the child's session id). Passed to a
+ *  continuation so a follow-up surfaces as a running sub-agent exactly like the first delegation did. */
+export interface SubagentProgressEvent {
+  type: string;
+  name?: string;
+  detail?: string;
+  sessionId?: string;
+  usage?: { totalTokens?: number };
+}
+
 export interface DelegatedChildBridge {
   runs(parentSessionId: string, limit?: number): DelegatedChildSummary[];
+  read(parentSessionId: string, childSessionId: string): string;
   continue(
     parentSessionId: string,
     childSessionId: string,
     text: string,
     access: { admin: boolean; projectIds: number[]; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean },
+    onEvent?: (e: SubagentProgressEvent) => void,
   ): Promise<string>;
+  stop(parentSessionId: string, childSessionId: string): Promise<{ stopped: boolean }>;
 }
 
 /** A skill contributed by a plugin. Reuses pi's file-backed `Skill` (name/description/filePath…), so it
@@ -464,6 +479,10 @@ export interface PluginContext {
    *  conversation's or another account's children are not merely hidden but unaddressable. Empty outside
    *  a prompt turn, or when nothing is wired. */
   subagentRuns(limit?: number): DelegatedChildSummary[];
+  /** Read the final stored assistant text of a sub-agent listed by {@link subagentRuns}. The host anchors
+   *  the lookup to the current turn's session; the plugin supplies only the child id and cannot widen the
+   *  parent scope. Throws for unknown/foreign children, invalid delegated scope, or no final text yet. */
+  readSubagent(sessionId: string): string;
   /** Send a follow-up to a sub-agent listed by {@link subagentRuns} and resolve with its reply. The child
    *  resumes its own transcript with full context preserved — this is how a delegating agent refines a
    *  finished sub-agent's work instead of respawning one that has to rediscover everything.
@@ -471,8 +490,20 @@ export interface PluginContext {
    *  Rejects when the id is not a child of this conversation, when that child still has a turn in flight
    *  (two agents on one transcript is a race), or when its captured scope would now grant more than this
    *  conversation itself holds. A continuation replays the child's ORIGINAL immutable boundary, narrowed
-   *  by the caller's current denies — it can never widen access. */
-  continueSubagent(sessionId: string, text: string): Promise<string>;
+   *  by the caller's current denies — it can never widen access.
+   *
+   *  `onEvent` receives the child's live progress (tool starts, token usage) so the follow-up shows as a
+   *  running sub-agent in the CLI rail / web table, the same way the first delegation does — omit it and
+   *  the continuation still runs, just invisibly. */
+  continueSubagent(sessionId: string, text: string, onEvent?: (e: SubagentProgressEvent) => void): Promise<string>;
+  /** Stop a DIRECT sub-agent listed by {@link subagentRuns} — a runaway or no-longer-needed one — without
+   *  touching its parent or siblings. The host anchors the lookup to the current turn's session, exactly
+   *  like {@link readSubagent}; the plugin supplies only the child id and cannot widen the parent scope.
+   *  Stopping a child also tears down whatever it itself delegated (the same recursive teardown a platform
+   *  `/stop` does), so a foreground-blocked middle agent and the grandchild it is stuck on come down
+   *  together. Resolves `{stopped: false}` rather than throwing when the child already finished or never
+   *  started — there is nothing to stop, which is not an error. Throws for an unknown/foreign child. */
+  stopSubagent(sessionId: string): Promise<{ stopped: boolean }>;
   /** The current turn's resolved working directory (the project the CLI was launched in, a channel's
    *  policy root, the daemon's primary project as fallback) — plugins that persist per-PROJECT state
    *  (e.g. a todo checklist) key on this alongside the identity. Undefined outside a prompt turn. */

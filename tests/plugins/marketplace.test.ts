@@ -150,6 +150,20 @@ describe('MarketplaceService.catalog', () => {
     expect(calls.some((c) => c.startsWith('git clone'))).toBe(true);
   });
 
+  it('keeps serving the last-good cache when an unhealthy cache cannot be re-cloned', async () => {
+    const { svc, exec, cacheDir } = setup({ registryEntries: [{ name: 'weather', version: '1.0.0' }] });
+    await svc.catalog(); // primes the cache with a readable registry.json
+    expect(existsSync(join(cacheDir, 'registry.json'))).toBe(true);
+    // Cache goes unhealthy AND the network is down: the refresh must not destroy what we can still read.
+    exec.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return { stdout: 'git version 2.40.0' };
+      throw new Error('network unreachable');
+    });
+    const cat = await svc.catalog(true);
+    expect(cat.registryError).toBeTruthy();
+    expect(cat.plugins.map((p) => p.name)).toEqual(['weather']);
+  });
+
   it('reports registryError and an empty catalog when git is unavailable and no cache exists', async () => {
     const { svc, exec } = setup({ registryEntries: [{ name: 'weather', version: '1.0.0' }] });
     exec.mockImplementation(async (cmd: string, args: string[]) => {
@@ -233,6 +247,20 @@ describe('MarketplaceService.update', () => {
     const manifest = JSON.parse(readFileSync(join(userDir, 'notion', 'elowen-plugin.json'), 'utf-8')) as { version: string };
     expect(manifest.version).toBe('2.0.0');
     expect(reload).toHaveBeenCalled();
+  });
+
+  it('rolls the previous version back in when the post-update reload fails', async () => {
+    const { svc, userDir, reload } = setup({
+      registryEntries: [{ name: 'notion', version: '2.0.0' }],
+      installed: [{ name: 'notion', version: '1.0.0' }],
+    });
+    reload.mockRejectedValueOnce(new Error('registry rebuild failed'));
+    await expect(svc.update('notion')).rejects.toThrow(/registry rebuild failed/);
+    // The update reported a failure, so the working version must still be the one on disk.
+    const manifest = JSON.parse(readFileSync(join(userDir, 'notion', 'elowen-plugin.json'), 'utf-8')) as { version: string };
+    expect(manifest.version).toBe('1.0.0');
+    expect(existsSync(join(userDir, '.old-notion-rnd'))).toBe(false); // backup consumed, no debris
+    expect(reload).toHaveBeenCalledTimes(2); // and the restored version was put back into service
   });
 
   it('refuses to update a built-in plugin (409)', async () => {

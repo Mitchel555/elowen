@@ -2,7 +2,7 @@
  *  is Czech (formal) — the SW does no i18n. `actions` map to inline notification buttons; an empty
  *  `actions` array means tap-to-open only (the SW opens `url`). */
 
-type PushKind = 'review' | 'needs_input' | 'stalled' | 'blocked' | 'done';
+type PushKind = 'review' | 'needs_input' | 'stalled' | 'blocked' | 'done' | 'turn_done';
 
 interface PushAction { action: string; title: string }
 
@@ -77,6 +77,18 @@ export function buildBlocked(input: { missionId?: string; taskId: string; taskTi
     taskId: input.taskId,
     actions: [{ action: 'open', title: 'Otevřít' }],
     url: '/escalations',
+  };
+}
+
+/** An owner-chat turn the user started from the WEB finished — a plain FYI so someone who walked away from
+ *  the browser learns on their phone that Elowen is done. No action; a tap opens the conversation. */
+export function buildTurnDone(input: { title: string }): PushPayload {
+  return {
+    kind: 'turn_done',
+    title: 'Elowen dokončil práci',
+    body: input.title ? trim(input.title) : 'Vaše konverzace je hotová.',
+    actions: [],
+    url: '/chat',
   };
 }
 

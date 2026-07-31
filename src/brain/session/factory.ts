@@ -40,6 +40,10 @@ export interface SessionSpec {
   delegatedAccess?: DelegatedExecutionScope;
   runtime: ModelRuntime;
   model: Model<Api>;
+  /** The CONFIG provider entry id this session runs on (BrainProviderEntry.id, from the resolved route —
+   *  NOT `model.provider`, which is the registry name). Persisted beside the model so a respawn can
+   *  restore the exact pair the conversation was running on. */
+  providerId?: string;
   /** Distinct model (any provider) used deterministically for PI-owned compaction requests — the user's
    *  chosen compaction model or a provider's stable default. Undefined → compact on the session model. */
   compactionFallbackModel?: Model<Api>;
@@ -233,7 +237,7 @@ export class BrainSessionFactory {
     const existing = this.d.store.getSession(spec.sessionId);
     if (!existing) {
       this.d.store.createSession({
-        id: spec.sessionId, userId: spec.ownerUserId, model: spec.model.id,
+        id: spec.sessionId, userId: spec.ownerUserId, model: spec.model.id, provider: spec.providerId,
         parentSessionId: spec.parentSessionId, delegatedAccess: spec.delegatedAccess,
       });
     } else {
@@ -248,7 +252,7 @@ export class BrainSessionFactory {
       } else if (spec.delegatedAccess) {
         throw new Error('delegated access requires a parent session');
       }
-      this.d.store.touchSession(spec.sessionId, spec.model.id);
+      this.d.store.touchSession(spec.sessionId, spec.model.id, spec.providerId);
     }
     if (spec.title && !this.d.store.getSession(spec.sessionId)?.title) {
       this.d.store.setTitle(spec.sessionId, spec.title.slice(0, 60));
@@ -308,6 +312,12 @@ export class BrainSessionFactory {
     // pipeline created for this session. The extension above has already been loaded and only marks
     // PI's own compaction signal; it never executes or returns a custom compaction.
     compactionModelRoute?.install(session);
+    // PI's steering queue defaults to "one-at-a-time", so N messages sent during a running turn cost N
+    // model rounds and the agent answers each without seeing the ones behind it. "all" hands the whole
+    // queue to the loop, which injects every message into the context before a SINGLE model call. The
+    // messages stay separate transcript rows — durable per-message rows, positional queue-remove ids and
+    // image attachments all survive. Session-local: it lands in the in-memory SettingsManager above.
+    session.setSteeringMode('all');
     // Wire the live session onto the deferred-tool handle so ToolSearch (which closes over the handle) can
     // read the registry and change the active slice. AgentSession structurally satisfies the handle's
     // ToolActivationTarget (getAllTools/getActiveToolNames/setActiveToolsByName). No-op when nothing is
@@ -351,14 +361,18 @@ export class BrainSessionFactory {
     // Kept as a re-callable closure (returned to the caller) because PI reads compaction lazily at each
     // check: re-applying it turns a saved threshold change into an immediate effect on a RUNNING
     // conversation, instead of one that only appears after the next respawn.
+    // The proactive flag has the same runtime mutability as the threshold, so the turn-boundary check
+    // reads it through this cell instead of the spawn-time snapshot — see installTurnBoundaryAutoCompaction.
+    let proactiveCompaction = spec.autoCompact;
     const applyCompaction = (proactive: boolean, atPercent: number): void => {
+      proactiveCompaction = proactive;
       settingsManager.applyOverrides({
         compaction: { enabled: true, reserveTokens: compactionReserveTokens(spec.model.contextWindow, proactive, atPercent) },
       });
     };
     applyCompaction(spec.autoCompact, spec.autoCompactAtPct);
     const boundaryCompactionInstalled = installTurnBoundaryAutoCompaction(
-      session, sessionManager, spec.autoCompact, spec.pendingCompactionMessages,
+      session, sessionManager, () => proactiveCompaction, spec.pendingCompactionMessages,
     );
     if (spec.autoCompact && !boundaryCompactionInstalled && !missingBoundaryCompactionWarned) {
       missingBoundaryCompactionWarned = true;

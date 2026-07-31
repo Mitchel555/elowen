@@ -7,6 +7,7 @@ import { useBrainProcesses } from '../../lib/queries';
 import { elowenClient } from '../../lib/elowenClient';
 import { Modal } from '../../components/ui/Modal';
 import type { ProcessInfo } from '../../lib/types';
+import { isOwnProcess } from '../../lib/processScope';
 
 /** Live output of one background process, polled while it runs. Mirrors the terminal plugin's rolling
  *  buffer (read via GET /brain/processes/:id/output). Exported so the telemetry rail opens THIS detail
@@ -35,29 +36,17 @@ export function ProcessOutputModal({ proc, onClose }: { proc: ProcessInfo; onClo
   );
 }
 
-/** Where a process came from, when that is NOT the conversation currently on screen: a delegated sub-agent
- *  (`brain-ch-subagent-…`), another channel session (Discord/WhatsApp…), or one of the user's OTHER chats.
- *  The list spans every session the user owns (that is what makes an orphaned service findable at all), so
- *  every foreign row MUST be badged — an unbadged row is one this conversation started, and only that. */
-function originLabel(
-  sessionId: string | null,
-  activeSessionId: string | null,
-  t: ReturnType<typeof useTranslation>['t'],
-): string | null {
-  if (sessionId && sessionId === activeSessionId) return null;
-  if (sessionId?.startsWith('brain-ch-subagent-')) return t.processes.subagent;
-  if (sessionId?.startsWith('brain-ch-')) return t.processes.channel;
-  // A plain `brain-N` that is not the open conversation (or a handle whose origin we cannot resolve).
-  return t.processes.otherChat;
-}
-
-/** A panel next to the todos listing the background shell processes the agent started. Each row opens a
- *  live-output modal on click and carries an ✕ to kill it. Hidden when there are none. The list is
- *  owner-wide, not conversation-wide, so `activeSessionId` is what tells a local row from a foreign one. */
-export function ProcessPanel({ activeSessionId = null }: { activeSessionId?: string | null }) {
+/** A panel next to the todos listing the background shell processes THIS conversation started — including
+ *  those its delegated sub-agents started, which are its work too. Each row opens a live-output modal on
+ *  click and carries an ✕ to kill it. Hidden when there are none. The query is owner-wide (every process
+ *  the user owns across sessions), so the transcript panel narrows to the open conversation — a job from
+ *  another chat or a channel is noise here. Those stay reachable, and killable, in the telemetry rail's
+ *  separate "other processes" section, so an orphaned delegate's leftover service is never stranded. */
+export function ProcessPanel({ owned }: { owned: ReadonlySet<string> }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
-  const { data: procs = [] } = useBrainProcesses();
+  const { data: allProcesses = [] } = useBrainProcesses();
+  const procs = allProcesses.filter((p) => isOwnProcess(p, owned));
   // Track the open modal by id, not a click-time snapshot, so `proc.running` reflects the LIVE state from
   // the polled list — the modal stops polling once the process exits (and closes if it's pruned away).
   const [openId, setOpenId] = useState<string | null>(null);
@@ -77,9 +66,7 @@ export function ProcessPanel({ activeSessionId = null }: { activeSessionId?: str
         <span className="tabular-nums opacity-70">{runningCount}</span>
       </div>
       <ul className="flex flex-col gap-0.5">
-        {procs.map((p) => {
-          const origin = originLabel(p.sessionId, activeSessionId, t);
-          return (
+        {procs.map((p) => (
           <li key={p.id} className="group flex items-center gap-1.5">
             <span className={`shrink-0 ${p.running ? 'text-success' : 'text-text-muted'}`} title={p.running ? t.processes.running : t.processes.exited}>●</span>
             <button
@@ -90,9 +77,6 @@ export function ProcessPanel({ activeSessionId = null }: { activeSessionId?: str
             >
               {p.command}
             </button>
-            {origin ? (
-              <span className="shrink-0 rounded bg-bg px-1 text-[10px] text-text-muted" title={p.sessionId ?? undefined}>{origin}</span>
-            ) : null}
             <button
               type="button"
               onClick={() => void kill(p.id)}
@@ -103,8 +87,7 @@ export function ProcessPanel({ activeSessionId = null }: { activeSessionId?: str
               <X size={11} aria-hidden />
             </button>
           </li>
-          );
-        })}
+        ))}
       </ul>
       {openProc ? <ProcessOutputModal proc={openProc} onClose={() => setOpenId(null)} /> : null}
     </div>

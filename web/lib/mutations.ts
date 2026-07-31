@@ -2,7 +2,7 @@
 import { useMutation, useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { elowenClient } from './elowenClient';
 import { QUERY_KEYS } from './queries';
-import type { Task, CreateTaskInput, UpdateTaskInput, PlanInput, EngageInput, ConfigPatch, InsertPhasesInput, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, CronJob, MemoryCreate, MemoryPatch, EmbeddingSettingsPatch, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettingsPatch, PluginInfo, PluginDetail } from './types';
+import type { Task, CreateTaskInput, UpdateTaskInput, PlanInput, EngageInput, ConfigPatch, InsertPhasesInput, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, CronJob, MemoryCreate, MemoryPatch, EmbeddingSettingsPatch, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettingsPatch, PluginInfo, PluginDetail, PluginSkill } from './types';
 
 type TaskCacheSnapshot = Array<[QueryKey, Task[] | undefined]>;
 
@@ -50,29 +50,34 @@ export function useDeleteMission() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks });
       qc.invalidateQueries({ queryKey: QUERY_KEYS.missions });
-      qc.invalidateQueries({ queryKey: ['mission'] });
     },
   });
 }
-/** Admin: destructively reset all usage stores. Invalidates the usage query on success. */
+/** Admin: destructively reset all usage stores. Invalidates every cache usage is read from — by-model
+ *  (Stats), by-day (the dashboard's daily chart) and the per-task usage badges — so nothing keeps
+ *  showing pre-reset numbers until an unrelated refetch happens to catch up. */
 export function useResetUsage() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => elowenClient.resetUsage(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: QUERY_KEYS.usageByModel }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.usageByModel });
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.usageByDay });
+      qc.invalidateQueries({ queryKey: ['task-usage'] });
+    },
   });
 }
 
 export function useCleanupAll() {
   const qc = useQueryClient();
   // cleanupAll disengages every mission, kills the elowen- sessions and wipes tasks + events. Invalidate
-  // exactly those caches (+ the mission detail and session signals derived from them) instead of a
-  // wildcard `invalidateQueries()` — config/system/users/usage don't change, so refetching them just
+  // exactly those caches (+ the session signals derived from them) instead of a wildcard
+  // `invalidateQueries()` — config/system/users/usage don't change, so refetching them just
   // re-hammers the daemon for no reason.
   return useMutation({
     mutationFn: () => elowenClient.cleanupAll(),
     onSuccess: () => {
-      for (const queryKey of [QUERY_KEYS.tasks, QUERY_KEYS.missions, ['mission'], QUERY_KEYS.sessions, QUERY_KEYS.sessionSignals, ['activity']]) {
+      for (const queryKey of [QUERY_KEYS.tasks, QUERY_KEYS.missions, QUERY_KEYS.sessions, QUERY_KEYS.sessionSignals, ['activity']]) {
         qc.invalidateQueries({ queryKey });
       }
     },
@@ -89,11 +94,8 @@ export function useInsertPhases() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (v: { epicId: string; body: InsertPhasesInput }) => elowenClient.insertPhases(v.epicId, v.body),
-    onSuccess: (_r, v) => {
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks });
-      // Invalidate only the affected epic's mission detail, not every open mission (the broad
-      // `['mission']` prefix would refetch all open detail views, including the stray null key).
-      qc.invalidateQueries({ queryKey: ['mission', v.epicId] });
       qc.invalidateQueries({ queryKey: QUERY_KEYS.missions });
     },
   });
@@ -327,12 +329,22 @@ export function useCreatePluginSkill() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['plugin-skills'] }),
   });
 }
-/** Edit a user skill in place — description/content and the disable-model-invocation flag. */
+/** Edit a user skill in place — description/content and the disable-model-invocation flag. Optimistic:
+ *  the row flips instantly (the daemon's plugin hot-reload can take a while, and the old wait-for-refetch
+ *  behaviour left the toggle greyed out until a manual reload). On error the change rolls back; on settle
+ *  the list re-fetches the real backend state. */
 export function useUpdatePluginSkill() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (v: { name: string; patch: { description?: string; content?: string; disableModelInvocation?: boolean } }) => elowenClient.updatePluginSkill(v.name, v.patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['plugin-skills'] }),
+    onMutate: async (v) => {
+      await qc.cancelQueries({ queryKey: ['plugin-skills'] });
+      const prev = qc.getQueryData<PluginSkill[]>(['plugin-skills']);
+      qc.setQueryData<PluginSkill[]>(['plugin-skills'], (cur) => cur?.map((s) => (s.name === v.name ? { ...s, ...v.patch } : s)));
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => { if (ctx?.prev) qc.setQueryData(['plugin-skills'], ctx.prev); },
+    onSettled: () => { void qc.invalidateQueries({ queryKey: ['plugin-skills'] }); },
   });
 }
 export function useDeletePluginSkill() {
@@ -414,13 +426,34 @@ export function useAssignProject() {
     onSuccess: (_r, v) => qc.invalidateQueries({ queryKey: ['user-projects', v.userId] }),
   });
 }
+const inFlightFileWrites = new Map<string, Promise<{ ok: boolean }>>();
+/** Saving is not gated on `isPending` (Cmd+S fires whenever), so two writes to the SAME file can be
+ *  in flight at once — and then the slower, older request can settle last and put its stale content
+ *  back into the cache and onto disk. Chain the writes per project + path so that never happens,
+ *  while writes to different files (or projects) still run in parallel. react-query's `scope` can't
+ *  express this: its id is fixed in the hook's options, but the file only arrives with the variables. */
+function writeProjectFileSerialized(id: number, path: string, content: string): Promise<{ ok: boolean }> {
+  const key = `${id}\u0000${path}`;
+  const previous = inFlightFileWrites.get(key);
+  // allSettled: a failed write must not block the next save of that file.
+  const run = Promise.allSettled([previous]).then(() => elowenClient.writeProjectFile(id, path, content));
+  inFlightFileWrites.set(key, run);
+  return run.finally(() => { if (inFlightFileWrites.get(key) === run) inFlightFileWrites.delete(key); });
+}
 export function useWriteProjectFile() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { id: number; path: string; content: string }) => elowenClient.writeProjectFile(v.id, v.path, v.content),
+    mutationFn: (v: { id: number; path: string; content: string }) => writeProjectFileSerialized(v.id, v.path, v.content),
     onSuccess: (_r, v) => {
+      // Update the file cache with what we just wrote before invalidating — the editor clears its local
+      // draft on save and falls back to this cache, so without the update it would briefly flash the
+      // stale pre-save content until the refetch below resolves.
+      qc.setQueryData<{ content: string; truncated: boolean }>(['project-file', v.id, v.path], { content: v.content, truncated: false });
       qc.invalidateQueries({ queryKey: ['project-file', v.id, v.path] });
       qc.invalidateQueries({ queryKey: ['project-git', v.id] });
+      // 'project-changed' is where the editor gets its highlighted (dirty) paths — without this the tree
+      // keeps claiming the just-saved path is unchanged until something else invalidates it.
+      qc.invalidateQueries({ queryKey: ['project-changed', v.id] });
     },
   });
 }

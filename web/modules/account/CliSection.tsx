@@ -7,7 +7,7 @@ import { Segmented } from '../../components/ui/Segmented';
 import { SpatialGroup, SpatialRow } from '../../components/ui/SpatialPrimitives';
 import { Toggle } from '../../components/ui/Toggle';
 import { ReasoningScale } from '../../components/ui/ReasoningScale';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { useAutoSaveStatus, type SaveStatus } from '../../lib/useAutoSaveStatus';
@@ -22,7 +22,7 @@ const NO_REASONING_LEVELS: string[] = [];
  *  Thinking level + vision fallback + auto-compact; the default model pickers render beside this
  *  section in AccountView. Communication style lives in Personality. Its own load/save + autosave. */
 export function CliSection({ onSaveState }: { onSaveState?: (section: string, status: SaveStatus, retry?: () => void) => void }) {
-  const { data, isLoading } = useMyCliSettings();
+  const { data, isLoading, isError, refetch } = useMyCliSettings();
   const models = useBrainModels();
   const save = useSaveMyCliSettings();
   const { toast } = useToast();
@@ -141,6 +141,7 @@ export function CliSection({ onSaveState }: { onSaveState?: (section: string, st
     onSaveState?.('cli', status, retry);
   }, [onSaveState, retrySettings, retryUnattended, retryYolo, settingsStatus, status, unattendedStatus, yoloStatus]);
 
+  if (isError) return <ErrorState message={t.common.daemonUnreachable} onRetry={() => refetch()} />;
   if (isLoading || !data) return <LoadingState />;
 
   return (

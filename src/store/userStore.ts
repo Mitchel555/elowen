@@ -16,8 +16,10 @@ export interface User { id: number; username: string; created_at: string; is_adm
  *  full access at the guard, its own DB scope so revoking a terminal never disturbs login/advisor/agent tokens. */
 export type TokenScope = 'full' | 'agent';
 export type StoredScope = TokenScope | 'advisor' | 'terminal';
-/** A resolved token: the owning user plus the token's scope, so route guards can narrow an agent. */
-export interface Principal { user: User; scope: TokenScope }
+/** A resolved token: the owning user, the token's scope, and — for an agent token minted for one
+ *  specific task — that task's id, so route guards can narrow an agent to its own work. `taskId` is
+ *  null for every other token (interactive sessions, and the unbound shared service token). */
+export interface Principal { user: User; scope: TokenScope; taskId: string | null }
 type Row = { id: number; username: string; created_at: string; is_admin: number; password_hash: string; allowed_execs: string; disabled_tools: string; name: string; email: string; avatar: string; default_exec: string; advisor_exec: string; advisor_autostart: number };
 const mask = (r: Row): User => ({ id: r.id, username: r.username, created_at: r.created_at, is_admin: !!r.is_admin, allowed_execs: r.allowed_execs ? r.allowed_execs.split(',').filter(Boolean) : [], disabled_tools: r.disabled_tools ? r.disabled_tools.split(',').filter(Boolean) : [], name: r.name ?? '', email: r.email ?? '', avatar: r.avatar ?? '', default_exec: r.default_exec ?? '', advisor_exec: r.advisor_exec ?? '', advisor_autostart: r.advisor_autostart === undefined ? true : !!r.advisor_autostart });
 
@@ -123,7 +125,16 @@ export class UserStore {
   delete(id: number): void {
     // One transaction so a mid-way failure can't leave orphan tokens/assignments (consistent with
     // ProjectStore.remove and TaskStore.delete). The schema has no FK cascade, so order is explicit.
+    //
+    // `users.id` is a plain SQLite rowid, not AUTOINCREMENT (schema.sql:56-57), so deleting the
+    // highest-numbered user and creating a new one typically REUSES that exact id. Without nulling
+    // `created_by` here, the new account would silently inherit the old tasks' prompt attribution
+    // (prompts/owner.ts) and the old missions' replan/notification ownership — data belonging to a
+    // person who no longer has the account. Nulling is correct even independent of id reuse: a
+    // `created_by` pointing at a user that no longer exists is already a dangling reference.
     this.db.transaction(() => {
+      this.db.prepare('UPDATE tasks SET created_by = NULL WHERE created_by = ?').run(id);
+      this.db.prepare('UPDATE missions SET created_by = NULL WHERE created_by = ?').run(id);
       this.db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').run(id);
       this.db.prepare('DELETE FROM brain_terminals WHERE user_id = ?').run(id); // no orphan terminal bindings (their tokens went with auth_tokens above)
       this.db.prepare('DELETE FROM user_projects WHERE user_id = ?').run(id); // no orphan assignments
@@ -131,9 +142,9 @@ export class UserStore {
       this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     })();
   }
-  issueToken(userId: number, scope: StoredScope = 'full'): string {
+  issueToken(userId: number, scope: StoredScope = 'full', taskId: string | null = null): string {
     const token = randomBytes(32).toString('hex');
-    this.db.prepare('INSERT INTO auth_tokens (token, user_id, scope) VALUES (?, ?, ?)').run(token, userId, scope);
+    this.db.prepare('INSERT INTO auth_tokens (token, user_id, scope, task_id) VALUES (?, ?, ?, ?)').run(token, userId, scope, taskId);
     return token;
   }
   /** Resolve a token to its owning user AND scope, so route guards can restrict agent tokens.
@@ -141,23 +152,41 @@ export class UserStore {
    *  even if it was never explicitly revoked. */
   principalForToken(token: string, days?: number): Principal | null {
     const r = this.db
-      .prepare(`SELECT u.*, t.scope AS token_scope FROM auth_tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ? AND t.created_at > datetime('now', '-${ttlDays(days)} days')`)
-      .get(token) as (Row & { token_scope: string }) | undefined;
+      .prepare(`SELECT u.*, t.scope AS token_scope, t.task_id AS token_task FROM auth_tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ? AND t.created_at > datetime('now', '-${ttlDays(days)} days')`)
+      .get(token) as (Row & { token_scope: string; token_task: string | null }) | undefined;
     if (!r) return null;
-    return { user: mask(r), scope: r.token_scope === 'agent' ? 'agent' : 'full' };
+    const scope: TokenScope = r.token_scope === 'agent' ? 'agent' : 'full';
+    // Only an agent token carries a task binding; anything else is unbound by definition.
+    return { user: mask(r), scope, taskId: scope === 'agent' ? r.token_task : null };
   }
-  /** The daemon's agent service token, reused across restarts: return the existing valid agent token
-   *  if one is still within TTL, else clear stale ones and mint a fresh token. Called at boot — unlike
-   *  a blind rotate, this keeps in-flight agents' credential alive across a daemon restart (they'd
-   *  otherwise 401 on `elowen close`) while still bounding accumulation (at most one live token). */
+  /** The daemon's UNBOUND agent service token, reused across restarts: return the existing valid agent
+   *  token if one is still within TTL, else clear stale ones and mint a fresh token. Called at boot —
+   *  unlike a blind rotate, this keeps in-flight agents' credential alive across a daemon restart (they'd
+   *  otherwise 401 on `elowen close`) while still bounding accumulation (at most one live token).
+   *  Scoped to `task_id IS NULL` throughout, so it neither returns nor sweeps away the per-task tokens
+   *  minted by {@link ensureAgentTokenForTask} for live workers. */
   ensureAgentToken(userId: number, days?: number): string {
     return this.db.transaction(() => {
       const existing = this.db
-        .prepare(`SELECT token FROM auth_tokens WHERE user_id = ? AND scope = 'agent' AND created_at > datetime('now', '-${ttlDays(days)} days') ORDER BY created_at DESC LIMIT 1`)
+        .prepare(`SELECT token FROM auth_tokens WHERE user_id = ? AND scope = 'agent' AND task_id IS NULL AND created_at > datetime('now', '-${ttlDays(days)} days') ORDER BY created_at DESC LIMIT 1`)
         .get(userId) as { token?: string } | undefined;
       if (existing?.token) return existing.token;
-      this.db.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND scope = 'agent'").run(userId);
+      this.db.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND scope = 'agent' AND task_id IS NULL").run(userId);
       return this.issueToken(userId, 'agent');
+    })();
+  }
+  /** The agent token for ONE task, reused within TTL. A worker is spawned with this instead of the
+   *  shared service token, so the API can refuse it on any task but its own (and its parent epic) —
+   *  the shared token alone cannot distinguish two workers in the same project. Reuse keeps a resumed
+   *  or re-spawned worker on the same credential, exactly like {@link ensureAgentToken} does at boot. */
+  ensureAgentTokenForTask(userId: number, taskId: string, days?: number): string {
+    return this.db.transaction(() => {
+      const existing = this.db
+        .prepare(`SELECT token FROM auth_tokens WHERE user_id = ? AND scope = 'agent' AND task_id = ? AND created_at > datetime('now', '-${ttlDays(days)} days') ORDER BY created_at DESC LIMIT 1`)
+        .get(userId, taskId) as { token?: string } | undefined;
+      if (existing?.token) return existing.token;
+      this.db.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND scope = 'agent' AND task_id = ?").run(userId, taskId);
+      return this.issueToken(userId, 'agent', taskId);
     })();
   }
   /** The user's advisor token, reused across restarts. Stored under DB scope 'advisor' so it is

@@ -61,6 +61,9 @@ export interface StartScreenState {
   statusLeft: string;
   /** Plain version string, rendered faint in the bottom-right corner. */
   version: string;
+  /** User's `/maskot` preference. When false the flame wordmark is dropped and the layout centers
+   *  without it. Optional so structural callers default to shown (the product default). */
+  showMascot?: boolean;
 }
 
 /** The centered input box geometry of the start screen — shared with overlay anchoring (the slash
@@ -73,8 +76,10 @@ export function startScreenBox(width: number): { boxWidth: number; leftPad: numb
 
 /** Row (0-based, within the start screen's rows) where the input box starts — mirror of the vertical
  *  centering in {@link StartScreen.render}, kept here so overlay anchoring can never drift from it. */
-export function startScreenInputTop(rows: number, inputRows: number, noticeRows: number): number {
-  const bodyLength = BANNER_ROWS + 1 + inputRows + 2 + 2 + 1 + (noticeRows ? 1 + noticeRows : 0);
+export function startScreenInputTop(rows: number, inputRows: number, noticeRows: number, showMascot = true): number {
+  // The mascot art plus the single spacer row beneath it — both drop together when the flame is hidden.
+  const banner = showMascot ? BANNER_ROWS + 1 : 0;
+  const bodyLength = banner + inputRows + 2 + 2 + 1 + (noticeRows ? 1 + noticeRows : 0);
   if (bodyLength > rows - 1) {
     let room = Math.max(0, rows - 1);
     const inputCount = Math.min(inputRows, room);
@@ -88,7 +93,7 @@ export function startScreenInputTop(rows: number, inputRows: number, noticeRows:
     return Math.max(0, rows - 1 - compactLength);
   }
   const topPad = Math.max(0, Math.floor((rows - 1 - bodyLength) / 2) - 1);
-  return topPad + BANNER_ROWS + 1;
+  return topPad + banner;
 }
 
 /** Render an input inside a physical row budget without losing its focused cursor. ChatEditor understands
@@ -135,9 +140,11 @@ export class StartScreen implements Component {
     const boxLine = (line: string): string => `${indent}${truncateToWidth(line, boxWidth, '…')}`;
     const hint = truncateToWidth(st.hints, boxWidth, '…');
     const hintLine = `${' '.repeat(Math.max(0, leftPad + boxWidth - visibleWidth(hint)))}${hint}`;
+    // `/maskot` off drops the flame wordmark and its spacer; the vertical centering below follows suit.
+    const showMascot = st.showMascot !== false;
+    const mascotBlock = showMascot ? [...MASCOT_ART.map((line) => center(line)), ''] : [];
     const body = [
-      ...MASCOT_ART.map((line) => center(line)),
-      '',
+      ...mascotBlock,
       ...inputLines.map(boxLine),
       `${indent}${truncateToWidth(st.modelLine, boxWidth, '…')}`,
       hintLine,
@@ -178,7 +185,8 @@ export class StartScreen implements Component {
     }
     // Center the block vertically, biased slightly upward (startScreenInputTop mirrors this math);
     // the status row is pinned to the last line.
-    const topPad = Math.max(0, startScreenInputTop(rows, inputLines.length, noticeLines.length) - BANNER_ROWS - 1);
+    const banner = showMascot ? BANNER_ROWS + 1 : 0;
+    const topPad = Math.max(0, startScreenInputTop(rows, inputLines.length, noticeLines.length, showMascot) - banner);
     const lines: string[] = Array.from({ length: topPad }, () => '');
     lines.push(...body);
     while (lines.length < rows - 1) lines.push('');

@@ -55,6 +55,17 @@ beforeEach(() => {
   useBrainModels.mockReturnValue({ data: [] });
 });
 
+describe('PluginDetail — error state', () => {
+  it('shows a retryable error instead of an infinite skeleton', () => {
+    const refetch = vi.fn();
+    usePluginDetail.mockReturnValue({ data: undefined, isLoading: false, isError: true, refetch });
+    renderDetail();
+    expect(screen.getByRole('button', { name: en.common.retry })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: en.common.retry }));
+    expect(refetch).toHaveBeenCalledOnce();
+  });
+});
+
 describe('PluginDetail model field', () => {
   it('uses the shared searchable provider modal for brain models', async () => {
     useBrainModels.mockReturnValue({ data: [

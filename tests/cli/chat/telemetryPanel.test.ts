@@ -1,0 +1,86 @@
+import { describe, it, expect } from 'vitest';
+import { visibleWidth } from '@earendil-works/pi-tui';
+import { TelemetryPanel, type TelemetryState } from '../../../src/cli/chat/telemetryPanel.js';
+import type { BrainGoalState } from '../../../src/brain/events.js';
+import type { ProcessInfo } from '../../../src/brain/processRegistry.js';
+
+const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+/** The rail paints every row to the full panel width with the background colour, so the trailing padding
+ *  is literal spaces. Trim them off to recover where the row's actual CONTENT ends. */
+const contentExtent = (row: string): number => visibleWidth(strip(row).replace(/\s+$/u, ''));
+
+/** PANEL_BAR_MARGIN in telemetryPanel.ts. Kept in sync by the assertion below: content must end at least
+ *  this many columns before the right edge, so a two-space gutter mirrors the two-space left indent. */
+const PANEL_BAR_MARGIN = 2;
+
+const resetsAt = Math.floor(Date.now() / 1000) + 3_600;
+
+const goal: BrainGoalState = {
+  session_id: 's', user_id: 1, status: 'active',
+  goal: 'Ship the telemetry rail margin fix with a really long goal title that would overflow the rail',
+  draft: '', subgoals: '[]', turns_used: 3, turn_budget: 40,
+  last_verdict: '', last_evidence: '', paused_reason: '', created_at: '', updated_at: '',
+};
+
+/** A rail state that lights up EVERY section (context, goal, limits, workflow, sub-agents, processes,
+ *  project, mcp, lsp) with content long enough to overflow a narrow panel — so a reverted width
+ *  calculation shows up as a row that reaches the edge. */
+const fullState = (): TelemetryState => ({
+  usage: { tokens: 199_999, contextWindow: 200_000, percent: 99.9, totalTokens: 199_999, cost: 888.46 },
+  cwd: '~/projects/some/really/deeply/nested/directory/path/that/overflows/the/rail',
+  branch: 'feature/really-long-branch-name-here',
+  mcp: [{ name: 'chrome-devtools', status: 'connected' }, { name: 'github', status: 'connected' }],
+  lspEnabled: true,
+  processes: [{
+    id: 'p1', command: 'npm run dev --workspace some-really-long-package-name',
+    startedAt: new Date().toISOString(), running: true, completionMode: 'background',
+  } as ProcessInfo],
+  subagents: [{ sessionId: 's1', task: 'a really long sub-agent task description that would overflow the panel', status: 'running', tools: 3, seconds: 42 }],
+  workflows: [{ id: 'w1', title: 'A workflow with a long title that overflows', status: 'running', nodes: [] } as never],
+  rateLimits: {
+    provider: 'openai', planType: 'pro-max-enterprise-subscription-tier', stale: true, fetchedAt: 0,
+    windows: [
+      { usedPercent: 80, windowMinutes: 300, resetsAt },
+      { usedPercent: 55, windowMinutes: 10_080, resetsAt },
+    ],
+  },
+  goal,
+  floatOffset: 0,
+});
+
+describe('the telemetry rail keeps a right gutter', () => {
+  it('never lets a rendered content row reach past width - PANEL_BAR_MARGIN, at any width', () => {
+    // 36 is the rail's documented minimum width; go up from there. One parametrised pass covers every
+    // section, so a reverted width computation on any of them surfaces as a row that touches the edge.
+    for (const width of [36, 40, 46, 60, 80]) {
+      const rows = new TelemetryPanel(fullState).render(width);
+      for (const [index, row] of rows.entries()) {
+        expect(contentExtent(row), `row ${index} @ width ${width}: "${strip(row).replace(/\s+$/u, '')}"`)
+          .toBeLessThanOrEqual(width - PANEL_BAR_MARGIN);
+      }
+    }
+  });
+
+  it('hides the flame and disarms its animation when /maskot is off', () => {
+    const shown = new TelemetryPanel(() => ({ ...fullState(), showMascot: true }));
+    const hidden = new TelemetryPanel(() => ({ ...fullState(), showMascot: false }));
+    // The rail art is truecolor half-blocks (▀ / ▄); present when shown, gone when hidden.
+    expect(shown.render(60).join('\n')).toContain('▀');
+    expect(hidden.render(60).join('\n')).not.toContain('▀');
+    // canRenderMascot gates the animation timer (see AnimationController.canAnimateMascot); a hidden
+    // mascot must never let it arm and tick against nothing.
+    expect(shown.canRenderMascot(60)).toBe(true);
+    expect(hidden.canRenderMascot(60)).toBe(false);
+    // The functional sections still render regardless of the mascot toggle.
+    expect(hidden.render(60).join('\n')).toContain('Context');
+  });
+
+  it('still fills every section (the gutter check is not vacuously passing on an empty rail)', () => {
+    const text = new TelemetryPanel(fullState).render(60).map(strip).join('\n');
+    for (const label of ['Context', 'Goal', 'Limits', 'Workflow', 'Sub-agents', 'Processes', 'Project', 'MCP', 'LSP']) {
+      expect(text, label).toContain(label);
+    }
+    // The price is the row the bug report called out — it must be present and inside the gutter.
+    expect(text).toContain('$888.46');
+  });
+});

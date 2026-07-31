@@ -9,6 +9,8 @@ import { defaultLifecycleDeps, runLifecycle, runApiCommand } from './commands.js
 import { callElowenApi } from '../shared/apiClient.js';
 import { menu } from './menu.js';
 import { interactiveLogin, launchChat } from './chat/launch.js';
+import { urlHealthy, waitHealthy } from './launcher.js';
+import { flagValue as flag } from './flags.js';
 
 const BASE = (process.env.ELOWEN_URL) ?? 'http://localhost:4400';
 
@@ -103,23 +105,17 @@ export function needsDaemon(cmd: string | undefined): boolean {
 
 async function ensureDaemon() {
   if ((process.env.ELOWEN_AUTOSTART) === '0') return;
-  try { await fetch(`${BASE}/health`); return; } catch { /* down — start daemon */ }
+  // `urlHealthy` requires an `ok` response — a bare non-throwing fetch previously read a 500 as healthy —
+  // and bounds each probe so a half-open connection can't block an ordinary command.
+  if (await urlHealthy(`${BASE}/health`)) return;
   const entry = join(dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'index.js');
   spawn(process.execPath, [entry], { detached: true, stdio: 'ignore' }).unref();
-  for (let i = 0; i < 50; i++) { try { await fetch(`${BASE}/health`); return; } catch { /* not healthy yet — retry */ await new Promise(r => setTimeout(r, 100)); } }
-  throw new Error('elowen daemon did not become healthy');
+  // 5s TOTAL, not 50 probes that may each stall for their own timeout.
+  const [healthy] = await waitHealthy([`${BASE}/health`], { budgetMs: 5000 });
+  if (!healthy) throw new Error('elowen daemon did not become healthy');
 }
 
-/** Read `--flag value` from an argv slice. Returns undefined when the flag is absent OR present without
- *  a value — a following token that is itself a flag (`--…`) is never swallowed as this flag's value
- *  (`--summary --outcome ok` must not set summary to "--outcome"). Pair with `has()` to tell "absent"
- *  apart from "present but valueless" when a value is required. */
-function flag(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  if (i < 0) return undefined;
-  const next = args[i + 1];
-  return next === undefined || next.startsWith('--') ? undefined : next;
-}
+/** Companion to the shared `flag()` reader: tells "absent" apart from "present but valueless". */
 function has(args: string[], name: string): boolean { return args.includes(name); }
 
 export async function run(argv: string[], c: ElowenClient, env: NodeJS.ProcessEnv): Promise<void> {

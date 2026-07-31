@@ -66,13 +66,18 @@ export function SkillsEditor() {
         body: skill.content ?? '',
         disableModelInvocation: skill.disableModelInvocation,
       })}
-      renderBadges={(skill) => (skill.disableModelInvocation ? <Badge tone="default">{t.skills.manualOnlyBadge}</Badge> : null)}
+      renderBadges={(skill) => (
+        <>
+          {skill.version != null ? <Badge tone="default">v{skill.version}</Badge> : null}
+          {skill.disableModelInvocation ? <Badge tone="default">{t.skills.manualOnlyBadge}</Badge> : null}
+        </>
+      )}
       renderRowControl={(skill) => (
         <Toggle
           checked={skill.disableModelInvocation}
           onChange={(next) => toggleInvocation(skill, next)}
           label={t.skills.disableModelInvocation}
-          disabled={update.isPending}
+          disabled={update.isPending && update.variables?.name === skill.name}
         />
       )}
       renderFieldsAfterBody={(form, patch) => (

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach, beforeEach } from 'vitest';
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent, within } from '@testing-library/react';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 import { onUnhandledRequest } from '../../msw';
@@ -40,6 +40,8 @@ let processes: ProcessInfo[] = [];
 /** How many times the rail's process list was actually served — asserting that a row is ABSENT is only
  *  meaningful once the data it would have come from has arrived. */
 let processFetches = 0;
+/** Ids the rail asked the daemon to kill — the "other processes" section is the only web view that can. */
+const killed: string[] = [];
 
 const activeGoal = {
   session_id: 'brain-1', user_id: 1, status: 'active' as const,
@@ -58,6 +60,7 @@ const server = setupServer(
   })),
   http.get('*/api/brain/processes', () => { processFetches += 1; return HttpResponse.json(processes); }),
   http.get('*/api/brain/processes/:id/output', () => HttpResponse.json({ output: 'ready on :4500' })),
+  http.delete('*/api/brain/processes/:id', ({ params }) => { killed.push(String(params['id'])); return HttpResponse.json({ killed: true }); }),
   http.get('*/api/brain/rate-limits', () => HttpResponse.json(null)),
   http.get('*/api/brain/sessions', () => HttpResponse.json([])),
   http.get('*/api/brain/commands', () => HttpResponse.json({ commands: [] })),
@@ -72,6 +75,7 @@ afterEach(() => {
   FakeES.instances.length = 0;
   processes = [];
   processFetches = 0;
+  killed.length = 0;
   localStorage.clear();
   vi.restoreAllMocks();
 });
@@ -140,6 +144,49 @@ describe('telemetry rail — live work sections', () => {
     await renderRail();
     await waitFor(() => expect(processFetches).toBeGreaterThan(0));
     expect(screen.queryByTestId('telemetry-processes')).toBeNull();
+  });
+
+  it('keeps another conversation job out of the live section, but reachable in the one below', async () => {
+    // The processes query is owner-wide, so a job from a different chat comes back too. It is not THIS
+    // conversation's live work — yet hiding it outright stranded it: the rail was the only place able to
+    // reach a service an orphaned delegate left running. It goes into its own section, not nowhere.
+    processes = [
+      process1,
+      { ...process1, id: 'pX', command: 'python other.py', sessionId: 'brain-99' },
+    ];
+    await renderRail();
+    const section = await screen.findByTestId('telemetry-processes');
+    expect(section.textContent).toContain('npm run dev');
+    expect(section.textContent).not.toContain('python other.py');
+
+    const other = await screen.findByTestId('telemetry-processes-other');
+    expect(other.textContent).toContain('python other.py');
+    expect(other.textContent).not.toContain('npm run dev');
+  });
+
+  it('kills a stranded process straight from the other-processes section', async () => {
+    processes = [{ ...process1, id: 'pX', command: 'python other.py', sessionId: 'brain-ch-subagent-sub-dlg-9' }];
+    await renderRail();
+    const other = await screen.findByTestId('telemetry-processes-other');
+    // The row names where it came from, so the reader knows what they are about to kill.
+    expect(other.textContent).toContain('sub-agent');
+
+    await act(async () => { fireEvent.click(within(other).getByRole('button', { name: 'Kill process' })); });
+    await waitFor(() => expect(killed).toEqual(['pX']));
+  });
+
+  it("counts a job started by this conversation's own sub-agent as its live work", async () => {
+    processes = [{ ...process1, id: 'pSub', command: 'npm run watch', sessionId: 'child-1' }];
+    const es = await renderRail();
+    es.emit('snapshot', snapshot({
+      events: subagentEvents({ id: 't1', sessionId: 'child-1', status: 'running', task: 'staví web' }),
+    }));
+
+    // The delegate runs under its own session id, but the job it started is this conversation's work —
+    // so it belongs in the live section, and nothing is left over for the "other" one.
+    const section = await screen.findByTestId('telemetry-processes');
+    await waitFor(() => expect(section.textContent).toContain('npm run watch'));
+    expect(screen.queryByTestId('telemetry-processes-other')).toBeNull();
   });
 
   it('opens the existing process output modal from a rail row', async () => {

@@ -1,13 +1,15 @@
 'use client';
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import Link from 'next/link';
+import { ArrowLeft, Loader } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
-import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainModelOption, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
-import { collectSubagents, collectWorkflows, emptyView, fromHistory, fromSnapshot, prependHistory, reduce, upsertCard, type ChatTurn, type ChatView, type SubagentState, type TranscriptEvent, type WorkflowState } from '../../lib/transcript';
+import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainModelOption, BrainPendingPlan, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
+import { collectSubagents, collectWorkflows, emptyView, fromHistory, fromSnapshot, prependHistory, reduce, submittedPlan, upsertCard, type ChatTurn, type ChatView, type SubagentState, type TranscriptEvent, type WorkflowState } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
 import { subscribeRevive, STALE_HIDE_MS } from '../../lib/useRevive';
@@ -35,6 +37,12 @@ const WORK_MODES: readonly BrainWorkMode[] = ['build', 'plan', 'workflow'];
 /** What approving a submitted plan sends, verbatim from the CLI's plan follow-up (src/cli/chat/flows.ts)
  *  so both surfaces hand the model the same sentence. Model-facing, hence not translated. */
 const IMPLEMENT_PLAN_PROMPT = 'Implement the plan you proposed above.';
+
+/** Stable identity of a submitted plan: its ExitPlanMode call id, or the plan text for a call PI minted no
+ *  id for. Mirror of the key the CLI dedupes its own plan decision on (`planDecisionRaisedFor`). */
+function planKey(plan: BrainPendingPlan | null): string | null {
+  return plan ? plan.id ?? plan.plan : null;
+}
 
 /** How long a freshly opened stream may go without its guaranteed snapshot frame before it is retried. */
 const SNAPSHOT_TIMEOUT_MS = 15_000;
@@ -88,6 +96,16 @@ export interface BrainChatValue {
   turns: ChatTurn[];
   busy: boolean;
   ready: boolean;
+  /** A dropped stream is being recovered (the reconnect controller has an attempt in flight). Distinct from
+   *  `ready`, which is also false on the very first load — this is only ever a RE-connect, so it drives the
+   *  blur-and-spinner overlay without flashing it on initial boot. */
+  reconnecting: boolean;
+  /** Called by a chat surface on mount; the returned cleanup runs on unmount. The provider sits above every
+   *  route, so without knowing whether any surface is actually on screen it blurred the whole app —
+   *  dashboard and tasks included — whenever the stream dropped. */
+  registerSurface: () => () => void;
+  /** Whether at least one chat surface is currently mounted. */
+  hasSurface: boolean;
   notice: string;
   ask: Ask | null;
   cards: BrainCard[];
@@ -121,7 +139,7 @@ export interface BrainChatValue {
   exitReadOnly: () => void;
   deleteSession: (id: string, wasActive: boolean) => Promise<void>;
   onQueueRemove: (id: string) => void;
-  onAnswer: (id: string, answers: AskAnswer[]) => void;
+  onAnswer: (id: string, answers: AskAnswer[]) => Promise<void>;
   /** Explicit Stop intent — aborts the streaming turn for ALL watchers of the bound conversation. Wired
    *  here in Fáze 1; the visible Stop button lands in a later phase (no UX change yet). */
   abort: () => void;
@@ -150,14 +168,23 @@ export interface BrainChatValue {
    *  reappear the moment it is switched back on. Persisted per browser. */
   showThoughts: boolean;
   setShowThoughts: (v: boolean) => void;
-  /** The work mode every send is stamped with (`/plan`, `/build`, `/workflow`). Session-scoped and kept in
-   *  MEMORY only — a reload starts in 'build', exactly like a fresh CLI process, so the two surfaces can
-   *  never disagree about which mode a conversation is in. */
+  /** The work mode every send FROM THIS TAB is stamped with (`/plan`, `/build`, `/workflow`). Session-scoped
+   *  and kept in MEMORY only — a reload starts in 'build', exactly like a fresh CLI process. It says nothing
+   *  about the mode the conversation is actually in; that is the daemon's, and it reaches the surface as
+   *  `planDecision` rather than by overwriting the composer's own choice. */
   workMode: BrainWorkMode;
   setWorkMode: (m: BrainWorkMode) => void;
-  /** Approve a submitted plan: switch to build mode and send the CLI's implement prompt. Without it a web
+  /** The plan waiting on the user's implement/cancel decision, `null` when none is. Derived from the
+   *  DAEMON's answer (mode + submitted plan, hydrated on connect and on every snapshot frame) and kept in
+   *  step by the transcript, so the decision survives a reload, a second tab, and plan mode having been
+   *  entered from another surface — none of which tab-local state could ever see. */
+  planDecision: BrainPendingPlan | null;
+  /** Approve the submitted plan: switch to build mode and send the CLI's implement prompt. Without it a web
    *  user who entered plan mode would have no way to act on the plan they just got. */
   implementPlan: () => void;
+  /** Decline the decision without leaving plan mode (the CLI picker's Cancel): the plan stays in the
+   *  transcript and another message keeps refining it. */
+  dismissPlan: () => void;
   /** True while an approval is in flight — the button disables itself instead of firing twice. */
   planSubmitting: boolean;
   /** The `/rename` dialog's open state (the surface renders the modal; the controller owns the write). */
@@ -224,7 +251,30 @@ function useBrainChatController(): BrainChatValue {
   const historyEpochRef = useRef(0);
   const [input, setInput] = useState('');
   const [ready, setReady] = useState(false);
-  const [usage, setUsage] = useState<BrainUsage | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  // How many chat surfaces are mounted right now. The dock and /chat can both hold one, so this is a count
+  // rather than a flag — the second to unmount is what takes the overlay away.
+  const [surfaces, setSurfaces] = useState(0);
+  const registerSurface = useCallback(() => {
+    setSurfaces((n) => n + 1);
+    return () => setSurfaces((n) => n - 1);
+  }, []);
+  const [usage, setUsageState] = useState<BrainUsage | null>(null);
+  // Usage now has several writers: the live stream (`step`, `idle`) and a handful of REST snapshots
+  // (connect, a settled sub-agent, session-event, the stats modal). The stream is authoritative and
+  // ordered; a REST snapshot is a point-in-time read that can land LATE and undo it — the server samples
+  // it, then a newer step/idle arrives, then the slow response commits an older number that nothing
+  // corrects until the next round-trip. The connect `generation` guard does not catch this: these
+  // refetches keep the same generation, and a rollover deliberately does not bump it either.
+  // So stamp every stream write and let a REST write commit only if no stream write beat it — the same
+  // shape as historyEpochRef above, applied to usage.
+  const usageStampRef = useRef(0);
+  /** Commit a usage value from the LIVE STREAM — always wins, and fences any REST read still in flight. */
+  const setUsage = (u: BrainUsage | null): void => { usageStampRef.current += 1; setUsageState(u); };
+  /** Commit a usage value from a REST snapshot, but only if the stream has not moved since `stamp`. */
+  const setUsageIfFresh = (u: BrainUsage | null, stamp: number): void => {
+    if (stamp === usageStampRef.current) setUsageState(u);
+  };
   const [telemetry, setTelemetry] = useState<BrainTelemetry>(EMPTY_TELEMETRY);
   const [goal, setGoal] = useState<BrainGoal | null>(null);
   const [lineCfg, setLineCfg] = useState<StatuslineConfig | null>(null);
@@ -234,6 +284,12 @@ function useBrainChatController(): BrainChatValue {
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [queued, setQueued] = useState<{ id: string; text: string }[]>([]);
+  // Ids whose DELETE is in flight. The optimistic remove HIDES the item instead of taking it out of the
+  // list, so a failure only has to unhide it and there is no position left to reconstruct — reconstructing
+  // one from an index captured at click time is what reordered the queue whenever two failing removes
+  // overlapped, and this order is the order the agent is fed in. Every server-authoritative snapshot clears
+  // the set: it is newer truth, and queue ids are POSITIONAL, so a stale id would hide a different message.
+  const [removingQueue, setRemovingQueue] = useState<ReadonlySet<string>>(() => new Set());
   const [readOnly, setReadOnly] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -246,9 +302,18 @@ function useBrainChatController(): BrainChatValue {
   const [modelsError, setModelsError] = useState(false);
   const [currentModel, setCurrentModel] = useState('');
   const [focusNonce, setFocusNonce] = useState(0);
-  // Work mode + the `/rename` dialog: plain in-memory state. The daemon holds no mode (every send stamps
-  // its own), so persisting it here would make a reloaded tab claim a mode the CLI never has.
+  // Work mode + the `/rename` dialog: plain in-memory state. This is what the composer STAMPS on its own
+  // sends, so persisting it would make a reloaded tab claim a mode the user never re-chose.
   const [workMode, setWorkMode] = useState<BrainWorkMode>('build');
+  // Plan mode's decision, as the DAEMON sees it — the mode it last ran a turn in plus the plan that turn
+  // submitted. Both are hydrated from the server (status on connect, then every snapshot frame): the mode
+  // above is this tab's own stamp and knows nothing about a plan entered in the CLI, and it resets to
+  // 'build' on reload, which is exactly how the decision used to vanish from the page that had it.
+  const [daemonMode, setDaemonMode] = useState<BrainWorkMode>('build');
+  const [pendingPlan, setPendingPlan] = useState<BrainPendingPlan | null>(null);
+  /** The plan this tab has already decided on (implemented or dismissed), keyed like the CLI's
+   *  `planDecisionRaisedFor` so a re-hydration cannot raise the same decision twice. */
+  const [planDecided, setPlanDecided] = useState<string | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   // Lives on the controller (mounted once) rather than the surface, so the choice survives the dock's
   // Chat↔Terminál toggle and every route change, exactly like the transcript itself.
@@ -291,7 +356,7 @@ function useBrainChatController(): BrainChatValue {
   const reconnect = (): ReconnectController => (reconnectRef.current ??= createReconnectController(async () => {
     try { await connectRef.current(); }
     catch (e) { setReady(true); throw e; }
-  }));
+  }, { onActive: setReconnecting }));
 
   // The newest page bootstraps the transcript; older pages lazy-load on scroll-up. A full refetch (compaction
   // / model-switch markers) re-runs this, which correctly RESETS the lazy-load window to the tail — the
@@ -349,8 +414,11 @@ function useBrainChatController(): BrainChatValue {
     setReady(false);
     setNotice(''); // a fresh connection (mount / session switch) starts without a stale runtime line
     setAsk(null); // drop any parked question from the previous conversation
+    setPendingPlan(null); // and any plan decision — it belongs to the conversation being left
+    setPlanDecided(null); // whose decided key would otherwise suppress the NEXT conversation's plan
     setCards([]); // and any cards from the previous conversation
     setQueued([]); // and any pending mid-turn queue from the previous conversation
+    setRemovingQueue(new Set()); // its in-flight removes name ids that mean something else here
     setGoal(null); // a goal belongs to ONE conversation; the snapshot frame hydrates this one's own
     const generation = nextGeneration();
     const previousSession = boundSessionRef.current;
@@ -369,7 +437,7 @@ function useBrainChatController(): BrainChatValue {
     // Every field here is hydration from the server, so each one is applied UNCONDITIONALLY: a
     // `if (st.x) setX(st.x)` can only ever set, which leaves a question the daemon already settled on
     // screen (and unanswerable) instead of clearing it.
-    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); setAsk(st.pendingAsk ?? null); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
+    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); setAsk(st.pendingAsk ?? null); setDaemonMode(st.workMode ?? 'build'); setPendingPlan(st.pendingPlan ?? null); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
     // The identity rides purely as query params — native EventSource cannot set headers, and the daemon
     // parses session/client/generation off the URL (tapping the bound conversation, not the active pointer).
     // `snapshot=1` makes the FIRST frame the hydration: the newest history page plus the running turn's
@@ -432,8 +500,14 @@ function useBrainChatController(): BrainChatValue {
       const streaming = control ? control.streaming : folded.thinking;
       setView({ ...folded, thinking: streaming });
       // Explicit null included — this frame is the one moment the client can learn a question it never
-      // saw is parked, or that one it still shows is long gone.
-      if (control) setAsk(control.pendingAsk);
+      // saw is parked, or that one it still shows is long gone. The plan decision rides the same rule:
+      // this frame is what tells a reloaded page, a second tab, or a surface that never entered plan mode
+      // that the conversation is waiting on a plan.
+      if (control) {
+        setAsk(control.pendingAsk);
+        setDaemonMode(control.workMode);
+        setPendingPlan(control.pendingPlan);
+      }
       // The goal rides beside the journal because it OUTLIVES it: the journal is cleared at settle, so a
       // client that connects between turns would otherwise show no goal while one is plainly running. The
       // presence check (not `?? null`) is what distinguishes an older daemon from an explicit "none".
@@ -516,7 +590,8 @@ function useBrainChatController(): BrainChatValue {
       applyEvent({ type: 'subagent', ...s });
       // The child usage is persisted before its terminal progress event. Refresh the parent status now
       // so the session price includes delegated work immediately, not only after the next parent turn.
-      if (s.status !== 'running') void elowenClient.brainStatus(boundSessionRef.current).then((status) => { if (generation === genRef.current) setUsage(status.usage); }).catch(() => { /* best-effort */ });
+      // Fenced against the live stream: this read can settle after a newer step/idle and must not undo it.
+      if (s.status !== 'running') { const stamp = usageStampRef.current; void elowenClient.brainStatus(boundSessionRef.current).then((status) => { if (generation === genRef.current) setUsageIfFresh(status.usage, stamp); }).catch(() => { /* best-effort */ }); }
     });
     // Whole-DAG snapshot of a running workflow. Folded onto its WorkflowStart tool row (like `subagent`),
     // which is also what makes it durable — history carries the same attachment after a reload.
@@ -547,14 +622,24 @@ function useBrainChatController(): BrainChatValue {
     // replace wholesale — the optimistic remove must never fight an incoming snapshot.
     onFrame('queue', (e) => {
       const { items } = JSON.parse((e as MessageEvent).data) as { items: { id: string; text: string }[] };
+      setRemovingQueue(new Set()); // this snapshot supersedes every optimistic remove still in flight
       setQueued(items);
     });
     // The daemon's authoritative render of the user's turn (every real send — immediate or a queued
     // delivery). The composer never echoes optimistically, so THIS folds the 'you' bubble — and the fold
     // marks the turn in flight, which is what raises the thinking indicator.
     onFrame('user', (e) => {
-      const { text } = JSON.parse((e as MessageEvent).data) as { text: string };
-      applyEvent({ type: 'user', text });
+      const { text, durableId } = JSON.parse((e as MessageEvent).data) as { text: string; durableId?: string };
+      applyEvent({ type: 'user', text, ...(durableId ? { durableId } : {}) });
+    });
+    // The daemon cancelled a just-sent user turn before it produced output (Esc/Stop): pull its 'you'
+    // bubble (the fold, by durableId) and restore the text to the composer for editing/resending — but only
+    // when the composer is empty, so a discard never clobbers a draft the user already started typing.
+    onFrame('discard_user', (e) => {
+      const { durableId, text } = JSON.parse((e as MessageEvent).data) as { durableId: string; text: string };
+      applyEvent({ type: 'discard_user', durableId, text });
+      setInput((current) => (current.trim() ? current : text));
+      bumpFocus();
     });
     // A context compaction was persisted server-side (manual /compact or the auto-compact path): the
     // stored transcript is now a "context compacted" divider + the kept tail. Refetch so the surface
@@ -568,8 +653,9 @@ function useBrainChatController(): BrainChatValue {
     // reconnecting — this is exactly what keeps every attached client on one stream through a model switch.
     onFrame('session-event', () => {
       void loadHistory(genRef.current).catch(() => { /* transcript refetch is best-effort */ });
+      const stamp = usageStampRef.current; // usage is fenced against the stream; the rest is snapshot-only data
       void elowenClient.brainStatus(boundSessionRef.current)
-        .then((st) => { if (generation === genRef.current) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); } })
+        .then((st) => { if (generation === genRef.current) { setUsageIfFresh(st.usage, stamp); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); } })
         .catch(() => { /* status refresh is best-effort */ });
     });
     onFrame('diff', (e) => {
@@ -597,6 +683,25 @@ function useBrainChatController(): BrainChatValue {
     onFrame('ask', (e) => {
       const { id, questions, kind } = JSON.parse((e as MessageEvent).data) as { id: string; questions: AskQuestion[]; kind?: 'approval' };
       setAsk({ id, questions, kind });
+    });
+    // That question is settled — answered on another surface, timed out, or the turn was aborted. The
+    // `ask` frame fans out to every client of the conversation, so without this the surface that did not
+    // answer keeps showing a card whose POST can no longer match anything. Compared by id so a late
+    // frame cannot clear the NEXT question.
+    onFrame('ask_resolved', (e) => {
+      const { id } = JSON.parse((e as MessageEvent).data) as { id: string };
+      setAsk((cur) => (cur && cur.id === id ? null : cur));
+    });
+    // Every step boundary carries a fresh usage snapshot, so context fill, token totals and cost move
+    // DURING the turn instead of jumping once at the end. The daemon has always sent this (see the
+    // `step` event in brain/events.ts) and the CLI has always read it (chat/streamCoordinator.ts); the
+    // web client simply had no handler, so the frame arrived and was dropped and the statusline showed
+    // the PREVIOUS turn's numbers until idle landed.
+    onFrame('step', (e) => {
+      try {
+        const { usage: u } = JSON.parse((e as MessageEvent).data) as { usage?: BrainUsage };
+        if (u) setUsage(u);
+      } catch { /* step without payload — statusline just stays put */ }
     });
     onFrame('idle', (e) => {
       setNotice(''); // turn settled → drop any transient runtime line
@@ -659,11 +764,15 @@ function useBrainChatController(): BrainChatValue {
 
   // View a non-continuable session (a shared Discord channel or a task worker) read-only: load its stored
   // history, show it, and swap the composer for an exit banner. No live stream is opened. Bumping the
-  // generation discards any in-flight connect so it can't clobber the read-only view.
+  // generation discards any in-flight connect so it can't clobber the read-only view, and the stale-gen
+  // check below on our OWN await stops the reverse: this call's history landing after something newer
+  // (another switch/openReadOnly) has already taken over.
   const openReadOnly = async (sessionId: string): Promise<void> => {
     esRef.current?.close();
     esRef.current = null; // no live stream here — and nothing for the silence watchdog to revive
-    nextGeneration();
+    // Capture the generation right after bumping it (mirror `connect()`): a slow `brainMessages` below
+    // must not be allowed to land once a newer connect/switch/openReadOnly has superseded this one.
+    const generation = nextGeneration();
     setAsk(null); setCards([]); setNotice('');
     // The composer is about to be replaced by the read-only banner, so drop the in-flight marker at once
     // rather than only when the stored history lands below.
@@ -675,6 +784,7 @@ function useBrainChatController(): BrainChatValue {
     setHasMoreHistory(false);
     historyEpochRef.current++;
     const msgs = await elowenClient.brainMessages(sessionId);
+    if (generation !== genRef.current) return; // a newer connect/switch/openReadOnly superseded this one
     setView(fromHistory(msgs));
     setReady(true);
   };
@@ -701,12 +811,42 @@ function useBrainChatController(): BrainChatValue {
   };
   const removeAttachment = (index: number): void => setAttachments((cur) => cur.filter((_, j) => j !== index));
 
+  // Optimistic remove: the item disappears immediately, but on failure it is still queued server-side, so
+  // it comes back rather than leaving the UI claiming it was removed. Hiding it (instead of splicing the
+  // list) is what makes the rollback exact — it restores the item's own position, never a remembered one.
   const onQueueRemove = (id: string): void => {
-    setQueued((cur) => cur.filter((x) => x.id !== id));
-    void elowenClient.brainQueueRemove(id, boundSessionRef.current).catch(() => undefined);
+    if (removingQueue.has(id) || !queued.some((x) => x.id === id)) return;
+    const generation = genRef.current;
+    const session = boundSessionRef.current;
+    setRemovingQueue((cur) => new Set(cur).add(id));
+    void elowenClient.brainQueueRemove(id, session).catch(() => {
+      // Another conversation is on screen (a switch bumped the generation, or an idle rollover rebound the
+      // session without one): unhiding would plant a ghost chip pointing at a stranger's message, and the
+      // error concerns a queue the user is no longer looking at.
+      if (generation !== genRef.current || session !== boundSessionRef.current) return;
+      // A newer snapshot cleared the set meanwhile: it is authoritative and already carries this item if the
+      // server still holds it, so the delete below is a no-op and only the failure is reported.
+      setRemovingQueue((cur) => { const next = new Set(cur); return next.delete(id) ? next : cur; });
+      toast(t.brainChat.queueRemoveError, 'error');
+    });
   };
-  const onAnswer = (id: string, answers: AskAnswer[]): void => { void elowenClient.brainAnswer(id, answers).catch(() => undefined); setAsk(null); };
+  // Awaited by AskQuestionCard: the question is only removed from the UI once the server actually
+  // accepted the answer. On failure the agent is STILL waiting server-side, so the question must stay
+  // on screen (and the card's form re-enable) — losing it here would leave no way to answer without a
+  // reconnect or reload.
+  const onAnswer = async (id: string, answers: AskAnswer[]): Promise<void> => {
+    try {
+      await elowenClient.brainAnswer(id, answers);
+      setAsk(null);
+    } catch (e) {
+      toast(t.brainChat.askError, 'error');
+      throw e;
+    }
+  };
   const abort = (): void => { void elowenClient.brainAbort(boundSessionRef.current).catch(() => undefined); };
+
+  // What the surface renders: the server's queue minus the items whose removal is in flight.
+  const visibleQueue = useMemo(() => (removingQueue.size ? queued.filter((x) => !removingQueue.has(x.id)) : queued), [queued, removingQueue]);
 
   // Both projections are pure folds of the transcript, so they survive a reconnect for free: history
   // carries the same `sub`/`wf` attachments the live events wrote.
@@ -745,8 +885,25 @@ function useBrainChatController(): BrainChatValue {
     setWorkMode(mode);
     toast(`${t.brainChat.modeSwitched} ${t.brainChat.workMode[mode]}`, 'ok');
   };
+  // The transcript carries the same submitted plan the daemon does — live on `tool_end`, and rebuilt from
+  // history on every hydration — so it is what keeps the hydrated decision in step between snapshots, in
+  // BOTH directions: it raises a plan submitted while this tab is attached, and drops one the conversation
+  // has since moved past. Keyed on the turns rather than on the scan's result: two consecutive "no plan"
+  // answers are both null and would leave a stale decision standing. Reconciled by plan key, so the common
+  // case (a text delta) settles to the same state object and re-renders nothing.
+  useEffect(() => {
+    const scanned = submittedPlan(turns);
+    setPendingPlan((cur) => (planKey(cur) === planKey(scanned) ? cur : scanned));
+  }, [turns]);
+  // A decision is open while the daemon is in plan mode, the turn that submitted the plan has settled, and
+  // this tab has not already answered for that plan. Read-only previews are somebody else's conversation.
+  const openPlanKey = planKey(pendingPlan);
+  const planDecision = daemonMode === 'plan' && !busy && !readOnly && openPlanKey && openPlanKey !== planDecided
+    ? pendingPlan
+    : null;
   const [planSubmitting, setPlanSubmitting] = useState(false);
   const planInFlightRef = useRef(false);
+  const dismissPlan = (): void => setPlanDecided(openPlanKey);
   const implementPlan = (): void => {
     // The mode follows the daemon's ACCEPTANCE, never the click. Switching to `build` up front removed the
     // decision row — the only control that can approve the plan — the instant a send failed, leaving the
@@ -755,7 +912,7 @@ function useBrainChatController(): BrainChatValue {
     planInFlightRef.current = true;
     setPlanSubmitting(true);
     void elowenClient.brainSend(IMPLEMENT_PLAN_PROMPT, undefined, undefined, binding(), 'build')
-      .then(() => setWorkMode('build'))
+      .then(() => { setWorkMode('build'); setPlanDecided(openPlanKey); })
       .catch(() => toast(t.brainChat.sendError, 'error'))
       .finally(() => { planInFlightRef.current = false; setPlanSubmitting(false); });
   };
@@ -782,8 +939,9 @@ function useBrainChatController(): BrainChatValue {
       if (cmd.name === 'help') { toast(commands.map((c) => `/${c.name}`).join('  '), 'ok'); return; }
       if (cmd.name === 'stats') {
         setStatsOpen(true);
-        // Refresh usage data for the modal
-        void elowenClient.brainStatus(boundSessionRef.current).then((s) => { if (s) setUsage(s.usage); }).catch(() => undefined);
+        // Refresh usage data for the modal — fenced, so opening it mid-turn cannot roll the statusline
+        // back to a figure the stream has already moved past.
+        { const stamp = usageStampRef.current; void elowenClient.brainStatus(boundSessionRef.current).then((s) => { if (s) setUsageIfFresh(s.usage, stamp); }).catch(() => undefined); }
         return;
       }
       // Inspect loaded skills — list the invocable /skill:name commands (PI expands them on send).
@@ -913,13 +1071,13 @@ function useBrainChatController(): BrainChatValue {
   }, []);
 
   return {
-    turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
+    turns, busy, ready, reconnecting, registerSurface, hasSurface: surfaces > 0, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued: visibleQueue, readOnly, activeSessionId,
     usage, telemetry, goal, subagents, workflows, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
     models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
     showThoughts: thoughts === 'show',
     setShowThoughts: (v) => setThoughts(v ? 'show' : 'hide'),
-    workMode, setWorkMode: runMode, implementPlan, planSubmitting,
+    workMode, setWorkMode: runMode, planDecision, implementPlan, dismissPlan, planSubmitting,
     renameOpen, closeRename: () => setRenameOpen(false), renameSession,
     commands, runSlash: (cmd) => void runSlash(cmd),
     slash: { items: slashItems, open: slashItems.length > 0, modelOptsOpen: modelSlashOpen, clearModelOpts: () => setModelSlashOpen(false) },
@@ -936,5 +1094,41 @@ export function BrainChatProvider({ children }: { children: ReactNode }) {
   // `value` is rebuilt each render — like today's single BrainChat component, whose consumers all re-render
   // together on any state change. A useMemo over its identity was dead (the nested handlers/slash literal are
   // fresh every render), so the value is passed straight through; single-mount + single-SSE is what matters.
-  return <BrainChatContext.Provider value={value}>{children}</BrainChatContext.Provider>;
+  // The reconnect overlay lives HERE, not in BrainChatSurface: a phone with the dock open on /chat mounts
+  // two surfaces sharing this one provider, and a per-surface fixed-fullscreen overlay would then render
+  // twice (doubled backdrop, two aria-live "reconnecting" announcements). One provider → one overlay.
+  // But the provider spans every route, so it also needs to know a surface is actually on screen —
+  // otherwise a dropped stream blurred and froze the dashboard, tasks and settings, where there is no
+  // chat to protect from acting on stale state.
+  return (
+    <BrainChatContext.Provider value={value}>
+      {children}
+      {value.reconnecting && value.hasSurface ? <ReconnectOverlay /> : null}
+    </BrainChatContext.Provider>
+  );
+}
+
+/** Recovering a dropped stream: blur everything behind a centered spinner rather than let the user act on
+ *  state that may be out of date. Rendered once at the provider so it can never double up across surfaces.
+ *  It covers the whole viewport, including the navigation and the phone's history drawer, so it carries its
+ *  own way out: a daemon that stays down would otherwise lock the reader inside a chat they cannot leave. */
+function ReconnectOverlay() {
+  const { t } = useTranslation();
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-4 bg-bg/60 backdrop-blur-md"
+      role="status"
+      aria-live="polite"
+    >
+      <Loader size={40} className="animate-spin text-text-muted" aria-hidden />
+      <span className="text-base text-text-muted">{t.brainChat.reconnecting}</span>
+      <Link
+        href="/dash"
+        className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm text-text-muted transition-colors hover:bg-elevated hover:text-text"
+      >
+        <ArrowLeft size={16} aria-hidden />
+        <span>{t.nav.dashboard}</span>
+      </Link>
+    </div>
+  );
 }

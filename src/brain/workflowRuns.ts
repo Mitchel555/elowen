@@ -8,8 +8,8 @@ import type { WorkflowUpdate } from './events.js';
  *  writes running/done/error. Non-terminal nodes become `error` — they were interrupted, and claiming
  *  otherwise would put fiction in the record of what ran.
  *
- *  Shared by the boot sweep (which persists the result) and statusService (which applies it as a display
- *  transform for the sessions boot never resumes) so both agree on what an orphan looks like. */
+ *  Shared by the boot reconcile (which persists the result) and statusService (which applies it as a
+ *  read-time fallback) so both agree on what an orphan looks like. */
 export function terminalizeWorkflow(run: WorkflowUpdate): WorkflowUpdate {
   return {
     ...run,

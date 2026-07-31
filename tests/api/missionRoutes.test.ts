@@ -30,6 +30,31 @@ describe('mission lifecycle routes', () => {
     expect((await app.request('/missions', post(token, { epicId: 'nope' }))).status).toBe(404);
   });
 
+  it('POST /missions refuses a non-epic task (400) and never creates a mission for it', async () => {
+    const { app, token, deps } = await makeTestApp({});
+    // A plain task has no child phases: the engine would spawn nothing and never reach its
+    // "all children closed" completion branch, leaving a mission that ticks forever.
+    const plain = deps.tasks.create({ id: 'elowen-T', project_id: 1, title: 'Plain task', type: 'task', description: 'x' });
+    const res = await app.request('/missions', post(token, { epicId: plain.id, autonomy: 'L3', maxSessions: 1 }));
+    expect(res.status).toBe(400);
+    expect(deps.missions.get(`m-${plain.id}`)).toBeNull();
+  });
+
+  it('POST /missions refuses a maxSessions outside the sane range and engages nothing', async () => {
+    const { app, token, deps } = await makeTestApp({});
+    const epic = deps.tasks.create({ id: 'elowen-E2', project_id: 1, title: 'Epic', type: 'epic', description: 'goal' });
+    // 0 deadlocks the scheduler (running >= max_sessions before anything spawns), a huge value lets one
+    // request spawn agents without limit, and a fraction is not a slot count at all.
+    for (const maxSessions of [0, -1, 1000, 1.5]) {
+      const res = await app.request('/missions', post(token, { epicId: epic.id, autonomy: 'L3', maxSessions }));
+      expect(res.status).toBe(400);
+    }
+    expect(deps.missions.get(`m-${epic.id}`)).toBeNull();
+    // The bounded value still engages.
+    expect((await app.request('/missions', post(token, { epicId: epic.id, autonomy: 'L3', maxSessions: 2 }))).status).toBe(201);
+    expect(deps.missions.get(`m-${epic.id}`)?.max_sessions).toBe(2);
+  });
+
   it('PATCH /missions/:id pause/resume drives the engine; GET /missions/:id returns detail', async () => {
     const { app, token, deps } = await makeTestApp({});
     const { missionId, epicId } = deps.seedMissionWithChild();

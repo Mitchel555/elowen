@@ -4,7 +4,10 @@
 // engine holds the DAG in memory (like delegate's background jobs) and streams the whole snapshot to the
 // parent's clients as `workflow` events on every state change. It does NOT emit `subagent` events, so a
 // workflow node never doubles up in the flat sub-agent panel.
+import { AsyncResource } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { validateWorkflowNodes, mergeWorkflowNodes, readyNodeIds } from './dag.mjs';
@@ -15,6 +18,7 @@ import {
   TRUNCATION_MARKER,
   resolveContextTotalChars,
 } from './limits.mjs';
+import { clipTail } from './results.mjs';
 
 const MAX_WORKFLOWS = 16;
 const WORKFLOW_RETENTION_MS = 60 * 60_000;
@@ -36,6 +40,12 @@ const DEP_BLOCK_SEPARATOR = '\n\n';
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
 const errorText = (e) => (e instanceof Error ? e.message : String(e));
 const clip = (text, limit) => (text.length <= limit ? text : `${text.slice(0, limit)}${TRUNCATION_MARKER}`);
+/** A dependency block keeps the END of the result for the same reason the result itself does — the finding is
+ *  in the last paragraph — but with the bare marker PREPENDED rather than clipTail's note. It costs exactly
+ *  TRUNCATION_MARKER.length, which the per-block budget arithmetic below reserves, and DelegateRead would be
+ *  no use to a node anyway: it reads a session's own children, and a sibling node is not one. `depIntro`
+ *  already names, to the node, every dependency it is not seeing whole. */
+const clipDep = (text, limit) => (text.length <= limit ? text : `[truncated]\n${text.slice(-limit)}`);
 const depBlockHeading = (id) => `## Result from node "${id}"\n`;
 /** The note introducing the dependency blocks, naming the ones the node is not seeing in full. */
 const depIntro = (truncatedIds) => 'Results from the nodes this one depends on follow, one block per node.'
@@ -43,21 +53,70 @@ const depIntro = (truncatedIds) => 'Results from the nodes this one depends on f
     ? `\n\nThese were truncated to fit and you are NOT seeing them in full: ${truncatedIds.join(', ')}. `
       + 'Say so in your output rather than treating what you received as the complete result.'
     : '');
+/** Whether two `ctx.currentAccess()` boundaries are the same one. The host bakes the boundary into a
+ *  delegated child's IMMUTABLE persisted scope and lets that child run again only under an exact match, so
+ *  a resume that re-captures a narrowed boundary can no longer re-enter the sessions it minted. Both sides
+ *  are built by the same host accessor, so a plain structural compare is exact enough; anything it reads as
+ *  a change costs only session continuity (see WorkflowResume), while a missed change would fail the node
+ *  inside the host with `delegated access unavailable`. */
+const sameParentAccess = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 // Some models (seen: Qwen max preview) double-escape non-ASCII in tool-call JSON, so the parsed title
 // still carries literal backslash-u sequences ("Docs \u2014 write" instead of "Docs — write"). The title
 // is pure display, so decoding is always what the model meant; surrogate pairs recombine naturally.
 const decodeUnicodeEscapes = (s) =>
   (s.includes('\\u') ? s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))) : s);
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+const nodeLabel = (raw, index) => {
+  const id = isRecord(raw) && typeof raw.id === 'string' ? raw.id.trim() : '';
+  return `node ${index + 1}${id ? ` ("${id}")` : ''}`;
+};
 
-// The node-declaration shape shared by WorkflowStart and WorkflowAddNodes.
+/** Add file location to node-validation errors without creating a second set of node rules. The DAG
+ *  validator remains the only authority that accepts or rejects nodes; this only turns its first failure
+ *  into a location and repair instruction the caller can act on in the source file. `index` is that
+ *  validator's OWN offending-node index: searching the list for a node that matches the message instead
+ *  names the first entry carrying the id, which is the valid twin whenever an id is repeated. */
+const actionableNodeError = (rawNodes, error, index) => {
+  if (error === 'a workflow needs at least one node') {
+    return 'field "nodes" is empty; add at least one node object with required fields "id" and "task"';
+  }
+  const raw = index === undefined ? undefined : rawNodes[index];
+  if (raw !== undefined) {
+    if (error === 'each node must be an object') {
+      return `${nodeLabel(raw, index)}: must be an object with required fields "id" and "task"; replace this value with a node object`;
+    }
+    if (error === 'each node needs a non-empty string id') {
+      const issue = isRecord(raw) && !hasOwn(raw, 'id')
+        ? 'missing required field "id"'
+        : 'field "id" must be a non-empty string';
+      return `${nodeLabel(raw, index)}: ${issue}; add a unique non-empty string "id" to this node`;
+    }
+    const id = isRecord(raw) && typeof raw.id === 'string' ? raw.id.trim() : '';
+    if (id && error === `node "${id}" needs a non-empty task`) {
+      const issue = !hasOwn(raw, 'task')
+        ? 'missing required field "task"'
+        : 'field "task" must be a non-empty string';
+      return `${nodeLabel(raw, index)}: ${issue}; add a complete, non-empty string "task" to this node`;
+    }
+    if (id && error.startsWith(`node "${id}" `)) {
+      return `${nodeLabel(raw, index)}: ${error.slice(`node "${id}" `.length)}; fix this node in the workflow file`;
+    }
+  }
+  return `${error}; fix the workflow definition in the file`;
+};
+
+// The node-declaration shape WorkflowAddNodes takes inline. WorkflowStart reads the same shape out of its
+// JSON file, where it is validated by validateWorkflowNodes rather than by this schema — one set of rules,
+// two ways in.
 const NODE_SHAPE = Type.Object({
   id: Type.String({ description: 'Short unique id for this node (referenced by other nodes\' deps).' }),
   task: Type.String({ description: 'The complete, self-contained instruction for this node\'s sub-agent — it cannot see the conversation.' }),
   deps: Type.Optional(Type.Array(Type.String(), { description: 'Ids of nodes that must finish before this one starts. Omit for a root node.' })),
   model: Type.Optional(Type.String({ description: 'Run this node on a DIFFERENT model (value from DelegateModels). Omit to inherit yours.' })),
-  read_only: Type.Optional(Type.Boolean({ description: 'Give this node only read-only tools (explore/report, no writing or delegation).' })),
+  read_only: Type.Optional(Type.Boolean({ description: 'Give this node read-only tools and the non-destructive shell clamp (explore/report, no delegation). The clamp denies destructive commands; it does not prevent writing a file through redirection.' })),
   tools: Type.Optional(Type.Array(Type.String(), { description: 'Give this node EXACTLY these tools (names from your own toolset). Narrows only.' })),
-  subagent_type: Type.Optional(Type.String({ description: 'Run this node as a named sub-agent TYPE (from the delegate tool\'s type list) — it supplies the role prompt and toolset (a read-only type already includes read-only shell). Omit for a generic node.' })),
+  subagent_type: Type.Optional(Type.String({ description: 'Run this node as a named sub-agent TYPE (from the delegate tool\'s type list) — it supplies the role prompt and toolset (a read-only type already includes the non-destructive shell clamp). Omit for a generic node.' })),
 });
 
 /** Register the workflow tools on the subagent plugin. `getRun` returns the host channel handler once
@@ -68,7 +127,39 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
    *  restart, and its node child sessions persist on their own. */
   const workflows = new Map();
 
-  const freshNodeState = () => ({ status: 'pending', sessionId: '', tools: 0, detail: undefined, tokens: undefined, seconds: undefined, model: undefined, startedAt: undefined, result: undefined, error: undefined });
+  /** Where a workflow definition belongs by default: under elowen's own data dir, not in the user's
+   *  repository. A definition is scaffolding for one run — writing it into the project would leave
+   *  untracked files behind after every workflow, or worse, get committed.
+   *
+   *  Named in the tool description rather than derived by the model, because it is the ONLY way it can
+   *  learn this path: it is resolved from the daemon's data root, which no prompt otherwise mentions.
+   *  That works because the path is per-INSTALL, not per-session, so it is known at registration.
+   *
+   *  The directory is created here for the same reason plan mode creates its own: Write does not create
+   *  parent directories, so naming a path that does not exist would hand the model an ENOENT it has no
+   *  tool to fix. A repository path stays perfectly valid — this is the default, not a restriction. */
+  const workflowDir = join(ctx.dataDir(), 'workflows');
+  try { mkdirSync(workflowDir, { recursive: true }); } catch { /* surfaces on first write instead */ }
+
+  const freshNodeState = () => ({ status: 'pending', sessionId: '', channelId: '', taskNote: '', tools: 0, detail: undefined, tokens: undefined, seconds: undefined, model: undefined, startedAt: undefined, result: undefined, error: undefined });
+
+  /** Appended to a node's task when a resume puts it back into the conversation it already worked in. It has
+   *  to read sensibly BOTH ways: the child session usually survives (the node reads its own prior work and
+   *  carries on), but if it was rolled over or lost the very same text still describes a clean start. That is
+   *  why resume never has to prove the session is alive — the instruction degrades on its own. */
+  const RESUME_NOTE = 'Note: an earlier attempt at this node was interrupted before it could finish. If this '
+    + 'conversation already holds work you did on this task, continue from where you stopped instead of '
+    + 'starting over — re-check anything you had not verified. If it holds nothing, just start from the top.';
+
+  /** Appended instead of RESUME_NOTE when a node that HAD already run is relaunched in a FRESH channel,
+   *  because the resume could not carry its session across a changed access boundary. It must not point the
+   *  node at a conversation it does not have — but the earlier attempt is not gone either: whatever it wrote
+   *  is still on disk, and a node that assumes an untouched tree redoes half-applied work blind. The only
+   *  trace it can still observe is that disk state, so that is what this sends it to check. */
+  const RESTART_NOTE = 'Note: an earlier attempt at this node was interrupted before it could finish. It ran in '
+    + 'a different conversation that is not available here, so you cannot see what it did — but it may have '
+    + 'left partial changes on disk. Check the current state of anything you are about to create or modify '
+    + 'before assuming it is untouched, then carry the task through to the end.';
 
   const statusMap = (wf) => {
     const map = {};
@@ -79,6 +170,18 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   const pruneWorkflows = (now = Date.now()) => {
     for (const [id, wf] of workflows) {
       if (wf.finishedAt !== undefined && now - wf.finishedAt >= WORKFLOW_RETENTION_MS) workflows.delete(id);
+    }
+    // Bounded memory without blocking new starts: once retained history grows past MAX_WORKFLOWS, evict
+    // the OLDEST finished entries first (a finished workflow no longer counts against the start limit
+    // below, so this only trims history, never a workflow anyone is still waiting on).
+    if (workflows.size > MAX_WORKFLOWS) {
+      const finished = [...workflows.values()]
+        .filter((wf) => wf.finishedAt !== undefined)
+        .sort((a, b) => a.finishedAt - b.finishedAt);
+      for (const wf of finished) {
+        if (workflows.size <= MAX_WORKFLOWS) break;
+        workflows.delete(wf.id);
+      }
     }
   };
 
@@ -221,7 +324,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       contextParts.push(depIntro(depResults.filter((d) => d.result.length > perDep).map((d) => d.id)));
       for (let i = 0; i < depResults.length; i += perChunk) {
         contextParts.push(depResults.slice(i, i + perChunk)
-          .map((d) => `${depBlockHeading(d.id)}${clip(d.result, perDep)}`)
+          .map((d) => `${depBlockHeading(d.id)}${clipDep(d.result, perDep)}`)
           .join(DEP_BLOCK_SEPARATOR));
       }
     }
@@ -252,23 +355,47 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     const ns = wf.state.get(node.id);
     ns.startedAt = ns.startedAt ?? Date.now();
     const onEvent = (e) => {
-      if (e.type === 'session' && e.sessionId) { ns.sessionId = e.sessionId; wf.childSessions.add(e.sessionId); snapshot(wf); }
+      if (e.type === 'session' && e.sessionId) {
+        ns.sessionId = e.sessionId; wf.childSessions.add(e.sessionId);
+        // The host registers a delegated call BEFORE its first await but only emits `session` after the
+        // lock and the spawn, so a child that was already launching when the run was cancelled surfaces its
+        // id only now — too late for the sweep in WorkflowStop/reload, which can only see ids it has. Stop
+        // it here instead, or it would keep running tools and burning tokens after an announced stop.
+        // `wf.stopChild` carries the workflow's own origin turn, so this reaches the child no matter whose
+        // turn is on the stack; a stop the host still refuses is reported rather than dropped.
+        if (wf.finished) {
+          wf.stopChild(e.sessionId)?.catch((err) => ctx.logger.warn(
+            `workflow ${wf.id}: node "${node.id}" child ${e.sessionId} could not be stopped after cancellation: ${errorText(err)}`));
+        }
+        snapshot(wf);
+      }
       else if (e.type === 'tool' && e.name) { ns.tools += 1; ns.detail = e.detail ? `${e.name} ${e.detail}` : e.name; ns.seconds = Math.round((Date.now() - ns.startedAt) / 1000); snapshot(wf); }
       else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { ns.tokens = e.usage.totalTokens; ns.seconds = Math.round((Date.now() - ns.startedAt) / 1000); snapshot(wf); }
     };
     try {
       const access = await buildNodeAccess(wf, node);
+      // buildNodeAccess is an async boundary that can take a while — with an explicit model it may wait on
+      // a live /models request — and WorkflowStop or a plugin reload can settle the run inside that window.
+      // Without this fence the stale continuation would still spawn a child, one nobody can reach or abort:
+      // the very orphan the cancellation exists to prevent.
+      if (wf.finished) { ns.status = 'error'; ns.error = 'cancelled before the node started'; return; }
       // The EFFECTIVE model, not the node's override. `node.model` is only set when the caller named a
       // different one, so a node that inherits — the common case — would otherwise report nothing at all,
       // which is exactly when you most want to see what is actually running.
       ns.model = access.model ? `${access.model.provider}/${access.model.model}` : undefined;
       snapshot(wf);
-      const channelId = `wf-${wf.id}-${node.id}-${randomUUID()}`;
+      // A node's child session is keyed by this channel id (channelSessionId derives one from the other), so
+      // reusing the id on a resume drops the retry back into the SAME conversation — transcript intact,
+      // nothing to rehydrate. A first run mints a fresh one.
+      const channelId = ns.channelId || `wf-${wf.id}-${node.id}-${randomUUID()}`;
+      ns.channelId = channelId;
       const collectSource = { platform: 'subagent', userId: 'subagent', roleIds: [], channelId, access };
-      const raw = await getRun()(collectSource, node.task, onEvent);
+      const raw = await getRun()(collectSource, ns.taskNote ? `${node.task}\n\n${ns.taskNote}` : node.task, onEvent);
       const reply = raw || '(the node returned nothing)';
       if (reply.startsWith('Error:')) { ns.status = 'error'; ns.error = clip(reply.slice('Error:'.length).trim() || reply, MAX_RESULT_CHARS); }
-      else { ns.status = 'done'; ns.result = clip(reply, MAX_RESULT_CHARS); }
+      // The node's answer reaches the parent through `summarize` and its dependents through the blocks above:
+      // keep its END, where a report's conclusion is. An error stays head-first — it leads with what broke.
+      else { ns.status = 'done'; ns.result = clipTail(reply, MAX_RESULT_CHARS); }
     } catch (e) {
       ns.status = 'error';
       ns.error = clip(errorText(e), MAX_RESULT_CHARS);
@@ -309,6 +436,10 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       lines.push('', `[${n.id}] ${s.status.toUpperCase()}${n.deps.length ? ` (after ${n.deps.join(', ')})` : ''}`);
       if (s.status === 'done') lines.push(s.result || '(no output)');
       else if (s.status === 'error') lines.push(`Error: ${s.error}`);
+      // A node the cancellation caught mid-run is NOT a node that never ran: it may already have edited
+      // files or run commands, and a resume puts it back to work over that partial state. Reporting it as
+      // "did not run" is what would make someone resume, or redo the work by hand, without checking.
+      else if (s.status === 'running') lines.push('(interrupted while running — it may have already made partial changes)');
       else lines.push(wf.status === 'cancelled' ? '(did not run — the workflow was cancelled)' : '(did not run — a dependency failed)');
     }
     return lines.join('\n');
@@ -322,14 +453,16 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     wf.status = 'running';
     snapshot(wf);
     return new Promise((resolve) => { wf.resolveDone = resolve; tick(wf); }).then(() => {
-      // A cancel settles the status itself — the late arithmetic here must not repaint it as done/error
-      // when the aborted node children eventually error out.
+      // A cancel OWNS its own terminalization: cancelWorkflow already settled the status, stamped
+      // finishedAt and published the terminal snapshot before releasing this wait. Re-running it here would
+      // re-stamp the finish time and broadcast/persist a second terminal snapshot for one cancellation —
+      // once per running workflow on a plugin reload. Only summarize.
       if (wf.status !== 'cancelled') {
         wf.status = [...wf.state.values()].some((s) => s.status === 'error') ? 'error' : 'done';
+        wf.finished = true;
+        wf.finishedAt = Date.now();
+        snapshot(wf);
       }
-      wf.finished = true;
-      wf.finishedAt = Date.now();
-      snapshot(wf);
       return summarize(wf);
     });
   };
@@ -346,6 +479,54 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     }
   };
 
+  /** Drive an already-launched `completion` (a `runToCompletion(wf)` promise) to its tool result exactly
+   *  like WorkflowStart does — shared with WorkflowResume so both surfaces behave identically. Either
+   *  blocks for it (letting a live Ctrl+B detach race it into the background) or, when background was
+   *  requested up front, returns the handle immediately and delivers the summary through the durable sink
+   *  once it lands. */
+  const driveResult = async (wf, completion, requestedBackground) => {
+    if (requestedBackground) {
+      // No durable sink on this surface (worker/cron) — block rather than silently drop the result.
+      if (!wf.emitCompletion) return ok(await completion);
+      void completion.then((summary) => deliverCompletion(wf, summary));
+      return ok(
+        `Started background workflow ${wf.id}.\n`
+          + 'Its result is delivered to you automatically in a NEW turn when it finishes — you do not have to '
+          + 'fetch it. Do any other useful work now, then end your turn. If there is nothing else to do, say so '
+          + 'briefly and end the turn: waiting inside this turn only delays the result.',
+        { workflowId: wf.id, status: 'running' },
+      );
+    }
+    const detached = new Promise((resolve) => { wf.resolveDetached = resolve; });
+    const winner = await Promise.race([
+      completion.then((summary) => ({ kind: 'done', summary })),
+      detached.then(() => ({ kind: 'detached' })),
+    ]);
+    if (winner.kind === 'done') return ok(winner.summary);
+    void completion.then((summary) => deliverCompletion(wf, summary));
+    return ok(
+      `The user moved this workflow to the background. It is still running as ${wf.id}; continue helping the `
+      + 'user now. Its result is delivered to you automatically in a new turn when it finishes, so once you have '
+      + 'nothing else to do, end your turn instead of waiting or polling for it.',
+      { workflowId: wf.id, status: 'running', detached: true },
+    );
+  };
+
+  /** Settle a workflow as cancelled — the one place a run is stopped from the outside, shared by the
+   *  abort seam, the reload teardown and WorkflowStop. Marking it finished BEFORE anything else is what
+   *  stops the engine: `tick` bails on `finished`, so a node settling afterwards cannot launch the next
+   *  one. The snapshot publishes the terminal status (the durable row stops claiming the DAG is running)
+   *  and `resolveDone` releases whoever waits on it — a blocking WorkflowStart returns the cancelled
+   *  summary, a background one delivers it through its durable sink. Node children are NOT touched here;
+   *  each caller decides whether it owns their teardown. */
+  const cancelWorkflow = (wf) => {
+    wf.status = 'cancelled';
+    wf.finished = true;
+    wf.finishedAt = Date.now();
+    snapshot(wf);
+    wf.resolveDone?.();
+  };
+
   /** The abort seam core calls when a parent turn is torn down (Esc-Esc, /stop, queue interrupt). The
    *  abort tree kills the node children that are RUNNING; this stops the engine from launching the rest
    *  — without it, every node whose deps had already finished would spawn a fresh child AFTER the abort,
@@ -360,12 +541,8 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     let cancelled = 0;
     for (const wf of workflows.values()) {
       if (wf.finished || wf.background || wf.originSessionId !== sessionId) continue;
-      wf.status = 'cancelled';
-      wf.finished = true;
-      wf.finishedAt = Date.now();
+      cancelWorkflow(wf);
       cancelled += 1;
-      snapshot(wf);
-      wf.resolveDone?.();
     }
     return { cancelled };
   };
@@ -392,29 +569,79 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     detachForeground: ({ sessionId, principal }) => detachForeground(sessionId, principal),
   });
 
+  /** A plugin reload replaces THIS closure: the fresh instance registers its own empty `workflows` map,
+   *  so anything still held here becomes unreachable — cancelForSession can no longer stop it, and
+   *  WorkflowStatus/Resume/Stop can no longer see it. The runtime state cannot simply be handed over: the
+   *  turn emitters, the host `run` handler and the whole platform adapter behind it are torn down with the
+   *  old registry, so a workflow that kept ticking would launch fresh nodes nothing can reach or abort, and
+   *  its durable row would claim `running` for ever. Make the boundary terminal instead — including
+   *  BACKGROUND workflows, which normally outlive an abort: sparing one here would only orphan it. */
+  ctx.registerHook?.({
+    name: 'plugin.reload.before',
+    run: () => {
+      for (const wf of workflows.values()) {
+        if (!wf.finished) cancelWorkflow(wf);
+      }
+    },
+  });
+
   ctx.registerTool(defineTool({
     name: 'WorkflowStart', label: 'Run a workflow',
     description: [
-      'Run a DAG of sub-agents: you declare nodes (each a self-contained task) and their dependencies, and the engine executes them as dependencies clear — independent nodes run in parallel, dependents wait for what they need. Each node is a fresh sub-agent that inherits your access; it cannot see this conversation, so every task must be complete and standalone.',
-      'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. For a set of fully independent tasks, plain parallel delegate calls are simpler.',
-      'A node is given the results of the nodes it depends on as context, so a later task can refer to "your dependency results" instead of repeating the work or being told it twice.',
-      'By default the call BLOCKS and returns a summary of every node\'s result once the whole workflow finishes. Set background=true to return a handle immediately and have the summary delivered to you in a NEW turn when the DAG finishes — do other work meanwhile, then end your turn. A node whose dependency failed is reported as skipped. Give each node a short unique id and list its dependency ids in deps. Use read_only/tools/model per node exactly as with delegate — you can only ever narrow your own access.',
+      `Run a DAG of sub-agents whose complete definition lives in a JSON file. Before calling this tool, use Write to create that file, then pass its path as nodesFile. Do not pass nodes inline. When your session has unrestricted filesystem access, write it under ${workflowDir} (it already exists) so the run leaves nothing behind in the user's project. A project-scoped session cannot write there and must use a path inside an accessible repository — which is also the right choice for a definition you want to keep and version.`,
+      'The file may contain either a JSON array of node objects, or an object shaped as { title?, context?, nodes: [...], background? }. Explicit title, context, or background tool arguments override the corresponding values from the file, so one file can be reused as a template.',
+      'Each node requires a short unique string id and a complete self-contained string task. Optional fields are deps (node ids that must finish first), model, read_only, tools, and subagent_type. At least one node must have no deps. Each node is a fresh sub-agent that cannot see this conversation; put everything it needs in task or shared context.',
+      'Use a workflow instead of several separate delegate calls when the subtasks have an ORDER or dependency between them (gather → analyze → write), or when a later step needs earlier steps\' results. Independent nodes run in parallel, and a dependent receives its dependencies\' results as context. For fully independent tasks, plain parallel delegate calls are simpler.',
+      'By default the call BLOCKS and returns every node\'s result. Set background=true (in the file or as an explicit argument) to return a handle immediately and receive the summary in a NEW turn. A node whose dependency failed is reported as skipped.',
+      'If the result names failed or skipped nodes and the workflow is still held in memory, use WorkflowResume instead of starting over — it re-runs only unfinished nodes and leaves every completed node unchanged.',
     ].join(' '),
     parameters: Type.Object({
-      title: Type.Optional(Type.String({ description: 'Human label for the workflow, shown in the CLI panel: AT MOST 4 WORDS, in the user\'s language, no trailing punctuation (the UI appends an ellipsis).' })),
-      context: Type.Optional(Type.String({ description: 'Background shared by ALL nodes (added to each node\'s cache-friendly system prefix) — findings, conventions, ids they would otherwise re-derive.' })),
-      nodes: Type.Array(NODE_SHAPE, { description: 'The workflow nodes. At least one must have no deps (a root).' }),
-      background: Type.Optional(Type.Boolean({ description: 'Start asynchronously and return a handle immediately; the summary is delivered to you in a NEW turn when the workflow finishes. Omit or false to wait for the result.' })),
+      nodesFile: Type.String({ description: `Path to the JSON workflow definition. Create it with Write first — under ${workflowDir} for a one-off run if your session may write there, otherwise inside an accessible repository. Pass either a node array or { title?, context?, nodes, background? }.` }),
+      title: Type.Optional(Type.String({ description: 'Override the file\'s title. Human label shown in the CLI panel: AT MOST 4 WORDS, in the user\'s language, no trailing punctuation (the UI appends an ellipsis).' })),
+      context: Type.Optional(Type.String({ description: 'Override the file\'s context. Background shared by ALL nodes (added to each node\'s cache-friendly system prefix).' })),
+      background: Type.Optional(Type.Boolean({ description: 'Override the file\'s background setting. True starts asynchronously and delivers the summary in a NEW turn; false blocks until completion.' })),
     }),
     execute: async (toolCallId, p) => {
       if (!getRun()) return ok('Error: workflows are not wired up on this server.');
       const originSessionId = ctx.currentSessionId();
       const originPrincipal = principalOf(ctx.currentIdentity());
       if (!originSessionId || !originPrincipal) return ok('Error: workflows run only inside an authenticated conversation.');
-      const { nodes, error } = validateWorkflowNodes(p.nodes);
-      if (error) return ok(`Error: ${error}`);
+      let source;
+      try {
+        const path = ctx.assertPathAllowed(p.nodesFile);
+        source = JSON.parse(readFileSync(path, 'utf8'));
+      } catch (e) {
+        const message = errorText(e);
+        if (e instanceof SyntaxError) {
+          return ok(`Error: workflow file "${p.nodesFile}" contains invalid JSON (${message}). Fix the JSON syntax in the file, then call WorkflowStart again.`);
+        }
+        return ok(`Error: cannot read workflow file "${p.nodesFile}": ${message}. Create or correct the file inside an accessible repository, then call WorkflowStart again.`);
+      }
+      let rawNodes;
+      let fileOptions = {};
+      if (Array.isArray(source)) rawNodes = source;
+      else if (isRecord(source) && Array.isArray(source.nodes)) {
+        rawNodes = source.nodes;
+        fileOptions = source;
+      } else {
+        return ok(`Error: workflow file "${p.nodesFile}" must contain a JSON array of nodes or an object with a "nodes" array. Rewrite the file in one of those two forms, then call WorkflowStart again.`);
+      }
+      for (const [field, type] of [['title', 'string'], ['context', 'string'], ['background', 'boolean']]) {
+        if (fileOptions[field] !== undefined && typeof fileOptions[field] !== type) {
+          return ok(`Error: workflow file "${p.nodesFile}" field "${field}" must be a ${type}. Fix or remove that field, then call WorkflowStart again.`);
+        }
+      }
+      const { nodes, error, index } = validateWorkflowNodes(rawNodes);
+      if (error) return ok(`Error: workflow file "${p.nodesFile}": ${actionableNodeError(rawNodes, error, index)}.`);
+      const title = p.title !== undefined ? p.title : fileOptions.title;
+      const context = p.context !== undefined ? p.context : fileOptions.context;
+      const background = p.background !== undefined ? p.background : fileOptions.background;
       pruneWorkflows();
-      if (workflows.size >= MAX_WORKFLOWS) return ok(`Error: too many workflows (${MAX_WORKFLOWS}) are running; wait for one to finish.`);
+      // Only UNFINISHED workflows compete for the slot — a finished one sitting in memory for retention
+      // is not "running" and must never block a new start (that was the bug: 16 quickly-finished
+      // workflows locked the tool out for an hour even with nothing actually in flight).
+      const runningCount = [...workflows.values()].filter((wf) => wf.finishedAt === undefined).length;
+      if (runningCount >= MAX_WORKFLOWS) return ok(`Error: too many workflows (${MAX_WORKFLOWS}) are running; wait for one to finish.`);
       // Capture the durable completion sink on the ORIGIN turn, before any node is scheduled — node turns
       // run in their own scope where this accessor no longer resolves to this conversation.
       const emitCompletion = ctx.workflowCompletionEmitter?.() ?? undefined;
@@ -423,7 +650,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         // THIS call — the origin's WorkflowStart. Every snapshot names it, so the host can persist the
         // DAG against the transcript row this call produced (mirrors delegate's `toolCallId`).
         toolCallId,
-        title: typeof p.title === 'string' ? decodeUnicodeEscapes(p.title.trim()).slice(0, 200) || undefined : undefined,
+        title: typeof title === 'string' ? decodeUnicodeEscapes(title.trim()).slice(0, 200) || undefined : undefined,
         status: 'running',
         nodes,
         state: new Map(nodes.map((n) => [n.id, freshNodeState()])),
@@ -433,15 +660,25 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         // the SAME project the workflow was launched in, never the daemon's `/`.
         parentCwd: ctx.currentWorkDir?.(),
         emit: ctx.workflowEmitter(),
-        sharedContext: typeof p.context === 'string' && p.context.trim() ? p.context.trim() : undefined,
+        sharedContext: typeof context === 'string' && context.trim() ? context.trim() : undefined,
         originSessionId,
         originPrincipal,
+        // Abort one of this workflow's node children through the host. The host authorizes a stop against
+        // the turn on the async-context stack, and every node child is registered under `originSessionId`
+        // — but the engine keeps launching nodes long after the origin turn returned, and a self-expansion
+        // (WorkflowAddNodes) ticks under a NODE's turn, so an ambient stop is scoped to a session that
+        // does not own the child and is refused, leaving it running unsupervised. Everything else the
+        // engine needs from the origin turn is captured here as a value; this is the one call that has to
+        // be MADE in it, so it is bound to the origin's async context rather than the caller's. This
+        // widens nothing: it can only reach the origin's own children, exactly as WorkflowStop already
+        // does from the origin turn itself.
+        stopChild: AsyncResource.bind((sessionId) => ctx.stopSubagent?.(sessionId)),
         childSessions: new Set(),
         finished: false,
         finishedAt: undefined,
         resolveDone: undefined,
         // A detach (Ctrl+B) or explicit background flips this on; foreground and background share ONE run.
-        background: p.background === true,
+        background: background === true,
         emitCompletion,
         resolveDetached: undefined,
       };
@@ -455,33 +692,94 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         return `Error: workflow failed: ${errorText(e)}`;
       });
 
-      if (p.background === true) {
-        // No durable sink on this surface (worker/cron) — block rather than silently drop the result.
-        if (!emitCompletion) return ok(await completion);
-        void completion.then((summary) => deliverCompletion(wf, summary));
-        return ok(
-          `Started background workflow ${wf.id}.\n`
-            + 'Its result is delivered to you automatically in a NEW turn when it finishes — you do not have to '
-            + 'fetch it. Do any other useful work now, then end your turn. If there is nothing else to do, say so '
-            + 'briefly and end the turn: waiting inside this turn only delays the result.',
-          { workflowId: wf.id, status: 'running' },
-        );
-      }
+      // Foreground blocks on the DAG but lets Ctrl+B detach the wait; background returns the handle right
+      // away — driveResult is the shared tail WorkflowResume reuses so both behave identically.
+      return driveResult(wf, completion, background === true);
+    },
+  }));
 
-      // Foreground: block on the DAG, but let Ctrl+B detach the wait — the run keeps going in the
-      // background and delivers its summary through the completion sink, exactly like explicit background.
-      const detached = new Promise((resolve) => { wf.resolveDetached = resolve; });
-      const winner = await Promise.race([
-        completion.then((summary) => ({ kind: 'done', summary })),
-        detached.then(() => ({ kind: 'detached' })),
-      ]);
-      if (winner.kind === 'done') return ok(winner.summary);
-      void completion.then((summary) => deliverCompletion(wf, summary));
+  ctx.registerTool(defineTool({
+    name: 'WorkflowResume', label: 'Resume a workflow',
+    description: 'Re-run only the UNFINISHED nodes of a workflow that already stopped — one whose result named '
+      + 'failed or skipped nodes, or one you had to interrupt. Nodes that already finished (DONE) are left '
+      + 'exactly as they are and are NOT re-run; their results still feed the nodes that depend on them, '
+      + 'exactly as in the original run. Everything else (ERROR, or PENDING because a dependency failed) is '
+      + 'retried — and a node that had already STARTED resumes inside its own child session, so it still sees '
+      + 'the work it did before the interruption and is told to carry on from there rather than repeat it. A '
+      + 'node that never launched has no session to resume into and starts clean. '
+      + 'Behaves exactly like WorkflowStart otherwise — same blocking/background choice, '
+      + 'same live snapshot, same final summary — because it IS the same run continuing.\n\n'
+      + 'This only works while the workflow is still held in memory on this daemon: a workflow older than an '
+      + 'hour, or evicted because too many others ran since, or from before a daemon restart, cannot be '
+      + 'resumed — start a fresh WorkflowStart instead, most likely against a worktree that already carries '
+      + 'the DONE nodes\' completed work.',
+    parameters: Type.Object({
+      workflowId: Type.String({ description: 'The id of the finished workflow to resume (from WorkflowStart / WorkflowStatus).' }),
+      background: Type.Optional(Type.Boolean({ description: 'Override whether the resumed run is foreground or background. Omit to keep whatever the original run was.' })),
+    }),
+    execute: async (_id, p) => {
+      const wf = authWorkflow(p.workflowId);
+      // `authWorkflow` also accepts one of the workflow's OWN node sessions. That is right for
+      // WorkflowAddNodes — self-expansion runs under the boundary the child already holds — but wrong
+      // here: resume relaunches nodes under the workflow's PARENT access, so a node deliberately given a
+      // narrow toolset could use it to run sibling work it may not perform itself. Resume is the origin's
+      // to call.
+      if (!wf || ctx.currentSessionId() !== wf.originSessionId) {
+        return ok(`Error: no workflow ${p.workflowId} you can resume — it may have finished too long ago, been evicted from memory, or belong to another conversation. A workflow can only be resumed from the conversation that started it.`);
+      }
+      if (!wf.finished) return ok(`Error: workflow ${wf.id} is still running; there is nothing to resume yet.`);
+      const unfinished = wf.nodes.filter((n) => wf.state.get(n.id).status !== 'done');
+      if (!unfinished.length) return ok(`Error: every node in workflow ${wf.id} already finished; there is nothing to resume.`);
+      // The access boundary this resume will run under. It is re-captured (rather than replayed from the
+      // start) because it may since have been narrowed — a project revoked, tools disabled, permissions
+      // tightened, the conversation put in plan/read-only mode — and replaying the old one would execute
+      // authority the caller no longer holds, which is exactly what delegated continuation refuses to do
+      // elsewhere.
+      const access = ctx.currentAccess();
+      // A node's child session is pinned to the boundary it was minted under and the host demands an EXACT
+      // match to respawn it, so any change to the boundary — not only a narrowing — makes the old channel
+      // unusable: the respawn is refused with `delegated access unavailable` and the resume dies inside the
+      // node rather than here. Start those nodes in a FRESH channel instead — the run continues, at the
+      // honest cost of the earlier session's transcript, which they repeat rather than build on.
+      const scopeChanged = !sameParentAccess(wf.parentAccess, access);
+      // Reset the run-scoped fields, but carry the channel id of a node that ACTUALLY RAN across: that is
+      // what lets it resume inside its own session instead of repeating work it already did. A node holds a
+      // session only once it started, so a PENDING one (never launched, or skipped because a dependency
+      // failed) keeps a clean slate and starts from nothing, exactly as before.
+      //
+      // Losing the channel does NOT make a node that ran a clean-slate one: it is told about its earlier
+      // attempt either way, only in the terms it can act on — its own transcript when it kept the session,
+      // the state left on disk when it did not.
+      for (const n of unfinished) {
+        const prev = wf.state.get(n.id);
+        const next = freshNodeState();
+        if (prev?.sessionId) {
+          if (!scopeChanged && prev.channelId) { next.channelId = prev.channelId; next.taskNote = RESUME_NOTE; }
+          else next.taskNote = RESTART_NOTE;
+        }
+        wf.state.set(n.id, next);
+      }
+      if (typeof p.background === 'boolean') wf.background = p.background;
+      wf.finished = false;
+      wf.finishedAt = undefined;
+      // Re-capture BOTH turn-scoped emitters on THIS (resuming) turn, exactly like WorkflowStart does —
+      // the ones captured at the original Start are bound to a turn that is long over.
+      wf.emit = ctx.workflowEmitter();
+      wf.emitCompletion = ctx.workflowCompletionEmitter?.() ?? undefined;
+      wf.parentAccess = access;
+      const completion = runToCompletion(wf).catch((e) => {
+        wf.status = 'error';
+        wf.finished = true;
+        wf.finishedAt = Date.now();
+        return `Error: workflow failed: ${errorText(e)}`;
+      });
+      const res = await driveResult(wf, completion, wf.background === true);
+      if (!scopeChanged) return res;
       return ok(
-        `The user moved this workflow to the background. It is still running as ${wf.id}; continue helping the `
-        + 'user now. Its result is delivered to you automatically in a new turn when it finishes, so once you have '
-        + 'nothing else to do, end your turn instead of waiting or polling for it.',
-        { workflowId: wf.id, status: 'running', detached: true },
+        'Note: your access boundary has changed since this workflow started, so the unfinished nodes could '
+        + 'not re-enter the sessions they ran in before — they started clean under your current access and '
+        + `repeated any work they had already done.\n\n${res.content[0].text}`,
+        res.details,
       );
     },
   }));
@@ -532,5 +830,53 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     },
   }));
 
-  ctx.logger.info('workflow tools registered (start/add_nodes/status)');
+  ctx.registerTool(defineTool({
+    name: 'WorkflowStop', label: 'Stop a workflow',
+    description: 'Stop a workflow that is still running — the only way to end a BACKGROUND one early. A '
+      + 'background workflow (background=true, or a Ctrl+B detach) deliberately survives every abort of the '
+      + 'conversation that started it, so Esc-Esc does not reach it; call this when the user asks to stop it, '
+      + 'when it is working on something no longer wanted, or when a node is stuck. The engine stops '
+      + 'launching further nodes and the node sub-agents still running are aborted. Nodes that already '
+      + 'finished keep their results, so WorkflowResume can pick the workflow back up while it is still held '
+      + 'in memory. Resolves "nothing to stop" rather than erroring when it has already finished.',
+    parameters: Type.Object({
+      workflowId: Type.String({ description: 'The id of the running workflow (from WorkflowStart / WorkflowStatus).' }),
+    }),
+    execute: async (_id, p) => {
+      const wf = authWorkflow(p.workflowId);
+      // Origin-only, exactly like WorkflowResume: `authWorkflow` also accepts one of the workflow's own
+      // node sessions (right for self-expansion), but a node must not be able to tear down the run it and
+      // its siblings live in.
+      if (!wf || ctx.currentSessionId() !== wf.originSessionId) {
+        return ok(`Error: no workflow ${p.workflowId} you can stop — it may have finished too long ago, been evicted from memory, or belong to another conversation. A workflow can only be stopped from the conversation that started it.`);
+      }
+      if (wf.finished) return ok(`Nothing to stop — workflow ${wf.id} already finished (${wf.status}).`);
+      const running = [];
+      for (const node of wf.nodes) {
+        const s = wf.state.get(node.id);
+        if (s?.status === 'running' && s.sessionId) running.push({ id: node.id, sessionId: s.sessionId });
+      }
+      // Stop the ENGINE before the children, or it relaunches the next ready node the moment an aborted
+      // one settles — the same order the host's own delegated teardown uses.
+      cancelWorkflow(wf);
+      let stopped = 0;
+      for (const node of running) {
+        try {
+          const res = await wf.stopChild(node.sessionId);
+          if (res?.stopped) stopped += 1;
+        } catch (e) {
+          // The DAG is already stopped; a child that cannot be aborted (already settled, unwired host) is
+          // reported in the count, not raised as a failure of the stop itself.
+          ctx.logger.warn(`workflow ${wf.id}: node "${node.id}" could not be aborted: ${errorText(e)}`);
+        }
+      }
+      return ok(
+        `Stopped workflow ${wf.id}. ${stopped} of ${running.length} running node(s) aborted; `
+        + 'finished nodes keep their results, so WorkflowResume can still pick it up.',
+        { workflowId: wf.id, status: 'cancelled', stopped },
+      );
+    },
+  }));
+
+  ctx.logger.info('workflow tools registered (start/resume/stop/add_nodes/status)');
 }

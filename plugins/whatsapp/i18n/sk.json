@@ -26,8 +26,8 @@
       "hint": "Zapnuté: v skupinách bot odpovedá na každú správu namapovaného odosielateľa. Vypnuté: v skupinách odpovedá len pri @zmienke alebo keď niekto odpovie na jeho správu. Priame chaty dostanú odpoveď vždy."
     },
     "streaming": {
-      "label": "Živé streamované odpovede",
-      "hint": "Upravovať odpoveď priebežne, ako prichádza (volania nástrojov + text). Vypnuté = jedna správa na konci."
+      "label": "Živý priebeh práce",
+      "hint": "Zobrazovať priebeh práce agenta (volania nástrojov) v správe, ktorá sa počas práce priebežne upravuje. Samotná odpoveď príde vždy ako jedna správa na konci. Vypnuté = len finálna odpoveď."
     },
     "reactions": {
       "label": "Stavové reakcie",

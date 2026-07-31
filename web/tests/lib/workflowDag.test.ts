@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DAG_NODE_H, DAG_NODE_W, layoutDag, stepDagSelection, workflowLabel, workflowProgress } from '../../lib/workflowDag';
+import { DAG_NODE_W, layoutDag, stepDagSelection, workflowLabel, workflowProgress } from '../../lib/workflowDag';
 import type { DagNodeInput } from '../../lib/workflowDag';
 import type { WorkflowState } from '../../lib/transcript';
 
@@ -8,9 +8,10 @@ import type { WorkflowState } from '../../lib/transcript';
 
 const node = (id: string, deps: string[] = []): DagNodeInput => ({ id, deps });
 
-/** Do two node boxes share any area? The layout's core promise is that they never do. */
-function overlaps(a: { x: number; y: number }, b: { x: number; y: number }): boolean {
-  return a.x < b.x + DAG_NODE_W && b.x < a.x + DAG_NODE_W && a.y < b.y + DAG_NODE_H && b.y < a.y + DAG_NODE_H;
+/** Do two node boxes share any area? The layout's core promise is that they never do. Heights vary per
+ *  node (a full card is taller than a compact row), so the check uses each box's own height. */
+function overlaps(a: { x: number; y: number; height: number }, b: { x: number; y: number; height: number }): boolean {
+  return a.x < b.x + DAG_NODE_W && b.x < a.x + DAG_NODE_W && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
 const columnOf = (layout: ReturnType<typeof layoutDag>, id: string): number =>
@@ -84,14 +85,44 @@ describe('layoutDag', () => {
     expect(edge).toMatchObject({ from: 'a', to: 'b' });
     const target = layout.nodes.find((n) => n.id === 'b');
     expect(edge?.d.startsWith('M')).toBe(true);
-    expect(edge?.d.endsWith(`${target?.x} ${(target?.y ?? 0) + DAG_NODE_H / 2}`)).toBe(true);
+    expect(edge?.d.endsWith(`${target?.x} ${(target?.y ?? 0) + (target?.height ?? 0) / 2}`)).toBe(true);
+  });
+
+  it('gives a full node a taller box than a compact one and stacks the column around it', () => {
+    // The graph's foreground: the live/selected node is a card, everything else a row. Uniform boxes are
+    // what made 24 nodes read as a flat grid, so the two heights have to stay genuinely different.
+    const layout = layoutDag([
+      { id: 'a', deps: [], full: false }, { id: 'b', deps: [], full: true }, { id: 'c', deps: [], full: false },
+    ]);
+    const box = (id: string) => layout.nodes.find((n) => n.id === id);
+    expect(box('b')?.height).toBeGreaterThan(box('a')?.height ?? 0);
+    expect(box('b')?.full).toBe(true);
+    expect(box('a')?.full).toBe(false);
+    // Stacked with a running cursor: each node starts below the previous one's own height, never a fixed pitch.
+    expect(box('b')?.y).toBe((box('a')?.y ?? 0) + (box('a')?.height ?? 0) + 14);
+    expect(box('c')?.y).toBe((box('b')?.y ?? 0) + (box('b')?.height ?? 0) + 14);
+  });
+
+  it('routes edges entering one column on separate vertical tracks', () => {
+    // Three deps converging on one node: the crossings only read as a flow if each vertical run has its
+    // own track. Sharing one x is what made the web graph a tangle where the CLI's canvas stayed legible.
+    const layout = layoutDag([node('a'), node('b'), node('c'), node('x', ['a', 'b', 'c'])]);
+    const verticalTrack = (d: string): number | null => {
+      // In an orthogonal run the horizontal leg ends at the track, so the first L's x IS the track.
+      const first = /L(-?\d+(?:\.\d+)?) /.exec(d);
+      return first?.[1] !== undefined ? Number(first[1]) : null;
+    };
+    const bent = layout.edges.map((e) => e.d).filter((d) => d.includes('Q'));
+    expect(bent.length).toBeGreaterThanOrEqual(2);
+    const tracks = bent.map(verticalTrack);
+    expect(new Set(tracks).size).toBe(tracks.length);
   });
 
   it('sizes the canvas around every node it placed', () => {
     const layout = layoutDag([node('a'), node('b', ['a']), node('c', ['a'])]);
     for (const placed of layout.nodes) {
       expect(placed.x + DAG_NODE_W).toBeLessThanOrEqual(layout.width);
-      expect(placed.y + DAG_NODE_H).toBeLessThanOrEqual(layout.height);
+      expect(placed.y + placed.height).toBeLessThanOrEqual(layout.height);
     }
   });
 

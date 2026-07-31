@@ -1,19 +1,23 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 import { onUnhandledRequest } from '../../msw';
 import { createWrapper } from '../../test-utils';
 import { ProcessPanel } from '../../../modules/advisor/ProcessPanel';
+import { ownedSessionIds } from '../../../lib/processScope';
 import type { ProcessInfo } from '../../../lib/types';
+import type { SubagentState } from '../../../lib/transcript';
 
 const proc = (id: string, command: string, sessionId: string | null): ProcessInfo => ({
   id, command, cwd: '/w', startedAt: '2026-01-01T00:00:00Z', sessionId, running: true, exitCode: null,
 });
+const agent = (sessionId: string): SubagentState => ({ sessionId, status: 'running', task: 'build', tools: 0, seconds: 1 });
 
-// The sessionless list spans EVERY process the operator owns, so a row can come from a sub-agent child,
-// another channel, or one of the operator's OTHER chats — the panel labels every such origin and can kill
-// them from here (the only surface that can reach a service process an orphaned delegate left behind).
+// The API list is owner-wide (every process the operator owns across sessions), but the transcript panel
+// narrows it to the OPEN conversation so a job from another chat or a channel does not leak into it. Those
+// stay reachable in the telemetry rail's "other processes" section, which is where an orphaned delegate's
+// leftover service gets killed from.
 const processes: ProcessInfo[] = [
   proc('own', 'npm run dev', 'brain-1'),
   proc('other', 'python train.py', 'brain-7'),
@@ -31,44 +35,42 @@ afterEach(() => { server.resetHandlers(); killed.length = 0; });
 afterAll(() => server.close());
 
 describe('ProcessPanel', () => {
-  it('badges every process that the open conversation did not start', async () => {
+  it('shows only the processes the open conversation started, not the owner-wide list', async () => {
     const { wrapper } = createWrapper();
-    render(<ProcessPanel activeSessionId="brain-1" />, { wrapper });
+    render(<ProcessPanel owned={ownedSessionIds('brain-1', [])} />, { wrapper });
 
-    const own = await screen.findByTitle('npm run dev');
-    const sub = await screen.findByTitle('npm run watch');
-    const chan = await screen.findByTitle('tail -f log');
-    const other = await screen.findByTitle('python train.py');
-    // Origin badges sit next to the command, carrying the raw session id in their title.
-    expect(sub.parentElement?.textContent).toContain('sub-agent');
-    expect(screen.getByTitle('brain-ch-subagent-sub-dlg-9').textContent).toBe('sub-agent');
-    expect(chan.parentElement?.textContent).toContain('channel');
-    expect(screen.getByTitle('brain-ch-discord-42').textContent).toBe('channel');
-    // The list is owner-wide, so the user's OTHER chat shows up here too — and it must be marked as such.
-    // Unbadged has exactly one meaning: this conversation started it (and its ✕ kills something local).
-    expect(other.parentElement?.textContent).toContain('other chat');
-    expect(screen.getByTitle('brain-7').textContent).toBe('other chat');
-    expect(own.parentElement?.textContent).toBe('●npm run dev');
+    expect(await screen.findByTitle('npm run dev')).toBeInTheDocument();
+    // A job from another chat or a channel must NOT leak into this conversation's panel.
+    expect(screen.queryByTitle('python train.py')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('tail -f log')).not.toBeInTheDocument();
   });
 
-  it('follows the conversation on screen: the same row is local in one chat and foreign in another', async () => {
+  it('shows a job started by this conversation own sub-agent', async () => {
     const { wrapper } = createWrapper();
-    const { unmount } = render(<ProcessPanel activeSessionId="brain-7" />, { wrapper });
+    render(<ProcessPanel owned={ownedSessionIds('brain-1', [agent('brain-ch-subagent-sub-dlg-9')])} />, { wrapper });
 
-    // Viewing brain-7 flips the two plain-conversation rows: its own process loses the badge, and the one
-    // from brain-1 gains it. A badge that ignored the open conversation could not do both.
-    expect((await screen.findByTitle('python train.py')).parentElement?.textContent).toBe('●python train.py');
-    expect((await screen.findByTitle('npm run dev')).parentElement?.textContent).toContain('other chat');
-    unmount();
+    // The delegate runs under its own session id, but its background job is this conversation's live work.
+    expect(await screen.findByTitle('npm run watch')).toBeInTheDocument();
+    expect(screen.queryByTitle('python train.py')).not.toBeInTheDocument();
   });
 
-  it('kills a sub-agent process straight from the panel', async () => {
+  it('follows the conversation on screen: a row local in one chat is absent in another', async () => {
     const { wrapper } = createWrapper();
-    render(<ProcessPanel activeSessionId="brain-1" />, { wrapper });
-    const row = (await screen.findByTitle('npm run watch')).parentElement!;
+    render(<ProcessPanel owned={ownedSessionIds('brain-7', [])} />, { wrapper });
 
-    fireEvent.click(within(row).getByRole('button', { name: 'Kill process' }));
+    // Viewing brain-7: its own process shows, and brain-1's drops out of the panel entirely.
+    expect(await screen.findByTitle('python train.py')).toBeInTheDocument();
+    expect(screen.queryByTitle('npm run dev')).not.toBeInTheDocument();
+  });
 
-    await waitFor(() => expect(killed).toEqual(['sub']));
+  it('kills a local process straight from the panel', async () => {
+    const { wrapper } = createWrapper();
+    render(<ProcessPanel owned={ownedSessionIds('brain-1', [])} />, { wrapper });
+    await screen.findByTitle('npm run dev');
+
+    // brain-1 has exactly one local process, so its is the only kill button in the panel.
+    fireEvent.click(screen.getByRole('button', { name: 'Kill process' }));
+
+    await waitFor(() => expect(killed).toEqual(['own']));
   });
 });

@@ -1,6 +1,6 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Target, TerminalSquare, Users, Workflow, X } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
 import { plural } from '../../lib/i18n/plural';
@@ -14,6 +14,7 @@ import { railTypeVars, useTelemetryRailWidth, RAIL_MIN_WIDTH, RAIL_MAX_WIDTH } f
 import { workflowLabel, workflowProgress } from '../../lib/workflowDag';
 import { useBrainChat } from './BrainChatProvider';
 import { ProcessOutputModal } from './ProcessPanel';
+import { ownedSessionIds, isOwnProcess, processOrigin } from '../../lib/processScope';
 import { CommandOrbit } from './CommandOrbit';
 import type { BrainGoal } from '../../lib/types';
 
@@ -138,6 +139,7 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
   const { t } = useTranslation();
   const { usage, telemetry, activeSessionId, busy, goal, subagents, workflows, setAgentsOpen } = useBrainChat();
   const { data: allProcesses = [] } = useBrainProcesses();
+  const qc = useQueryClient();
   // Track the open process by id, not a click-time copy, so the modal follows the live list (it stops
   // polling once the process exits, and closes when the process is pruned away).
   const [openProcessId, setOpenProcessId] = useState<string | null>(null);
@@ -162,8 +164,19 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
   const liveAgents = subagents.filter((a) => a.status === 'running' || a.resultDelivery === 'pending');
   // A `foreground` handle is an in-flight Bash tool call that MAY still be detached, not a background
   // job — listing it would flash every ordinary shell command through the rail.
-  const processes = allProcesses.filter((p) => p.running && p.completionMode !== 'foreground');
-  const openProcess = processes.find((p) => p.id === openProcessId) ?? null;
+  const liveProcesses = allProcesses.filter((p) => p.running && p.completionMode !== 'foreground');
+  // The query is owner-wide, and both halves of it matter: this conversation's own live work reads as the
+  // rail's, while everything else — another chat, a channel, an orphaned delegate's leftover service —
+  // gets its own section below rather than being hidden. Hiding it left no way to kill it from the web.
+  const owned = useMemo(() => ownedSessionIds(activeSessionId, subagents), [activeSessionId, subagents]);
+  const processes = liveProcesses.filter((p) => isOwnProcess(p, owned));
+  const otherProcesses = liveProcesses.filter((p) => !isOwnProcess(p, owned));
+  // Resolved across BOTH lists so the output modal follows whichever row opened it.
+  const openProcess = liveProcesses.find((p) => p.id === openProcessId) ?? null;
+  const killProcess = async (id: string) => {
+    await elowenClient.brainKillProcess(id).catch(() => undefined);
+    await qc.invalidateQueries({ queryKey: ['brain-processes'] });
+  };
   const sections = [
     usage !== null,
     activeGoal !== null,
@@ -171,6 +184,7 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
     runningWorkflows.length > 0,
     liveAgents.length > 0,
     processes.length > 0,
+    otherProcesses.length > 0,
     hasProject,
     mcpConnected.length > 0,
     telemetry.lspEnabled !== null,
@@ -281,9 +295,57 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
               </li>
             ))}
           </ul>
-          {openProcess ? <ProcessOutputModal proc={openProcess} onClose={() => setOpenProcessId(null)} /> : null}
         </section>
       ) : null}
+
+      {/* Everything the open conversation does NOT own: another chat, a channel, or the service an
+          orphaned delegate left running. Kept in its own section so the rail above stays this
+          conversation's, while the one view able to reach a stranded process still exists. The kill
+          button is always visible here (no hover reveal) — the drawer is used on touch, where a
+          hover-only control is unreachable, and killing is the whole point of this section. */}
+      {otherProcesses.length > 0 ? (
+        <section className="flex flex-col gap-1" data-testid="telemetry-processes-other">
+          <SectionHead
+            label={t.telemetry.otherProcesses}
+            meta={`${otherProcesses.length} ${plural(t.telemetry.processesCount, otherProcesses.length)}`}
+          />
+          <ul className="flex flex-col gap-0.5">
+            {otherProcesses.map((proc) => {
+              const origin = processOrigin(proc.sessionId);
+              return (
+                <li key={proc.id} className="flex items-center gap-1.5">
+                  <TerminalSquare size={11} className="shrink-0 text-text-subtle" aria-hidden />
+                  <LiveRow
+                    label={proc.command}
+                    tone="running"
+                    title={proc.command}
+                    ariaLabel={t.telemetry.processOpen}
+                    onClick={() => setOpenProcessId(proc.id)}
+                  />
+                  {origin ? (
+                    <span className="shrink-0 rounded bg-bg px-1 text-[10px] text-text-muted" title={proc.sessionId ?? undefined}>
+                      {t.processes[origin]}
+                    </span>
+                  ) : null}
+                  {/* A destructive control sitting directly beside a tappable row needs a finger-sized hit
+                      area of its own; the glyph stays small so the row keeps its quiet density. */}
+                  <button
+                    type="button"
+                    onClick={() => void killProcess(proc.id)}
+                    aria-label={t.processes.kill}
+                    title={t.processes.kill}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-text-subtle transition-colors hover:text-danger"
+                  >
+                    <X size={11} aria-hidden />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {openProcess ? <ProcessOutputModal proc={openProcess} onClose={() => setOpenProcessId(null)} /> : null}
 
       {hasProject ? (
         <section className="flex flex-col gap-1" data-testid="telemetry-project">
@@ -337,7 +399,8 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
  *
  *  `column` is the desktop layout (a real sidebar beside the transcript); `drawer` is the mobile one,
  *  because a second column on a phone would squeeze the conversation off the screen. The host picks
- *  between them via `useMobile()` — this component never renders both.
+ *  between them via `useMobileViewport()` — this component never renders both, and neither is mounted
+ *  until the viewport has actually been measured.
  *
  *  Only the column is resizable, and the variant is the viewport decision: the host already made it, so
  *  the drag handle needs no media query of its own. A phone drawer has nothing to widen into anyway, and

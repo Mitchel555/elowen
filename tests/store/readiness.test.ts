@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb } from '../../src/store/db.js';
+import type { Db } from '../../src/store/db.js';
 import { TaskStore } from '../../src/store/taskStore.js';
 import { Readiness } from '../../src/store/readiness.js';
 
-let store: TaskStore; let ready: Readiness;
+let db: Db; let store: TaskStore; let ready: Readiness;
 beforeEach(() => {
-  const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
+  db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
   store = new TaskStore(db); ready = new Readiness(db);
   store.create({ id: 't1', project_id: 1, title: 'one' });
   store.create({ id: 't2', project_id: 1, title: 'two' });
@@ -27,6 +28,13 @@ describe('Readiness.ready', () => {
   it('excludes non-open tasks (in_progress / blocked / closed)', () => {
     store.setStatus('t1', 'in_progress');
     expect(ready.ready(1).map(t => t.id)).toEqual([]); // t2 still blocked by open dep t1
+  });
+  it('a dangling dependency (its task row is gone) blocks readiness — never reads as vacuously satisfied', () => {
+    // The store itself now refuses to persist a dangling edge, but a legacy row can still exist —
+    // insert one directly (bypassing addDep's guard) to prove the read path stays safe regardless.
+    store.create({ id: 't3', project_id: 1, title: 'three' });
+    db.prepare('INSERT INTO task_deps (task_id, depends_on_id) VALUES (?, ?)').run('t3', 'ghost');
+    expect(ready.ready(1).map(t => t.id)).toEqual(['t1']); // t3 never becomes ready
   });
 });
 

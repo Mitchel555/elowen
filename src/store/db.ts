@@ -61,6 +61,10 @@ export function openDb(path: string): Db {
   // Token scope: spawned agents get a 'agent'-scoped token (worker/overseer/pilot verbs only),
   // never the admin's full token. Pre-existing rows default to 'full' (interactive user sessions).
   addColumn(db, 'auth_tokens', 'scope', "TEXT NOT NULL DEFAULT 'full'");
+  // The task an 'agent'-scoped token was minted for. A worker spawned on task A must not be able to
+  // mutate task B through the API, and project-level gating cannot see an intra-project crossing.
+  // NULL = unbound (interactive tokens, and the shared service token the overseer/pilot still use).
+  addColumn(db, 'auth_tokens', 'task_id', 'TEXT');
   // Timeline drill-down: events carry the project they belong to (derived from the task at write
   // time) so the UI can scope/link an event to its repo. Nullable — mission/signal events have none.
   // The index is created here (not in schema.sql) so it runs *after* the column exists on migrated DBs.
@@ -97,6 +101,10 @@ export function openDb(path: string): Db {
   addColumn(db, 'memory_categories', 'icon', "TEXT NOT NULL DEFAULT ''");
   // Which model performed a memory mutation (curator/categorizer). Nullable — human/API events have none.
   addColumn(db, 'memory_events', 'model', 'TEXT');
+  // The provider entry a conversation last ran on, kept beside `model` so a respawn can restore the
+  // exact provider+model pair it was running. A model id alone is ambiguous (two entries can expose the
+  // same one), so an empty value here means "unknown" and the caller falls back to preference order.
+  addColumn(db, 'brain_sessions', 'provider', "TEXT NOT NULL DEFAULT ''");
   // Brain conversation ↔ working directory binding (per-client CLI sessions). Empty on migrated rows =
   // a cwd-less legacy/web session; stamped from the validated client-reported cwd on start/send.
   addColumn(db, 'brain_sessions', 'work_dir', "TEXT NOT NULL DEFAULT ''");
@@ -138,7 +146,117 @@ export function openDb(path: string): Db {
   repairImageToolNames(db);
   widenSessionEventKinds(db);
   dropPersonalityTables(db);
+  makeUserIdsMonotonic(db);
+  repairUserSequenceBelowReferences(db);
+  widenSessionEventKindsForSubagent(db);
   return db;
+}
+
+/** v8 — re-seed `sqlite_sequence` for `users` on a database that already ran v7.
+ *
+ *  v7 originally rebuilt the table without raising the counter past ids whose user had ALREADY been
+ *  deleted, so a database migrated by that version sits with the counter below a still-referenced id and
+ *  would hand the next account someone else's rows. v7 now seeds correctly, but it never runs twice, so
+ *  a database that took the earlier version can only be repaired by a new version — hence v8.
+ *
+ *  Idempotent and harmless where nothing is wrong: the seed only ever raises the counter. */
+function repairUserSequenceBelowReferences(db: Db): void {
+  runOnce(db, 8, () => { seedUserSequenceAboveEveryReference(db); });
+}
+
+/** v7 — rebuild `users` with `id INTEGER PRIMARY KEY AUTOINCREMENT`.
+ *
+ *  Without AUTOINCREMENT the id is a bare rowid, which SQLite assigns as max(id)+1 — so deleting the
+ *  HIGHEST-numbered user frees that id and hands it to the next account created. Ownership columns
+ *  (`tasks.created_by`, `missions.created_by`) reference users by id, so the new account would inherit
+ *  the deleted user's task attribution and mission notifications. UserStore.delete now nulls those
+ *  columns, which fixes the data already written; this fixes the id reuse itself, so nothing added
+ *  later can walk into the same trap.
+ *
+ *  A table rebuild, because AUTOINCREMENT is part of the PRIMARY KEY declaration and SQLite cannot add
+ *  it with ALTER TABLE — the same reason v5 had to rebuild brain_session_events.
+ *
+ *  Every existing id is preserved as-is (the INSERT carries `id` explicitly), so every reference from
+ *  every other table stays valid — this renumbers nobody. SQLite sets sqlite_sequence to the largest
+ *  id inserted, so the counter resumes above the current maximum rather than restarting at 1.
+ *
+ *  Safe under `foreign_keys = ON` (set in openDb): the whole schema declares exactly one foreign key,
+ *  and it is memory_embeddings → memories. Nothing REFERENCES users, so dropping the old table cannot
+ *  cascade or be rejected.
+ *
+ *  Column list written out in full rather than `SELECT *` so a column added to schema.sql later fails
+ *  loudly here instead of being silently dropped on every migrating database. It runs AFTER the
+ *  addColumn block above, so a database that predates any of these columns already has them by now.
+ *
+ *  NUMBERED 7: versions 1-6 are all spent (see the runners above) — a migration numbered ≤6 would be
+ *  skipped in silence on exactly the databases that need it. */
+function makeUserIdsMonotonic(db: Db): void {
+  runOnce(db, 7, () => {
+    const alreadyMonotonic = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users' AND sql LIKE '%AUTOINCREMENT%'",
+    ).get();
+    if (alreadyMonotonic) return; // a database created fresh off the current schema.sql needs no rebuild
+    db.exec(`
+      CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        allowed_execs TEXT NOT NULL DEFAULT '',
+        disabled_tools TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        avatar TEXT NOT NULL DEFAULT '',
+        default_exec TEXT NOT NULL DEFAULT '',
+        advisor_exec TEXT NOT NULL DEFAULT '',
+        advisor_autostart INTEGER NOT NULL DEFAULT 1
+      );
+      INSERT INTO users_new (
+        id, username, password_hash, created_at, is_admin, allowed_execs, disabled_tools,
+        name, email, avatar, default_exec, advisor_exec, advisor_autostart
+      ) SELECT
+        id, username, password_hash, created_at, is_admin, allowed_execs, disabled_tools,
+        name, email, avatar, default_exec, advisor_exec, advisor_autostart
+      FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+    `);
+    seedUserSequenceAboveEveryReference(db);
+  });
+}
+
+/** Every column that names a user. A value here belonging to no live user is a DANGLING reference left
+ *  by a deletion, and it is exactly what a recycled id would silently inherit — someone else's
+ *  conversations, memories, devices or settings. */
+const USER_REFERENCE_COLUMNS: readonly (readonly [table: string, column: string])[] = [
+  ['tasks', 'created_by'], ['missions', 'created_by'],
+  ['user_settings', 'user_id'], ['user_push_subscriptions', 'user_id'],
+  ['brain_sessions', 'user_id'], ['brain_goals', 'user_id'],
+  ['memories', 'user_id'], ['memory_events', 'user_id'], ['memory_categories', 'user_id'],
+  ['user_projects', 'user_id'], ['user_prompts', 'user_id'], ['auth_tokens', 'user_id'],
+  ['brain_terminals', 'user_id'],
+];
+
+/** AUTOINCREMENT alone does NOT make an id safe to hand out: SQLite seeds `sqlite_sequence` from the
+ *  rows actually present, so an id whose user was deleted BEFORE this migration is below the counter and
+ *  gets issued again — while rows elsewhere still reference it. This is not hypothetical: the live
+ *  database has `brain_sessions.user_id = 4` with no user 4, so a plain rebuild would seed the counter
+ *  at 3 and hand the next account someone's deleted conversations.
+ *
+ *  So push the counter above every id still referenced ANYWHERE, not merely above the surviving users.
+ *  Orphaned rows are deliberately left alone — this makes them unreachable, and deleting a departed
+ *  user's data is a separate, destructive decision that a schema migration has no business taking. */
+function seedUserSequenceAboveEveryReference(db: Db): void {
+  const tableExists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+  let highest = (db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM users').get() as { m: number }).m;
+  for (const [table, column] of USER_REFERENCE_COLUMNS) {
+    if (!tableExists.get(table)) continue; // a database predating this table simply has nothing to contribute
+    const { m } = db.prepare(`SELECT COALESCE(MAX(${column}), 0) AS m FROM ${table}`).get() as { m: number };
+    if (m > highest) highest = m;
+  }
+  if (highest <= 0) return; // nothing has ever referenced a user — the counter may start from scratch
+  // The row exists only once an AUTOINCREMENT insert has happened, so upsert rather than assuming it.
+  db.prepare("INSERT INTO sqlite_sequence (name, seq) SELECT 'users', ? WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'users')").run(highest);
+  db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'users' AND seq < ?").run(highest, highest);
 }
 
 /** v6 — drop the retired per-user/per-platform personality tables. The personality subsystem collapsed
@@ -172,6 +290,35 @@ function widenSessionEventKinds(db: Db): void {
         session_id TEXT NOT NULL,
         event_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd')),
+        detail TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (session_id, event_id)
+      );
+      INSERT INTO brain_session_events_new (session_id, event_id, kind, detail, created_at)
+        SELECT session_id, event_id, kind, detail, created_at FROM brain_session_events;
+      DROP TABLE brain_session_events;
+      ALTER TABLE brain_session_events_new RENAME TO brain_session_events;
+      CREATE INDEX IF NOT EXISTS idx_brain_session_events_session ON brain_session_events(session_id);
+    `);
+  });
+}
+
+/** v9 — let `brain_session_events.kind` also carry 'subagent' (a display-only "sub-agent finished"
+ *  marker, see sessionEvents.ts / recordSubagentFinishMarker).
+ *
+ *  Same rebuild rationale as v5 (widenSessionEventKinds): SQLite cannot alter a CHECK constraint and
+ *  `CREATE TABLE IF NOT EXISTS` in schema.sql leaves an existing DB on the old one, so an inserted
+ *  'subagent' marker would raise on every database that predates this while passing on a fresh one.
+ *
+ *  NUMBERED 9: versions 1-8 are all spent (see the runners above) — a migration numbered ≤8 would be
+ *  skipped in silence on exactly the databases that need it. */
+function widenSessionEventKindsForSubagent(db: Db): void {
+  runOnce(db, 9, () => {
+    db.exec(`
+      CREATE TABLE brain_session_events_new (
+        session_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent')),
         detail TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (session_id, event_id)

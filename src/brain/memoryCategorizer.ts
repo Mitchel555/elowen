@@ -61,14 +61,30 @@ export class MemoryCategorizer {
     try {
       const mem = this.memories.get(userId, memoryId);
       if (!mem || mem.status !== 'active') return;
+      // Captured BEFORE the round-trip so the audit names the model that actually decided, even if the
+      // workspace switches categorization models while this call is in flight.
+      const model = this.inference()?.model ?? null;
       const catId = await this.classify(userId, mem.body);
-      if (catId !== mem.category_id) {
-        this.memories.setCategory(userId, memoryId, catId, actor, 'categorizer: auto-classified',
-          this.inference()?.model ?? null);
+      // A model round-trip is long enough for the owner to have filed this memory by hand in the meantime.
+      // Re-read and write only if nothing moved under us: an automatic guess must never quietly replace a
+      // category a person chose.
+      const fresh = this.memories.get(userId, memoryId);
+      if (!fresh || fresh.status !== 'active' || fresh.category_id !== mem.category_id) return;
+      if (catId !== fresh.category_id) {
+        this.memories.setCategory(userId, memoryId, catId, actor, 'categorizer: auto-classified', model);
       }
     } catch (err) {
       this.logger?.warn('memory categorizer failed', { userId, memoryId, error: String(err) });
     }
+  }
+
+  /** Fire-and-forget classification of a memory that was JUST stored. Every write path goes through this
+   *  — the curator, the MemoryAdd tool and the API — so which path created a memory no longer decides
+   *  whether it gets a category at all. Deliberately not awaited: storing a fact must not wait on a model
+   *  round-trip. classifyMemory already swallows and logs its own failures; the catch only guarantees it
+   *  can never reject into a caller that is not awaiting it. */
+  classifyNewMemory(userId: number, memoryId: number, actor: string): void {
+    void this.classifyMemory(userId, memoryId, actor).catch(() => { /* best-effort */ });
   }
 
   /** Batch (re)classify the user's active memories, capped at MAX_RECLASSIFY. By default only touches

@@ -54,10 +54,22 @@ export function currentAccess(): { projectIds: number[]; admin: boolean; owner: 
  *  resolves through its closest existing ancestor instead. */
 function realAbs(path: string): string {
   const abs = resolve(path);
-  try { return realpathSync(abs); }
-  catch {
-    try { return join(realpathSync(dirname(abs)), basename(abs)); }
-    catch { return abs; } // deeper non-existent path — any disk op will ENOENT anyway
+  // Walk up to the CLOSEST existing ancestor and resolve that, then re-append the missing tail. Trying
+  // only the target and its immediate parent would fall back to the lexical path for anything deeper —
+  // and a lexical path hides a symlinked ancestor, so `<root>/link/a/b` (link → outside) would read as
+  // inside the root while every write through it lands outside.
+  const missing: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return missing.length ? join(real, ...missing) : real;
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return abs; // nothing on this path exists — any disk op will ENOENT anyway
+      missing.unshift(basename(cur));
+      cur = parent;
+    }
   }
 }
 

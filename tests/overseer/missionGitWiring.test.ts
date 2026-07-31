@@ -84,6 +84,22 @@ describe('MissionEngine × MissionGit (PR-native)', () => {
     expect(git(repo, 'branch', '--list', 'elowen/demo-epic').trim()).toContain('elowen/demo-epic');
   });
 
+  it('pause keeps the worktree with the running phase\'s uncommitted work, and resume reuses it', async () => {
+    const { engine, prs } = setup(true);
+    const m = await engine.engage({ epicId: 'epic', autonomy: 'L3', maxSessions: 1 });
+    const dir = prs.get(m.id)!.worktree;
+    // What the stopped phase's agent had produced but not yet closed — Elowen only commits at close.
+    writeFileSync(join(dir, 'wip.txt'), 'work in progress\n');
+
+    await engine.pause(m.id);
+    expect(existsSync(join(dir, 'wip.txt'))).toBe(true); // pause must not destroy uncommitted work
+    expect(prs.get(m.id)!.worktree).toBe(dir);
+
+    await engine.resume(m.id);
+    expect(prs.get(m.id)!.worktree).toBe(dir);          // same worktree, not a fresh one off the branch
+    expect(existsSync(join(dir, 'wip.txt'))).toBe(true);
+  });
+
   it('commitPhase records the phase work as a commit on the branch', async () => {
     const { engine, prs, missionGit } = setup(true);
     const m = await engine.engage({ epicId: 'epic', autonomy: 'L3', maxSessions: 1 });
@@ -91,5 +107,17 @@ describe('MissionEngine × MissionGit (PR-native)', () => {
     writeFileSync(join(dir, 'feature.txt'), 'work\n');
     expect(await missionGit.commitPhase(m.id, 'first phase')).toBe(true);
     expect(git(dir, 'log', '-1', '--pretty=%s').trim()).toBe('first phase');
+  });
+
+  it('commitPhase rejects on a git failure instead of reporting a clean tree', async () => {
+    const { engine, prs, missionGit } = setup(true);
+    const m = await engine.engage({ epicId: 'epic', autonomy: 'L3', maxSessions: 1 });
+    const dir = prs.get(m.id)!.worktree;
+    expect(await missionGit.commitPhase(m.id, 'nothing to do')).toBe(false); // clean tree → false
+
+    writeFileSync(join(dir, 'feature.txt'), 'work\n');
+    rmSync(join(dir, '.git')); // break the worktree link → every git call in it fails
+    // The phase's work is still on disk and uncommitted, so this must NOT look like "clean tree".
+    await expect(missionGit.commitPhase(m.id, 'first phase')).rejects.toThrow();
   });
 });

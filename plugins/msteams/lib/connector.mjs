@@ -121,12 +121,41 @@ export class ConnectorClient {
     return out?.id;
   }
 
-  /** Download an authenticated attachment (Teams file/image URLs on the connector host need our bearer). */
+  /** Download an authenticated attachment (Teams file/image URLs on the connector host need our bearer).
+   *  Rejects oversized attachments WITHOUT buffering them into memory first: a declared Content-Length
+   *  over the cap is rejected before any body byte is read, and — since Content-Length can be absent or
+   *  understated — the body is also streamed with a running counter that aborts the instant the cap is
+   *  crossed, instead of via `res.arrayBuffer()` which pulls the whole response before any size check. */
   async download(url, maxBytes) {
     const res = await fetch(url, { headers: { authorization: `Bearer ${await this.token()}` } });
     if (!res.ok) throw new Error(`attachment download → ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (maxBytes && buf.byteLength > maxBytes) throw new Error('attachment exceeds the configured size cap');
-    return buf;
+    const declared = Number(res.headers.get('content-length'));
+    if (maxBytes && Number.isFinite(declared) && declared > maxBytes) {
+      await res.body?.cancel().catch(() => {});
+      throw new Error('attachment exceeds the configured size cap');
+    }
+    if (!maxBytes || !res.body) {
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (maxBytes && buf.byteLength > maxBytes) throw new Error('attachment exceeds the configured size cap');
+      return buf;
+    }
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new Error('attachment exceeds the configured size cap');
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c)));
   }
 }

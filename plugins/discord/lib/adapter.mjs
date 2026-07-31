@@ -1,12 +1,13 @@
 // The Discord adapter: gateway connection management, the inbound message pipeline,
 // slash-command/component interactions, voice (STT/TTS) and outbound posting.
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { memberIsAdmin, displayNameOf, resolveMentions, buildReplyContext, parseModelExec, stripForSpeech, withoutFooter } from './format.mjs';
 import { buildAskComponents } from './ask.mjs';
 import { MESSAGES } from './messages.mjs';
 import { LiveMessage, postWithImages } from './stream.mjs';
-import { resolveDisplaySettings, updateDisplayOverrides } from './display.mjs';
+import { resolveDisplaySettings, updateDisplayOverrides, observesLiveEvents } from './display.mjs';
+import { buildRoleAccess, applyVisionModel } from '../../_shared/access.mjs';
+import { resolveImageFiles } from '../../_shared/images.mjs';
+import { voiceCreds, transcribeBuffer } from '../../_shared/voice.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
 import { isSteered } from '../../_shared/turnResult.mjs';
 
@@ -55,13 +56,6 @@ async function collectAttachments(list, maxImageBytes, maxImages) {
     }
   }
   return { images, audio, notes };
-}
-
-function rolePrompt(policy) {
-  const parts = [];
-  if (policy.name) parts.push(`The user you are talking to has the "${policy.name}" role.`);
-  if (policy.prompt) parts.push(policy.prompt);
-  return parts.join('\n') || undefined;
 }
 
 export class DiscordAdapter {
@@ -315,25 +309,7 @@ export class DiscordAdapter {
     const policies = Array.isArray(this.cfg.rolePolicies) ? this.cfg.rolePolicies : [];
     const match = policies.find((p) => p.roleId && roleIds.includes(p.roleId));
     if (!match) return { roleIds, access: undefined };
-    const st = this.state.get(channelId);
-    const chosen = st.model;
-    return {
-      roleIds,
-      access: {
-        // admin:true = the operator's admin role — full project scope + the full plugin toolset
-        // (trusted-channel). It does NOT grant the owner's Elowen* control-plane tools or API token:
-        // a shared channel is never the verified owner's own chat, whatever role the sender holds.
-        admin: match.admin === true,
-        projectIds: (match.projectIds ?? []).map(Number),
-        prompt: rolePrompt(match),
-        model: chosen ? { provider: chosen.provider, model: chosen.model } : undefined,
-        // Per-channel reasoning effort (set via /reasoning); empty = the model default.
-        thinkingLevel: typeof st.thinkingLevel === 'string' ? st.thinkingLevel : undefined,
-        fast: st.fast === true,
-        // Per-role tool allowlist (undefined or ['*'] = everything the session would normally get).
-        tools: Array.isArray(match.tools) && match.tools.length > 0 ? match.tools : undefined,
-      },
-    };
+    return { roleIds, access: buildRoleAccess(match, this.state.get(channelId)) };
   }
 
   /** Recent channel history as a context block for a BRAND-NEW brain conversation (the brain calls
@@ -449,8 +425,7 @@ export class DiscordAdapter {
 
     const reactions = this.cfg.reactions !== false;
     const display = resolveDisplaySettings(this.cfg, this.state.get(m.channel_id));
-    const observesLiveEvents = display.toolActivity !== 'off' || display.answerMode === 'live' || this.cfg.showReasoning === true;
-    const stream = observesLiveEvents ? new LiveMessage(this, m.channel_id, m.id, m.author.id, display) : null;
+    const stream = observesLiveEvents(display, this.cfg) ? new LiveMessage(this, m.channel_id, m.id, m.author.id, display) : null;
     // Even with live streaming OFF, AskUserQuestion must still render its choice message — otherwise the
     // parked turn hangs until the timeout. Route events through the stream when present, else handle only `ask`.
     const onEvent = stream
@@ -463,13 +438,7 @@ export class DiscordAdapter {
     // Image turns steer to the configured vision model — the channel's normal model may be text-only.
     const vision = images.length ? parseModelExec(this.cfg.visionModel) : null;
     let turnAccess = access;
-    if (vision) {
-      const models = await this.listModels().catch(() => []);
-      const visionOption = models.find((m) => m.model === vision.model && (!vision.provider || m.provider === vision.provider));
-      // Fast belongs to the normal channel profile. A non-OAuth vision hop clears it only for this
-      // temporary request; persisted channel state stays untouched and resumes on the normal model.
-      turnAccess = { ...access, model: vision, ...(!visionOption?.fastAvailable ? { fast: false } : {}) };
-    }
+    if (vision) turnAccess = applyVisionModel(access, vision, await this.listModels().catch(() => []));
 
     try {
       const reply = await this.handler(
@@ -495,7 +464,7 @@ export class DiscordAdapter {
       clearInterval(typing);
       if (stream) await stream.fail(e?.message ?? e); // settle live tools before the error reply lands below them
       if (reactions) { await this.unreact(m.channel_id, m.id, '👀').catch(() => {}); void this.react(m.channel_id, m.id, '❌').catch(() => {}); }
-      await this.reply(m.channel_id, `⚠️ ${e?.message ?? e}`).catch(() => {});
+      await this.reply(m.channel_id, this.msg.error(e?.message ?? e)).catch(() => {});
     }
   }
 
@@ -513,8 +482,7 @@ export class DiscordAdapter {
     const convoKey = `${channelId}#${gen}`;
     const author = i.member?.user ?? i.user ?? {};
     const display = resolveDisplaySettings(this.cfg, this.state.get(channelId));
-    const observesLiveEvents = display.toolActivity !== 'off' || display.answerMode === 'live' || this.cfg.showReasoning === true;
-    const stream = observesLiveEvents ? new LiveMessage(this, channelId, undefined, author.id, display) : null;
+    const stream = observesLiveEvents(display, this.cfg) ? new LiveMessage(this, channelId, undefined, author.id, display) : null;
     const onEvent = stream
       ? (e) => stream.onEvent(e)
       : (e) => { if (e.type === 'ask' && Array.isArray(e.questions)) void this.postAsk(channelId, undefined, author.id, e.id, e.questions).catch(() => {}); };
@@ -533,7 +501,7 @@ export class DiscordAdapter {
     } catch (e) {
       clearInterval(typing);
       if (stream) await stream.fail(e?.message ?? e);
-      await this.reply(channelId, `⚠️ ${e?.message ?? e}`).catch(() => {});
+      await this.reply(channelId, this.msg.error(e?.message ?? e)).catch(() => {});
     }
   }
 
@@ -803,17 +771,7 @@ export class DiscordAdapter {
    *  from the image plugins' data dirs. A missing/unreadable file is skipped silently — the text still
    *  goes out without it. */
   resolveImageFiles(names) {
-    const files = [];
-    const cap = cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10);
-    for (const name of names.slice(0, cap)) {
-      for (const dir of this.imageDirs) {
-        const p = join(dir, name);
-        if (!existsSync(p)) continue;
-        try { files.push({ name, data: readFileSync(p) }); } catch { /* unreadable → skip */ }
-        break;
-      }
-    }
-    return files;
+    return resolveImageFiles(this.imageDirs, names, cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10));
   }
 
   /** Multipart message post: text + attached PNG files (Discord renders uploads; a relative daemon
@@ -827,27 +785,18 @@ export class DiscordAdapter {
       headers: { authorization: `Bot ${this.cfg.botToken}` }, // content-type: fetch sets the multipart boundary
       body: form,
     });
-    if (res.status === 429 && attempt < 3) {
-      const wait = (Number(res.headers.get('retry-after')) || 1) * 1000;
-      await new Promise((r) => setTimeout(r, wait));
-      return this.uploadImages(channelId, content, files, attempt + 1, extra);
-    }
+    if (await this.retryAfter(res, attempt)) return this.uploadImages(channelId, content, files, attempt + 1, extra);
     if (!res.ok) throw new Error(`discord API POST /channels/${channelId}/messages (upload) → HTTP ${res.status}`);
     return res.json();
   }
 
-  /** Resolve the voice provider's credentials (central brain provider chosen in config) → { apiKey,
-   *  baseUrl }, or null when unset/keyless. baseUrl carries the audio endpoints (e.g. …/v1). */
+  /** The voice provider's credentials for this plugin's config, or null when unset/keyless. */
   voiceCreds() {
-    const id = typeof this.cfg.voiceProvider === 'string' ? this.cfg.voiceProvider.trim() : '';
-    if (!id) return null;
-    const p = this.resolveProvider(id);
-    if (!p?.apiKey || !p.baseUrl) return null;
-    return { apiKey: p.apiKey, baseUrl: String(p.baseUrl).replace(/\/+$/, '') };
+    return voiceCreds(this.cfg, this.resolveProvider);
   }
 
-  /** Transcribe one audio attachment via Whisper — download the CDN clip, then multipart it to the
-   *  provider's /audio/transcriptions. Returns the trimmed text, or null when empty/oversized/keyless. */
+  /** Transcribe one audio attachment via Whisper — download the CDN clip, then hand it to the shared
+   *  transcriber. Returns the trimmed text, or null when empty/keyless; throws when oversized. */
   async transcribe(clip) {
     const creds = this.voiceCreds();
     if (!creds) return null;
@@ -855,16 +804,7 @@ export class DiscordAdapter {
     const dl = await fetch(clip.url);
     if (!dl.ok) throw new Error(`download HTTP ${dl.status}`);
     const buf = Buffer.from(await dl.arrayBuffer());
-    const form = new FormData();
-    form.append('file', new Blob([buf], { type: clip.type || 'audio/ogg' }), clip.name || 'audio.ogg');
-    form.append('model', String(this.cfg.sttModel || 'whisper-1'));
-    const res = await fetch(`${creds.baseUrl}/audio/transcriptions`, {
-      method: 'POST', headers: { authorization: `Bearer ${creds.apiKey}` }, body: form,
-    });
-    if (!res.ok) throw new Error(`STT HTTP ${res.status}`);
-    const j = await res.json().catch(() => ({}));
-    const t = typeof j?.text === 'string' ? j.text.trim() : '';
-    return t || null;
+    return transcribeBuffer(creds, buf, { name: clip.name, type: clip.type, model: this.cfg.sttModel });
   }
 
   /** Whether spoken replies are on for a channel: the per-channel /voice toggle wins, else cfg.tts. */
@@ -899,11 +839,7 @@ export class DiscordAdapter {
       headers: { authorization: `Bot ${this.cfg.botToken}` }, // fetch sets the multipart boundary
       body: form,
     });
-    if (res.status === 429 && attempt < 3) {
-      const wait = (Number(res.headers.get('retry-after')) || 1) * 1000;
-      await new Promise((r) => setTimeout(r, wait));
-      return this.uploadAudio(channelId, content, files, extra, attempt + 1);
-    }
+    if (await this.retryAfter(res, attempt)) return this.uploadAudio(channelId, content, files, extra, attempt + 1);
     if (!res.ok) throw new Error(`discord API POST /channels/${channelId}/messages (audio) → HTTP ${res.status}`);
     return res.json();
   }
@@ -916,17 +852,22 @@ export class DiscordAdapter {
     await this.reply(target, text);
   }
 
+  /** The one 429 discipline every Discord call shares (rest + both multipart posters): on a rate-limited
+   *  response with retries left, wait out `retry-after` and report that the caller should try again. */
+  async retryAfter(res, attempt) {
+    if (res.status !== 429 || attempt >= 3) return false;
+    const wait = (Number(res.headers.get('retry-after')) || 1) * 1000;
+    await new Promise((r) => setTimeout(r, wait));
+    return true;
+  }
+
   async rest(method, path, body, attempt = 0) {
     const res = await fetch(`${this.api}${path}`, {
       method,
       headers: { authorization: `Bot ${this.cfg.botToken}`, 'content-type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (res.status === 429 && attempt < 3) {
-      const wait = (Number(res.headers.get('retry-after')) || 1) * 1000;
-      await new Promise((r) => setTimeout(r, wait));
-      return this.rest(method, path, body, attempt + 1);
-    }
+    if (await this.retryAfter(res, attempt)) return this.rest(method, path, body, attempt + 1);
     if (!res.ok) throw new Error(`discord API ${method} ${path} → HTTP ${res.status}`);
     return res.status === 204 ? null : res.json();
   }

@@ -18,8 +18,26 @@ process.env.PI_CACHE_RETENTION ??= 'long';
 // A long-running daemon must survive a stray rejection/exception from one of its many fire-and-forget
 // loops (deriver/scheduler/janitor/reconcile/relay). Node's default would exit the process and drop
 // every live mission's orchestrator; log and keep running instead.
-process.on('unhandledRejection', (e) => log.error('unhandledRejection', e));
-process.on('uncaughtException', (e) => log.error('uncaughtException', e));
+// stdout/stderr can break under the daemon while it is still running: a piped parent (the e2e harness,
+// a `| head`, a detached shell) goes away and every later write raises EPIPE. That error surfaces as an
+// uncaughtException, the handler below LOGS it, logging writes to the console again, and the next EPIPE
+// re-enters the handler — an unbounded loop that also appends every iteration to the day's log file. It
+// really happened: two e2e runs left a 30 GB daemon-<date>.log each and filled the disk. The CLI already
+// guards this (src/cli/index.ts); a service must not exit on it, so swallow it instead — the write is
+// already lost and the file sink still has the record.
+const onStreamError = (e: NodeJS.ErrnoException): void => {
+  if (e.code !== 'EPIPE') log.error('stdio stream error', e);
+};
+process.stdout.on('error', onStreamError);
+process.stderr.on('error', onStreamError);
+
+// A long-running daemon must survive a stray rejection/exception from one of its many fire-and-forget
+// loops (deriver/scheduler/janitor/reconcile/relay). Node's default would exit the process and drop
+// every live mission's orchestrator; log and keep running instead. EPIPE is excluded for the reason
+// above: logging it is what feeds the loop.
+const isEpipe = (e: unknown): boolean => (e as NodeJS.ErrnoException | null)?.code === 'EPIPE';
+process.on('unhandledRejection', (e) => { if (!isEpipe(e)) log.error('unhandledRejection', e); });
+process.on('uncaughtException', (e) => { if (!isEpipe(e)) log.error('uncaughtException', e); });
 
 // Runtime env. Bound to locals so control-flow narrowing works in the guards below.
 const relayUrl = process.env.ELOWEN_RELAY_URL;
@@ -60,7 +78,6 @@ app.get('/ws/terminal', upgradeWebSocket(terminalWsHandler({
   resizeWindow: (session, cols, rows) => { void tmux.resize(session, cols, rows); },
 })));
 
-startLoops();
 // Bind to localhost by default: a daemon token can spawn agents (effectively RCE), so the daemon
 // must not be publicly reachable. Front it with the web app's BFF proxy (or a reverse proxy). Set
 // ELOWEN_HOST=0.0.0.0 to expose it deliberately (e.g. web app on a separate host).
@@ -70,7 +87,15 @@ const server = serve({
   port: Number((process.env.ELOWEN_PORT) ?? 4400),
   hostname: host,
   websocket: { server: new WebSocketServer({ noServer: true }) },
-}, info => log.info(`elowen serve on ${host}:${info.port} — logs → ${LOG_DIR}`));
+}, info => {
+  log.info(`elowen serve on ${host}:${info.port} — logs → ${LOG_DIR}`);
+  // Boot reconcile terminalizes delegation rows left `running` by a previous process, which is only
+  // safe when nothing else is serving them — a live delegation is registered in daemon memory, so a
+  // second instance cannot tell ours apart from a crashed one and would kill it. Winning the port is
+  // what establishes that: run the loops only once the bind succeeded, never before. This still does
+  // not cover a second daemon started on a *different* port against the same database.
+  startLoops();
+});
 // Without an error handler an EADDRINUSE (zombie daemon still holding the port) crashes with a bare
 // stack trace; give it a clear exit message instead.
 server.on('error', (e: NodeJS.ErrnoException) => {

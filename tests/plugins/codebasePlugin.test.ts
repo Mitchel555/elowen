@@ -258,22 +258,22 @@ describe('codebase plugin — index + search', () => {
   });
 });
 
+const waitFor = async (cond: () => boolean, ms = 3000) => {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > ms) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+const chunkCount = (dataRoot: string, sql = 'SELECT COUNT(*) AS n FROM chunks', ...params: unknown[]): number => {
+  const db = new Database(join(dataRoot, 'codebase', 'index.db'), { readonly: true });
+  const n = (db.prepare(sql).get(...(params as [])) as { n: number }).n;
+  db.close();
+  return n;
+};
+
 // ── batch3 regression fixes (#4 convergence, #5 scoping, #6 debounce, #8 latency, #9 memory) ────────────
 describe('codebase plugin — batch3 fixes', () => {
-  const waitFor = async (cond: () => boolean, ms = 3000) => {
-    const start = Date.now();
-    while (!cond()) {
-      if (Date.now() - start > ms) throw new Error('waitFor timed out');
-      await new Promise((r) => setTimeout(r, 10));
-    }
-  };
-  const chunkCount = (dataRoot: string, sql = 'SELECT COUNT(*) AS n FROM chunks', ...params: unknown[]): number => {
-    const db = new Database(join(dataRoot, 'codebase', 'index.db'), { readonly: true });
-    const n = (db.prepare(sql).get(...(params as [])) as { n: number }).n;
-    db.close();
-    return n;
-  };
-
   // #4 — a budget-capped model switch must CONVERGE: each pass converts a fresh batch, so `pending`
   // strictly shrinks and the leading files are never re-embedded forever.
   it('#4 model switch converges under a per-pass budget (pending shrinks 2→1→0)', async () => {
@@ -449,5 +449,264 @@ describe('codebase plugin — batch3 fixes', () => {
     expect(text).toContain('... [truncated]');
     // No U+FFFD replacement char: the multibyte '€' sequence was never cut mid-byte.
     expect(text).not.toContain('�');
+  });
+});
+
+// ── auto-reindex single-flight: concurrent searches must never run the same repo's pass twice ───────────
+describe('codebase plugin — auto-reindex single-flight', () => {
+  // An embedder whose every embedBatch call parks on a manual gate, so a pass can be held mid-flight while
+  // further callers arrive. With one file per repo, `calls` counts PASSES; `maxConcurrent` records whether
+  // two passes ever overlapped.
+  const gatedEmbedder = () => {
+    let open: () => void = () => {};
+    const gate = new Promise<void>((r) => { open = r; });
+    const state = { calls: 0, concurrent: 0, maxConcurrent: 0 };
+    const embedder = {
+      embed: async (_c: EmbeddingConfig, t: string) => fakeVec(t), // the query embed never blocks
+      embedBatch: async (_c: EmbeddingConfig, texts: string[]) => {
+        state.calls++;
+        state.concurrent++;
+        state.maxConcurrent = Math.max(state.maxConcurrent, state.concurrent);
+        await gate;
+        state.concurrent--;
+        return texts.map(fakeVec);
+      },
+    };
+    return { embedder, state, release: () => open() };
+  };
+
+  const seedRepo = (tag: string) => {
+    const dataRoot = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-data-`));
+    const repo = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-repo-`));
+    writeFileSync(join(repo, 'x.ts'), 'export function x() { return 1; } // cosine similarity vector\n');
+    return { dataRoot, repo };
+  };
+  const cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
+  const load = (dataRoot: string, embeddings: ReturnType<typeof gatedEmbedder>['embedder']) => loadPlugins({
+    dirs: [join(repoRoot, 'plugins')], enabled: ['codebase'], logger: log, dataRoot,
+    embeddings, embeddingConfig: () => cfg,
+  });
+  const search = (reg: PluginRegistry, repo: string) =>
+    runWithPolicy(adminPolicy(), () => runTool(reg, 'CodebaseSearch', { query: 'cosine similarity vector' }), { workDir: repo });
+
+  it('two concurrent admin searches run ONE pass, and the pass outliving the debounce window does not let a third in', async () => {
+    const { dataRoot, repo } = seedRepo('sf1');
+    const { embedder, state, release } = gatedEmbedder();
+    const reg = await load(dataRoot, embedder);
+
+    // The second search starts while the first one's pass is parked inside embedBatch — a genuine overlap,
+    // not two sequential calls: neither has written anything yet when the other checks the debounce.
+    const both = Promise.all([search(reg, repo), search(reg, repo)]);
+    await waitFor(() => state.calls > 0);
+    await new Promise((r) => setTimeout(r, 50)); // a duplicate pass would have started (and parked) by now
+    expect(state.calls).toBe(1);          // the bug: both callers clear the debounce check → 2 passes
+    expect(state.maxConcurrent).toBe(1);  // ...running concurrently over the same repo
+
+    // A pass slower than the debounce window must still not be duplicated: expire the marker under the
+    // running pass, then search again. Only the in-flight guard can hold this one.
+    const wdb = new Database(join(dataRoot, 'codebase', 'index.db'));
+    wdb.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(`reindex:${realpathSync(repo)}`, '0');
+    wdb.close();
+    await search(reg, repo);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(state.calls).toBe(1);
+    expect(state.maxConcurrent).toBe(1);
+
+    release();
+    await both;
+    await waitFor(() => chunkCount(dataRoot) > 0); // the single shared pass still indexes the repo
+    expect(state.calls).toBe(1);
+  });
+
+  const manualReindex = (reg: PluginRegistry, repo: string, full = false) =>
+    runWithPolicy(adminPolicy(), () => runTool(reg, 'CodebaseReindex', { repo, full }), { workDir: repo });
+
+  it('a manual reindex waits for the in-flight pass instead of doubling it — and is never skipped', async () => {
+    const { dataRoot, repo } = seedRepo('sf3');
+    const { embedder, state, release } = gatedEmbedder();
+    const reg = await load(dataRoot, embedder);
+
+    const auto = search(reg, repo); // an admin search kicks a pass that parks inside embedBatch
+    await waitFor(() => state.calls > 0);
+
+    const manual = manualReindex(reg, repo, true); // full → real embedding work even though the pass indexed it
+    await new Promise((r) => setTimeout(r, 50));   // a claim-bypassing manual run would have parked by now
+    expect(state.calls).toBe(1);                   // the bug: the manual path calls reindexRepo directly → 2 passes
+    expect(state.maxConcurrent).toBe(1);           // ...embedding the same repo concurrently
+
+    release();
+    await auto;
+    const res = await manual;
+    expect(res.details.ok).toBe(true);
+    expect(res.details.chunksEmbedded as number).toBeGreaterThan(0); // unlike an auto pass, it still ran
+    expect(state.calls).toBe(2);
+    expect(state.maxConcurrent).toBe(1);
+  });
+
+  it('two manual reindexes queued behind the same pass do not overlap each other', async () => {
+    const { dataRoot, repo } = seedRepo('sf4');
+    const { embedder, state, release } = gatedEmbedder();
+    const reg = await load(dataRoot, embedder);
+
+    const auto = search(reg, repo);
+    await waitFor(() => state.calls > 0);
+
+    // Both manual runs queue behind the SAME parked pass, so both are resumed by its completion. Waiting on
+    // that one pass is not enough: whichever wakes second must re-check and queue behind the first.
+    const first = manualReindex(reg, repo, true);
+    const second = manualReindex(reg, repo, true);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(state.calls).toBe(1);
+
+    release();
+    await auto;
+    expect((await first).details.ok).toBe(true);
+    expect((await second).details.ok).toBe(true);
+    expect(state.calls).toBe(3);         // every explicitly requested run happened
+    expect(state.maxConcurrent).toBe(1); // but never two at once over the same repo
+  });
+
+  it('a plugin reload does not restart a pass already in flight (the debounce marker is claimed up front)', async () => {
+    const { dataRoot, repo } = seedRepo('sf2');
+    const { embedder, state, release } = gatedEmbedder();
+    const reg1 = await load(dataRoot, embedder);
+
+    const first = search(reg1, repo);
+    await waitFor(() => state.calls > 0); // reg1's pass is parked inside embedBatch
+
+    // A reload swaps in a fresh closure — empty in-flight map, same index.db. Only a marker written at the
+    // START of the pass can tell it that one is already running.
+    const reg2 = await load(dataRoot, embedder);
+    await search(reg2, repo);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(state.calls).toBe(1);
+    expect(state.maxConcurrent).toBe(1);
+
+    release();
+    await first;
+    await waitFor(() => chunkCount(dataRoot) > 0);
+  });
+});
+
+// ── scheduled reindexing: the background timer converges a repo with no search and no manual run ────────
+describe('codebase plugin — scheduled reindex', () => {
+  const cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
+  // The adapter's own surface. `tick` is what the interval calls, driven directly here because the smallest
+  // configurable interval is five minutes.
+  type Indexer = { name: string; connect(): Promise<void>; disconnect(): void; tick(): Promise<void> };
+
+  const countingEmbedder = () => {
+    const state = { calls: 0 };
+    return {
+      state,
+      embedder: {
+        embed: fakeEmbedder.embed,
+        embedBatch: async (c: EmbeddingConfig, texts: string[]) => { state.calls++; return fakeEmbedder.embedBatch(c, texts); },
+      },
+    };
+  };
+  const load = (dataRoot: string, config: Record<string, unknown>, embeddings = fakeEmbedder) => loadPlugins({
+    dirs: [join(repoRoot, 'plugins')], enabled: ['codebase'], logger: log, dataRoot,
+    config: { codebase: config }, embeddings, embeddingConfig: () => cfg,
+  });
+  const indexerOf = (reg: PluginRegistry) => {
+    const found = reg.platforms.find((p) => p.name === 'codebase-index');
+    if (!found) throw new Error('scheduled indexer not registered');
+    return found as unknown as Indexer;
+  };
+  const seed = (tag: string, files: Record<string, string>) => {
+    const dataRoot = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-data-`));
+    const repo = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-repo-`));
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(repo, name), body);
+    return { dataRoot, repo };
+  };
+  const src = (word: string) => `export function f() { return 1; } // ${word} similarity vector\n`;
+  // Expire the shared debounce marker, i.e. make the repo due again without waiting out the interval.
+  const expireMarker = (dataRoot: string, repo: string) => {
+    const db = new Database(join(dataRoot, 'codebase', 'index.db'));
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(`reindex:${realpathSync(repo)}`, '0');
+    db.close();
+  };
+
+  it('registers the adapter but stays idle while the schedule is off', async () => {
+    const { dataRoot, repo } = seed('sch-off', { 'a.ts': src('cosine') });
+    const { embedder, state } = countingEmbedder();
+    // Scope and paths configured, but scheduledReindex left at its default (false).
+    const reg = await load(dataRoot, { reindexScope: 'listed', reindexRepos: repo }, embedder);
+    const indexer = indexerOf(reg);
+
+    await indexer.connect();
+    await indexer.tick();
+
+    expect(state.calls).toBe(0); // an unattended timer must not spend the provider until it is asked to
+    indexer.disconnect();
+  });
+
+  it('indexes only the listed repositories and skips a path that is not a directory', async () => {
+    const { dataRoot, repo } = seed('sch-listed', { 'a.ts': src('cosine') });
+    const reg = await load(dataRoot, {
+      scheduledReindex: true,
+      reindexIntervalMinutes: 5,
+      reindexScope: 'listed',
+      reindexRepos: `${repo}\n/var/empty/does-not-exist-${Date.now()}`,
+    });
+    const indexer = indexerOf(reg);
+
+    await indexer.tick(); // the bogus path must be skipped, not thrown on
+
+    expect(chunkCount(dataRoot)).toBe(1);
+    expect(chunkCount(dataRoot, 'SELECT COUNT(*) AS n FROM chunks WHERE repo = ?', realpathSync(repo))).toBe(1);
+    indexer.disconnect();
+  });
+
+  it('refreshes a repository the index already holds when the scope is everything indexed', async () => {
+    const { dataRoot, repo } = seed('sch-indexed', { 'a.ts': src('cosine') });
+    const reg = await load(dataRoot, { scheduledReindex: true, reindexIntervalMinutes: 5 });
+    await runWithPolicy(adminPolicy(), () => runTool(reg, 'CodebaseReindex', { repo }), { workDir: repo });
+    expect(chunkCount(dataRoot)).toBe(1);
+
+    writeFileSync(join(repo, 'b.ts'), src('dot')); // a commit lands while nobody searches
+    expireMarker(dataRoot, repo);
+    await indexerOf(reg).tick();
+
+    expect(chunkCount(dataRoot)).toBe(2); // the timer found the repo through the index itself
+    indexerOf(reg).disconnect();
+  });
+
+  it('converges a repo bigger than one pass within a single tick', async () => {
+    const { dataRoot, repo } = seed('sch-conv', { 'a.ts': src('cosine'), 'b.ts': src('vector'), 'c.ts': src('dot') });
+    const reg = await load(dataRoot, {
+      scheduledReindex: true,
+      reindexIntervalMinutes: 5,
+      reindexEmbedBudget: 1, // one chunk per pass, so three files need three passes
+      reindexMaxPassesPerRepo: 4,
+      reindexScope: 'listed',
+      reindexRepos: repo,
+    });
+
+    await indexerOf(reg).tick();
+
+    // Follow-up passes must bypass the debounce marker the first pass stamped, or the tick indexes one file
+    // and then blocks itself for the whole interval.
+    expect(chunkCount(dataRoot)).toBe(3);
+    indexerOf(reg).disconnect();
+  });
+
+  it('a disconnected generation does no further work (a reload must not leave two timers indexing)', async () => {
+    const { dataRoot, repo } = seed('sch-stop', { 'a.ts': src('cosine') });
+    const { embedder, state } = countingEmbedder();
+    const config = { scheduledReindex: true, reindexIntervalMinutes: 5, reindexScope: 'listed', reindexRepos: repo };
+    const reg1 = await load(dataRoot, config, embedder);
+    const orphan = indexerOf(reg1);
+    await orphan.connect();
+
+    orphan.disconnect(); // the host tears the old generation down right before swapping in the new one
+    await orphan.tick();
+    expect(state.calls).toBe(0);
+
+    const reg2 = await load(dataRoot, config, embedder); // the live generation still works
+    await indexerOf(reg2).tick();
+    expect(state.calls).toBe(1);
+    indexerOf(reg2).disconnect();
   });
 });

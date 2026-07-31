@@ -89,9 +89,20 @@ export class ClientAttachments {
    *  bindings so a cancelled claim cannot become stop's target, while reordered requests still fence. */
   private readonly generationTombstones = new Map<string, ClientGenerationTombstone>();
 
-  /** Long-lived listeners keyed by SESSION id — re-attached by the spawner whenever that session
-   *  (re)spawns, so an open drill-in stream survives respawns (unlike a raw `listeners.add`). */
+  /** Every live listener currently attached to a session id — subscribe() AND tapSession() alike — kept
+   *  independently of any particular LiveBrain instance, so it survives a respawn (model switch, restart,
+   *  vision hop, rollover) even though the LiveBrain's own transient `listeners` Set is rebuilt from
+   *  scratch each time. `attach()`/`detachTransport()` own this bookkeeping; the spawner reads it on every
+   *  (re)spawn to restore every genuinely attached transport, not just drill-in taps (name kept as
+   *  `sessionTaps` — that is what brainService.ts wires into the spawner). Re-keyed by `retarget()`. */
   readonly sessionTaps = new Map<string, Set<(e: BrainEvent) => void>>();
+
+  /** Register a listener under its session's persistent ownership record — see `sessionTaps`. */
+  private trackSessionListener(sessionId: string, listener: ClientListener): void {
+    let set = this.sessionTaps.get(sessionId);
+    if (!set) { set = new Set(); this.sessionTaps.set(sessionId, set); }
+    set.add(listener);
+  }
 
   /** How many live client streams are currently attached to this session (web dock subscriptions +
    *  CLI session taps). 0 = no client is following the conversation right now. */
@@ -184,6 +195,7 @@ export class ClientAttachments {
     this.pruneDetached();
     if (!clientId) {
       this.clientStreams.set(listener, sessionId);
+      this.trackSessionListener(sessionId, listener);
       return true;
     }
     const key = this.stableKey(userId, clientId);
@@ -202,6 +214,7 @@ export class ClientAttachments {
     }
     if (previous?.listener && previous.listener !== listener) previous.detach?.();
     this.clientStreams.set(listener, sessionId);
+    this.trackSessionListener(sessionId, listener);
     this.stableClients.delete(key); // refresh insertion order on reconnect
     this.stableClients.set(key, {
       userId, sessionId, listener, detach,
@@ -311,6 +324,11 @@ export class ClientAttachments {
    *  therefore still find the replacement id even when socket abort reached the daemon first. */
   detachTransport(listener: ClientListener): void {
     this.clientStreams.delete(listener);
+    // Own the removal here rather than making every call site reach into the map: rollover can re-key (or
+    // merge) the session bucket a listener started in, so scan every key instead of trusting a captured id.
+    for (const [id, set] of this.sessionTaps) {
+      if (set.delete(listener) && set.size === 0) this.sessionTaps.delete(id);
+    }
     const key = this.stableKeyByListener.get(listener);
     if (!key) return;
     this.stableKeyByListener.delete(listener);

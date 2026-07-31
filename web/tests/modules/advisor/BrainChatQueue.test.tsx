@@ -96,7 +96,7 @@ describe('BrainChat pending queue', () => {
     renderChat();
     // The stream connects after brainStart/history/status resolve.
     await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
-    const es = FakeES.instances[0]!;
+    const es = FakeES.instances[0];
 
     // A full-snapshot queue event → two pending chips with a "Queued" badge, no premature user bubbles.
     act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'check the logs' }, { id: 'q2', text: 'and the metrics' }] }));
@@ -106,7 +106,7 @@ describe('BrainChat pending queue', () => {
 
     // Clicking × on the first chip optimistically drops it AND DELETEs /brain/queue/q1.
     const removeButtons = screen.getAllByRole('button', { name: /Remove from queue|Odebrat z fronty/i });
-    act(() => fireEvent.click(removeButtons[0]!));
+    act(() => fireEvent.click(removeButtons[0]));
     await waitFor(() => expect(removed).toEqual(['q1']));
     expect(screen.queryByText('check the logs')).toBeNull(); // optimistic removal
     expect(screen.getByText('and the metrics')).toBeTruthy();
@@ -116,10 +116,95 @@ describe('BrainChat pending queue', () => {
     await waitFor(() => expect(screen.queryByText('and the metrics')).toBeNull());
   });
 
+  /** A DELETE that hangs until the test releases it, then fails — the window where the UI moves on. */
+  function gateQueueRemove(): () => void {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.delete('*/api/brain/queue/:id', async ({ params }) => {
+      removed.push(String(params['id']));
+      await held;
+      return HttpResponse.json({ error: 'queue gone' }, { status: 500 });
+    }));
+    return release;
+  }
+
+  it('does not resurrect a queue item when the DELETE fails after a session switch', async () => {
+    const release = gateQueueRemove();
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
+    const es = FakeES.instances[0];
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'check the logs' }] }));
+    expect(await screen.findByText('check the logs')).toBeTruthy();
+
+    act(() => fireEvent.click(screen.getByRole('button', { name: /Remove from queue|Odebrat z fronty/i })));
+    await waitFor(() => expect(removed).toEqual(['q1']));
+
+    // Switch to another conversation whose queue has its OWN positional q1 — the id the failing DELETE names.
+    server.use(
+      http.post('*/api/brain/start', () => HttpResponse.json({ sessionId: 'brain-2' }, { status: 201 })),
+      http.get('*/api/brain/status', () => HttpResponse.json({ running: true, sessionId: 'brain-2', model: 'm', usage: null, statusline: null, cards: [], queued: [{ id: 'q1', text: 'other conversation item' }] })),
+    );
+    await act(async () => { openBrainSession('brain-2', true); });
+    expect(await screen.findByText('other conversation item')).toBeTruthy();
+
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 50)); });
+
+    // The late failure belongs to the previous conversation: no ghost chip, no toast about an invisible queue.
+    expect(screen.queryByText('check the logs')).toBeNull();
+    expect(screen.getByText('other conversation item')).toBeTruthy();
+    expect(screen.queryByText(/not removed|nepodařilo odebrat|nepodarilo odobrať/i)).toBeNull();
+  });
+
+  it('leaves a newer server queue snapshot alone when the DELETE fails afterwards', async () => {
+    const release = gateQueueRemove();
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
+    const es = FakeES.instances[0];
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'check the logs' }, { id: 'q2', text: 'and the metrics' }] }));
+    expect(await screen.findByText('check the logs')).toBeTruthy();
+
+    act(() => fireEvent.click(screen.getAllByRole('button', { name: /Remove from queue|Odebrat z fronty/i })[0]));
+    await waitFor(() => expect(removed).toEqual(['q1']));
+
+    // The server speaks after the request was sent but before it fails: this list is the authoritative truth.
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'drained and refilled' }] }));
+    expect(await screen.findByText('drained and refilled')).toBeTruthy();
+
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 50)); });
+
+    // The failure is reported, but the snapshot stands — no stale item spliced back into it.
+    expect(await screen.findByText(/not removed|nepodařilo odebrat|nepodarilo odobrať/i)).toBeTruthy();
+    expect(screen.queryByText('check the logs')).toBeNull();
+    expect(screen.getByText('drained and refilled')).toBeTruthy();
+  });
+
+  it('restores the queue in its own order when two overlapping removes both fail', async () => {
+    // The queue order is the order the agent is fed in, so a failed remove must put the item back exactly
+    // where it was — including when a second remove is already in flight over the shortened list.
+    const release = gateQueueRemove();
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
+    const es = FakeES.instances[0];
+    act(() => es.emit({ type: 'queue', items: [{ id: 'q1', text: 'first' }, { id: 'q2', text: 'second' }, { id: 'q3', text: 'third' }] }));
+    expect(await screen.findByText('first')).toBeTruthy();
+
+    const removeButtons = () => screen.getAllByRole('button', { name: /Remove from queue|Odebrat z fronty/i });
+    const queueTexts = () => removeButtons().map((button) => button.previousElementSibling?.textContent ?? '');
+
+    act(() => fireEvent.click(removeButtons()[1])); // the middle item
+    await waitFor(() => expect(removed).toEqual(['q2']));
+    act(() => fireEvent.click(removeButtons()[1])); // the last one — same position in the shortened list
+    await waitFor(() => expect(removed).toEqual(['q2', 'q3']));
+
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 50)); });
+
+    expect(queueTexts()).toEqual(['first', 'second', 'third']);
+  });
+
   it('folds a `user` delivery event into a you-turn bubble', async () => {
     renderChat();
     await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
-    const es = FakeES.instances[0]!;
+    const es = FakeES.instances[0];
     act(() => es.emit({ type: 'user', text: 'combined queued delivery' }));
     expect(await screen.findByText('combined queued delivery')).toBeTruthy();
   });
@@ -129,13 +214,12 @@ describe('BrainChat pending queue', () => {
     server.use(http.post('*/api/brain/send', async ({ request }) => { sent = (await request.json()) as { text?: string }; return HttpResponse.json({ ok: true }); }));
     renderChat();
     await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
-    const es = FakeES.instances[0]!;
+    const es = FakeES.instances[0];
     const textarea = screen.getByRole('textbox');
     act(() => fireEvent.change(textarea, { target: { value: 'hello there' } }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Send|Odeslat/i })); });
     // The send POSTed the message, but the composer did NOT push an optimistic 'you' bubble.
-    await waitFor(() => expect(sent).toBeTruthy());
-    expect(sent!.text).toBe('hello there');
+    await waitFor(() => expect(sent).toMatchObject({ text: 'hello there' }));
     expect(screen.queryByText('hello there')).toBeNull();
     // The daemon's authoritative `user` event is what renders the 'you' turn — exactly once, no dupe.
     act(() => es.emit({ type: 'user', text: 'hello there' }));

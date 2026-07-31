@@ -28,8 +28,8 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
       invalidate();
     };
 
-    const taskHandler = makeHandler(() => { qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks }); qc.invalidateQueries({ queryKey: ['mission'] }); qc.invalidateQueries({ queryKey: ['activity'] }); });
-    const missionHandler = makeHandler(() => { qc.invalidateQueries({ queryKey: QUERY_KEYS.missions }); qc.invalidateQueries({ queryKey: ['mission'] }); qc.invalidateQueries({ queryKey: ['activity'] }); });
+    const taskHandler = makeHandler(() => { qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks }); qc.invalidateQueries({ queryKey: ['activity'] }); });
+    const missionHandler = makeHandler(() => { qc.invalidateQueries({ queryKey: QUERY_KEYS.missions }); qc.invalidateQueries({ queryKey: ['activity'] }); });
     const signalHandler = (e: MessageEvent) => {
       let data: { session?: string; signal?: DerivedSignal };
       try { data = JSON.parse(e.data); } catch { return; } // skip malformed, keep the stream alive
@@ -62,7 +62,6 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
       let data: ReviewEvent & { type?: string };
       try { data = JSON.parse(e.data); } catch { return; } // skip malformed, keep the stream alive
       qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks });
-      qc.invalidateQueries({ queryKey: ['mission'] });
       qc.invalidateQueries({ queryKey: QUERY_KEYS.missions });
       qc.invalidateQueries({ queryKey: ['activity'] });
       if (data.taskId) qc.invalidateQueries({ queryKey: ['task-activity', data.taskId] }); // the task's conversation feed
@@ -93,7 +92,6 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
       let data: { taskId?: string };
       try { data = JSON.parse(e.data); } catch { return; } // skip malformed, keep the stream alive
       qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks });
-      qc.invalidateQueries({ queryKey: ['mission-changed-files'] }); // the dashboard's live mission card
       if (data.taskId) {
         qc.invalidateQueries({ queryKey: ['task-commits', data.taskId] });
         qc.invalidateQueries({ queryKey: ['task-commit-diff', data.taskId] });

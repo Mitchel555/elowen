@@ -70,7 +70,12 @@ export class MissionGit {
     if (!project) { log.warn(`PR mode: no project for mission ${missionId} — skipping worktree`); return; }
     const slug = sanitize(project.slug);
     const branch = `elowen/${slug}-${sanitize(epicId)}`;
-    const dir = join(dirname(project.path), '.elowen-worktrees', `${slug}-${missionId}`);
+    // `missionId` is `m-${epicId}` and the epic id can be client-chosen, so it is sanitized before it
+    // becomes a path segment: an id carrying `../` would otherwise escape .elowen-worktrees entirely,
+    // and the cleanup path removes this directory with `git worktree remove --force`. sanitize() is a
+    // no-op for generated ids (shortId emits only [a-z0-9-]), so existing layouts are unaffected — and
+    // provisioned worktrees are read back from the `prs` row, never recomputed from the id.
+    const dir = join(dirname(project.path), '.elowen-worktrees', `${slug}-${sanitize(missionId)}`);
     try {
       const base = await detectBaseBranch(project.path, this.d.config.get().autopilot.prBaseBranch);
       await createMissionWorktree(project.path, branch, base, dir);
@@ -90,15 +95,17 @@ export class MissionGit {
   /** Commit a finished phase's work so the per-task change snapshot has a stable base..HEAD to diff.
    *  In PR-native mode this commits the mission's worktree; otherwise it commits the shared project
    *  checkout (`fallbackDir`) so non-PR missions still record each phase's delta. No-op (returns false)
-   *  when there's no target dir or the tree is clean. */
+   *  when there's no target dir or the tree is clean. A git failure THROWS: reporting it as `false` made
+   *  it indistinguishable from a clean tree, so the caller went on to freeze a change snapshot (and the
+   *  mission later pushed a branch) that silently missed the phase's work. */
   async commitPhase(missionId: string, phaseTitle: string, fallbackDir?: string): Promise<boolean> {
     const dir = this.worktreeFor(missionId) ?? (this.prEnabled(missionId) ? null : fallbackDir ?? null);
     if (!dir) return false;
     try {
       return await commitAll(dir, phaseTitle);
     } catch (e) {
-      log.error(`phase commit failed for mission ${missionId}`, e);
-      return false;
+      log.error(`phase commit failed for mission ${missionId} in ${dir}`, e);
+      throw e;
     }
   }
 

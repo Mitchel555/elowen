@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { emptyView, fromHistory, fromSnapshot, groupToolItems, prependHistory, reduce } from '../../lib/transcript';
+import { emptyView, fromHistory, fromSnapshot, groupToolItems, prependHistory, reduce, submittedPlan } from '../../lib/transcript';
 import type { ToolItem } from '../../lib/transcript';
 
 describe('web fromSnapshot: a reconnect frame rebuilds the whole transcript', () => {
@@ -262,6 +262,27 @@ describe('web transcript reducer', () => {
     expect(view.turns.at(-1)).toEqual({ role: 'you', text: 'queued follow-up' });
   });
 
+  // Esc/Stop before the turn produced output: the daemon deletes the row and sends discard_user; the fold
+  // pulls the matching you-bubble by durableId and stops the spinner. Composer restore is the provider's job.
+  it('discards the trailing you-turn on discard_user, by durableId', () => {
+    let view = reduce(emptyView(), { type: 'user', text: 'cancel before the reply', durableId: 'dur-1' });
+    expect(view.turns.at(-1)).toEqual({ role: 'you', text: 'cancel before the reply', id: 'dur-1' });
+    expect(view.thinking).toBe(true);
+    view = reduce(view, { type: 'discard_user', durableId: 'dur-1', text: 'cancel before the reply' });
+    expect(view.turns).toEqual([]);
+    expect(view.thinking).toBe(false);
+  });
+
+  it('leaves a you-turn AND its spinner in place when discard_user names a different turn', () => {
+    let view = reduce(emptyView(), { type: 'user', text: 'kept', durableId: 'dur-1' });
+    expect(view.thinking).toBe(true);
+    view = reduce(view, { type: 'discard_user', durableId: 'other-id', text: 'kept' });
+    expect(view.turns.some((t) => t.role === 'you' && t.id === 'dur-1')).toBe(true);
+    // A no-match must NOT settle the spinner: a duplicate discard (double Esc) would otherwise kill the
+    // spinner of a turn the user has meanwhile resent.
+    expect(view.thinking).toBe(true);
+  });
+
   it('rehydrates durable child state and patches done after parent idle without a new spinner turn', () => {
     let view = fromHistory([{ role: 'assistant', text: '', segments: [{
       kind: 'tool', id: 'delegate-1', name: 'Delegate', detail: 'inspect',
@@ -290,5 +311,36 @@ describe('web transcript reducer', () => {
     });
     expect(after).toBe(before);
     expect(after.thinking).toBe(false);
+  });
+});
+
+describe('web transcript submittedPlan: the plan waiting on a decision', () => {
+  const planTurn = { id: 'm2', role: 'assistant' as const, text: '', segments: [{ kind: 'tool' as const, name: 'ExitPlanMode', id: 'call-1', plan: '# Ship it' }] };
+
+  it('reports the plan of the newest assistant turn with its call id', () => {
+    expect(submittedPlan(fromHistory([{ id: 'm1', role: 'user', text: 'plan it' }, planTurn]).turns))
+      .toEqual({ id: 'call-1', plan: '# Ship it' });
+  });
+
+  // The regression this pins: a model/mode marker (or a compaction divider) landing after the plan is not
+  // the conversation moving on, and disqualifying the tail on it lost the decision entirely.
+  it('is not hidden by a trailing session-event or compaction row', () => {
+    const withEvent = fromHistory([planTurn, { id: 'e1', role: 'event', text: '', kind: 'mode', detail: 'plan' }]);
+    expect(submittedPlan(withEvent.turns)).toEqual({ id: 'call-1', plan: '# Ship it' });
+    const withDivider = fromHistory([planTurn, { id: 'c1', role: 'compaction', text: '' }]);
+    expect(submittedPlan(withDivider.turns)).toEqual({ id: 'call-1', plan: '# Ship it' });
+  });
+
+  it('answers null once a newer user turn or a plan-less answer moved the conversation on', () => {
+    expect(submittedPlan(fromHistory([planTurn, { id: 'm3', role: 'user', text: 'do it' }]).turns)).toBeNull();
+    expect(submittedPlan(fromHistory([planTurn, { id: 'm4', role: 'assistant', text: 'done' }]).turns)).toBeNull();
+    expect(submittedPlan(emptyView().turns)).toBeNull();
+  });
+
+  it('follows the live tool_end frame that carries the plan', () => {
+    let view = reduce(emptyView(), { type: 'tool', name: 'ExitPlanMode', id: 'call-9' });
+    expect(submittedPlan(view.turns)).toBeNull();
+    view = reduce(view, { type: 'tool_end', id: 'call-9', plan: '# Live plan' });
+    expect(submittedPlan(view.turns)).toEqual({ id: 'call-9', plan: '# Live plan' });
   });
 });

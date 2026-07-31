@@ -80,6 +80,8 @@ describe('resolveDelegateTools', () => {
 describe('delegate — the access handed to the child', () => {
   let reg: PluginRegistry;
   let seen: { access?: Record<string, unknown> };
+  /** What the stand-in child answers. Mutable so one test can hand back an oversized report. */
+  let childReply = 'child done';
 
   beforeAll(async () => {
     reg = await loadPlugins({
@@ -91,7 +93,7 @@ describe('delegate — the access handed to the child', () => {
     const platform = reg.platforms.find((p) => p.name === 'subagent')!;
     platform.listen(async (src: { access?: Record<string, unknown> }) => {
       seen.access = src.access;
-      return 'child done';
+      return childReply;
     });
   });
 
@@ -222,5 +224,23 @@ describe('delegate — the access handed to the child', () => {
     const res = await delegate({ task: 'go', subagent_type: 'nope' });
     expect(res.content[0].text).toMatch(/unknown subagent_type "nope"/);
     expect(seen.access).toBeUndefined();
+  });
+
+  // The incident this exists for: a delegated report reached its parent cut short and the conclusion — the
+  // last paragraph, the only part that mattered — was what got destroyed. Over the stored ceiling the parent
+  // must receive the END of the report, and be told plainly how to page the rest back out of the database.
+  it('returns the END of an over-long child report, with the note that names DelegateRead', async () => {
+    const conclusion = 'CONCLUSION: the retry backoff is the root cause.';
+    childReply = `OPENING: how I looked.\n${'x'.repeat(120_000)}\n${conclusion}`;
+    try {
+      const text = (await delegate({ task: 'write a very long report' })).content[0].text;
+      expect(text.endsWith(conclusion)).toBe(true);
+      expect(childReply.endsWith(text.replace(/^\[truncated:[^\]]*\]\n/, ''))).toBe(true);
+      expect(text).not.toContain('OPENING: how I looked.');
+      expect(text).toMatch(/^\[truncated: first \d+ chars dropped, end kept — read it in full with DelegateRead\]\n/);
+      expect(text.length).toBeLessThanOrEqual(100_000);
+    } finally {
+      childReply = 'child done';
+    }
   });
 });

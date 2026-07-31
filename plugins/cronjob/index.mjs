@@ -4,10 +4,11 @@
 // because only an admin session can create jobs in the first place.
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
+import { runtimeFooter } from '../_shared/format.mjs';
+import { readJsonSafe, writeJsonAtomic } from '../_shared/atomicJson.mjs';
 
 // `exec` runs the command through the PLATFORM default shell (/bin/sh -c on POSIX, cmd.exe /d /s /c on
 // Windows), so a job's check collector works cross-platform — hardcoding /bin/sh broke every cron on
@@ -23,12 +24,24 @@ const CHECK_MAX_BUFFER = 1024 * 1024; // 1 MB of stdout is plenty of "what's new
 const DEFAULT_CHECK_OUTPUT_CHARS = 32_000;
 const DEFAULT_CRON_TURN_ATTEMPTS = 2; // one retry on a request-time failure (a transient relay/gateway/network blip)
 const DEFAULT_CRON_RETRY_BACKOFF_MS = 3_000; // brief pause before the retry so the transient condition can clear
+// How many undelivered results may wait for a retry at once. A delivery sink that is down for good (a
+// revoked bot token, a deleted channel) must not grow this file forever — past the cap, the OLDEST
+// pending delivery is dropped (and logged) to make room for the next one.
+const MAX_PENDING_DELIVERIES = 50;
+// How long an adapter generation owns a pending delivery it is sending (see DeliveryStore.claim). The
+// lease EXPIRES because the holder can die mid-send — a daemon crash would otherwise leave the result
+// claimed forever and never delivered. It is deliberately long relative to a send: re-delivering after a
+// falsely expired lease is exactly the duplicate the claim exists to prevent.
+const DELIVERY_LEASE_MS = 5 * 60_000;
 // The per-turn idle rollover forwarded to the host as access.sessionIdleMs. It is OPT-IN, not defaulted:
 // leaving the config key unset means the job's channel session rolls over under the host's own shared
 // default (SESSION_IDLE_ROLLOVER_MS, Discord's 30 min) — the same as every other channel — so an
 // existing recurring job never silently loses its cross-run context after an upgrade. See resolveSessionIdleMs.
 const SESSION_IDLE_MIN_MS = 60_000; // an explicit value is clamped UP to a 1-min floor; there is no upper clamp
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Identifier for a job, a pending delivery or an adapter generation — short, sortable-ish, collision-free
+ *  enough for records that live in one small JSON file. */
+const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 /** Read a number config field, falling back to `def` when unset/invalid, then clamp to [min, max]. */
 const clampConfig = (value, def, min, max) => Math.min(Math.max(Number(value) || def, min), max);
@@ -140,17 +153,9 @@ export async function runCheck(command, logger, timeoutMs = DEFAULT_CHECK_TIMEOU
 const ok = (text) => ({ content: [{ type: 'text', text }], details: {} });
 const fail = (e) => ok(`Error: ${e instanceof Error ? e.message : String(e)}`);
 
-/** Runtime footer for a delivered cron result — `-# model · 42 %` (Discord subtext), built from the
- *  turn's idle event (model id + context fill). Empty when the turn reported no usable numbers. Mirrors
- *  the streaming reply's footer in the discord plugin so proactive cron pushes read the same. */
-export function cronFooter(idle) {
-  const parts = [];
-  const model = typeof idle?.model === 'string' ? idle.model.split('/').pop() : '';
-  if (model) parts.push(model);
-  const pct = idle?.usage?.percent;
-  if (typeof pct === 'number' && pct >= 0) parts.push(`${Math.round(pct)} %`);
-  return parts.length ? `-# ${parts.join(' · ')}` : '';
-}
+/** The subtext markup a delivered cron result's runtime footer is wrapped in. Cron pushes land on the
+ *  notification channel (Discord), so it is Discord's own subtext fence — see plugins/discord/lib/format.mjs. */
+const FOOTER_FENCE = { open: '-# ', close: '' };
 
 /** Resolve a one-shot spec — "in 20s", "in 20m", "in 2h", "at 18:30" (today, or tomorrow when past) —
  *  to an absolute run time in ms, relative to `now`. "at HH:MM" is the USER's wall clock, so it resolves in
@@ -380,8 +385,15 @@ class CronAdapter {
   // multiplying every cron echo into dozens of Discord messages.
   // `timezone` is a LIVE getter, not a captured string: the operator can change the zone in Settings and
   // the very next tick must schedule against it, without a plugin reload.
-  constructor(store, logger, deliver, config = {}, timezone = systemZone) {
-    this.store = store; this.log = logger; this.deliver = deliver; this.handler = null; this.running = false;
+  constructor(store, deliveryStore, logger, deliver, config = {}, timezone = systemZone) {
+    this.store = store; this.deliveryStore = deliveryStore; this.log = logger; this.deliver = deliver;
+    this.handler = null; this.running = false;
+    // Set by disconnect(): this adapter generation has been torn down (a plugin reload) and must not
+    // start any further work — see disconnect() and the tick loop.
+    this.stopped = false;
+    // Identifies THIS adapter generation as the holder of a pending-delivery lease, so a generation only
+    // ever releases a lease it still owns — see attemptDelivery and DeliveryStore.claim.
+    this.deliveryOwner = newId();
     this.timezone = timezone;
     // Scheduler limits, resolved once from plugin config (see orca-plugin.json's "Scheduler" section) and
     // clamped to sane bounds — unset config reproduces the previous hardcoded defaults exactly.
@@ -399,30 +411,36 @@ class CronAdapter {
   async connect() {
     this.timer = setInterval(() => void this.tick().catch((e) => this.log.error(`tick failed: ${e?.message ?? e}`)), this.tickMs);
   }
-  disconnect() { clearInterval(this.timer); }
+  // Clearing the interval only stops FUTURE ticks — a tick already in flight is parked on a (slow) brain
+  // turn and would happily carry on running the rest of its due jobs long after the host replaced this
+  // adapter with a fresh one built from the reloaded registry. That orphan generation writes to the same
+  // jobs.json and delivers through the same sink as its replacement, so it is marked stopped here: the
+  // tick loop finishes delivering the result it already paid for, then abandons the remaining jobs to the
+  // live adapter. Synchronous on purpose — the host's stopAll() cannot await, and a reload must not block
+  // for the minutes an LLM turn can take.
+  disconnect() { this.stopped = true; clearInterval(this.timer); }
   async send() { /* cron has no outbound channel; results land in the job's conversation */ }
 
   async tick() {
     // One tick at a time. Jobs run sequentially and each is a (slow) LLM turn, so a due-cluster — e.g. the
     // morning batch of daily reports — can exceed the 30s interval; without this guard the next interval
     // overlaps, double-fires a job and hammers the relay with concurrent turns (a source of transient 400s).
-    if (!this.handler || this.running) return;
+    if (!this.handler || this.running || this.stopped) return;
     this.running = true;
     try {
+    // Retry any result a previous tick prepared but failed to deliver — a re-send only, never a re-run
+    // of the (expensive, possibly side-effecting) model turn that produced it.
+    await this.flushPendingDeliveries();
     const now = Date.now();
     const tz = this.timezone();
-    for (const job of this.store.all()) {
-      const slot = dueSlot(job, now, tz);
-      if (slot === null) continue;
-      // One-shot (runAt) jobs are consumed at fire time: remove BEFORE the (long) turn so a daemon crash
-      // mid-run can't strand a zombie — a job left with lastRun set but never deleted would neither re-fire
-      // (isDue for runAt needs `!lastRun`) nor ever get cleaned up. Deletion IS the dedup, so at-most-once
-      // holds even if the turn crashes (a wake-up that starts running is spent — acceptable). Recurring
-      // jobs still stamp lastRun before running so a slow turn doesn't re-fire them next tick; they must
-      // fire again on their next natural slot. `lastSlot` records WHICH wall-clock slot that was, so the
-      // repeated hour of an autumn DST change cannot run the same 02:30 twice.
-      if (job.runAt) this.store.save(this.store.all().filter((j) => j.id !== job.id));
-      else this.store.patch(job.id, { lastRun: new Date(now).toISOString(), lastSlot: slot });
+    for (const snapshot of this.store.all()) {
+      // Torn down mid-tick (plugin reload): the job just delivered is settled, so hand the rest over to
+      // the adapter that replaced us instead of running them from a generation the host has dropped.
+      if (this.stopped) break;
+      // Cheap pre-filter on the snapshot — claiming re-reads the file, so only pay that for a due job.
+      if (dueSlot(snapshot, now, tz) === null) continue;
+      const job = this.claimDueJob(snapshot.id, now, tz);
+      if (!job) continue;
       // Cheap guard gate: if the job has a `check` command, run it FIRST (no LLM). Only spend a brain
       // turn when the guard surfaces fresh work — an "every 5m" poll that finds nothing costs a shell
       // exec, not a model call. The guard's output is fed into the turn so the brain acts on real data.
@@ -513,7 +531,7 @@ class CronAdapter {
       // Echo the outcome to the notification channel (Discord) so it reaches the user proactively.
       // A job with nothing to say answers with a quiet marker (isQuietReply) and stays silent.
       if (trimmed && !isQuietReply(trimmed)) {
-        const footer = cronFooter(idle);
+        const footer = runtimeFooter(idle, FOOTER_FENCE);
         // `plain` jobs deliver the reply as-is (persona messages in a dedicated channel don't want
         // the "⏰ job name" banner); the footer subtext stays — it matches streamed replies.
         const header = job.plain ? '' : `⏰ **${job.name}**\n`;
@@ -521,27 +539,177 @@ class CronAdapter {
         // (Discord splits on line boundaries), so a long report — e.g. a 60-item debtor list —
         // arrives complete across several messages instead of being clipped mid-list.
         const body = `${header}${String(reply)}${footer ? `\n\n${footer}` : ''}`;
-        await this.deliver(body, job.notifyChannelId).catch(() => {});
+        await this.deliverOrQueue(job, body);
       }
     }
     } finally {
       this.running = false;
     }
   }
+
+  /** Take ownership of job `id`'s due slot and return the FRESH record to run, or null when it is no
+   *  longer due (another tick already claimed it), or gone.
+   *
+   *  The check is re-done against the CURRENT persisted state rather than the snapshot the tick started
+   *  from, because that snapshot goes stale the moment a job's turn is awaited: a torn-down adapter
+   *  generation parked on a slow turn — and the fresh one the host started in its place after a plugin
+   *  reload — read and stamp the same jobs.json, and the in-memory `running` guard only covers one of
+   *  them. Read-check-write runs synchronously here, so the two can never both win a slot and double-fire
+   *  the job.
+   *
+   *  One-shot (runAt) jobs are consumed by deletion BEFORE the (long) turn so a daemon crash mid-run can't
+   *  strand a zombie — a job left with lastRun set but never deleted would neither re-fire (isDue for
+   *  runAt needs `!lastRun`) nor ever get cleaned up. Deletion IS the dedup, so at-most-once holds even if
+   *  the turn crashes (a wake-up that starts running is spent — acceptable). Recurring jobs stamp lastRun
+   *  so a slow turn doesn't re-fire them next tick; they fire again on their next natural slot. `lastSlot`
+   *  records WHICH wall-clock slot that was, so the repeated hour of an autumn DST change cannot run the
+   *  same 02:30 twice. */
+  claimDueJob(id, now, tz) {
+    const jobs = this.store.all();
+    const job = jobs.find((j) => j.id === id);
+    if (!job) return null;
+    const slot = dueSlot(job, now, tz);
+    if (slot === null) return null;
+    if (job.runAt) this.store.save(jobs.filter((j) => j.id !== job.id));
+    else this.store.patch(job.id, { lastRun: new Date(now).toISOString(), lastSlot: slot });
+    return job;
+  }
+
+  /** Persist the prepared payload as a PENDING delivery before attempting to send it — so a delivery
+   *  failure never loses a result the model already produced (and, for a one-shot job, already paid the
+   *  turn for). The pending record survives independently of the job: a one-shot's own row is gone by the
+   *  time this runs (consumed before the turn, see the tick loop), so the record here is the only place
+   *  left holding the result until it is actually delivered. */
+  async deliverOrQueue(job, body) {
+    const entry = {
+      id: newId(),
+      jobId: job.id, jobName: job.name, channelId: job.notifyChannelId, body, createdAt: new Date().toISOString(),
+    };
+    this.deliveryStore.add(entry);
+    await this.attemptDelivery(entry);
+  }
+
+  /** Send one pending delivery, after claiming it so no other adapter generation sends the same result
+   *  while this send is in flight (see DeliveryStore.claim). On success it is removed from the store; on
+   *  failure the lease is released and it is LOGGED, left in place for the next tick's
+   *  {@link flushPendingDeliveries} — never silently dropped. */
+  async attemptDelivery(entry) {
+    const claimed = this.deliveryStore.claim(entry.id, this.deliveryOwner, Date.now());
+    if (!claimed) return; // another generation is delivering it right now
+    try {
+      await this.deliver(claimed.body, claimed.channelId);
+      this.deliveryStore.remove(claimed.id);
+    } catch (e) {
+      this.deliveryStore.release(claimed.id, this.deliveryOwner);
+      this.log.error(`cron delivery failed for job ${claimed.jobId} (${claimed.jobName}) — will retry next tick: ${e?.message ?? e}`);
+    }
+  }
+
+  /** Re-attempt every delivery still pending from an earlier tick, oldest first. Each is a plain re-send
+   *  of the ALREADY-PRODUCED result — it never touches the model or the job's schedule. */
+  async flushPendingDeliveries() {
+    for (const entry of this.deliveryStore.all()) await this.attemptDelivery(entry);
+  }
 }
 
-class JobStore {
-  constructor(file) { this.file = file; }
-  all() {
-    try { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf-8')) : []; }
-    catch { return []; } // corrupted file → treat as empty, next write repairs it
+/** Parsing only proves the file was JSON, not that it holds what this plugin stores. A hand-edited or
+ *  half-migrated state file can be `{}` instead of an array, or an array with a null in it — and iterating
+ *  that threw inside the tick. Since the corruption is persistent, EVERY later tick failed the same way and
+ *  no job ran again. So the shape is validated here: well-formed entries are kept, the rest are dropped
+ *  with a log rather than allowed to take the scheduler down. */
+function validEntries(value, isValid, onInvalid) {
+  if (!Array.isArray(value)) {
+    onInvalid('the file does not contain a JSON array');
+    return [];
   }
-  save(jobs) { writeFileSync(this.file, JSON.stringify(jobs, null, 2)); }
+  return value.filter((entry, index) => {
+    if (isValid(entry)) return true;
+    onInvalid(`entry #${index} is malformed`);
+    return false;
+  });
+}
+
+/** A record this plugin can safely iterate, patch and filter — anything else is not one of ours. */
+const isRecord = (entry) => typeof entry === 'object' && entry !== null && !Array.isArray(entry) && typeof entry.id === 'string';
+
+class JobStore {
+  constructor(file, logger) { this.file = file; this.log = logger; }
+  all() {
+    const parsed = readJsonSafe(this.file, [], (e) =>
+      this.log?.error?.(`cron: corrupt jobs file ${this.file} — treating as empty: ${e?.message ?? e}`));
+    return validEntries(parsed, isRecord, (reason) =>
+      this.log?.error?.(`cron: skipping malformed job in ${this.file} — ${reason}`));
+  }
+  save(jobs) {
+    try { writeJsonAtomic(this.file, jobs); }
+    catch (e) { this.log?.error?.(`cron: failed to persist ${this.file}: ${e?.message ?? e}`); throw e; }
+  }
   patch(id, fields) { this.save(this.all().map((j) => (j.id === id ? { ...j, ...fields } : j))); }
 }
 
+/** Results a tick prepared to deliver but could not send yet — a separate file from jobs.json because a
+ *  one-shot job's own record is already gone (consumed before it ran) by the time delivery is attempted,
+ *  so the pending record here is the only surviving copy of that result until it lands. */
+class DeliveryStore {
+  constructor(file, logger) { this.file = file; this.log = logger; }
+  all() {
+    const parsed = readJsonSafe(this.file, [], (e) =>
+      this.log?.error?.(`cron: corrupt pending-deliveries file ${this.file} — treating as empty: ${e?.message ?? e}`));
+    // A pending entry is only useful if it still carries the text to deliver.
+    return validEntries(parsed, (entry) => isRecord(entry) && typeof entry.body === 'string', (reason) =>
+      this.log?.error?.(`cron: skipping malformed pending delivery in ${this.file} — ${reason}`));
+  }
+  save(entries) {
+    try { writeJsonAtomic(this.file, entries); }
+    catch (e) { this.log?.error?.(`cron: failed to persist ${this.file}: ${e?.message ?? e}`); throw e; }
+  }
+  add(entry) {
+    const entries = this.all();
+    entries.push(entry);
+    while (entries.length > MAX_PENDING_DELIVERIES) {
+      const dropped = entries.shift();
+      this.log?.error?.(`cron: pending delivery queue full — dropping oldest undelivered result for job ${dropped.jobId} (${dropped.jobName})`);
+    }
+    this.save(entries);
+  }
+  remove(id) {
+    const entries = this.all();
+    const next = entries.filter((e) => e.id !== id);
+    if (next.length !== entries.length) this.save(next);
+  }
+  /** Take exclusive ownership of entry `id` for `owner` and return the claimed record, or null when it is
+   *  gone or another owner holds an unexpired lease.
+   *
+   *  A pending delivery must be claimed before it is sent, for the same reason a due job is claimed before
+   *  it is run (see CronAdapter.claimDueJob): this file is shared with any other adapter generation, and a
+   *  plugin reload leaves the old one parked inside a slow deliver() with the entry still queued — the
+   *  replacement's flush would pick it up and send the very same result a second time. Read-check-write is
+   *  synchronous here, so the two can never both win the entry. */
+  claim(id, owner, now) {
+    const entries = this.all();
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) return null;
+    if (entry.leaseOwner && entry.leaseOwner !== owner && Number(entry.leaseUntil) > now) return null;
+    const claimed = { ...entry, leaseOwner: owner, leaseUntil: now + DELIVERY_LEASE_MS };
+    this.save(entries.map((e) => (e.id === id ? claimed : e)));
+    return claimed;
+  }
+  /** Drop `owner`'s lease so the next tick can retry the entry immediately instead of waiting the lease
+   *  out. A lease that has since been taken over by another owner is left alone. */
+  release(id, owner) {
+    const entries = this.all();
+    const entry = entries.find((e) => e.id === id);
+    if (!entry || entry.leaseOwner !== owner) return;
+    const free = { ...entry };
+    delete free.leaseOwner;
+    delete free.leaseUntil;
+    this.save(entries.map((e) => (e.id === id ? free : e)));
+  }
+}
+
 export function register(ctx) {
-  const store = new JobStore(join(ctx.dataDir(), 'jobs.json'));
+  const store = new JobStore(join(ctx.dataDir(), 'jobs.json'), ctx.logger);
+  const deliveryStore = new DeliveryStore(join(ctx.dataDir(), 'pending-deliveries.json'), ctx.logger);
   const adminOnly = () => { if (!ctx.isAdminSession()) throw new Error('cron jobs can only be managed from an admin session'); };
 
   ctx.registerTool(defineTool({
@@ -568,7 +736,7 @@ export function register(ctx) {
         adminOnly();
         if (!parseSchedule(p.schedule)) return ok('Error: invalid schedule — use "every 15m", "every 2h", "daily 07:30", "weekly sun 20:00", or a 5-field cron expression like "0 9 * * 1-5".');
         const jobs = store.all();
-        const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+        const id = newId();
         // "provider/model" → {provider, model}; a bare or malformed value is ignored (server default runs).
         const slash = typeof p.model === 'string' ? p.model.indexOf('/') : -1;
         const model = slash > 0 ? { provider: p.model.slice(0, slash), model: p.model.slice(slash + 1) } : undefined;
@@ -599,7 +767,7 @@ export function register(ctx) {
         const runAt = parseOneShot(p.when, Date.now(), ctx.timezone());
         if (!runAt) return ok('Error: invalid time — use "in 30s", "in 20m", "in 2h" or "at 18:30".');
         const jobs = store.all();
-        const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+        const id = newId();
         // A wake-up scheduled from a USER conversation records its origin: at fire time the host runs
         // the prompt as a bound send into that conversation, so the reply lands where it was asked for.
         // Channel/cron-originated schedules (session id `brain-ch-…`/`brain-task-…`, or no session at
@@ -659,6 +827,6 @@ export function register(ctx) {
       .map((j) => j.originSessionId),
   });
 
-  ctx.registerPlatform(new CronAdapter(store, ctx.logger, ctx.notify, ctx.config, () => ctx.timezone()));
+  ctx.registerPlatform(new CronAdapter(store, deliveryStore, ctx.logger, ctx.notify, ctx.config, () => ctx.timezone()));
   ctx.logger.info('cron tools + scheduler registered');
 }

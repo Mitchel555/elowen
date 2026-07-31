@@ -3,6 +3,7 @@ import { eventIcon } from '../timeline/eventMeta';
 import { useActivity } from '../../lib/queries';
 import { useTranslation } from '../../lib/i18n';
 import { parseTs, compactElapsed } from '../../lib/format';
+import { LoadingState } from '../../components/ui/states';
 import type { ActivityEvent } from '../../lib/types';
 import type { LocaleDict } from '../../lib/i18n/types';
 
@@ -50,7 +51,10 @@ function EventRow({ event, last }: { event: ActivityEvent; last: boolean }) {
 /** The journal's chronological spine: newest daemon activity first, without a card shell. */
 export function ActivityTile({ limit = 5 }: { limit?: number }) {
   const { t } = useTranslation();
-  const activity = useActivity();
+  // Fetch a little more than the tile shows: `signal` rows are dropped client-side, and asking for the
+  // exact limit could leave the spine short. The server-side default is 200 rows — far more than a
+  // five-row tile can use.
+  const activity = useActivity(undefined, limit * 2 + 2);
   const rows = (activity.data ?? []).filter((e) => e.type !== 'signal').slice(0, limit);
   return (
     <section aria-labelledby="dashboard-activity" className="px-1 py-6 @sm:px-3 @2xl:px-5">
@@ -60,7 +64,9 @@ export function ActivityTile({ limit = 5 }: { limit?: number }) {
           <span aria-hidden className="live-dot h-1.5 w-1.5 rounded-full bg-success" />{t.dashboard.live}
         </span>
       </header>
-      {rows.length === 0 ? (
+      {activity.isLoading ? (
+        <LoadingState />
+      ) : rows.length === 0 ? (
         <p className="py-5 text-sm text-text-muted">{t.dashboard.eventStreamEmpty}</p>
       ) : (
         <ol>{rows.map((e, index) => <EventRow key={e.id} event={e} last={index === rows.length - 1} />)}</ol>

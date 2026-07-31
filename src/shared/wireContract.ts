@@ -84,6 +84,16 @@ export type BrainSegment =
  *  model/mode/rename/cwd event) rather than an assistant/user turn. */
 export interface BrainMessageView { id?: string; role: string; text: string; segments?: BrainSegment[]; kind?: string; detail?: string }
 
+/** The mode a turn runs in: `build` (the default), `plan` (planning only, tools clamped) or `workflow`.
+ *  Part of the wire contract because a surface stamps it per send AND reads it back off the daemon: the
+ *  mode is otherwise per-client, so plan mode entered in one surface is invisible to every other. */
+export type BrainWorkMode = 'build' | 'plan' | 'workflow';
+
+/** A plan an `ExitPlanMode` call submitted that is still waiting on the user's implement/cancel decision.
+ *  `id` is the submitting tool call's id — the key a client dedupes on so one plan raises one decision;
+ *  it is absent only for a call PI minted no id for, where the plan text is the key instead. */
+export interface BrainPendingPlan { id?: string; plan: string }
+
 /** Which chat surface exposes a slash command. Part of the wire contract because `GET /brain/commands`
  *  serves the filtered list to every surface (CLI, web dock, platform bots). */
 export type SlashSurface = 'cli' | 'discord' | 'whatsapp' | 'telegram' | 'msteams' | 'web';
@@ -131,4 +141,11 @@ export interface BrainStreamControl {
   streaming: boolean;
   /** The question parked for this conversation, `null` when none is. */
   pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null;
+  /** Mode of the last turn the daemon ran for this conversation. The mode is stamped per send and kept
+   *  nowhere else, so this is the ONLY way a client learns that another surface put the conversation in
+   *  plan mode — without it a plan submitted from the CLI reaches a web tab as an ordinary tool call. */
+  workMode: BrainWorkMode;
+  /** The submitted plan awaiting an implement/cancel decision, `null` when none is. Explicit for the same
+   *  reason as `pendingAsk`: a set-only hydration could never clear a decision the daemon has moved past. */
+  pendingPlan: BrainPendingPlan | null;
 }

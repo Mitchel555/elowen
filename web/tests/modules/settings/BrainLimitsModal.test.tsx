@@ -25,6 +25,63 @@ function tooltipZ(tooltip: HTMLElement): number {
 describe('BrainLimitsModal', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
+  it('shows human units and writes canonical milliseconds and characters', () => {
+    const updates: Parameters<typeof BrainLimitsModal>[0]['onChange'] extends (next: infer T) => void ? T[] : never = [];
+    render(
+      <LanguageProvider>
+        <BrainLimitsModal limits={BRAIN_LIMIT_DEFAULTS} onChange={(update) => updates.push(update)} onClose={() => {}} />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByText('5 min')).toBeTruthy();
+    expect(screen.getByText('≈ 7.5k tokens')).toBeTruthy();
+    fireEvent.change(screen.getByRole('slider', { name: 'Question timeout' }), { target: { value: '10' } });
+    fireEvent.change(screen.getByRole('slider', { name: 'Tool output — tokens' }), { target: { value: '4000' } });
+
+    const durationUpdate = updates[0];
+    const sizeUpdate = updates[1];
+    if (!durationUpdate || !sizeUpdate) throw new Error('slider changes did not reach onChange');
+    expect(durationUpdate(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(600000);
+    expect(sizeUpdate(BRAIN_LIMIT_DEFAULTS).toolOutputMaxChars).toBe(16000);
+  });
+
+  it('keeps slider changes inside the canonical field bounds', () => {
+    const updates: Parameters<typeof BrainLimitsModal>[0]['onChange'] extends (next: infer T) => void ? T[] : never = [];
+    render(
+      <LanguageProvider>
+        <BrainLimitsModal limits={BRAIN_LIMIT_DEFAULTS} onChange={(update) => updates.push(update)} onClose={() => {}} />
+      </LanguageProvider>,
+    );
+    const timeout = screen.getByRole('slider', { name: 'Question timeout' }) as HTMLInputElement;
+    expect(timeout.min).toBe('0.5');
+    expect(timeout.max).toBe('360'); // 6 hours, in the slider's own unit (minutes)
+
+    fireEvent.change(timeout, { target: { value: '500' } }); // past the ceiling — must come back clamped
+
+    const update = updates[0];
+    if (!update) throw new Error('slider change did not reach onChange');
+    expect(update(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(21_600_000);
+  });
+
+  it('names the value actually in force on a field the daemon clamped', () => {
+    render(
+      <LanguageProvider>
+        <BrainLimitsModal
+          limits={{ ...BRAIN_LIMIT_DEFAULTS, memoryRecallCount: 9 }}
+          applied={{ memoryRecallCount: 6 }}
+          onChange={() => {}}
+          onClose={() => {}}
+        />
+      </LanguageProvider>,
+    );
+
+    // The row keeps showing what the operator set — the note is what stops that from being a lie.
+    expect(screen.getByText('9')).toBeTruthy();
+    expect(screen.getByText('Saved as 6 — the value you set was outside the allowed range.')).toBeTruthy();
+    // Every other row saved as asked, so none of them carries a note.
+    expect(screen.getAllByText(/^Saved as /)).toHaveLength(1);
+  });
+
   it('opens field help as a floating layer above the limits modal', () => {
     render(
       <LanguageProvider>

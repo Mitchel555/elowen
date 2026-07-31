@@ -45,56 +45,122 @@ export interface PermissionSettings {
 /** Tool names whose permission is decided in the `bash` pattern space, against `args.command`. */
 export const BASH_PERMISSION_TOOLS: ReadonlySet<string> = new Set(['Bash']);
 
-/** The read-only shell allow-list: commands that only ever inspect, never mutate. The single source of
- *  truth for "safe to run without asking" — feeding both the built-in defaults below and the full clamp
- *  in READ_ONLY_BASH_RULES, so every read-only context sees the same list. Module-private: callers take
- *  the assembled rules, never the bare patterns, so nobody can re-permit these without the re-denies. */
-const READ_ONLY_BASH_ALLOW: readonly string[] = [
+/** The non-destructive shell allow-list: commands that inspect, measure or transform data to stdout.
+ *  The single source of truth for "safe to run without asking" — feeding both the built-in defaults
+ *  below and the full clamp in NON_DESTRUCTIVE_BASH_RULES, so every gated context sees the same list.
+ *  Module-private: callers take the assembled rules, never the bare patterns, so nobody can re-permit
+ *  these without the claw-backs. */
+const NON_DESTRUCTIVE_BASH_ALLOW: readonly string[] = [
   // `git show` belongs with diff/log: reading a commit is the basic operation of reviewing one, and
-  // without it a read-only reviewer can only inspect the working tree and has to guess at history.
-  // Its write-capable flags (--output, --ext-diff, --extcmd) are clawed back below like the others'.
-  'git status*', 'git diff*', 'git log*', 'git show*', 'ls', 'ls *', 'pwd', 'cat *', 'grep *', 'which *',
+  // without it a reviewer can only inspect the working tree and has to guess at history.
+  'git status*', 'git diff*', 'git log*', 'git show*',
+  'ls', 'ls *', 'pwd', 'cat *', 'grep *', 'which *',
+  'head *', 'tail *', 'wc *', 'find *', 'sed *', 'awk *', 'jq *',
+  'du *', 'df', 'df *', 'stat *', 'file *', 'diff *', 'sort *', 'uniq *',
+  'date', 'date *', 'basename *', 'dirname *', 'realpath *',
+  // Bare `env` only: it prints the environment. `env CMD` EXECUTES CMD (env is a wrapper — see
+  // BASH_COMMAND_WRAPPERS), so an `env *` pattern would allow-list every command on the system.
+  'env',
+  // Search and listing. Same shape as grep/find above — they read the tree and print to stdout.
+  'rg *', 'fd *', 'tree', 'tree *', 'nl *', 'cut *', 'tr *', 'column *', 'comm *', 'paste *',
+  'xxd *', 'od *', 'strings *', 'base64 *', 'readlink *', 'seq *', 'echo *', 'printf *',
+  'md5sum *', 'sha1sum *', 'sha256sum *', 'cksum *',
+  // Host and process facts. Read-only introspection an agent needs to describe the machine it is on.
+  'ps', 'ps *', 'pgrep *', 'free', 'free *', 'uptime', 'whoami', 'id', 'id *', 'groups', 'groups *',
+  'hostname', 'uname', 'uname *', 'nproc', 'arch', 'lsblk', 'lsblk *', 'lsof *', 'ss *', 'netstat *',
+  'printenv', 'printenv *', 'locale', 'locale *', 'getconf *', 'whereis *', 'command -v *', 'type *',
+  // Read-only git plumbing beyond status/diff/log/show. `git branch` is bare-only — `git branch -D`
+  // deletes, and unlike the claw-backs below that is a subcommand flag, not an exec escape.
+  'git blame*', 'git branch', 'git rev-parse*', 'git ls-files*', 'git ls-tree*', 'git cat-file*',
+  'git describe*', 'git shortlog*', 'git show-ref*', 'git merge-base*', 'git name-rev*',
+  'git symbolic-ref*', 'git reflog*', 'git stash list*', 'git remote', 'git remote -v',
+  'git config --get*', 'git config --list*',
+  // Service and log inspection: the read-only systemctl verbs, spelled out rather than `systemctl *`,
+  // which would admit start/stop/restart/disable. journalctl reads, but see the --vacuum/--rotate
+  // claw-backs — those delete history.
+  'systemctl status*', 'systemctl is-active*', 'systemctl is-enabled*', 'systemctl is-failed*',
+  'systemctl show*', 'systemctl cat*', 'systemctl list-units*', 'systemctl list-timers*',
+  'systemctl list-sockets*', 'journalctl*',
+  // Loopback HTTP only, so an agent can probe a service it just described. The host must be local:
+  // curl is the exfiltration path, and a pattern like `curl *` would hand it every URL on the
+  // internet. Mutating verbs and request bodies are clawed back below.
+  'curl*http://127.0.0.1*', 'curl*http://localhost*', 'curl*http://[::1]*',
+  // Verification scripts BY NAME. `npm run *` would be `npm run deploy` too — the script body is
+  // arbitrary and lives in the repo, so the boundary can only trust the conventional names for
+  // "check the code without changing anything".
+  'npm test*', 'npm run lint*', 'npm run typecheck*', 'npm run check*', 'npm run test*',
+  'npx tsc*', 'npx vitest run*', 'npx eslint*', 'npx prettier --check*',
 ];
 
-/** The full shell clamp for a context that must not mutate: deny every command, re-permit only the
- *  read-only allow-list above, then claw back the ways an otherwise-allowed command can still write or
- *  execute. Order is load-bearing (last-match-wins). The re-denies, and why each is needed:
- *   - `*>*` — an output redirection (`>` / `>>`) is a write; `cat x > victim` would otherwise ride the
- *     `cat *` allow (the `>` is not a command separator, so it stays in the same segment);
+/** The ways an allow-listed command can still run an ARBITRARY PROGRAM or destroy data — re-denied
+ *  after the allows wherever the allow-list is assembled (last-match-wins). Deliberately NOT about
+ *  file writes: redirection and `--output` are permitted now (see NON_DESTRUCTIVE_BASH_RULES), so a
+ *  write-blocking deny here would only pretend the boundary is tighter than it is.
  *   - `git difftool*` / `git mergetool*` and `*--ext-diff*` / `*--extcmd*` / `*GIT_EXTERNAL_DIFF*` — every
  *     path by which git runs an arbitrary external command, which the broad `git diff*` allow would admit;
- *   - `*--output*` — `git diff`/`git log --output=FILE` writes a file, and carries no `>` to catch;
  *   - `*GIT_CONFIG*=*` / `*GIT_PAGER=*` — a leading env assignment of the GIT_CONFIG* family (GIT_CONFIG,
  *     GIT_CONFIG_GLOBAL/SYSTEM, GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS) or
  *     GIT_PAGER injects core.pager/diff.external/textconv → arbitrary exec. segmentMatchValues strips
  *     these leading `VAR=val` assignments off the canonical form (so `… git diff` still matches the allow),
  *     but they survive in the VERBATIM value these patterns match; the `=` keeps a safe read of a file
  *     merely NAMED like the var (`cat GIT_CONFIG_notes.md`) out of the net.
- *  Shared by the unattended read-only agent boundary (brain/agents/readOnlyBoundary.ts) and by plan mode
- *  (brain/service/turnContextBuilder.ts), so "read-only shell" has exactly ONE definition. */
-export const READ_ONLY_BASH_RULES: readonly PermissionRule[] = [
+ *   - `find*-delete*` / `find*-exec*` / `find*-ok*` — the one inspection command that also deletes files
+ *     or runs a program. A filename literally containing "-exec" is a false positive, and fails closed.
+ *   - `awk*system(*` — awk spawns a shell from its program text. awk/sed are full interpreters, so a
+ *     determined model has other escapes (getline pipes, sed's `e` flag) no pattern list will close:
+ *     this clamp is a guardrail against unguided destruction, not a sandbox. */
+const NON_DESTRUCTIVE_BASH_CLAWBACKS: readonly string[] = [
+  'git difftool*', 'git mergetool*', '*--ext-diff*', '*--extcmd*', '*GIT_EXTERNAL_DIFF*',
+  '*GIT_CONFIG*=*', '*GIT_PAGER=*',
+  'find*-delete*', 'find*-exec*', 'find*-ok*',
+  'awk*system(*',
+  // journalctl reads history — these three subcommands destroy it.
+  'journalctl*--vacuum*', 'journalctl*--rotate*', 'journalctl*--flush*',
+  // The loopback allow above is for PROBING a local service. These turn the same command into a write
+  // against it, and --proxy turns a loopback URL into a request to anywhere.
+  'curl*-X *', 'curl*--request*', 'curl*-d *', 'curl*--data*', 'curl*-T *', 'curl*--upload*',
+  'curl*-F *', 'curl*--form*', 'curl*--proxy*',
+];
+
+/** The full shell clamp for a context that must not run DESTRUCTIVE commands: deny every command,
+ *  re-permit the allow-list above, then claw back the exec/delete escapes. Order is load-bearing
+ *  (last-match-wins).
+ *
+ *  WHAT THIS BOUNDARY IS — and is not. It is NOT "cannot write": output redirection (`cat a > b`,
+ *  `>>`), `git diff --output=FILE` and `sed -i` are all permitted, so a clamped agent can create or
+ *  overwrite any file the daemon's own user can reach. (That is also why the old `*>*` and
+ *  `*--output*` denies are gone: once redirection is allowed they would forbid one spelling of a
+ *  write while another stays open.) What the clamp removes is the destructive and hard-to-reverse
+ *  set (rm/mv/dd/chmod/chown/ln/truncate/mkfs, git commit/push/reset/checkout/clean), package and
+ *  process control (npm install/publish, kill), service control (systemctl start/stop/restart —
+ *  only the read-only verbs are listed), network access beyond a loopback GET (wget/ssh, and curl to
+ *  any host but 127.0.0.1/localhost), privilege escalation (sudo) and the exec escapes clawed back
+ *  above.
+ *
+ *  ONE DELIBERATE HOLE: the conventional verification scripts (`npm test`, `npm run lint|typecheck|
+ *  check`) are allowed by NAME, and a script body is arbitrary repo code. A repo whose `test` script
+ *  deploys would run that deploy. This is the same bargain as `awk`/`sed` above — the clamp is a
+ *  guardrail against unguided destruction, not a sandbox — taken because a planning agent that cannot
+ *  run the project's own check has to guess whether its plan compiles.
+ *  Shared by the unattended read-only agent boundary (brain/agents/readOnlyBoundary.ts) and by plan
+ *  mode (brain/service/turnContextBuilder.ts), so the shell clamp has exactly ONE definition. */
+export const NON_DESTRUCTIVE_BASH_RULES: readonly PermissionRule[] = [
   { scope: 'bash', pattern: '*', action: 'deny' },
-  ...READ_ONLY_BASH_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
-  { scope: 'bash', pattern: '*>*', action: 'deny' },
-  { scope: 'bash', pattern: 'git difftool*', action: 'deny' },
-  { scope: 'bash', pattern: 'git mergetool*', action: 'deny' },
-  { scope: 'bash', pattern: '*--ext-diff*', action: 'deny' },
-  { scope: 'bash', pattern: '*--extcmd*', action: 'deny' },
-  { scope: 'bash', pattern: '*GIT_EXTERNAL_DIFF*', action: 'deny' },
-  { scope: 'bash', pattern: '*--output*', action: 'deny' },
-  { scope: 'bash', pattern: '*GIT_CONFIG*=*', action: 'deny' },
-  { scope: 'bash', pattern: '*GIT_PAGER=*', action: 'deny' },
+  ...NON_DESTRUCTIVE_BASH_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
+  ...NON_DESTRUCTIVE_BASH_CLAWBACKS.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'deny' as const })),
 ];
 
 /** Built-in defaults, conservative but usable: everything not otherwise named is allowed (read-only
- *  tools stay frictionless), file edits ask, and shell commands ask except for a small read-only
- *  allow-list. User rules are appended AFTER these, so any of them can be overridden per user. */
+ *  tools stay frictionless), file edits ask, and shell commands ask except for the inspection
+ *  allow-list — with the same claw-backs, so `find . -delete` or a pager/config injection never runs
+ *  silently here either. User rules are appended AFTER these, so any of them can be overridden per user. */
 const DEFAULT_PERMISSION_RULES: readonly PermissionRule[] = [
   { scope: 'tools', pattern: '*', action: 'allow' },
   { scope: 'tools', pattern: 'Write', action: 'ask' },
   { scope: 'tools', pattern: 'Edit', action: 'ask' },
   { scope: 'bash', pattern: '*', action: 'ask' },
-  ...READ_ONLY_BASH_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
+  ...NON_DESTRUCTIVE_BASH_ALLOW.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'allow' as const })),
+  ...NON_DESTRUCTIVE_BASH_CLAWBACKS.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'deny' as const })),
 ];
 
 const ACTIONS: readonly PermissionAction[] = ['allow', 'ask', 'deny'];

@@ -470,7 +470,7 @@ export function createChatComposition(
       const screenRows = Math.max(1, term.rows - TOP_RULE_ROWS);
       const inputRows = Math.min(startInput.render(boxWidth).length, Math.max(0, screenRows - 1));
       const noticeRows = rt.notice ? rt.notice.split('\n').length : 0;
-      return [...base, boxWidth, leftPad, inputRows, noticeRows].join(':');
+      return [...base, boxWidth, leftPad, inputRows, noticeRows, rt.showMascot ? 1 : 0].join(':');
     }
     const budget = rowBudget();
     const bottom = budget.sections.queue + budget.sections.attachments + budget.sections.editor
@@ -544,6 +544,7 @@ export function createChatComposition(
     rateLimits: rt.rateLimits,
     goal: rt.goal,
     floatOffset: animations.mascotOffset,
+    showMascot: rt.showMascot,
   }));
   const startScreen = new StartScreen(
     startInput,
@@ -555,6 +556,7 @@ export function createChatComposition(
       notice: rt.notice,
       statusLeft: `${color.dim(resources.cwdLabel)}${resources.branchLabel ? color.faint(` · ${resources.branchLabel}`) : ''}`,
       version: ELOWEN_CLI_VERSION,
+      showMascot: rt.showMascot,
     }),
   );
   const compactNotice: Component = {
@@ -813,10 +815,11 @@ export function createChatComposition(
     // Project context yields only when the active-goal progress would otherwise be truncated. It remains
     // visible in the telemetry rail or returns automatically as soon as the terminal is wide enough.
     promptMeta.setRight(activeGoal && visibleWidth(metaLeftLine()) + visibleWidth(metaRight) + 1 > chatWidth() ? '' : metaRight);
-    // Drop the terminal plugin's pinned `bg-processes` card only while the dedicated right rail is
-    // actually visible. Narrow terminals cannot fit that rail; retaining the compact card there avoids
-    // making background work disappear entirely while still preventing duplicates on wide layouts.
-    cardPanel.set(focusedCards().filter((c) => c.id !== 'bg-processes' || !panelVisible()));
+    // The terminal plugin pins a `bg-processes` card, but its real home is the ProcessPanel in the right
+    // rail — keeping it above the composer only put running background shells in two places at once. Drop
+    // it from the card panel unconditionally so it shows ONLY in the rail. (On a terminal too narrow to
+    // fit the rail the running list is not surfaced above the input, by design.)
+    cardPanel.set(focusedCards().filter((c) => c.id !== 'bg-processes'));
     subPanel.set(panelAvailable() ? [] : agents);
     subPanel.setSelected(rt.childView?.sessionId ?? null);
     // Pending mid-turn queue strip above the composer (with the remove-last keybind hint when bound).
@@ -887,6 +890,7 @@ export function createChatComposition(
       input: startInput,
       notice: rt.notice,
       budget: hasMessages() ? rowBudget() : null,
+      showMascot: rt.showMascot,
     }));
   };
 
@@ -1231,7 +1235,6 @@ export function createChatComposition(
      *  resolved leader sequence — one dispatcher so both paths share guards and behavior. */
     const dispatchAction = (action: KeybindAction): void => {
       switch (action) {
-        case 'leader': return; // the leader only prefixes — it is never an action of its own
         case 'quit': actions.quit(); return;
         // No telemetry panel on the start screen — a toggle there would silently pre-hide it for later.
         case 'telemetry_toggle': {

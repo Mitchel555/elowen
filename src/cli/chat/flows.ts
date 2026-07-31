@@ -7,6 +7,10 @@ import type { ChatApplicationActions, ChatApplicationResources } from './chatCap
 
 export interface Flows {
   launchAsk(id: string, questions: AskQuestion[], kind?: 'approval'): void;
+  /** Drop the dock for a question settled elsewhere (answered in the web, timed out, or aborted).
+   *  No-op unless `id` is the question currently on screen, so a late event cannot steal a dock that
+   *  already belongs to the next question. */
+  closeAsk(id: string): void;
   openPlanDecision(): void;
 }
 
@@ -25,24 +29,47 @@ export function createFlows(
   // kind (a blocked tool-permission ask) takes the dedicated warning-toned modal instead: 1/2/3 or
   // arrows+Enter pick, and Esc answers Deny — it never aborts the turn (the tool just reports the
   // denial to the model and the run continues).
+  // The question on screen right now, so a remote resolution can take it down. Cleared by whichever
+  // exit happens first — a local decision here, or closeAsk() below.
+  let onScreen: { id: string; close: () => void } | null = null;
+  const settled = (id: string): void => { if (onScreen?.id === id) onScreen = null; };
+
   const launchAsk = (id: string, questions: AskQuestion[], kind?: 'approval'): void => {
     const q = questions[0];
     if (kind === 'approval' && q) {
-      runApprovalFlow({
+      const handle = runApprovalFlow({
         tui, slot: editorSlot, editor, question: q,
-        onDecision: (label) => lifetime.runSession(
-          () => client.answer(id, [{ header: q.header, selected: [label] }]),
-          () => {},
-          () => { /* turn may have gone */ },
-        ),
+        onDecision: (label) => {
+          settled(id);
+          lifetime.runSession(
+            () => client.answer(id, [{ header: q.header, selected: [label] }]),
+            () => {},
+            () => { /* turn may have gone */ },
+          );
+        },
       });
+      onScreen = { id, close: handle.close };
       return;
     }
-    runAskFlow({
+    const handle = runAskFlow({
       tui, slot: editorSlot, editor, questions,
-      onComplete: (answers) => lifetime.runSession(() => client.answer(id, answers), () => {}, () => { /* turn may have gone */ }),
-      onCancel: () => lifetime.runSession(() => client.abort(), () => {}, () => { /* already settled */ }),
+      onComplete: (answers) => {
+        settled(id);
+        lifetime.runSession(() => client.answer(id, answers), () => {}, () => { /* turn may have gone */ });
+      },
+      onCancel: () => {
+        settled(id);
+        lifetime.runSession(() => client.abort(), () => {}, () => { /* already settled */ });
+      },
     });
+    onScreen = { id, close: handle.close };
+  };
+
+  const closeAsk = (id: string): void => {
+    if (onScreen?.id !== id) return;
+    const { close } = onScreen;
+    onScreen = null;
+    close();
   };
 
   /** Plan-mode follow-up: the agent finished a turn whose ExitPlanMode call submitted a plan — ask
@@ -65,5 +92,5 @@ export function createFlows(
     });
   };
 
-  return { launchAsk, openPlanDecision };
+  return { launchAsk, closeAsk, openPlanDecision };
 }

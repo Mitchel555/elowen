@@ -90,6 +90,14 @@ export type BrainEvent =
    *  `kind: 'approval'` marks a blocking tool-permission prompt (three fixed options — see
    *  brain/toolPermissions.ts) so frontends can style it differently; absent = a regular question. */
   | { type: 'ask'; id: string; questions: AskQuestion[]; kind?: 'approval' }
+  /** That parked question is SETTLED and every surface should stop showing it. The `ask` event fans out
+   *  to all of a conversation's clients, so the CLI and the web raise the same question — without this
+   *  the one that did NOT answer keeps showing a prompt that can no longer be answered (its POST would
+   *  find nothing to match). `reason` distinguishes a real answer from a timeout, an abort, or the
+   *  supersede when the model asks a second question, so a surface can say why it vanished. Synthetic,
+   *  like `ask` itself, and emitted AFTER the entry is removed so a follow-up /brain/status is
+   *  already consistent with it. */
+  | { type: 'ask_resolved'; id: string; reason: 'answered' | 'timeout' | 'cancelled' }
   /** A new agent step (one model round-trip / turn) started within the current run. `step` is 1-based;
    *  `maxSteps` is the configured ceiling (0 = unlimited). `usage` snapshots context at step boundaries
    *  so clients don't wait until the final idle event to refresh context fill. Synthetic — counted
@@ -128,7 +136,7 @@ export type BrainEvent =
    *  model, work mode (build/plan/workflow), renamed the conversation, or changed the reasoning level.
    *  Rendered as a subtle system line interleaved into the transcript by `at`; persisted (replayed on
    *  reconnect) but NEVER part of the model's context. Synthetic — safe to ignore. */
-  | { type: 'session-event'; id: string; kind: 'model' | 'mode' | 'rename' | 'reasoning' | 'cwd'; detail: string; at: string }
+  | { type: 'session-event'; id: string; kind: 'model' | 'mode' | 'rename' | 'reasoning' | 'cwd' | 'subagent'; detail: string; at: string }
   /** The pending message queue for this session — a FULL snapshot (an empty array clears it). Mapped
    *  from PI's native `queue_update` event: a message a user sends while a turn is already streaming is
    *  STEERED into the running turn (delivered between steps, before the next model call), and PI reports
@@ -142,6 +150,13 @@ export type BrainEvent =
    *  @mention/prompt expansion), else the persisted model-facing text. Internal goal kickoff/continuation
    *  turns are NOT user messages and emit nothing. Safe to ignore (the streamed reply still arrives). */
   | { type: 'user'; text: string; /** Store row replaced by this ordered live marker in snapshots. */ durableId?: string }
+  /** The DAEMON discarded a just-sent user turn: the user hit Esc/Stop before the turn produced any output,
+   *  so its durable row was deleted and clients must pull the matching `you` bubble (`durableId`) from the
+   *  transcript and restore `text` to the composer for editing/resending. Authoritative — a client never
+   *  decides this itself (it cannot tell a first token racing the cancel). Only ever fires between a user
+   *  turn's admission and its first output; safe to ignore (the row is already gone from the store, so a
+   *  reconnect snapshot is consistent without it). */
+  | { type: 'discard_user'; durableId: string; text: string }
   /** A FULL snapshot of the owner's background shell processes (the terminal plugin's
    *  `Bash(background:true)` children), pushed to the owner's live client streams whenever one
    *  spawns/exits/is killed — so the CLI/web process panel updates OUT of turn. Owner-only: a command

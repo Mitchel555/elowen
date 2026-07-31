@@ -25,10 +25,13 @@ function live(spec: { provider?: string; model: string; thinkingLevel?: string; 
 describe('ConversationLifecycle vision fallback', () => {
   it('temporarily clears Fast, then restores the exact provider/model/reasoning/Fast profile', async () => {
     const sessions = new LiveSessionRegistry<LiveBrain>();
+    const attachments = new ClientAttachments();
     const original = live({ provider: 'codex', model: 'gpt-main', thinkingLevel: 'max', fast: true });
-    const listener = vi.fn();
-    original.listeners.add(listener);
     sessions.set('brain-1', original);
+    const listener = vi.fn();
+    // Listener ownership lives in ClientAttachments (attach()), not on the transient LiveBrain — this is
+    // what subscribe()/tapSession() do.
+    attachments.attach(1, 'brain-1', listener, vi.fn());
 
     const spawn = vi.fn(async (opts: SpawnOpts) => {
       const next = live({
@@ -37,14 +40,17 @@ describe('ConversationLifecycle vision fallback', () => {
         thinkingLevel: opts.thinkingLevel,
         fast: opts.fast,
       });
+      // Mirrors LiveSessionSpawner: every respawn restores whatever ClientAttachments still has attached
+      // to this session id — the hop keeps the same id, so the listener stays registered throughout.
+      for (const l of attachments.sessionTaps.get(opts.sessionId) ?? []) next.listeners.add(l);
       return next;
     });
     const lifecycle = new ConversationLifecycle({
       store: { getSession: () => ({ id: 'brain-1', user_id: 1, work_dir: '' }) },
       sessions,
-      attachments: new ClientAttachments(),
+      attachments,
       elicitation: { cancelForSession: vi.fn() },
-      goals: { cancelGoalContinuation: vi.fn() },
+      goals: { cancelGoalContinuation: vi.fn(), resumeAfterRespawn: vi.fn(), pauseForRespawnFailure: vi.fn() },
       spawn,
       policy: () => ({ allowedProjectIds: 'all', allowedPaths: () => [] }),
       userSettings: () => ({
@@ -82,7 +88,7 @@ describe('ConversationLifecycle vision fallback', () => {
       sessions,
       attachments: new ClientAttachments(),
       elicitation: { cancelForSession: vi.fn() },
-      goals: { cancelGoalContinuation: vi.fn() },
+      goals: { cancelGoalContinuation: vi.fn(), resumeAfterRespawn: vi.fn(), pauseForRespawnFailure: vi.fn() },
       spawn: async () => live({ provider: 'wrong-provider', model: 'shared-id' }),
       policy: () => ({ allowedProjectIds: 'all', allowedPaths: () => [] }),
       userSettings: () => ({ visionModelProvider: 'vision-provider', visionModel: 'shared-id' }),

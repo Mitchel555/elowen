@@ -349,13 +349,20 @@ function alignedKeepCount(storeRoles: string[], keptRoles: string[]): number {
 
 /** The stored rows of a session, JSON-parsed defensively: a single corrupt `content` blob skips just
  *  that row instead of aborting the whole rehydration (which would make the conversation un-spawnable
- *  and un-exportable). Carries each row's original `created_at` for callers that need real timestamps. */
+ *  and un-exportable). Carries each row's original `created_at` for callers that need real timestamps.
+ *
+ *  Parsing successfully is NOT enough to hand a row to `appendMessage`: `null` and bare scalars are valid
+ *  JSON and would enter the live session as messages with no `role`, where every later reader of
+ *  `session.messages` (persistCompaction, PI's own request building) throws on them. A message is
+ *  therefore only yielded when it is an object carrying a string `role`. */
 function* parsedRows(store: BrainStore, sessionId: string): Generator<{ msg: { role: string; content: unknown }; createdAt: string }> {
   for (const row of store.getMessages(sessionId)) {
-    let msg: { role: string; content: unknown };
-    try { msg = JSON.parse(row.content) as { role: string; content: unknown }; }
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.content); }
     catch { continue; } // corrupt row — skip it, keep the rest of the history intact
-    yield { msg, createdAt: row.created_at };
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+    if (typeof (parsed as { role?: unknown }).role !== 'string') continue;
+    yield { msg: parsed as { role: string; content: unknown }, createdAt: row.created_at };
   }
 }
 

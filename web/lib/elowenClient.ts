@@ -1,4 +1,4 @@
-import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, MissionDetail, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, LogFileList, LogFileContent, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, BrainWorkMode, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, CommitFileChange, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
+import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, LogFileList, LogFileContent, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, BrainWorkMode, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
 import { clearToken } from './token';
 import type { BrainBinding } from './brainSession';
 
@@ -55,12 +55,8 @@ const json = (body: unknown, method = 'POST'): RequestInit => ({ method, headers
 
 export const elowenClient = {
   tasks: (projectId?: number) => req<Task[]>(projectId != null ? `/tasks?project_id=${projectId}` : '/tasks'),
-  ready: () => req<Task[]>('/tasks/ready'),
   sessions: () => req<SessionInfo[]>('/sessions'),
   missions: () => req<Mission[]>('/missions'),
-  getMissionDetail: (id: string) => req<MissionDetail>(`/missions/${encodeURIComponent(id)}`),
-  /** Files changed across all of a mission's phases, aggregated (summed per path) and churn-sorted. */
-  missionChangedFiles: (id: string) => req<CommitFileChange[]>(`/missions/${encodeURIComponent(id)}/changed-files`),
   health: () => req<{ ok: boolean; version?: string }>('/health'),
   setupStatus: () => req<{ needsSetup: boolean }>('/setup'),
   createTask: (input: CreateTaskInput) => req<Task>('/tasks', json(input)),
@@ -222,8 +218,6 @@ export const elowenClient = {
   /** Admin: launch (or reuse) an `elowen chat` TUI terminal bound to the given brain conversation.
    *  Returns the opaque tmux terminal name to stack as a dock pane; `created:false` when one already runs. */
   brainTerminal: (session: string) => req<{ terminal: string; created: boolean }>('/brain/terminal', json({ session })),
-  /** The conversation's pending mid-turn message queue (full snapshot); `session` scopes it to a bound one. */
-  brainQueue: (session?: string) => req<{ id: string; text: string }[]>(`/brain/queue${session ? `?session=${encodeURIComponent(session)}` : ''}`),
   /** Remove one pending queued message by id (the × button). The reduced snapshot rides back on the
    *  `queue` stream event — the server is authoritative. `session` scopes it to a bound conversation. */
   brainQueueRemove: (id: string, session?: string) => req<{ removed: boolean }>(`/brain/queue/${encodeURIComponent(id)}${session ? `?session=${encodeURIComponent(session)}` : ''}`, { method: 'DELETE' }),

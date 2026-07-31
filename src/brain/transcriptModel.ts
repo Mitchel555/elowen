@@ -241,10 +241,33 @@ export class TranscriptModel implements TranscriptRead {
         if (event.durableId) this.userIds.add(event.durableId);
         this.settleStreamingTail(); // this row displaces any streaming assistant tail — settle it first
         const index = this.turns.length;
-        this.turns.push({ role: 'you', text: event.text });
+        this.turns.push({ role: 'you', text: event.text, ...(event.durableId ? { id: event.durableId } : {}) });
         this.lastAssistant = '';
         this.thinkingState = true;
         this.publish({ kind: 'append', index });
+        return true;
+      }
+      case 'discard_user': {
+        // The daemon cancelled this user turn before it produced output (Esc/Stop). Find the matching 'you'
+        // row from the END rather than assuming it is the very last turn: a display marker (a debounced
+        // reasoning change, a sub-agent finish) can interleave after the bubble and it must still pop. But
+        // stop at any OUTPUT turn — if the run produced an assistant turn the discard is stale (the daemon
+        // only discards a turn with no output), so leave everything in place. Remove it, drop its dedup id,
+        // settle the spinner. The composer restore is bridged by the stream coordinator (editor lives
+        // outside the model). A no-op if no matching row is reachable before an output turn.
+        let index = -1;
+        for (let i = this.turns.length - 1; i >= 0; i--) {
+          const turn = this.turns[i];
+          if (!turn) continue;
+          if (turn.role === 'you' && turn.id === event.durableId) { index = i; break; }
+          if (turn.role !== 'event') break; // a non-marker turn after the bubble means output arrived
+        }
+        if (index === -1) return false;
+        this.turns.splice(index, 1);
+        this.userIds.delete(event.durableId);
+        this.lastAssistant = '';
+        this.thinkingState = false;
+        this.publish({ kind: 'reset' });
         return true;
       }
       case 'session-event': {

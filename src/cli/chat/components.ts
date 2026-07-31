@@ -192,8 +192,9 @@ export interface SubagentPanelEntry {
 
 /** A bounded live list shared by the telemetry rail and its narrow-terminal chat fallback — a spinner
  *  + task per row with the child's current tool and counters, each row clickable to open that session.
- *  Active agents only: running children plus terminal results awaiting parent acknowledgement. Settled
- *  transcript rows remain drillable after acknowledged entries leave this bounded rail. */
+ *  RUNNING children only: a finished sub-agent leaves the panel at once — its result reaches the
+ *  conversation as a message, and its transcript stays drillable there, so a completed row has no reason
+ *  to linger (least of all a delivery stuck pending forever). */
 export class SubagentPanel implements Component {
   private entries: SubagentPanelEntry[] = [];
   private collapsed = false;
@@ -207,7 +208,7 @@ export class SubagentPanel implements Component {
   private selected: string | null = null;
   invalidate(): void { /* re-rendered on the next frame */ }
   set(entries: readonly SubagentPanelEntry[]): void {
-    this.entries = entries.filter((e) => e.status === 'running' || e.resultDelivery === 'pending');
+    this.entries = entries.filter((e) => e.status === 'running');
     this.clampScroll();
   }
   setSelected(sessionId: string | null): void { this.selected = sessionId; }
@@ -531,16 +532,21 @@ export interface ApprovalFlowOpts {
 }
 
 /** Drive one blocking approval prompt in the TUI (the approval sibling of runAskFlow): swap the chat
- *  editor for an ApprovalDock, restore it on any decision, then deliver the pick. */
-export function runApprovalFlow(o: ApprovalFlowOpts): void {
+ *  editor for an ApprovalDock, restore it on any decision, then deliver the pick.
+ *  The returned handle tears the dock down WITHOUT deciding — for when the same question was already
+ *  settled on another surface, since the prompt fans out to every client of the conversation. */
+export function runApprovalFlow(o: ApprovalFlowOpts): { close(): void } {
+  const restore = (): void => {
+    o.slot.clear();
+    o.slot.addChild(o.editor);
+    o.tui.setFocus(o.editor);
+    o.tui.requestRender(true);
+  };
   const dock = new ApprovalDock({
     tui: o.tui,
     question: o.question,
     onPick: (label) => {
-      o.slot.clear();
-      o.slot.addChild(o.editor);
-      o.tui.setFocus(o.editor);
-      o.tui.requestRender(true);
+      restore();
       o.onDecision(label);
     },
   });
@@ -548,6 +554,7 @@ export function runApprovalFlow(o: ApprovalFlowOpts): void {
   o.slot.addChild(dock);
   o.tui.setFocus(dock);
   o.tui.requestRender(true);
+  return { close: restore };
 }
 
 /** Pending image attachments as a chip row above the input ("[img] shot.png · 42 KB · esc to drop").
@@ -564,7 +571,7 @@ export class AttachmentChips implements Component {
 }
 
 /** Pending mid-turn messages shown above the input: the queued message text itself, each on its own
- *  indented line marked by a quiet pause glyph — no 'N queued' header label, so the strip reads as the
+ *  indented line marked by a quiet pointer glyph — no 'N queued' header label, so the strip reads as the
  *  messages rather than an announcement about them. These are messages typed while a turn streams; they
  *  are STEERED into the running turn (PI delivers them between steps) and reported as a transient backlog
  *  via the daemon's `queue` snapshot. Renders nothing while empty, so it costs no rows at rest. `removeHint`
@@ -583,7 +590,7 @@ export class QueuedMessages implements Component {
   render(width: number): string[] {
     if (this.items.length === 0 || this.maxRows <= 0) return [];
     const room = Math.max(8, width - 7);
-    const lines = this.items.map((it) => `  ${color.accentDim('⏸')} ${DIM(truncateToWidth(inlineText(it.text), room, '…'))}`);
+    const lines = this.items.map((it) => `  ${FAINTC('❯')} ${DIM(truncateToWidth(inlineText(it.text), room, '…'))}`);
     if (this.removeHint) lines.push(`     ${FAINTC(inlineText(this.removeHint))}`);
     if (lines.length <= this.maxRows) return lines;
     // Over budget: the last visible row counts the messages hidden by the clip (that note takes one row).

@@ -129,8 +129,8 @@ export class PlatformOrchestrator {
             // the owner's ambient policy. `owner` is independently authenticated, never inferred from an
             // admin role (a foreign Discord admin is not the instance operator).
             // Read-only MODE — from a read-only agent TYPE or a bare `read_only` delegation — resolves to ONE
-            // host-side definition: the READ_ONLY_AGENT_TOOLS preset plus a minted read-only permission
-            // boundary (Bash gated to look-only commands even though the child runs unattended — see
+            // host-side definition: the READ_ONLY_AGENT_TOOLS preset plus a minted permission boundary (Bash
+            // clamped to non-destructive commands even though the child runs unattended — see
             // readOnlyBoundary.ts). This is the single source of "read-only"; the subagent plugin no longer
             // carries its own toolset.
             const readOnlyMode = agentDef?.toolsSpec === 'read-only' || src.access.readOnly === true;
@@ -282,12 +282,27 @@ export class PlatformOrchestrator {
   }
 
   /** Push a proactive message to every started platform that has a notification channel (Discord, …).
-   *  Fail-open per adapter — a broken sink must not break the cron tick that triggered it. */
+   *  Fail-open per adapter — one broken sink must not stop the others, so a push that reached at least one
+   *  of them counts as delivered. But when EVERY sink threw, nothing was delivered, and reporting success
+   *  there is what let the cron scheduler drop a result it had promised to retry (it deletes the stored
+   *  pending delivery on a resolved push). So that case rejects, carrying each sink's failure.
+   *  An instance with no notification sink at all is a configuration state, not a delivery failure — it
+   *  resolves, exactly as before, so nothing queues results for a channel that does not exist. */
   async notify(text: string, channelId?: string): Promise<void> {
+    let delivered = false;
+    const failures: string[] = [];
     for (const p of this.started) {
       if (typeof p.notify === 'function') {
-        try { await p.notify(text, channelId); } catch { /* one sink down must not block the rest */ }
+        try {
+          await p.notify(text, channelId);
+          delivered = true;
+        } catch (e) {
+          failures.push(`${p.name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
+    }
+    if (!delivered && failures.length > 0) {
+      throw new Error(`notification delivery failed on every platform — ${failures.join('; ')}`);
     }
   }
 }

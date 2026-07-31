@@ -63,7 +63,9 @@ export interface UsageSource {
   cacheKey(auth: UsageAuth): string | null;
   /** The usage endpoint + request headers for this credential. */
   request(accessToken: string, cacheKey: string): { url: string; headers: Record<string, string> };
-  /** Parse the provider's JSON into the unified projection, or null when unusable / entirely empty. */
+  /** Parse the provider's JSON into the unified projection, or null when unusable / entirely empty. A
+   *  snapshot carrying no windows counts as empty and is rejected by {@link UsageService} regardless of
+   *  what the source returns — the invariant lives there so the per-provider parsers cannot drift from it. */
   normalize(raw: unknown, fetchedAt: number): ProviderUsage | null;
 }
 
@@ -164,7 +166,9 @@ export class UsageService {
       }
 
       const normalized = this.source.normalize(await response.json(), this.now());
-      if (!normalized) return this.stale(key);
+      // A window-less snapshot renders nothing anywhere, so it is as unusable as a null one: keep serving
+      // the last good snapshot (explicitly stale) instead of caching the empty one over it.
+      if (!normalized || normalized.windows.length === 0) return this.stale(key);
       // Enforce the documented shortest-first window order centrally, so a source needn't repeat it.
       normalized.windows.sort((a, b) => (a.windowMinutes ?? Infinity) - (b.windowMinutes ?? Infinity));
       this.cache.set(key, { at: normalized.fetchedAt, value: normalized });

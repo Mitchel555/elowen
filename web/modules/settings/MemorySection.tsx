@@ -7,7 +7,7 @@ import { ProviderPicker } from '../../components/ui/ProviderPicker';
 import { ChoiceField } from '../../components/ui/ChoiceField';
 import { ModelCatalogField } from '../../components/ui/ModelCatalogField';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { useConfig, useEmbeddingSettings, useCategorizationSettings, useBrainModels } from '../../lib/queries';
@@ -34,8 +34,8 @@ function useProviderCatalog(brainModels: BrainModelOption[] | undefined, provide
 export function MemorySection({ onSaveState }: { onSaveState?: (section: string, status: SaveStatus, retry?: () => void) => void }) {
   const { t } = useTranslation();
   const { data: config } = useConfig();
-  const { data: embedding } = useEmbeddingSettings();
-  const { data: categorization } = useCategorizationSettings();
+  const { data: embedding, isError: embeddingIsError, refetch: refetchEmbedding } = useEmbeddingSettings();
+  const { data: categorization, isError: categorizationIsError, refetch: refetchCategorization } = useCategorizationSettings();
   const { data: brainModels } = useBrainModels();
   const saveEmbedding = useSaveEmbeddingSettings();
   const reindex = useReindexMemories();
@@ -103,6 +103,14 @@ export function MemorySection({ onSaveState }: { onSaveState?: (section: string,
     onSaveState?.('memory', saveStatus, retry);
   }, [categorizationStatus, embeddingStatus, onSaveState, retryCategorization, retryEmbedding, saveStatus]);
 
+  if (embeddingIsError || categorizationIsError) {
+    return (
+      <ErrorState
+        message={t.common.daemonUnreachable}
+        onRetry={() => { if (embeddingIsError) void refetchEmbedding(); if (categorizationIsError) void refetchCategorization(); }}
+      />
+    );
+  }
   if (!config || !embedding || !categorization) return <LoadingState />;
 
   const providers = config.brain?.providers ?? [];

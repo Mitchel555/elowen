@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ToastProvider } from '../../../components/ui/Toast';
 import { createWrapper } from '../../test-utils';
 import { en } from '../../../lib/i18n/dictionaries/en';
@@ -11,11 +11,52 @@ const CONFIG = { brain: { providers: [], agentName: 'Elowen', maxSteps: 20 } };
 // The daemon's /brain/oauth/status returns the full supported type set (OAUTH_BUILTIN); the rendered
 // account rows are derived from these keys, so the mock mirrors the endpoint faithfully.
 const OAUTH = { 'oauth-anthropic': true, 'oauth-openai-codex': false, 'oauth-github-copilot': false, 'oauth-kimi': false };
+const oauthRefetch = vi.fn();
+const rateLimitsRefetch = vi.fn();
+
+// The connect dialog polls /brain/oauth/flow; the poll promise is resolved by hand so a test can land an
+// answer at a chosen moment (notably after the dialog was cancelled). Hoisted because the elowenClient
+// factory runs before this module's body, via the queries import chain.
+const oauthFlowMocks = vi.hoisted(() => {
+  const pending: { resolve: ((flow: { id: string; status: string }) => void) | null } = { resolve: null };
+  return {
+    pending,
+    start: vi.fn(() => Promise.resolve({ id: 'flow-1', status: 'action-required', authUrl: 'https://auth.example/device' })),
+    flow: vi.fn(() => new Promise<{ id: string; status: string }>((resolve) => { pending.resolve = resolve; })),
+  };
+});
+
+// The endpoint probe behind the provider modal's model picker, resolved by hand per call so a test can
+// land answers out of order (a slow probe for an edited-away URL arriving last).
+const probeMock = vi.hoisted(() => {
+  const pending: { baseUrl: string; resolve: (r: { models: string[] }) => void }[] = [];
+  return {
+    pending,
+    probe: vi.fn((body: { baseUrl: string }) => new Promise<{ models: string[] }>((resolve) => {
+      pending.push({ baseUrl: body.baseUrl, resolve });
+    })),
+  };
+});
+
+/** The pending probe for `baseUrl`, as an explicit failure when the component never issued it. */
+const probeFor = (baseUrl: string) => {
+  const call = probeMock.pending.find((p) => p.baseUrl === baseUrl);
+  if (!call) throw new Error(`no probe was issued for ${baseUrl} (issued: ${probeMock.pending.map((p) => p.baseUrl).join(', ') || 'none'})`);
+  return call.resolve;
+};
+
+/** The connect dialog's in-flight poll resolver, as an explicit failure when no poll is in flight. */
+const pendingPoll = () => {
+  const resolve = oauthFlowMocks.pending.resolve;
+  if (!resolve) throw new Error('the connect dialog has no poll in flight');
+  return resolve;
+};
 
 vi.mock('../../../lib/queries', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useConfig: () => ({ data: CONFIG }),
-  useBrainOauthStatus: () => ({ data: OAUTH, refetch: vi.fn() }),
+  useBrainOauthStatus: () => ({ data: OAUTH, refetch: oauthRefetch }),
+  useBrainRateLimitsAll: () => ({ data: undefined, refetch: rateLimitsRefetch }),
 }));
 vi.mock('../../../lib/mutations', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -27,7 +68,13 @@ vi.mock('../../../lib/elowenClient', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
-    elowenClient: { ...(actual.elowenClient as object), brainOauthCatalog: vi.fn(() => Promise.resolve({ models: ['claude-opus', 'claude-sonnet'] })) },
+    elowenClient: {
+      ...(actual.elowenClient as object),
+      brainOauthCatalog: vi.fn(() => Promise.resolve({ models: ['claude-opus', 'claude-sonnet'] })),
+      brainOauthStart: oauthFlowMocks.start,
+      brainOauthFlow: oauthFlowMocks.flow,
+      brainProviderProbe: probeMock.probe,
+    },
   };
 });
 
@@ -35,7 +82,13 @@ import { BrainSection, modelPickerItems } from '../../../modules/settings/BrainS
 
 const renderSection = () => render(<ToastProvider><BrainSection /></ToastProvider>, { wrapper: createWrapper().wrapper });
 
-beforeEach(() => { saveProviders.mockClear(); disconnect.mockClear(); updateConfig.mockClear(); });
+beforeEach(() => {
+  saveProviders.mockClear(); disconnect.mockClear(); updateConfig.mockClear();
+  oauthRefetch.mockClear(); rateLimitsRefetch.mockClear();
+  oauthFlowMocks.start.mockClear(); oauthFlowMocks.flow.mockClear(); oauthFlowMocks.pending.resolve = null;
+  probeMock.probe.mockClear(); probeMock.pending.length = 0;
+});
+afterEach(() => { vi.useRealTimers(); });
 
 describe('BrainSection — OAuth account model picker', () => {
   it('provides shared settings groups for the page-owned settings document', () => {
@@ -78,6 +131,76 @@ describe('BrainSection — OAuth account model picker', () => {
     expect(items.filter((i) => i.id === 'claude-opus')).toEqual([expect.objectContaining({ group: '' })]);
     // A live but unselected model is still offered.
     expect(items.some((i) => i.id === 'claude-sonnet')).toBe(true);
+  });
+
+  it('ignores a connect poll that resolves after the dialog was cancelled, and calls cancelling no failure', async () => {
+    // Regression: cancelling only cleared the interval, so a poll already in flight still settled the
+    // flow — the cancelled account was reported connected (success toast + usage refetch) seconds later.
+    // Cancelling is also not an error: closing the dialog must not raise the red "connect failed" toast.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderSection();
+    fireEvent.click(screen.getAllByRole('button', { name: en.brain.connect })[0]);
+    // The dialog carries its title as its accessible name, so it is addressable by role.
+    await waitFor(() => expect(screen.getByRole('dialog', { name: en.brain.connectTitle })).toBeInTheDocument());
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(oauthFlowMocks.flow).toHaveBeenCalled();
+
+    const resolvePoll = pendingPoll();
+    fireEvent.click(screen.getByRole('button', { name: en.common.cancel }));
+    await act(async () => { resolvePoll({ id: 'flow-1', status: 'success' }); });
+
+    expect(rateLimitsRefetch).not.toHaveBeenCalled();
+    expect(screen.queryByText(en.brain.connectedToast)).toBeNull();
+    expect(screen.queryByText(en.brain.connectFailed)).toBeNull();
+  });
+
+  it('waits for a connect poll to answer before scheduling the next one', async () => {
+    // On a fixed interval a slow poll is still in flight when the next one fires, and the older answer
+    // landing last briefly pushes the dialog back to a state the flow has already left.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderSection();
+    fireEvent.click(screen.getAllByRole('button', { name: en.brain.connect })[0]);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: en.brain.connectTitle })).toBeInTheDocument());
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(oauthFlowMocks.flow).toHaveBeenCalledTimes(1);
+    // Two more interval ticks pass while the first poll is still unanswered — no overlapping poll.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(oauthFlowMocks.flow).toHaveBeenCalledTimes(1);
+
+    // Once it answers, polling resumes on the same cadence.
+    await act(async () => { pendingPoll()({ id: 'flow-1', status: 'action-required' }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(oauthFlowMocks.flow).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the newest probed catalog when the abandoned endpoint answers last', async () => {
+    // Regression: the debounce cleanup did not reach a probe already in flight, so a slow answer for an
+    // endpoint the operator had edited away could overwrite the catalog of the URL now in the field.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderSection();
+    fireEvent.click(screen.getByRole('button', { name: en.brain.addProvider }));
+    const url = screen.getByPlaceholderText('https://ai.example.com/v1');
+
+    fireEvent.change(url, { target: { value: 'https://old.example/v1' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    fireEvent.change(url, { target: { value: 'https://new.example/v1' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    // Answers land in the opposite order: the current endpoint first, the abandoned one after it.
+    await act(async () => { probeFor('https://new.example/v1')({ models: ['new-model'] }); });
+    await act(async () => { probeFor('https://old.example/v1')({ models: ['old-model'] }); });
+
+    fireEvent.click(screen.getByRole('button', { name: en.managePicker.manage }));
+    expect(await screen.findByRole('button', { name: 'new-model' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'old-model' })).toBeNull();
+  });
+
+  it('names the provider dialog for assistive technology', () => {
+    renderSection();
+    fireEvent.click(screen.getByRole('button', { name: en.brain.addProvider }));
+    expect(screen.getByRole('dialog', { name: en.brain.addProvider })).toBeInTheDocument();
   });
 
   it('confirms before disconnecting an OAuth account', () => {

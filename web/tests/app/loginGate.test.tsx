@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { LanguageProvider } from '../../lib/i18n';
 import { ToastProvider } from '../../components/ui/Toast';
 import { LoginGate } from '../../components/auth/LoginGate';
+import { useMe } from '../../lib/queries';
 import { AUTH_CLEARED_EVENT } from '../../lib/token';
 
 function Wrap({ children }: { children: React.ReactNode }) {
@@ -63,5 +64,43 @@ describe('LoginGate', () => {
     window.dispatchEvent(new Event(AUTH_CLEARED_EVENT));
     await waitFor(() => expect(passwordInput()).toBeTruthy());
     expect(screen.queryByText('secret-content')).toBeNull();
+  });
+
+  it('renders the shell while the session probe is still in flight', async () => {
+    // Hold /auth/me open: whatever renders before it resolves is what the user sees during the probe.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.get('*/api/auth/me', async () => {
+      await held;
+      return HttpResponse.json({ user: { id: 1, username: 'admin' } });
+    }));
+
+    render(<Wrap><LoginGate><span>secret-content</span></LoginGate></Wrap>);
+
+    // The shell is up before the probe answers, so the page's own queries race it instead of queueing
+    // behind it — that is what makes the dashboard fill progressively instead of after a full round trip.
+    expect(screen.getByText('secret-content')).toBeInTheDocument();
+    release();
+    await waitFor(() => expect(screen.getByText('secret-content')).toBeInTheDocument());
+  });
+
+  it('seeds the probe result so a user-dependent hook never re-requests /auth/me', async () => {
+    let calls = 0;
+    server.use(http.get('*/api/auth/me', () => {
+      calls += 1;
+      return HttpResponse.json({ user: { id: 1, username: 'admin' } });
+    }));
+
+    function NeedsUser() {
+      const me = useMe();
+      return <span>{me.data?.user?.username ?? 'pending'}</span>;
+    }
+
+    render(<Wrap><LoginGate><NeedsUser /></LoginGate></Wrap>);
+    await waitFor(() => expect(screen.getByText('admin')).toBeInTheDocument());
+
+    // Without the cache seed the gate's probe and useMe() are two separate fetches of the same endpoint,
+    // and the hooks gated on `is_admin` wait for the second one before they even start.
+    expect(calls).toBe(1);
   });
 });

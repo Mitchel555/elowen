@@ -1,4 +1,4 @@
-import type { BrainCard, BrainMessage, BrainStreamTailEvent, BrainWorkflowView, ToolOutputView } from './types';
+import type { BrainCard, BrainMessage, BrainPendingPlan, BrainStreamTailEvent, BrainWorkflowView, ToolOutputView } from './types';
 
 /** The workflow DAG a `WorkflowStart` call is running — the shared wire shape (BrainWorkflowView),
  *  attached to its tool item by call id exactly as `sub` is for a delegate call. */
@@ -33,8 +33,12 @@ export type TranscriptEvent =
    *  the panel from the transcript instead of losing every workflow it did not witness live. */
   | { type: 'workflow'; id: string; toolCallId: string; title?: string; status: WorkflowState['status']; nodes: WorkflowState['nodes'] }
   /** A server-delivered user message (a steered mid-turn message never optimistically echoed) — folded as
-   *  a 'you' turn. The `queue` snapshot event (PI steering queue) is handled outside this fold. */
-  | { type: 'user'; text: string }
+   *  a 'you' turn. `durableId` is the store row id, kept on the turn so a later `discard_user` can find it.
+   *  The `queue` snapshot event (PI steering queue) is handled outside this fold. */
+  | { type: 'user'; text: string; durableId?: string }
+  /** The daemon discarded a just-sent user turn (Esc/Stop before any output): remove the matching 'you'
+   *  bubble by `durableId`. Its `text` is restored to the composer by the provider, which owns input state. */
+  | { type: 'discard_user'; durableId: string; text: string }
   | { type: 'idle' }
   | { type: 'error'; message: string };
 
@@ -196,7 +200,7 @@ export function prependHistory(view: ChatView, older: BrainMessage[]): ChatView 
  *  wire events down to the ones it understands instead of casting the rest through it. */
 const TRANSCRIPT_EVENT_TYPES = new Set<TranscriptEvent['type']>([
   'text', 'reasoning', 'tool', 'tool_progress', 'diff', 'tool_output', 'tool_end',
-  'notice', 'session', 'subagent', 'workflow', 'user', 'idle', 'error',
+  'notice', 'session', 'subagent', 'workflow', 'user', 'discard_user', 'idle', 'error',
 ]);
 
 function isTranscriptEvent(event: BrainStreamTailEvent): event is BrainStreamTailEvent & TranscriptEvent {
@@ -309,7 +313,18 @@ export function reduce(view: ChatView, e: TranscriptEvent): ChatView {
     case 'user': {
       // The daemon's authoritative render of the user's turn (every real user send — normal or queued
       // delivery). The client no longer echoes optimistically, so this is what shows the 'you' bubble.
-      return { turns: [...turns, { role: 'you', text: e.text }], thinking: true, notice: view.notice };
+      // Keep the durable id on the turn so an Esc/Stop-before-output `discard_user` can pull this bubble.
+      return { turns: [...turns, { role: 'you', text: e.text, ...(e.durableId ? { id: e.durableId } : {}) }], thinking: true, notice: view.notice };
+    }
+    case 'discard_user': {
+      // The daemon cancelled this user turn before it produced output: drop the matching 'you' bubble and
+      // stop the spinner. The composer restore is the provider's job (it owns the input state).
+      const index = turns.findIndex((turn) => turn.role === 'you' && turn.id === e.durableId);
+      // No match — a duplicate discard (double Esc) or a turn already gone. Leave the view untouched:
+      // forcing thinking:false here would kill the spinner of a turn the user has meanwhile resent.
+      if (index === -1) return view;
+      turns.splice(index, 1);
+      return { turns, thinking: false, notice: undefined };
     }
     case 'idle': {
       const last = turns[turns.length - 1];
@@ -386,6 +401,25 @@ export function collectWorkflows(turns: ChatTurn[]): WorkflowState[] {
     }
   }
   return [...byId.values()];
+}
+
+/** The plan an `ExitPlanMode` call submitted in the newest assistant turn, with the id of the call that
+ *  submitted it — the transcript's own answer to "is a plan waiting on the user", live from `tool_end`
+ *  and rebuilt from history on every hydration. Mirror of the CLI's `TranscriptModel.lastSubmittedPlan`.
+ *
+ *  Trailing non-assistant turns are SKIPPED rather than disqualifying: a session-event marker or a
+ *  compaction divider landing after the plan (the user switching model or mode in that window) is not the
+ *  conversation moving on, and treating it as such is what made the decision disappear. A newer 'you' turn
+ *  or a later assistant turn without a plan still answers null, so nothing resurrects. */
+export function submittedPlan(turns: ChatTurn[]): BrainPendingPlan | null {
+  const last = turns.findLast((turn) => turn.role !== 'event' && turn.role !== 'divider');
+  if (last?.role !== 'elowen') return null;
+  let found: BrainPendingPlan | null = null;
+  for (const seg of last.segments) {
+    if (seg.kind !== 'tools') continue;
+    for (const item of seg.items) if (item.plan) found = { ...(item.id ? { id: item.id } : {}), plan: item.plan };
+  }
+  return found;
 }
 
 /** Fold a live `card` event into the card list: replace by id, append when new, drop when it came back

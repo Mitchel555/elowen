@@ -5,8 +5,7 @@ import {
   downloadMediaMessage, jidNormalizedUser,
 } from 'baileys';
 import QRCode from 'qrcode';
-import { readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { rmSync, mkdirSync } from 'node:fs';
 import { parseModelExec, buildReplyContext, splitContent, stripThinking, withoutFooter } from './format.mjs';
 import { parseAskReply } from './ask.mjs';
 import { sameId, isGroup, numberOf, toJid, senderIsAdmin } from './jid.mjs';
@@ -14,6 +13,8 @@ import { MESSAGES } from './messages.mjs';
 import { LiveMessage } from './stream.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
 import { isSteered } from '../../_shared/turnResult.mjs';
+import { buildRoleAccess, applyVisionModel } from '../../_shared/access.mjs';
+import { resolveImageFiles } from '../../_shared/images.mjs';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // default: larger inbound images are noted, not downloaded (cfg: maxImageBytes)
 const MAX_IMAGES = 4;                    // default vision cap per message (cfg: maxImages)
@@ -59,13 +60,6 @@ async function resolveSocketFactory() {
   const modPath = process.env.WHATSAPP_E2E_SOCKET_MODULE;
   socketFactory = modPath ? (await import(modPath)).createFakeSocket : null;
   return socketFactory;
-}
-
-function rolePrompt(policy) {
-  const parts = [];
-  if (policy.name) parts.push(`The user you are talking to has the "${policy.name}" role.`);
-  if (policy.prompt) parts.push(policy.prompt);
-  return parts.join('\n') || undefined;
 }
 
 export class WhatsAppAdapter {
@@ -275,20 +269,7 @@ export class WhatsAppAdapter {
     const policies = Array.isArray(this.cfg.senderPolicies) ? this.cfg.senderPolicies : [];
     const match = policies.find((p) => p.roleId && ids.some((id) => sameId(p.roleId, id)));
     if (!match) return { ids, access: undefined };
-    const st = this.state.get(chatJid);
-    const chosen = st.model;
-    return {
-      ids,
-      access: {
-        admin: match.admin === true,
-        projectIds: (match.projectIds ?? []).map(Number),
-        prompt: rolePrompt(match),
-        model: chosen ? { provider: chosen.provider, model: chosen.model } : undefined,
-        thinkingLevel: typeof st.thinkingLevel === 'string' ? st.thinkingLevel : undefined,
-        fast: st.fast === true,
-        tools: Array.isArray(match.tools) && match.tools.length > 0 ? match.tools : undefined,
-      },
-    };
+    return { ids, access: buildRoleAccess(match, this.state.get(chatJid)) };
   }
 
   // ── inbound ──
@@ -364,13 +345,7 @@ export class WhatsAppAdapter {
 
     const vision = images.length ? parseModelExec(this.cfg.visionModel) : null;
     let turnAccess = access;
-    if (vision) {
-      const models = await this.listModels().catch(() => []);
-      const visionOption = models.find((model) => model.model === vision.model && (!vision.provider || model.provider === vision.provider));
-      // Do not leak the normal chat's OAuth priority tier into a temporary non-OAuth vision call.
-      // This only changes the current access descriptor; the saved Fast preference remains intact.
-      turnAccess = { ...access, model: vision, ...(!visionOption?.fastAvailable ? { fast: false } : {}) };
-    }
+    if (vision) turnAccess = applyVisionModel(access, vision, await this.listModels().catch(() => []));
 
     try {
       const reply = await this.handler(
@@ -390,10 +365,10 @@ export class WhatsAppAdapter {
       if (reactions && !isSteered(reply)) void this.react(m.key, '✅').catch(() => {});
     } catch (e) {
       clearInterval(typing);
-      stream?.abandon(); // the stall-hint timer must not edit the dead progress bubble after the error reply
+      if (stream) await stream.fail(e?.message ?? e); // settle live tools before the error reply lands below them
       void this.sock.sendPresenceUpdate('paused', chatJid).catch(() => {});
       if (reactions) void this.react(m.key, '❌').catch(() => {});
-      await this.sendText(chatJid, `⚠️ ${e?.message ?? e}`, m).catch(() => {});
+      await this.sendText(chatJid, this.msg.error(e?.message ?? e), m).catch(() => {});
     }
   }
 
@@ -727,17 +702,7 @@ export class WhatsAppAdapter {
   /** Load up to the configured cap (default MAX_UPLOAD_IMAGES) of generated images by validated name
    *  from the image plugins' data dirs. */
   resolveImageFiles(names) {
-    const files = [];
-    const cap = cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10);
-    for (const name of names.slice(0, cap)) {
-      for (const dir of this.imageDirs) {
-        const p = join(dir, name);
-        if (!existsSync(p)) continue;
-        try { files.push({ name, data: readFileSync(p) }); } catch { /* unreadable → skip */ }
-        break;
-      }
-    }
-    return files;
+    return resolveImageFiles(this.imageDirs, names, cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10));
   }
 
   async groupSubject(jid) {

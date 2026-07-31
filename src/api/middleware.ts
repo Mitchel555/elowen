@@ -43,9 +43,32 @@ export function registerAuthGuards(app: ElowenApp, ctx: RouteContext): void {
     }
     return false;
   };
+  // Which task a `/tasks/...` request targets, or null when the route carries no task id. `/tasks/ready`
+  // is the ready-queue listing, not a task — every other allow-listed `/tasks/<seg>` is an id.
+  const targetTask = (path: string): string | null => {
+    if (path === '/tasks' || path === '/tasks/ready') return null;
+    const m = /^\/tasks\/([^/]+)/.exec(path);
+    if (!m?.[1]) return null;
+    // A malformed escape (`/tasks/%`) makes decodeURIComponent throw, and throwing HERE would turn an
+    // authorisation decision into a 500 on a request an agent can send. The raw segment is no task id,
+    // so it simply fails the comparison below and the caller gets its 403.
+    try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+  };
   app.use('*', async (c, next) => {
     if (c.get('tokenScope') !== 'agent') return next();
     if (!agentAllowed(c.req.method, c.req.path)) return c.json({ error: 'forbidden' }, 403);
+    // A worker is spawned with a token minted for ITS task, so the allow-listed task verbs are pinned
+    // to that task: without this, every agent in a project shares one credential and agent A could
+    // close/ask-on/read task B (the project gate above can't see an intra-project crossing). A final
+    // mission phase legitimately closes its parent epic (see agent-guide-phase), so the epic passes too.
+    // An UNBOUND agent token (the shared service token the overseer/pilot run on) keeps the old reach.
+    const bound = c.get('agentTask');
+    if (bound) {
+      const target = targetTask(c.req.path);
+      if (target !== null && target !== bound && target !== d.tasks.get(bound)?.parent_id) {
+        return c.json({ error: 'forbidden' }, 403);
+      }
+    }
     return next();
   });
 

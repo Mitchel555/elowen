@@ -87,6 +87,70 @@ describe('per-resource task/mission access', () => {
     expect((await app.request('/missions/m2', del(bobTok))).status).toBe(403);
   });
 
+  // resolveTarget() used to return the home project (and its data) without ever calling
+  // canAccessProject(), so a caller confined elsewhere could still create tasks/plans in it — the
+  // original version of this test masked exactly this by assigning its second user to the home
+  // project. Here Carol is a member of project 2 ONLY, never of the home project (1).
+  it('a non-admin not assigned to the home project cannot POST /tasks or /tasks/plan into it', async () => {
+    const db = openDb(':memory:');
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'home','/o')").run();
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (2,'other','/p2')").run();
+    const users = new UserStore(db);
+    users.create('admin', 'pw');
+    const carol = users.create('carol', 'pw');
+    const userProjects = new UserProjectStore(db);
+    userProjects.assign(carol.id, 2); // carol can reach project 2 — never the home project (1)
+    const tasks = new TaskStore(db);
+    const app = createServer({
+      tasks, readiness: new Readiness(db), missions: new MissionStore(db), bus: new EventBus(),
+      engine: null as never, spawn: null as never, tmux: null as never,
+      project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
+      clock: new FakeClock(0), config: new ConfigStore(db),
+      users, projects: new ProjectStore(db), userProjects,
+    });
+    const carolTok = users.issueToken(carol.id);
+    // No project_id → defaults to the home project (1); carol has no access to it.
+    const createRes = await app.request('/tasks', {
+      method: 'POST', headers: { authorization: `Bearer ${carolTok}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'sneaky home task' }),
+    });
+    expect(createRes.status).toBe(403);
+    expect(tasks.list().length).toBe(0); // never created
+
+    const planRes = await app.request('/tasks/plan', {
+      method: 'POST', headers: { authorization: `Bearer ${carolTok}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ goal: 'sneaky home plan' }),
+    });
+    expect(planRes.status).toBe(403);
+  });
+
+  // Same bypass, but for an agent-scoped token: canAccessProject documents agent confinement as
+  // "never admin-bypass", and resolveTarget's home-project early return skipped that too. An
+  // agent token with an empty working set (no live agent task/mission) must be refused the home
+  // project exactly like any other project it hasn't been confined to.
+  it('an agent-scoped token outside its working set cannot POST /tasks into the home project', async () => {
+    const db = openDb(':memory:');
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'home','/o')").run();
+    const users = new UserStore(db);
+    const admin = users.create('admin', 'pw');
+    const userProjects = new UserProjectStore(db); // multi-tenant mode → agent tokens are gated by working set
+    const tasks = new TaskStore(db);
+    const app = createServer({
+      tasks, readiness: new Readiness(db), missions: new MissionStore(db), bus: new EventBus(),
+      engine: null as never, spawn: null as never, tmux: null as never,
+      project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
+      clock: new FakeClock(0), config: new ConfigStore(db),
+      users, projects: new ProjectStore(db), userProjects,
+    });
+    const agentTok = users.issueToken(admin.id, 'agent'); // nothing in_progress/active → empty working set
+    const res = await app.request('/tasks', {
+      method: 'POST', headers: { authorization: `Bearer ${agentTok}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'sneaky agent home task' }),
+    });
+    expect(res.status).toBe(403);
+    expect(tasks.list().length).toBe(0);
+  });
+
   // The final-phase agent closes the epic itself right after closing its own leaf. By then its task is
   // no longer in_progress and the mission has disengaged, so the agent's working set (in_progress agent
   // tasks + active missions' epics) is empty — its epic-close would 403. The still-open epic, having

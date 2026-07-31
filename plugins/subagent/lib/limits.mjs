@@ -29,13 +29,16 @@ export const MAX_CONTEXT_CHUNKS = 12;
 /** Total context budget across all chunks. The operator tunes it in Settings → Elowen AI → Limits
  *  (`brain.limits.delegateContextChars`), where core clamps it to the same range; the ceiling here is the
  *  plugin's own guard for a host that wires nothing (unit tests, an older daemon), not a second policy.
- *  The maximum leaves ~6 000 chars of the delegated-scope total for the role prompt.
+ *  The maximum must track core's own ceiling (BRAIN_LIMIT_BOUNDS.delegateContextChars in
+ *  src/store/configStore.ts) — a lower value here would silently undo an operator's setting, since this
+ *  clamp runs last. Both are sized against MAX_PROMPT_TOTAL_CHARS in src/brain/delegatedScope.ts, which
+ *  is shared with the child's role prompt.
  *
  *  Deliberately not exported: the bounds are reachable through resolveContextTotalChars(), so a caller
  *  cannot read one and apply it by hand without the clamp that gives it meaning. */
 const DEFAULT_CONTEXT_TOTAL_CHARS = 20_000;
 const MIN_CONTEXT_TOTAL_CHARS = 2_000;
-const MAX_CONTEXT_TOTAL_CHARS = 26_000;
+const MAX_CONTEXT_TOTAL_CHARS = 80_000;
 
 /** Clamp an operator-supplied total budget; anything missing or malformed falls back to the default. */
 export function resolveContextTotalChars(raw) {

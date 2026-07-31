@@ -8,7 +8,7 @@ import { Segmented } from '../../components/ui/Segmented';
 import { ChoiceField } from '../../components/ui/ChoiceField';
 import { Slider } from '../../components/ui/Slider';
 import { Toggle } from '../../components/ui/Toggle';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { useTheme } from '../../lib/useTheme';
@@ -23,7 +23,7 @@ import type { TerminalSettings, TerminalPalette, TerminalFontFamily, TerminalCur
  *  Font, cursor, scrollback and a full 21-colour custom palette, with a live preview and debounced
  *  autosave. `theme:'auto'` keeps the app-theme-following default. */
 export function TerminalSection({ onSaveState }: { onSaveState?: (section: string, status: SaveStatus, retry?: () => void) => void } = {}) {
-  const { data, isLoading } = useMyTerminalSettings();
+  const { data, isLoading, isError, refetch } = useMyTerminalSettings();
   const save = useSaveMyTerminalSettings();
   const { resolvedTheme } = useTheme();
   const { toast } = useToast();
@@ -56,6 +56,7 @@ export function TerminalSection({ onSaveState }: { onSaveState?: (section: strin
   }, { ready: seeded });
   useEffect(() => onSaveState?.('terminal', autosave.status, autosave.retry), [onSaveState, autosave.status, autosave.retry]);
 
+  if (isError) return <ErrorState message={t.common.daemonUnreachable} onRetry={() => refetch()} />;
   if (isLoading || !data) return <LoadingState />;
 
   const fontOpts = (['system', 'menlo', 'ibm', 'courier'] as const).map((id) => ({ value: id, label: t.terminal.fonts[id] }));

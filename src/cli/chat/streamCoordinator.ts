@@ -66,13 +66,13 @@ export class StreamCoordinator implements StreamCoordinatorPort {
 
   constructor(
     rt: ChatState,
-    resources: Pick<ChatApplicationResources, 'client'>,
+    resources: Pick<ChatApplicationResources, 'client' | 'editor'>,
     actions: Pick<ChatApplicationActions, 'render' | 'refreshMeta' | 'onTurnSettled' | 'onTurnActive' | 'invalidateAsyncState'>,
     flows: Flows,
     hydrator: SnapshotHydrator<BrainEvent>,
     hydrationNotices: HydrationNoticeOwner,
   ) {
-    const { client } = resources;
+    const { client, editor } = resources;
     const { render, refreshMeta, onTurnSettled, onTurnActive, invalidateAsyncState } = actions;
     let childGeneration = 0;
     let sessionGeneration = 0;
@@ -137,6 +137,9 @@ export class StreamCoordinator implements StreamCoordinatorPort {
         // Control snapshots are state outside the transcript and must remain responsive while history is
         // hydrating. They are still fenced by this stream generation before mutation/render.
         if (event.type === 'ask') { flows.launchAsk(event.id, event.questions, event.kind); return; }
+        // Settled elsewhere (answered in the web, timed out, or the turn was aborted) — the prompt fans
+        // out to every client, so the one that did not answer has to be told to drop it.
+        if (event.type === 'ask_resolved') { flows.closeAsk(event.id); return; }
         if (event.type === 'queue') { rt.queued = event.items; render('stream:queue'); return; }
         if (event.type === 'process') { rt.processes = event.processes; render('stream:process'); return; }
         if (event.type === 'goal') { rt.setGoal(event.goal); render('stream:goal'); return; }
@@ -184,6 +187,10 @@ export class StreamCoordinator implements StreamCoordinatorPort {
         if (event.type === 'subagent' && event.status !== 'running') {
           void refreshMeta().then(() => { if (current() && lease.isCurrent()) render('metadata:subagent-settled'); });
         }
+        // Esc/Stop-before-output discard: the transcript apply below pulls the 'you' bubble; here restore
+        // its text to the composer for editing/resending — but only when the composer is empty, so a
+        // discard never clobbers a draft the user already started (mirror of onQueueRecall's "edit wins").
+        if (event.type === 'discard_user' && editor.getText().trim() === '') editor.setText(event.text);
         rt.transcript.apply(event);
         if (event.type === 'session') pendingSessionReset = null;
         render(`stream:${event.type}`);
@@ -317,6 +324,7 @@ export class StreamCoordinator implements StreamCoordinatorPort {
       const fold = (event: BrainEvent, bypassHydration = false): void => {
         if (!current() || !lease.isCurrent() || !rt.childView) return;
         if (event.type === 'ask') { flows.launchAsk(event.id, event.questions, event.kind); return; }
+        if (event.type === 'ask_resolved') { flows.closeAsk(event.id); return; }
         if (!bypassHydration) {
           const buffered = lease.buffer(event);
           if (buffered !== 'passthrough') return;

@@ -1,13 +1,13 @@
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import { describe, it, expect } from 'vitest';
 import { encodeMessage, MessageDecoder } from '../../src/lsp/protocol.js';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { detectLanguage, serverForLanguage, commandExists, listServers, resolveServerCommand } from '../../src/lsp/servers.js';
 import { parsePublishDiagnostics, LspClient, type LspTransport, type JsonRpcMessage } from '../../src/lsp/client.js';
 import { LspManager, formatCheckResult, projectRootForFile } from '../../src/lsp/manager.js';
-import { buildLspTools, toggleLsp, lspManager, formatDocumentSymbols, formatLocations, formatHover, formatWorkspaceSymbols } from '../../src/brain/tools/lspTools.js';
+import { buildLspTools, toggleLsp, lspManager, workspaceBoundary, formatDocumentSymbols, formatLocations, formatHover, formatWorkspaceSymbols } from '../../src/brain/tools/lspTools.js';
 
 describe('LSP protocol codec', () => {
   it('encodes with a byte-accurate Content-Length header', () => {
@@ -249,7 +249,42 @@ function publishOnceServer(diags: unknown[]): { transport: LspTransport; opens: 
   return ctl;
 }
 
+/** A server whose verdict is whatever text it was last sent, and which answers hover with the same. It
+ *  makes the interleaving visible: a publish belongs to ONE document content, and publishDiagnostics
+ *  carries no version to tell them apart. */
+function echoTextServer(): LspTransport {
+  let onMsg: (m: JsonRpcMessage) => void = () => {};
+  let lastText = '';
+  return {
+    send: (framed) => {
+      const msg = JSON.parse(framed.split('\r\n\r\n')[1]!) as JsonRpcMessage;
+      if (msg.method === 'initialize' && typeof msg.id === 'number') {
+        queueMicrotask(() => onMsg({ jsonrpc: '2.0', id: msg.id, result: { capabilities: {} } }));
+      } else if (msg.method === 'textDocument/didOpen' || msg.method === 'textDocument/didChange') {
+        const params = msg.params as { textDocument: { uri: string; text?: string }; contentChanges?: { text: string }[] };
+        lastText = params.contentChanges?.[0]?.text ?? params.textDocument.text ?? '';
+        const uri = params.textDocument.uri;
+        const message = lastText;
+        queueMicrotask(() => onMsg({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri, diagnostics: [{ severity: 1, message, range: { start: { line: 0, character: 0 } } }] } }));
+      } else if (msg.method === 'textDocument/hover' && typeof msg.id === 'number') {
+        queueMicrotask(() => onMsg({ jsonrpc: '2.0', id: msg.id, result: { contents: lastText } }));
+      }
+    },
+    onMessage: (cb) => { onMsg = cb; }, onExit: () => {}, dispose: () => {},
+  };
+}
+
 describe('LspClient end-to-end (fake transport)', () => {
+  it('a hover on the same document cannot hand the pending diagnose another text\'s verdict', async () => {
+    const client = new LspClient(echoTextServer(), '/proj');
+    const diagnosing = client.diagnose('/proj/a.ts', 'A', 'typescript', 1000, 40);
+    await new Promise((r) => setTimeout(r, 5)); // the didOpen for A is on the wire, its verdict pending
+    const hovering = client.hover('/proj/a.ts', 'B', 'typescript', 1, 1, 1000);
+    const verdict = await diagnosing;
+    expect(verdict.diagnostics.map((d) => d.message)).toEqual(['A']); // never B's publish
+    expect(await hovering).toEqual({ contents: 'B' }); // and the hover still answers for its own text
+  });
+
   it('initializes, opens a doc, and returns its diagnostics', async () => {
     const transport = fakeServer({
       '/proj/a.ts': [{ severity: 1, message: 'boom', range: { start: { line: 2, character: 1 } }, source: 'ts' }],
@@ -885,6 +920,23 @@ describe('lsp tool + /lsp toggle', () => {
       () => tool.execute('c1', { path: '/etc/passwd' }),
     );
     expect(res.content[0]!.text).toMatch(/not allowed/);
+  });
+
+  it('LspWorkspaceSymbol searches the project the turn is bound to, not the longest allowed root', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'elowen-wsb-')));
+    try {
+      const current = join(dir, 'a');
+      const other = join(dir, 'bbbbbbbbbbbbbbbb'); // deliberately the longest path, a DIFFERENT project
+      mkdirSync(join(current, 'src'), { recursive: true });
+      mkdirSync(other, { recursive: true });
+      const policy = { allowedProjectIds: new Set([1, 2]), allowedPaths: () => [current, other] };
+      const bound = runWithPolicy(policy, () => workspaceBoundary(), { workDir: join(current, 'src') });
+      expect(bound).toBe(current); // the repo the caller is working in, not whichever name sorts longest
+      // Nothing to anchor on → unchanged fallback: the caller's widest allowed scope.
+      expect(runWithPolicy(policy, () => workspaceBoundary())).toBe(other);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('toggle flips the shared manager state and back', () => {

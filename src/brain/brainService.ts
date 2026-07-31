@@ -18,6 +18,7 @@ import { ChannelSessionService } from './channels.js';
 import type { ChannelSendOpts } from './channels.js';
 import { PlatformOrchestrator } from './platforms.js';
 import type { BrainMessageView } from './messageView.js';
+import { extractText } from './messageView.js';
 import { runCompaction, withDescendantUsage } from './events.js';
 import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
 import { isNonUserSession, isOwnedUserSession, isChannelSession, isSubagentSession, channelIdOf, defaultUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
@@ -200,7 +201,16 @@ export class BrainService {
       sendDelegatedCustom: async (userId, sessionId, customType, content, resultId) => {
         await this.sendDelegated(userId, sessionId, content, { internalSystem: { customType, resultId } });
       },
-      afterTurnSettled: () => this.drainDeferredPluginReload(),
+      afterTurnSettled: (userId, sessionId, fromWeb) => {
+        this.drainDeferredPluginReload();
+        // A web-started turn just finished with NO client stream still attached — tell the user's phone.
+        // `fromWeb` alone only means the send did not come from a bound CLI, which is also true of the web
+        // tab the user is reading right now: notifying then buzzes someone who is watching the answer
+        // arrive. Enablement is implicit: no push subscription means the notifier sends nothing.
+        if (fromWeb && this.attachments.attachedCount(sessionId) === 0 && d.notifyTurnComplete) {
+          d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
+        }
+      },
     });
     this.statusView = new BrainStatusService({
       store: d.store, sessions: this.sessions, attachments: this.attachments,
@@ -247,7 +257,7 @@ export class BrainService {
       // apart from a failed attempt and still deliver errors through its notify fallback.
       originSend: async (userId, sessionId, text, onEvent) => {
         const row = this.d.store.getSession(sessionId);
-        if (!row || row.user_id !== userId || isNonUserSession(sessionId)) return null;
+        if (!isOwnedUserSession(row, userId, sessionId)) return null;
         await this.send({ userId, text, mode: 'build', session: sessionId });
         onEvent?.({ type: 'session', sessionId });
         return lastAssistantText(this.d.store, sessionId);
@@ -287,6 +297,58 @@ export class BrainService {
   /** One-shot boot sweep for restart-zombie goals — see GoalLoopService.reconcileGoalsOnBoot. */
   reconcileGoalsOnBoot(): void {
     this.goals.reconcileGoalsOnBoot();
+  }
+
+  /** The delegation twin of {@link reconcileGoalsOnBoot}: every durable sub-agent/workflow row the DB still
+   *  marks `running` at boot is a zombie, because the in-memory child registrations died with the process.
+   *  Terminalize them ONCE, HERE. Boot is the only moment the blanket rule is sound — no live delegation can
+   *  exist yet. The same sweep run lazily from start() cannot tell an orphan from a healthy delegation whose
+   *  registration it simply cannot see, and killed live work from the outside on every client reconnect.
+   *  Sweeping globally also repairs the state for good instead of hiding it per read, and reaches the
+   *  channel/task sessions an owner start() never visits.
+   *
+   *  Only an autoDeliver child ever promised automatic delivery, so only it gets a synthetic "interrupted by
+   *  daemon restart" result — enqueued durably, NOT delivered here: draining would respawn every orphaned
+   *  conversation at boot. start() and the post-turn hook drain the inbox when the conversation is next used. */
+  reconcileDelegationsOnBoot(): void {
+    for (const sessionId of this.d.store.runningDelegationParentSessionIds()) {
+      for (const run of this.d.store.getSubagentRuns(sessionId)) {
+        if (run.status !== 'running') continue;
+        // Preserve the detail + ORIGINAL flags — never fabricate background/autoDeliver.
+        const terminal = {
+          id: run.toolCallId, sessionId: run.sessionId, status: 'error' as const, task: run.task,
+          ...(run.detail !== undefined ? { detail: run.detail } : {}),
+          tools: run.tools, tokens: run.tokens, seconds: run.seconds, model: run.model,
+          ...(run.background === true ? { background: true } : {}),
+          ...(run.autoDeliver === true ? { autoDeliver: true } : {}),
+        };
+        // No timeline marker here on purpose: this runs at boot before any client attaches, so there is no
+        // live replay to publish to and the marker is display-only (never persisted to session events). The
+        // panel reflects the terminal status on next read; the marker is for finishes that happen live.
+        if (!this.d.store.upsertSubagentRun(sessionId, terminal)) continue;
+        if (run.autoDeliver !== true) continue;
+        this.d.store.enqueueSubagentResult(sessionId, {
+          id: syntheticRestartResultId(sessionId, run.toolCallId), toolCallId: run.toolCallId,
+          sessionId: run.sessionId, status: 'error', task: run.task,
+          error: 'sub-agent interrupted by daemon restart', tools: run.tools, tokens: run.tokens,
+          seconds: run.seconds, model: run.model,
+        });
+      }
+      // The loop above can only repair what getSubagentRuns returns, and that read requires a live direct
+      // same-owner child. A row whose child session vanished or changed hands is skipped by it AND rejected
+      // by upsertSubagentRun, so it would keep claiming `running` for good. Repair it straight on the row.
+      const orphaned = this.d.store.terminalizeOrphanedSubagentRuns(sessionId);
+      if (orphaned > 0) {
+        logger('brain').warn(`boot reconcile terminalized ${orphaned} delegation row(s) of ${sessionId} whose child session no longer resolves`);
+      }
+      // Same restart concern for workflows, minus the delivery half: WorkflowStart BLOCKS, so a restart
+      // killed the tool call and its whole turn — there is no result anyone is still waiting on, and no
+      // completion inbox to weave into. The row only has to stop claiming the DAG is still running.
+      for (const run of this.d.store.getWorkflowRuns(sessionId)) {
+        if (run.status !== 'running') continue;
+        this.d.store.upsertWorkflowRun(sessionId, terminalizeWorkflow(run));
+      }
+    }
   }
 
   /** The model id the CURRENT config resolves to (readiness), or null — see BrainStatusService. */
@@ -331,13 +393,30 @@ export class BrainService {
   async abort(userId: number, session?: string): Promise<void> {
     const b = session ? this.sessions.get(this.lifecycle.ownedUserSession(userId, session)) : this.lifecycle.activeLive(userId);
     if (!b) throw new Error('brain not started');
-    // Fence before taking the child snapshot. Otherwise an idle drill-in continuation can register a
-    // fresh child between childrenOf() and the deregistration of the doomed ones, escaping this stop tree.
-    this.sessions.beginParentAbort(b.sessionId);
+    // Esc/Stop before the turn produced any output discards the just-sent user turn: delete its durable
+    // row and tell clients to pull the bubble + restore its text to the composer. Decided synchronously,
+    // before the first await — JS is single-threaded, so turnProducedOutput cannot change under us between
+    // this read and arming the guard; a token still in flight is then dropped by the reducer's guard.
+    // Only abort() (the explicit Esc/Stop) does this — stopSession (client disconnect) and interruptQueued
+    // keep the turn, so this deliberately lives here and not in abortFenced/abortLive.
+    const discard = !b.turnProducedOutput ? b.lastAdmitted : undefined;
+    if (discard) b.discardingUserTurn = discard.durableId;
     try {
-      await this.abortLive(b);
+      await this.abortFenced(b);
+      if (discard) {
+        // Delete the user row AND any partial assistant output the aborted turn's agent_end persisted:
+        // projectEvent runs synchronously while abortFenced tears the run down, so a token that raced the
+        // cancel can leave a fragment in the store. Removing only the user row would surface that fragment
+        // as an answer with no question after a reconnect. deleteMessagesFrom clears the row and everything
+        // after it in this turn.
+        this.d.store.deleteMessagesFrom(b.sessionId, discard.durableId);
+        b.replay.publish({ type: 'discard_user', durableId: discard.durableId, text: discard.text });
+      }
     } finally {
-      this.sessions.endParentAbort(b.sessionId);
+      // Always release the guard, even if abortFenced threw — otherwise the reducer would keep dropping
+      // every future content event (discardingUserTurn stays armed) and the session would go mute until a
+      // respawn, and a stale lastAdmitted could let a later abort delete a turn that already has output.
+      if (discard) { b.discardingUserTurn = undefined; b.lastAdmitted = undefined; }
     }
   }
 
@@ -478,6 +557,19 @@ export class BrainService {
     clearDeliveredUserEchoes(b);
   }
 
+  /** `abortLive` behind the parent-abort fence — the one entry point every caller that already HOLDS the
+   *  live record uses. Fence before the child snapshot is taken inside: otherwise an idle drill-in
+   *  continuation can register a fresh child between childrenOf() and the deregistration of the doomed
+   *  ones, escaping this stop tree. */
+  private async abortFenced(b: LiveBrain): Promise<void> {
+    this.sessions.beginParentAbort(b.sessionId);
+    try {
+      await this.abortLive(b);
+    } finally {
+      this.sessions.endParentAbort(b.sessionId);
+    }
+  }
+
   /** Whether a client-initiated stop may interrupt this session's turn (Invariant 2). A detaching client
    *  must not abort a turn ANOTHER interactive client is watching. A stable client id identifies a terminal
    *  ending its own run, so only another stable client — or one mid-boot, which is on its way to watch —
@@ -489,6 +581,24 @@ export class BrainService {
     return clientId
       ? !this.attachments.hasLiveStableClient(sessionId)
       : this.attachments.attachedCount(sessionId) === 0;
+  }
+
+  /** Whether `sessionId` is safe for `bindChannelContext` to re-key onto a new id right now — the
+   *  review's smallest safe fix for the `/context` move (Tier 2 #13): refuse the bind rather than migrate
+   *  every sidecar map that is keyed on the OLD id (attachments, live children, processRegistry, the goal
+   *  loop). Fails closed like `sessionIsIdle` below, but deliberately does NOT take its "`!live` → idle"
+   *  shortcut: a background delegate, a workflow node or a goal continuation can all still be keyed on
+   *  this id with no LiveBrain currently spawned in memory, and re-keying it would orphan them exactly as
+   *  it would if the session were live. */
+  private isBindQuiescent(sessionId: string): boolean {
+    if (this.sessions.get(sessionId)?.session.isStreaming) return false;
+    // An attached client stream (web dock, CLI tap/subscribe) or a mid-boot start claim both read/write
+    // through the OLD id; neither follows a bare `reassignSession`, so either would go dark or misfire.
+    if (this.attachments.attachedCount(sessionId) !== 0 || this.attachments.hasPendingStartClaim(sessionId)) return false;
+    if (this.sessions.hasActiveChildren(sessionId) || this.sparedChildSessionIds(sessionId).size > 0) return false;
+    if (processRegistry.runningJobCountForSession(sessionId) > 0) return false;
+    if (this.d.store.getGoal(sessionId)?.status === 'active') return false;
+    return true;
   }
 
   /** Whether this conversation has WORK in flight — a running turn, anything queued behind it, a parked
@@ -570,7 +680,12 @@ export class BrainService {
       // and the abandoned-teardown path clears it explicitly, but a throw in between (a goal, elicitation
       // or card teardown) would strand it — pinning a perfectly healthy session on the slow path forever.
       try {
-        try { await this.abort(userId, sessionId); } catch { /* already idle/settled */ }
+        // Abort through the record this teardown already holds, NOT the public abort(): that one throws a
+        // bare 'brain not started' for an already-settled conversation, so catching it here also swallowed
+        // a REAL failure — a workflow that refused to cancel, a foreground delegate that stayed up, a PI
+        // turn that never unwound — and disposed the parent anyway, leaving that work running with nothing
+        // above it. Nothing live to abort is the only benign case, and it cannot happen under this lock.
+        await this.abortFenced(live);
         // Re-check after the abort settles: a client can attach during that await, and it must not be
         // disposed out from under. If one arrived, leave the (now idle) session live for the new observer.
         // Deliberately NOT counting a pending claim here, unlike the gate above: a start that arrives once
@@ -833,21 +948,92 @@ export class BrainService {
 
   /** Delete one of the user's stored conversations (never a channel session, never someone else's).
    *  A live session is disposed first; deleting the active conversation just clears the pointer —
-   *  the next start() falls back to the most recent remaining one. */
-  deleteSession(userId: number, sessionId: string): void {
+   *  the next start() falls back to the most recent remaining one.
+   *
+   *  Serialized on the session lock, like every neighbouring path that mutates one conversation
+   *  (compact, stopSession, the idle reaper, bindChannelContext). Unserialized, the teardown interleaved
+   *  with a prompt() already running inside that lock: the delete disposed the live record and dropped
+   *  the row while the turn ran on, and that turn's own agent_end then persisted its output into a
+   *  conversation that no longer existed. The in-flight work is fenced and interrupted BEFORE queueing on
+   *  the lock — a running turn HOLDS it, so serializing first would make the delete wait out the very
+   *  turn it exists to destroy (the ordering stopSession uses, for the same reason). */
+  async deleteSession(userId: number, sessionId: string): Promise<void> {
     const row = this.d.store.getSession(sessionId);
     if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
+    this.fenceDeletedSession(sessionId);
+    await this.serial(sessionId, async () => {
+      // Re-read under the lock: a concurrent delete of the same conversation may already have completed,
+      // and running the teardown a second time would tear down whatever took this id in the meantime.
+      if (!isOwnedUserSession(this.d.store.getSession(sessionId), userId, sessionId)) {
+        this.sessions.clearDisposing(sessionId); // teardown abandoned — don't pin a live record on the slow path
+        return;
+      }
+      this.teardownDeletedSession(userId, sessionId);
+      this.d.store.deleteSession(sessionId);
+    });
+  }
+
+  /** Fence a conversation whose delete is COMMITTED, in the same tick the caller reserves its session
+   *  lock. `markDisposing` is what keeps a concurrent ensureLive() from fast-pathing onto the record this
+   *  delete is about to throw away — it queues on the lock instead, where the row is already gone and
+   *  every bound entry point rejects the id. Releasing the parked question and interrupting PI's run is
+   *  what lets a turn holding that lock reach the end of it rather than run to completion first; a turn
+   *  parked on AskUserQuestion is not PI-level work, so no interrupt can unwind it (see stopSession).
+   *  Both are signals only, deliberately not awaited, so the lock is still reserved in this tick. */
+  private fenceDeletedSession(sessionId: string): void {
+    const live = this.sessions.get(sessionId);
+    if (!live) return;
+    this.sessions.markDisposing(sessionId);
+    this.elicitation.cancelForSession(sessionId, 'conversation deleted');
+    void abortSessionWork(live.session).catch((err: unknown) => {
+      // Nothing else reports this one: it runs before the lock and nothing awaits it, so a failed
+      // interrupt would silently turn the delete back into "wait out the turn".
+      logger('brain').warn(`delete ${sessionId}: interrupt failed — ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
+  /** Everything a conversation owns, released before its row is dropped — shared by the user-facing
+   *  delete and the admin one so the two cannot drift apart (they already had: only one of them cleared
+   *  the active pointer and the card cache, so an admin delete of the active conversation left
+   *  `activeSessionId` naming a row that no longer existed).
+   *
+   *  A delete spares nothing, unlike a stop: a detached delegate or a background workflow keeps burning
+   *  tokens for an inbox that has ceased to exist. */
+  private teardownDeletedSession(userId: number, id: string): void {
     // Tear down any chat terminal bound to this conversation FIRST (docs order: terminal, then session).
-    // Fire-and-forget — deleteSession is sync and the binding row outlives store.deleteSession (separate
-    // table), so the async teardown still resolves the row; the janitor is the backstop if it's unwired.
-    void this.terminalTeardown?.(userId, sessionId).catch((e) => logger('brain').error(`terminal teardown failed for ${sessionId}`, e));
-    this.cleanupProcessesForTree(sessionId);
-    this.elicitation.cancelForSession(sessionId, 'conversation deleted'); // release a parked turn before dropping its session
-    this.goals.cancelGoalContinuation(sessionId);
-    this.cards.clearSession(sessionId);
-    this.sessions.dispose(sessionId);
-    if (this.sessions.activeIdFor(userId) === sessionId) this.sessions.clearActive(userId);
-    this.d.store.deleteSession(sessionId);
+    // Fire-and-forget — no delete path awaits it, and the binding row outlives store.deleteSession
+    // (separate table), so the async teardown still resolves the row; the janitor is the backstop if
+    // it's unwired. No-op when the conversation has no bound terminal (channel/task sessions never do).
+    void this.terminalTeardown?.(userId, id).catch((e) => logger('brain').error(`terminal teardown failed for ${id}`, e));
+    this.cleanupProcessesForTree(id);
+    this.cancelDelegatedWorkFor(id);
+    this.elicitation.cancelForSession(id, 'conversation deleted'); // release a parked turn before dropping its session
+    this.goals.cancelGoalContinuation(id);
+    this.cards.clearSession(id);
+    if (isChannelSession(id)) this.sessions.channelDispose(channelIdOf(id));
+    else this.sessions.dispose(id);
+    // The in-memory pointer must not survive the row it names, or status/send would keep answering for a
+    // conversation that no longer exists (lifecycle.activeSessionId trusts the pointer verbatim).
+    if (this.sessions.activeIdFor(userId) === id) this.sessions.clearActive(userId);
+  }
+
+  /** Stop the DELEGATED work a deleted conversation is still driving: the workflow DAG that keeps
+   *  launching fresh nodes into it, and every running delegated child whose result now has nowhere to be
+   *  delivered. cleanupProcessesForTree reaches only the shell processes those children spawned, never
+   *  the agent turns themselves.
+   *
+   *  Fired and logged rather than awaited: the workflow control lives behind the plugin registry (async)
+   *  while neither delete entry point awaits it — the same contract the terminal teardown above uses.
+   *  Cancel the engine BEFORE the children, or it relaunches a node the moment an aborted one settles. */
+  private cancelDelegatedWorkFor(id: string): void {
+    const children = this.sessions.childrenOf(id);
+    void (async () => {
+      await this.cancelWorkflowsFor(id);
+      for (const child of children) {
+        if (isChannelSession(child)) await this.channelService.abort(channelIdOf(child));
+        this.sessions.setChildRunning(id, child, false);
+      }
+    })().catch((e) => logger('brain').error(`delegated teardown failed for ${id}`, e));
   }
 
   renameSession(userId: number, sessionId: string, title: string): { id: string; title: string } {
@@ -915,6 +1101,13 @@ export class BrainService {
       // bind of an already-moved id finds nothing here (the id ceased to exist on the first bind).
       const row = this.d.store.getSession(chosenSessionId);
       if (!row || row.user_id !== callerUserId) throw new Error('unknown session');
+      // Smallest safe fix for the /context move (Tier 2 #13): durable bindings move with reassignSession
+      // below, but the in-memory maps (attachments, live children, processes, the goal loop) do not, so a
+      // session with real work still keyed on its OLD id would be orphaned by the move — refuse it
+      // outright rather than migrate every one of those maps (judged needlessly risky).
+      if (!this.isBindQuiescent(chosenSessionId)) {
+        throw new Error('this conversation has work in progress and cannot be moved into a channel right now');
+      }
       // A bound `elowen chat` terminal was launched with `--session <chosenSessionId>`; the re-key below
       // moves that id out from under it, so its tmux would resume a gone id and the next sweep would reap
       // it as 'conversationGone' — killing the live pane and revoking its token. Tear it down cleanly
@@ -957,14 +1150,7 @@ export class BrainService {
   deleteManagedSession(userId: number, id: string): number {
     const row = this.d.store.getSession(id);
     if (!row || row.user_id !== userId) return 0;
-    // Same terminal-first teardown as deleteSession (the admin panel's per-session delete). No-op when the
-    // conversation has no bound terminal (channel/task sessions never do).
-    void this.terminalTeardown?.(userId, id).catch((e) => logger('brain').error(`terminal teardown failed for ${id}`, e));
-    this.cleanupProcessesForTree(id);
-    this.elicitation.cancelForSession(id, 'session deleted');
-    this.goals.cancelGoalContinuation(id);
-    if (isChannelSession(id)) this.sessions.channelDispose(channelIdOf(id));
-    else if (this.sessions.has(id)) this.sessions.dispose(id);
+    this.teardownDeletedSession(userId, id);
     this.d.store.deleteSession(id);
     return 1;
   }
@@ -1028,39 +1214,9 @@ export class BrainService {
   /** Start (or resume) a conversation — see ConversationLifecycle.start. */
   async start(userId: number, opts?: { provider?: string; model?: string; session?: string; fresh?: boolean; cwd?: string; clientId?: string; clientGeneration?: number }): Promise<{ sessionId: string }> {
     const started = await this.lifecycle.start(userId, opts);
-    const activeChildren = new Set(this.sessions.childrenOf(started.sessionId));
-    for (const run of this.d.store.getSubagentRuns(started.sessionId)) {
-      // A daemon restart drops every in-memory child registration, so ANY still-'running' row without a
-      // live child is a dead orphan (foreground, background and autoDeliver alike). Terminalize each so the
-      // history stops showing a phantom running spinner — preserving its detail + ORIGINAL flags (never
-      // fabricate background/autoDeliver). Only an autoDeliver child ever promised automatic delivery, so
-      // only it gets the synthetic "interrupted by daemon restart" result woven into the parent's context;
-      // foreground/manual-background orphans just terminalize (the user sees the error row in history).
-      if (run.status !== 'running' || activeChildren.has(run.sessionId)) continue;
-      const terminal = {
-        id: run.toolCallId, sessionId: run.sessionId, status: 'error' as const, task: run.task,
-        ...(run.detail !== undefined ? { detail: run.detail } : {}),
-        tools: run.tools, tokens: run.tokens, seconds: run.seconds, model: run.model,
-        ...(run.background === true ? { background: true } : {}),
-        ...(run.autoDeliver === true ? { autoDeliver: true } : {}),
-      };
-      if (!this.d.store.upsertSubagentRun(started.sessionId, terminal)) continue;
-      if (run.autoDeliver !== true) continue;
-      this.turnRunner.acceptSubagentCompletion(started.sessionId, userId, {
-        id: syntheticRestartResultId(started.sessionId, run.toolCallId), toolCallId: run.toolCallId,
-        sessionId: run.sessionId, status: 'error', task: run.task,
-        error: 'sub-agent interrupted by daemon restart', tools: run.tools, tokens: run.tokens,
-        seconds: run.seconds, model: run.model,
-      });
-    }
-    // Same restart concern for workflows, minus the delivery half: WorkflowStart BLOCKS, so a restart
-    // killed the tool call and its whole turn — there is no result anyone is still waiting on, and no
-    // completion inbox to weave into. The row only has to stop claiming the DAG is still running.
-    for (const run of this.d.store.getWorkflowRuns(started.sessionId)) {
-      if (run.status !== 'running') continue;
-      if (run.nodes.some((node) => node.sessionId && activeChildren.has(node.sessionId))) continue;
-      this.d.store.upsertWorkflowRun(started.sessionId, terminalizeWorkflow(run));
-    }
+    // Drain only — never sweep. Opening a conversation says nothing about whether its still-'running'
+    // delegation rows are orphans (see reconcileDelegationsOnBoot); the inbox may hold a background child's
+    // result, or a restart orphan's synthetic one that boot enqueued but deliberately left undelivered.
     void this.turnRunner.drainPendingSubagentResults(userId, started.sessionId);
     return started;
   }
@@ -1121,6 +1277,61 @@ export class BrainService {
    *  here (steering another member's turn would mix privileges). */
   async sendToSubagent(userId: number, sessionId: string, text: string): Promise<void> {
     await this.sendDelegated(userId, sessionId, text);
+  }
+
+  /** A delegating turn reading the final stored reply of one of its own sub-agents. The durable parent
+   *  relation and sub-agent id family are the confidentiality boundary; requiring a resolvable delegated
+   *  scope also rejects legacy/corrupt children exactly like continuation does.
+   *
+   *  `scopeExceedsCurrentAccess` deliberately does not apply here: reading stored text executes no child
+   *  tools and cannot revive its captured permissions. Applying a write-time execution check would only
+   *  make an already-authorized parent lose access to its own durable result after its tool scope narrows.
+   *
+   *  Deliberately NOT `lastAssistantText` (which is `lastAssistant` — literally the last row). A follow-up
+   *  attempt on this child that later errored (a bad model route, a dropped connection) appends its own
+   *  empty-text assistant row AFTER the real answer, and the shared helper would then report the child as
+   *  having "no final text" even though it plainly does — one row further back. Scanning backward for the
+   *  last NON-EMPTY assistant text is what "the sub-agent's answer" actually means here. */
+  readSubagent(parentSessionId: string, childSessionId: string): string {
+    const row = this.d.store.getSession(childSessionId);
+    if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
+      throw new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+    }
+    if (this.sessions.isActiveChild(childSessionId)) {
+      throw new Error('that sub-agent is still running — wait for it to finish before reading its final assistant text');
+    }
+    const scope = this.d.store.delegatedAccessFor(childSessionId);
+    if (!scope) throw new Error('delegated access unavailable');
+    const messages = this.d.store.getMessages(childSessionId);
+    let text = '';
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]!.role !== 'assistant') continue;
+      try {
+        const candidate = extractText(JSON.parse(messages[i]!.content));
+        if (candidate) { text = candidate; break; }
+      } catch { /* malformed row — keep scanning further back */ }
+    }
+    if (!text) {
+      throw new Error('that sub-agent has not produced final assistant text yet — wait for it to finish, then try DelegateRead again; if it finished empty, use DelegateContinue to ask for a conclusion');
+    }
+    return text;
+  }
+
+  /** Stop a runaway or no-longer-needed DIRECT sub-agent — the targeted counterpart of the whole-tree
+   *  teardown `/stop` already does. Same ownership guard as {@link readSubagent}: the child must belong to
+   *  THIS conversation, so a sibling's or another account's sub-agent is not addressable, and stopping one
+   *  never reaches past it — `ChannelSessionService.abort` recurses into whatever that child itself
+   *  delegated, exactly like a platform `/stop`, so the whole stuck branch (a foreground-blocked middle
+   *  agent together with the grandchild it is blocked on) comes down together. `{stopped: false}` for a
+   *  child that already finished (or never started) is not an error — there is simply nothing to stop. */
+  async stopSubagent(parentSessionId: string, childSessionId: string): Promise<{ stopped: boolean }> {
+    const row = this.d.store.getSession(childSessionId);
+    if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
+      throw new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+    }
+    if (!this.sessions.isActiveChild(childSessionId)) return { stopped: false };
+    await this.channelService.abort(channelIdOf(childSessionId));
+    return { stopped: true };
   }
 
   /** A delegating TURN continuing one of its own sub-agents: the child picks its transcript back up
@@ -1397,8 +1608,8 @@ export class BrainService {
   }
 
   /** Restart a user's live session so changed settings apply — see ConversationLifecycle.restart. */
-  async restart(userId: number): Promise<void> {
-    return this.lifecycle.restart(userId);
+  async restart(userId: number, opts: { reapplyModelPreference?: boolean } = {}): Promise<void> {
+    return this.lifecycle.restart(userId, opts);
   }
 
   /** A user saved their auto-compact settings: re-apply the threshold to every conversation of theirs that
@@ -1428,13 +1639,15 @@ export class BrainService {
 
   /** A user changed their active personality profile: respawn so the new persona chunk lands in the
    *  system prompt. The user's own owner-chat session restarts (per-user, safe), AND every channel
-   *  session is dropped so a Discord room respawns on the owner's fresh 'discord' persona — the channel
-   *  session is owner-anchored and shared, so it must not keep the stale persona. History rehydrates from
-   *  SQLite on respawn. Rare operation; serialized on its own key so it never interleaves a reload. */
+   *  session THIS USER OWNS is reset so a Discord room respawns on the owner's fresh 'discord' persona —
+   *  the channel session is owner-anchored and shared, so it must not keep the stale persona. Scoped by
+   *  owner: persona is resolved per channel-session owner at spawn, so a global reset would interrupt
+   *  every OTHER user's channels for a setting that never touched them. History rehydrates from SQLite on
+   *  respawn. Rare operation; serialized on its own key so it never interleaves a reload. */
   async applyPersonalityChange(userId: number): Promise<void> {
     await this.serial(`personality-${userId}`, async () => {
       await this.restart(userId);
-      this.sessions.channelDisposeAll();
+      await this.channelService.resetChannels('personality changed', (ownerUserId) => ownerUserId === userId);
     });
   }
 
@@ -1460,7 +1673,7 @@ export class BrainService {
       for (const [id] of this.sessions.liveEntries()) {
         if (!activeIds.includes(id)) this.sessions.dispose(id);
       }
-      this.sessions.channelDisposeAll();
+      await this.channelService.resetChannels('plugins reloaded');
       // Platform adapters were built by the old registry — disconnect them and start the fresh set.
       this.platforms.stopAll();
       await this.platforms.startAll();

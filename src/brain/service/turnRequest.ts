@@ -1,3 +1,5 @@
+import type { BrainWorkMode } from '../../shared/wireContract.js';
+
 /** One image attached to an owner-chat turn. The bytes are transient PI input; durable history stores
  * only a human-readable attachment marker. */
 export interface TurnImage {
@@ -5,7 +7,9 @@ export interface TurnImage {
   mimeType: string;
 }
 
-export type TurnMode = 'build' | 'plan' | 'workflow';
+/** The daemon's name for the wire contract's {@link BrainWorkMode}: the mode now rides back to clients on
+ *  the brain status, so the union is defined once instead of once per side. */
+export type TurnMode = BrainWorkMode;
 
 /** The three internal turn kinds: a goal-loop kickoff, a goal-loop continuation, or a system nudge. */
 type InternalTurnKind = 'goalKickoff' | 'goalContinue' | 'systemNudge';

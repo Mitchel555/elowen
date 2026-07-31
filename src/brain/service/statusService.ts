@@ -1,9 +1,10 @@
 import { createAgentSession, SessionManager, DefaultResourceLoader } from '@earendil-works/pi-coding-agent';
-import type { BrainStore, BrainSearchHit, BrainWorkflowRun } from '../../store/brainStore.js';
+import type { BrainStore, BrainSearchHit, BrainMessageRow, BrainWorkflowRun } from '../../store/brainStore.js';
 import type { BrainRuntimeConfig } from '../providers.js';
 import { buildBrainRegistry, resolveBrainModel } from '../providers.js';
-import { extractText, shapeBrainMessages, lastAssistant } from '../messageView.js';
+import { extractText, shapeBrainMessages, lastAssistant, pendingSubmittedPlan } from '../messageView.js';
 import type { BrainMessageView } from '../messageView.js';
+import type { BrainPendingPlan, BrainWorkMode } from '../../shared/wireContract.js';
 import { sessionUsageSnapshot } from '../events.js';
 import type { AskQuestion, BrainCard, BrainUsage } from '../events.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
@@ -66,6 +67,8 @@ export interface BrainStatusView {
   fast: boolean;
   fastAvailable: boolean;
   pendingAsk: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null;
+  workMode: BrainWorkMode;
+  pendingPlan: BrainPendingPlan | null;
   cards: BrainCard[];
   queued: { id: string; text: string }[];
   yolo: boolean;
@@ -125,18 +128,18 @@ export class BrainStatusService {
   constructor(private d: StatusServiceDeps) {}
 
   private subagentRuns(sessionId: string) {
-    // Display invariant: a durable row still marked 'running' but with no LIVE child registration is a
-    // restart orphan (the daemon dropped every in-memory child on boot). Hide it until start()'s reconcile
-    // terminalizes it — otherwise the history would show a phantom spinner for a child that is already dead.
+    // Restart orphans are repaired durably at boot (BrainService.reconcileDelegationsOnBoot), so this is
+    // NOT that fix — it is the read-time fallback for a row that goes stale WITHIN a process run: a child
+    // whose live registration is already gone while its terminal upsert has not landed. Hiding it keeps a
+    // dead child from rendering a phantom running spinner in the meantime.
     const active = new Set(this.d.sessions.childrenOf(sessionId));
     return this.d.store.getSubagentRuns(sessionId)
       .filter((run) => run.status !== 'running' || active.has(run.sessionId));
   }
 
-  /** The conversation's durable DAGs. Same restart-orphan concern as subagentRuns, but a TRANSFORM rather
-   *  than a filter: a workflow row is the only thing that renders its transcript marker, so hiding it
-   *  would lose the record of what ran — it is terminalized instead. This also covers what the boot sweep
-   *  cannot reach: channel/task sessions and the read-only history view.
+  /** The conversation's durable DAGs. Same read-time fallback as subagentRuns, but a TRANSFORM rather than
+   *  a filter: a workflow row is the only thing that renders its transcript marker, so hiding it would lose
+   *  the record of what ran — it is terminalized for display instead.
    *
    *  Keyed on the ORIGIN's liveness, not childrenOf: a genuinely running workflow has real windows with
    *  zero live children (between one node ending and tick() launching the next), which a children-based
@@ -158,6 +161,30 @@ export class BrainStatusService {
       this.d.store.getSessionEvents(sessionId),
       this.workflowRuns(sessionId),
     );
+  }
+
+  /** Plan mode's state for one conversation: the mode the daemon last ran a turn in, plus the plan that
+   *  turn submitted and is now waiting on the user. Published so a client stops having to guess either —
+   *  the mode is stamped per send and kept nowhere else, so a plan entered from the CLI was invisible to
+   *  the web, and a tab that reloaded lost the decision entirely.
+   *
+   *  The plan is read ONLY in plan mode: outside it there is no decision to raise (the model calls
+   *  ExitPlanMode nowhere else), and the gate is also what keeps every ordinary status call off the
+   *  history read. `rows` lets a caller that already loaded them (the snapshot) skip a second query. */
+  private planState(live: LiveBrain | undefined, sessionId: string | null, rows?: BrainMessageRow[]): { workMode: BrainWorkMode; pendingPlan: BrainPendingPlan | null } {
+    if (!sessionId) return { workMode: live?.lastTurnMode ?? 'build', pendingPlan: null };
+    // A LIVE conversation whose last turn ran in build mode has no pending plan — ExitPlanMode is called in
+    // no other mode — so trust the in-memory stamp and skip the history read entirely. This keeps the hot
+    // status poll (build mode is the common case) off the DB, where the only index is on session_id.
+    if (live && live.lastTurnMode !== 'plan') return { workMode: 'build', pendingPlan: null };
+    // Otherwise the plan is read from durable history, not from live.lastTurnMode: that stamp lives only in
+    // memory and a daemon restart resets it to 'build', which would strand a decision the transcript still
+    // holds (the modal that never came back after a redeploy). A submitted, still-undecided ExitPlanMode IS
+    // the proof we are plan-pending, so it also fixes the reported work mode when the live stamp is gone —
+    // a cold session after a restart (no live to trust) falls through here. `rows` lets the snapshot reuse
+    // the history it already loaded; the status poll reads only the newest turn, never the full history.
+    const pendingPlan = pendingSubmittedPlan(rows ?? this.d.store.getLatestTurn(sessionId));
+    return { workMode: pendingPlan ? 'plan' : (live?.lastTurnMode ?? 'build'), pendingPlan };
   }
 
   /** The current provider config, or null when nothing is configured (never throws). Shared by the
@@ -254,6 +281,10 @@ export class BrainStatusService {
       // A question parked for the active conversation, so a client reconnecting mid-question (refresh, SSE
       // drop) restores the picker instead of hanging until the timeout.
       pendingAsk: b ? this.d.elicitation.pendingForSession(b.sessionId) : null,
+      // Plan mode's mode + parked decision, for the same reason as the question above: a client that was
+      // not attached when the plan was submitted (a reload, a second tab, a surface that never entered
+      // plan mode itself) can only learn about it here.
+      ...this.planState(b, activeId),
       // The conversation's display cards (ctx.emitCard) so a client restores them on connect. Keyed on the
       // CONVERSATION, not the live session: reopening a chat the user closed has no live brain yet, and
       // that is exactly when the todo checklist has to come back rather than show up empty.
@@ -369,9 +400,10 @@ export class BrainStatusService {
     // Journaled users are already durable, but replaying them is what preserves their position among
     // pre/post-steer deltas. Remove exactly those id-matched rows from the history prefix (no text
     // guessing: display text may differ from persisted image/mention framing).
+    const rows = this.d.store.getMessages(sessionId);
     const clean = this.shapedHistory(
       sessionId,
-      this.d.store.getMessages(sessionId).filter((message) => !orderedUserRows.has(message.id)),
+      rows.filter((message) => !orderedUserRows.has(message.id)),
     );
     // Window AFTER the removal, never before: cutting first would let a journaled row consume a slot of
     // the window and drop a real turn out of the page. The removed rows all belong to the UNSETTLED run,
@@ -386,6 +418,7 @@ export class BrainStatusService {
       control: {
         streaming: !!live && (live.session.isStreaming || this.d.sessions.hasActiveChildren(live.sessionId)),
         pendingAsk: live ? this.d.elicitation.pendingForSession(live.sessionId) : null,
+        ...this.planState(live, sessionId, rows),
       },
       ...(page ? { hasMore: page.hasMore, nextBefore: page.nextBefore } : {}),
       ...replay,

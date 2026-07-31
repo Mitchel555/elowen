@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import * as p from '../ui/prompts.js';
 import { defaultLifecycleDeps, runLifecycle } from '../commands.js';
 import { readInstallInfo } from '../installInfo.js';
+import { waitHealthy } from '../launcher.js';
+import { hasLiveMission } from '../missionGate.js';
 import { SERVICES, systemctl } from '../systemd.js';
 import { clearMarker, isOnboarded, readMarker } from './marker.js';
 import { runOnboarding } from './wizard.js';
@@ -17,10 +19,14 @@ export async function runSetup(args: string[], env: NodeJS.ProcessEnv, base: str
   // Non-interactive: flag-driven setup (agents / CI / E2E). Works in or out of a TTY; never prompts.
   if (nonInteractive) {
     if (reset) clearMarker(env);
+    const { parseHeadlessFlags, runHeadlessSetup } = await import('./headless.js');
+    // Validate the flags before bringUp, not after: bringUp may restart the daemon's services, and a
+    // malformed flag has to stop the run while the machine is still untouched.
+    try { parseHeadlessFlags(args, env); }
+    catch (e) { console.error((e as Error).message); process.exit(1); }
     try { await bringUp(base, env, version); }
     catch (e) { console.error(`Couldn't start the Elowen daemon: ${(e as Error).message}`); process.exit(1); }
     try {
-      const { runHeadlessSetup } = await import('./headless.js');
       await runHeadlessSetup(base, env, args);
     } catch (e) {
       console.error(debug ? ((e as Error).stack ?? String(e)) : (e as Error).message);
@@ -96,17 +102,64 @@ function tmuxInstallHint(): string {
   return 'install tmux with your system package manager';
 }
 
+/** How long setup waits for the daemon to answer after it has restarted it. The same 20s the installer
+ *  and `elowen up` allow: the daemon runs its DB migrations on boot, so a box that has any to run does
+ *  not answer within a few seconds and a shorter budget only reports a healthy start as a failure. */
+const READY_BUDGET_MS = 20_000;
+
+/** How long the pre-flight check keeps probing before the daemon counts as unhealthy. Everything that
+ *  follows REPLACES a running daemon (systemctl restart, or down+up), which SIGTERMs the agents it is
+ *  running — one timed-out probe (a load spike, a GC pause) is too thin a reason for that. Kept short so
+ *  the ordinary "nothing is running yet" case is still recovered promptly. */
+const HEALTH_BUDGET_MS = 5000;
+
 /** Bring the daemon up the right way for this box: nothing if it's already healthy, else systemctl on an
- *  `elowen install` box (never a second, port-conflicting detached daemon), otherwise the local lifecycle. */
+ *  `elowen install` box (never a second, port-conflicting detached daemon), otherwise the local lifecycle.
+ *  Readiness goes through the shared readiness wait (the same probe the launcher, `ensureDaemon` and the
+ *  installer use): a bare non-throwing fetch read a wedged daemon's 500 as "up" and let the wizard run on
+ *  against it, and it had no timeout, so a half-open connection hung setup instead of failing it.
+ *
+ *  Everything below this line runs only because the daemon did NOT answer healthily, so both paths must
+ *  be able to REPLACE a running-but-broken instance — merely asking for one to exist recovers nothing. */
 async function bringUp(base: string, env: NodeJS.ProcessEnv, version: string): Promise<void> {
-  try { await fetch(`${base}/health`); return; } catch { /* down — start it below */ }
-  if (readInstallInfo()) {
-    const r = await systemctl('start', ...SERVICES);
-    if (r.code !== 0) throw new Error(`systemctl start failed (code ${r.code})`);
-    for (let i = 0; i < 50; i++) { try { await fetch(`${base}/health`); return; } catch { await sleep(100); } }
-    throw new Error('daemon did not become healthy');
+  const [alreadyHealthy] = await waitHealthy([`${base}/health`], { budgetMs: HEALTH_BUDGET_MS, pollMs: 500 });
+  if (alreadyHealthy) return;
+  // Only this machine's own daemon may be replaced. With ELOWEN_URL pointing elsewhere, an unreachable
+  // remote says nothing about the local services, and restarting (or `down`-ing) them would kill a
+  // healthy local daemon over a box we cannot even reach.
+  if (!isLocalBase(base)) {
+    throw new Error(`${base} did not answer, and it is not this machine's daemon (ELOWEN_URL) — start it there, or unset ELOWEN_URL to set up the local one`);
   }
-  await runLifecycle('up', env, defaultLifecycleDeps(version));
+  // Both replacement paths below SIGTERM the agents the daemon is running, so they are withheld while a
+  // mission is live exactly like the updater withholds its restart (`update.ts`): an unhealthy /health is
+  // not worth throwing away a mission's in-flight work. Setup cannot defer the way the updater does — the
+  // wizard needs the daemon — so it stops and says why.
+  if (hasLiveMission(env)) {
+    throw new Error('a mission is live and restarting the daemon would kill its agents mid-run — wait for it to finish, then run `elowen setup` again');
+  }
+  if (readInstallInfo()) {
+    // `restart`, not `start`: systemd considers a wedged unit active, so `start` is a no-op on the very
+    // state that got us here and setup would just wait out the budget. `restart` also starts a stopped unit.
+    const r = await systemctl('restart', ...SERVICES);
+    if (r.code !== 0) throw new Error(`systemctl restart failed (code ${r.code})`);
+    const [healthy] = await waitHealthy([`${base}/health`], { budgetMs: READY_BUDGET_MS });
+    if (!healthy) throw new Error(`daemon did not become healthy within ${READY_BUDGET_MS / 1000}s of a restart (journalctl -u elowen-daemon)`);
+    return;
+  }
+  // Locally-owned processes: `up` ADOPTS a tracked pid that is merely alive (birth identity is all it
+  // checks), so on its own it can never replace an unhealthy daemon. `down` first — a no-op when nothing
+  // is tracked — so `up` spawns a fresh pair instead of re-adopting the broken one.
+  const deps = defaultLifecycleDeps(version);
+  await runLifecycle('down', env, deps);
+  await runLifecycle('up', env, deps);
 }
 
-function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+/** Whether `base` addresses the daemon on THIS machine — the only one setup is allowed to restart. */
+function isLocalBase(base: string): boolean {
+  try {
+    const { hostname } = new URL(base);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}

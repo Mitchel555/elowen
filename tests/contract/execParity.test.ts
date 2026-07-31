@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { KNOWN_EXECS, PROGRAM_PREFIXES, BARE_WITH_SLASH_PROGRAM, BARE_PLAIN_PROGRAM } from '../../src/shared/execs.js';
 import { EXEC_PRESETS } from '../../web/lib/execPresets';
-import { execProvider } from '../../web/lib/modelProvider';
+import { execProvider, execModel, buildExec, type ProviderId } from '../../web/lib/modelProvider';
 
 // The exec allow-list and the provider-prefix routing table are hand-mirrored in the web bundle (it can't
 // import the daemon's NodeNext source). Root vitest CAN import both trees, so pin them in lockstep here:
@@ -18,5 +18,20 @@ describe('exec / provider parity (web ↔ daemon)', () => {
     }
     expect(execProvider('provider/model')).toBe(BARE_WITH_SLASH_PROGRAM); // bare, slash → opencode
     expect(execProvider('sonnet')).toBe(BARE_PLAIN_PROGRAM);              // bare, plain → claude-code
+  });
+
+  // Guards the SAVING direction: `buildExec` composes what the settings form actually persists. Parity
+  // above only proves parsing a daemon-shaped exec agrees; a new PROGRAM_PREFIXES entry with no matching
+  // buildExec branch falls through to the claude-code fallback and silently saves the wrong executor.
+  it('web buildExec round-trips every PROGRAM_PREFIXES program through build → parse → model', () => {
+    for (const [prefix, program] of Object.entries(PROGRAM_PREFIXES)) {
+      const provider = program as ProviderId; // Program and ProviderId are the same id set
+      const exec = buildExec(provider, 'some-model');
+      expect(execProvider(exec)).toBe(program);
+      expect(execModel(exec)).toBe('some-model');
+      // Ordinary providers must actually USE the table's prefix (not merely parse back to the right
+      // program) — this is what catches a hardcoded buildExec branch that quietly no-ops for a new one.
+      if (provider !== 'opencode' && provider !== 'claude-code') expect(exec).toBe(`${prefix}some-model`);
+    }
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import type { Db } from '../../src/store/db.js';
 import { ConfigStore } from '../../src/store/configStore.js';
+import { modelsBlock } from '../../src/overseer/planner.js';
 
 let db: Db;
 let cfg: ConfigStore;
@@ -321,5 +322,71 @@ describe('ConfigStore exec validation (O22)', () => {
     c.update({ defaults: { exec: 'codex:gpt-5.4' } });
     c.update({ defaults: { exec: 'bogus' } }); // bare, not allow-listed → keep previous
     expect(c.get().defaults.exec).toBe('codex:gpt-5.4');
+  });
+});
+
+// review-api-store-sol, finding 7: the API route now rejects a hostile PUT via Zod, but a row written
+// by an older build (or hand-edited) can already hold a bad element — these sanitisers protect that
+// read path too, and the same element-level checks run when a patch is applied through `update()`
+// directly (an internal caller bypassing the API's Zod schema).
+describe('ConfigStore element-level sanitisation on corrupt stored JSON (finding 7)', () => {
+  it('drops a non-string modelNotes value on read, keeping the built-in seed and other valid entries', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)')
+      .run(JSON.stringify({ modelNotes: { sonnet: 7, opus: 'great for review' } }));
+    const cs = new ConfigStore(db);
+    const notes = cs.get().modelNotes;
+    expect(notes.opus).toBe('great for review'); // valid entry survives
+    expect(notes.sonnet).not.toBe(7); // the number never reaches a consumer
+    expect(typeof notes.sonnet).toBe('string'); // falls back to the built-in seed
+    // The actual downstream crash this closes: modelsBlock() calls .trim() on every listed note.
+    expect(() => modelsBlock(['sonnet', 'opus'], notes)).not.toThrow();
+  });
+
+  it('drops non-string allowedExecs elements on read', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)')
+      .run(JSON.stringify({ allowedExecs: ['sonnet', 42, null, 'opus'] }));
+    expect(new ConfigStore(db).get().allowedExecs).toEqual(['sonnet', 'opus']);
+  });
+
+  it('drops malformed customModels entries on read', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify({
+      customModels: [{ label: 'Good', exec: 'good/model' }, { label: 'Bad', exec: 7 }, { label: '', exec: 'noname' }, 'junk'],
+    }));
+    expect(new ConfigStore(db).get().customModels).toEqual([{ label: 'Good', exec: 'good/model' }]);
+  });
+
+  it('drops non-string plugins.enabled/removed elements on read', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify({
+      plugins: { enabled: ['files', 5, 'terminal'], removed: [null, 'skills'], config: {} },
+    }));
+    const p = new ConfigStore(db).get().plugins;
+    expect(p.enabled).toEqual(['files', 'terminal']);
+    expect(p.removed).toEqual(['skills']);
+  });
+
+  it('drops non-string hiddenPresets elements on read', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify({ hiddenPresets: ['a', 3, 'b'] }));
+    expect(new ConfigStore(db).get().hiddenPresets).toEqual(['a', 'b']);
+  });
+
+  it('also sanitises a hostile patch applied directly through update() (an internal caller, not the API route)', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({
+      modelNotes: { sonnet: 7 as unknown as string, opus: 'ok' },
+      allowedExecs: ['sonnet', 99 as unknown as string],
+      customModels: [{ label: 'Good', exec: 'g/m' }, { label: 7 as unknown as string, exec: 'bad' }],
+      plugins: { enabled: ['files', 1 as unknown as string] },
+    });
+    const c = cs.get();
+    expect(c.modelNotes.opus).toBe('ok');
+    expect(typeof c.modelNotes.sonnet).toBe('string'); // number dropped, built-in seed backfilled
+    expect(c.allowedExecs).toEqual(['sonnet']);
+    expect(c.customModels).toEqual([{ label: 'Good', exec: 'g/m' }]);
+    expect(c.plugins.enabled).toEqual(['files']);
   });
 });

@@ -34,6 +34,7 @@ import { ConfigStore } from '../store/configStore.js';
 import { ensureVapidKeys } from '../push/vapid.js';
 import { PushSender } from '../push/pushSender.js';
 import { PushDispatcher } from '../push/pushDispatcher.js';
+import { buildTurnDone } from '../push/messages.js';
 import { UserStore } from '../store/userStore.js';
 import { EventStore } from '../store/eventStore.js';
 import { NoteStore } from '../store/noteStore.js';
@@ -79,6 +80,7 @@ import { brainConfigFromElowen } from '../brain/config.js';
 import { loadAgentRegistry, agentCatalog, type AgentDef } from '../brain/agents/agentRegistry.js';
 import { listBrainModels } from '../brain/models.js';
 import { setToolOutputCaps, setToolOutputPolicy } from '../brain/messageView.js';
+import { setSpillMaxResultBytes } from '../brain/session/toolResultClearing.js';
 import { makeToolOutputPolicy } from '../brain/toolOutput.js';
 import { BUILTIN_TOOL_OUTPUT_SHOWN } from '../brain/tools/index.js';
 import { discoverPlugins, loadPlugins } from '../plugins/loader.js';
@@ -339,8 +341,15 @@ export async function buildApp(opts: BuildOpts) {
   const cliArgv = (process.env.ELOWEN_CLI) ? process.env.ELOWEN_CLI.split(' ') : ['node', cliPath];
   // Reuse the existing agent token across restarts so a daemon restart doesn't 401 in-flight agents
   // mid-task (they hold the token they were spawned with); only mints fresh when none is valid.
-  const serviceToken = users.count() > 0 ? users.ensureAgentToken(users.list()[0]!.id) : '';
-  const elowenCli = { cli, url: `http://localhost:${(process.env.ELOWEN_PORT) ?? 4400}`, token: serviceToken };
+  const serviceUserId = users.count() > 0 ? users.list()[0]?.id ?? null : null;
+  const serviceToken = serviceUserId !== null ? users.ensureAgentToken(serviceUserId) : '';
+  // Per-task agent credential: a worker is spawned with a token bound to the task it was spawned for,
+  // so the API can refuse it on any other task — one shared token cannot tell two workers apart inside
+  // the same project. Only ids that are REAL task rows bind; the overseer (`overseer-<mission>`), the
+  // pilot (a plan job id) and the advisor have no task row and keep the unbound service token.
+  const tokenForTask = (taskId: string): string | undefined =>
+    serviceUserId !== null && tasks.get(taskId) ? users.ensureAgentTokenForTask(serviceUserId, taskId) : undefined;
+  const elowenCli = { cli, url: `http://localhost:${(process.env.ELOWEN_PORT) ?? 4400}`, token: serviceToken, tokenForTask };
   const spawn = new SpawnService({ tmux, agents, elowen: elowenCli, providers: (program) => config.get().providers[program], prompts, tddMode: () => config.get().autopilot.tddMode });
   const bus = new EventBus();
   const events = new EventStore(db);
@@ -572,6 +581,9 @@ export async function buildApp(opts: BuildOpts) {
   // providerId/model → the service degrades to keyword search and the queue no-ops.
   // Tool-output preview caps (Elowen AI → Limits) feed the shared messageView renderer; read live.
   setToolOutputCaps(() => ({ lines: config.get().brain.limits.toolOutputMaxLines, chars: config.get().brain.limits.toolOutputMaxChars }));
+  // Size trigger for inline tool results (Elowen AI → Limits): a single result above this is spilled to
+  // disk and the model gets a placeholder instead. Read live so a Settings change applies without a restart.
+  setSpillMaxResultBytes(() => config.get().brain.limits.toolResultInlineBytes);
   // Tool-output VISIBILITY policy (single source, mirrors the icon pipeline): output is hidden by
   // default; the built-in show defaults plus every enabled plugin's manifest `showOutput` are merged and
   // injected into the shared messageView renderer so the live (events.ts) and history (shapeBrainMessages)
@@ -639,8 +651,15 @@ export async function buildApp(opts: BuildOpts) {
       // session the registry reads off the live turn, so a plugin can only ever reach its OWN children.
       delegatedChildren: {
         runs: (parentSessionId, limit) => brainStore.listDelegatedChildren(parentSessionId, limit),
-        continue: (parentSessionId, childSessionId, text, access) => brain
-          ? brain.continueSubagent(parentSessionId, childSessionId, text, access)
+        read: (parentSessionId, childSessionId) => {
+          if (!brain) throw new Error('the brain is not available on this deployment');
+          return brain.readSubagent(parentSessionId, childSessionId);
+        },
+        continue: (parentSessionId, childSessionId, text, access, onEvent) => brain
+          ? brain.continueSubagent(parentSessionId, childSessionId, text, access, onEvent)
+          : Promise.reject(new Error('the brain is not available on this deployment')),
+        stop: (parentSessionId, childSessionId) => brain
+          ? brain.stopSubagent(parentSessionId, childSessionId)
           : Promise.reject(new Error('the brain is not available on this deployment')),
       },
       // ONE answer to "what time is it for this operator", read from the single place they configure it
@@ -693,6 +712,9 @@ export async function buildApp(opts: BuildOpts) {
         runtime: brainRuntime,
         cwd: brainDir,
         projectPath: () => homeProject.path,
+        // A web-started owner turn finished with no CLI watching it live → push it to the user's phone.
+        // No subscription registered ⇒ sendToUsers is a no-op, so this needs no separate enable flag.
+        notifyTurnComplete: (userId, title) => { void pushSender.sendToUsers([userId], buildTurnDone({ title })); },
         plugins: pluginProvider,
         hookAudit,
         policy: (userId) => resolvePolicy({ userProjects, projects }, userId),
@@ -898,6 +920,10 @@ export async function buildApp(opts: BuildOpts) {
     // Restart zombies on the brain side: goals still marked 'active' whose in-memory continuation timers
     // died with the process. Pause them so nothing falsely claims to be running (the user /goal resumes).
     try { brain?.reconcileGoalsOnBoot(); } catch (e) { log.error('reconcileGoalsOnBoot failed', e); }
+    // Same on the delegation side: sub-agent runs and workflow DAGs still marked 'running' whose in-memory
+    // children died with the process. Synchronous and BEFORE startPlatforms, so no channel turn — and no
+    // client connecting the moment the port opens — can observe (or act on) a phantom running delegation.
+    try { brain?.reconcileDelegationsOnBoot(); } catch (e) { log.error('reconcileDelegationsOnBoot failed', e); }
     // One-shot: reap chat terminals + tokens orphaned while the daemon was down (tmux died / conversation
     // deleted), and kill stray `elowen-chat-*` panes with no binding. Periodic sweep is scheduled below.
     void brainTerminal?.sweep().catch((e) => log.error('brain terminal sweep failed', e));

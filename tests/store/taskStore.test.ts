@@ -135,6 +135,73 @@ describe('TaskStore', () => {
     expect(store.depsFor('a')).toEqual([]);
   });
 
+  it('addDep rejects a dangling endpoint (no such task) and reports failure', () => {
+    store.create({ id: 'a', project_id: 1, title: 'A' });
+    expect(store.addDep('a', 'nope')).toBe(false);
+    expect(store.depsFor('a')).toEqual([]);
+    expect(store.addDep('nope', 'a')).toBe(false); // the task itself missing is rejected too
+  });
+
+  it('addDep rejects a cross-project edge — a foreign task must never gate this one', () => {
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (2,'other','/o2')").run();
+    store.create({ id: 'a', project_id: 1, title: 'A' });
+    store.create({ id: 'b', project_id: 2, title: 'B' });
+    expect(store.addDep('a', 'b')).toBe(false);
+    expect(store.depsFor('a')).toEqual([]);
+  });
+
+  it('addDep returns true once the edge exists (added, or already present)', () => {
+    store.create({ id: 'a', project_id: 1, title: 'A' });
+    store.create({ id: 'b', project_id: 1, title: 'B' });
+    expect(store.addDep('b', 'a')).toBe(true);
+    expect(store.addDep('b', 'a')).toBe(true); // idempotent re-add still reports success
+  });
+
+  it('setDeps drops a dangling id and a cross-project id, keeping the valid ones', () => {
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (2,'other','/o2')").run();
+    store.create({ id: 'a', project_id: 1, title: 'A' });
+    store.create({ id: 'b', project_id: 1, title: 'B' });
+    store.create({ id: 'foreign', project_id: 2, title: 'Foreign' });
+    store.setDeps('a', ['b', 'nope', 'foreign']);
+    expect(store.depsFor('a')).toEqual(['b']);
+  });
+
+  it('setDeps on a task id that does not exist wires nothing (no crash)', () => {
+    store.create({ id: 'a', project_id: 1, title: 'A' });
+    expect(() => store.setDeps('nope', ['a'])).not.toThrow();
+    expect(store.depsFor('nope')).toEqual([]);
+  });
+
+  it('transaction() commits every write on success', () => {
+    const result = store.transaction(() => {
+      store.create({ id: 'a', project_id: 1, title: 'A' });
+      store.create({ id: 'b', project_id: 1, title: 'B' });
+      return 'ok';
+    });
+    expect(result).toBe('ok');
+    expect(store.get('a')).not.toBeNull();
+    expect(store.get('b')).not.toBeNull();
+  });
+
+  it('transaction() rolls back every write when a later step throws', () => {
+    store.create({ id: 'keep', project_id: 1, title: 'Keep' });
+    expect(() => store.transaction(() => {
+      store.create({ id: 'a', project_id: 1, title: 'A' });
+      store.create({ id: 'b', project_id: 1, title: 'B' });
+      throw new Error('boom');
+    })).toThrow('boom');
+    expect(store.get('a')).toBeNull();
+    expect(store.get('b')).toBeNull();
+    expect(store.get('keep')).not.toBeNull(); // pre-existing state untouched
+  });
+
+  it('listMissionIds returns every mission row id', () => {
+    expect(store.listMissionIds()).toEqual([]);
+    db.prepare("INSERT INTO missions (id,epic_id,autonomy,state) VALUES ('m1','e1','L3','active')").run();
+    db.prepare("INSERT INTO missions (id,epic_id,autonomy,state) VALUES ('m2','e2','L3','disengaged')").run();
+    expect(store.listMissionIds().sort()).toEqual(['m1', 'm2']);
+  });
+
   it('update drops a non-string scheduled_at, keeps string/null', () => {
     store.create({ id: 's', project_id: 1, title: 'S', scheduled_at: '2026-06-20T10:00:00.000Z' });
     // A loose request value (number) must not be persisted.
@@ -216,6 +283,14 @@ describe('TaskStore', () => {
     expect(store.list()).toEqual([]);
     expect(db.prepare('SELECT COUNT(*) c FROM task_deps').get()).toEqual({ c: 0 });
     expect(db.prepare('SELECT COUNT(*) c FROM missions').get()).toEqual({ c: 0 });
+  });
+
+  it('deleteAll also removes mission_pr rows — no orphan PR/worktree metadata after an admin wipe', () => {
+    store.create({ id: 'epic', project_id: 1, title: 'Epic', type: 'epic' });
+    db.prepare("INSERT INTO missions (id,epic_id,autonomy,state) VALUES ('m1','epic','L3','active')").run();
+    db.prepare("INSERT INTO mission_pr (mission_id,branch,worktree) VALUES ('m1','elowen/x','/wt/m1')").run();
+    store.deleteAll();
+    expect(db.prepare('SELECT COUNT(*) c FROM mission_pr').get()).toEqual({ c: 0 });
   });
 
   it('setExec sets, replaces and clears the exec label, preserving others', () => {

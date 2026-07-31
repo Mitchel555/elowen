@@ -1,5 +1,5 @@
 @keyframes toast-in {
-  from { opacity: 0; transform: translateY(var(--motion-distance-md)) scale(0.985); }
+  from { opacity: 0; transform: translateY(calc(var(--motion-distance-md) * -1)) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 

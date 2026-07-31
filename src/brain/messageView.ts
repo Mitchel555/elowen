@@ -7,7 +7,7 @@ type StoredTurnRow = { id?: string; role: string; content: string; created_at?: 
 // The display-transcript shapes are the daemon↔web wire contract — defined once in src/shared and
 // re-exported here for daemon callers (BrainStore passes its validated rows straight through). See
 // wireContract.ts for why they live outside src/brain.
-import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView } from '../shared/wireContract.js';
+import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView, BrainPendingPlan } from '../shared/wireContract.js';
 import { parseDbTs } from '../shared/time.js';
 import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
@@ -83,6 +83,48 @@ export function submittedPlan(toolName: string, result: unknown): string | undef
   const details = (result as { details?: unknown } | null | undefined)?.details;
   const plan = (details as { plan?: unknown } | null | undefined)?.plan;
   return typeof plan === 'string' && plan.trim() ? stripControl(plan) : undefined;
+}
+
+/** The plan the conversation is currently waiting on a decision for, rebuilt from its durable rows: the
+ *  plan an `ExitPlanMode` call submitted in the NEWEST assistant turn, or null.
+ *
+ *  Same question the CLI answers over its own in-memory transcript (`TranscriptModel.lastSubmittedPlan`),
+ *  answered here for every client that has no transcript of its own — which is what lets the decision
+ *  survive a reload, a second tab and a client that was not attached when the turn ran.
+ *
+ *  The scan is the newest turn, not the newest row: a turn ends on plain text as often as on the tool call
+ *  itself, and taking only the last assistant row would lose a plan that had prose after it. A newer USER
+ *  row ends the turn and the decision with it — the conversation moved on. Display-only session events
+ *  (a model/mode marker landing between the plan and the turn's end) live in their own table, so nothing
+ *  in this row stream can hide the plan. */
+export function pendingSubmittedPlan(rows: readonly StoredTurnRow[]): BrainPendingPlan | null {
+  let start = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i]?.role === 'user') { start = i + 1; break; }
+  }
+  const turn = rows.slice(start);
+  const results = new Map<string, unknown>();
+  for (const row of turn) {
+    if (row.role !== 'toolResult') continue;
+    try {
+      const message = JSON.parse(row.content) as { toolCallId?: string };
+      if (message.toolCallId) results.set(message.toolCallId, message);
+    } catch { /* malformed row → no result to read a plan off */ }
+  }
+  let found: BrainPendingPlan | null = null;
+  for (const row of turn) {
+    if (row.role !== 'assistant') continue;
+    let content: unknown;
+    try { content = (JSON.parse(row.content) as { content?: unknown }).content; }
+    catch { continue; }
+    for (const part of Array.isArray(content) ? content : []) {
+      const call = part as { type?: string; id?: string; name?: string };
+      if (call?.type !== 'toolCall' || typeof call.name !== 'string' || !call.id) continue;
+      const plan = submittedPlan(call.name, results.get(call.id));
+      if (plan) found = { id: call.id, plan };
+    }
+  }
+  return found;
 }
 
 export function toolDisplay(toolName: string, args: unknown): { name: string; detail?: string } {
@@ -302,22 +344,36 @@ export function frameUntrusted(tag: string, preface: string, body: string): stri
  *  the user-visible reply. Removes complete blocks, an unclosed trailing block (a stream cut off before
  *  the answer), and a leading close tag (reasoning that streamed before any open tag). Native-reasoning
  *  models are unaffected — their thinking never appears in the text at all. A reply that is ONLY
- *  reasoning yields '', which every caller already treats as "no text". */
+ *  reasoning yields '', which every caller already treats as "no text".
+ *
+ *  The two open-ended rules are ANCHORED TO A LINE BOUNDARY, and that anchoring is load-bearing. Both
+ *  delete an unbounded span — to end-of-string, and from start-of-string — so an unanchored match turns
+ *  any prose that merely MENTIONS a reasoning tag into a silently truncated answer. That is not
+ *  hypothetical: a report discussing this very function lost ~10 000 characters to it. A genuinely cut-off
+ *  stream always begins its reasoning on a fresh line, and a close tag that really ends streamed reasoning
+ *  is followed by a newline before the answer, so requiring those boundaries keeps every real case while
+ *  leaving inline mentions (`<think>` inside a sentence or backticks) untouched.
+ *  Mirrored by `stripThinking` in plugins/_shared/format.mjs — tests/contract/inlineReasoningParity.test.ts
+ *  holds the two to the same corpus. */
 export function stripInlineReasoning(text: string): string {
   if (!/<\/?think(?:ing)?\b/i.test(text)) return text;
   let out = text
     .replace(/<think(?:ing)?\b[^>]*>[\s\S]*?<\/think(?:ing)?>/gi, '') // complete <think>…</think> blocks
-    .replace(/<think(?:ing)?\b[^>]*>[\s\S]*$/i, '');                   // an unclosed trailing block
-  const lead = /^[\s\S]*?<\/think(?:ing)?>/i.exec(out); // reasoning that streamed before an open tag
+    .replace(/^[ \t]*<think(?:ing)?\b[^>]*>[\s\S]*$/im, '');           // an unclosed trailing block, line-anchored
+  const lead = /^[\s\S]*?<\/think(?:ing)?>[ \t]*(?:\n|$)/i.exec(out); // reasoning that streamed before an open tag
   if (lead) out = out.slice(lead[0].length);
   return out.trim();
 }
 
 /** Pull display text out of a stored message's content JSON. Content is either a plain string or an
  *  array of parts ({type:'text', text}); anything else yields an empty string. Inline reasoning tags are
- *  stripped here (single source) so no consumer — reply, curator, title — ever sees leaked chain-of-thought. */
+ *  stripped here (single source) so no consumer — reply, curator, title — ever sees leaked chain-of-thought.
+ *
+ *  `msg` is genuinely unknown: callers hand it straight from `JSON.parse` of a stored row, and `null` (a
+ *  row whose content is the literal `null`) parses fine. Reading `.content` off it would throw and take
+ *  the WHOLE transcript down, so the access is optional. */
 export function extractText(msg: unknown): string {
-  const content = (msg as { content?: unknown }).content;
+  const content = (msg as { content?: unknown } | null | undefined)?.content;
   if (typeof content === 'string') return stripInlineReasoning(content);
   if (Array.isArray(content)) {
     return stripInlineReasoning(content.map((p) => (p && typeof p === 'object' && 'text' in p ? String((p as { text: unknown }).text) : '')).join(''));
@@ -392,8 +448,15 @@ export function shapeBrainMessages(
       continue;
     }
     if (row.role !== 'user' && row.role !== 'assistant') continue;
+    // A stored row is only usable as a message when it parses to an OBJECT: `null` and bare scalars are
+    // valid JSON, so the parse alone would let them through and every `.content` read below would throw —
+    // taking the entire transcript down over one bad row. Anything else stays the empty message, which
+    // produces no view and is skipped.
     let msg: { content?: unknown } = {};
-    try { msg = JSON.parse(row.content) as { content?: unknown }; } catch { /* malformed row → skipped below */ }
+    try {
+      const parsed: unknown = JSON.parse(row.content);
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) msg = parsed;
+    } catch { /* malformed row → skipped below */ }
     if (row.role === 'user') {
       const text = extractText(msg);
       if (text.trim()) stamped.push({ at: row.created_at ?? '', view: { ...(row.id ? { id: row.id } : {}), role: 'user', text } });

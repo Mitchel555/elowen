@@ -8,6 +8,7 @@ import {
   type DelegatedExecutionScope,
 } from './delegatedScope.js';
 import type { AskQuestion, BrainEvent, BrainUsage, CompactResult, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from './events.js';
+import { recordSubagentFinishMarker } from './service/sessionEvents.js';
 import { runCompaction, withDescendantUsage, sessionUsageSnapshot } from './events.js';
 import type { ElicitationRegistry } from './elicitation.js';
 import { normalizeCard } from './cards.js';
@@ -373,9 +374,15 @@ export class ChannelSessionService {
         // Mirror owner-chat delegation tracking: the progress event is both the live UI seam and the
         // abort tree. A channel can delegate recursively, so every channel node owns its direct children.
         const emitSubagent = (u: SubagentUpdate) => {
+          // See turnContextBuilder.emitSubagent: read prior status before the upsert so the finish marker
+          // fires once on the running→terminal transition, mirrored here for channel-driven delegations.
+          const prevStatus = u.status === 'done' || u.status === 'error'
+            ? this.d.store.getSubagentRuns(ch.sessionId).find((run) => run.sessionId === u.sessionId)?.status
+            : undefined;
           if (!this.d.store.upsertSubagentRun(ch.sessionId, u)) return;
           this.d.registry.setChildRunning(ch.sessionId, u.sessionId, u.status === 'running');
           ch.replay.publish({ type: 'subagent', ...u });
+          recordSubagentFinishMarker(this.d.store, ch.sessionId, (event) => ch.replay.publish(event), prevStatus, u);
         };
         const emitSubagentCompletion = parentSessionId && this.d.completeSubagent
           ? (completion: SubagentCompletion) => { this.d.completeSubagent!(ch.sessionId, opts.ownerUserId, completion); }
@@ -490,10 +497,30 @@ export class ChannelSessionService {
   private async trySteerIntoRunningTurn(opts: ChannelSendOpts, text: string, delegationAborted: () => boolean): Promise<string | null> {
     const streaming = this.d.registry.channelGet(opts.channelId);
     if (streaming?.session.isStreaming) {
+      // A durable sub-agent/workflow result for a DELEGATED parent (BrainTurnRunner.sendCustomSystem →
+      // sendDelegatedCustom). Steer it in so the child folds the result into the work it is doing instead
+      // of learning about it a turn late — the same reason the owner path steers. It rides PI's custom
+      // seam rather than enqueueMirrored: a hidden message must not surface as a queue chip or a durable
+      // user row. It carries only the result, because the running turn already holds the ambient turn
+      // context this path would otherwise compose around it. `triggerTurn` is off so that a turn ending
+      // between the isStreaming read and here appends the message instead of starting a turn outside the
+      // channel lock.
+      if (opts.internalSystem) {
+        if (delegationAborted()) throw new Error('delegation aborted');
+        await streaming.session.sendCustomMessage({
+          customType: opts.internalSystem.customType, content: text, display: false,
+          details: { source: 'elowen', resultId: opts.internalSystem.resultId },
+        }, { triggerTurn: false, deliverAs: 'steer' });
+        if (delegationAborted()) {
+          streaming.session.clearQueue();
+          throw new Error('delegation aborted');
+        }
+        return '';
+      }
       // Owner steering a delegated SUB-AGENT (BrainService.sendToSubagent sets ownerSteer): inject the
       // guidance mid-run — the owner owns the child, so redirecting it immediately is the point. Now the
       // SAME primitive as the Discord same-sender path below.
-      if (opts.ownerSteer && !opts.internalSystem) {
+      if (opts.ownerSteer) {
         // This path intentionally does not take the channel lock (it must steer the current PI turn), so
         // fence it on both sides of the await. If stop clears PI's queue while steer() is pending, the
         // second check clears it again before rejecting; no late instruction survives the aborted tree.
@@ -561,17 +588,20 @@ export class ChannelSessionService {
     await this.abortTree(channelId, new Set());
   }
 
-  private async abortTree(channelId: string, seen: Set<string>): Promise<void> {
+  private async abortTree(channelId: string, seen: Set<string>, reason = 'aborted'): Promise<void> {
     if (seen.has(channelId)) return;
     seen.add(channelId);
     const sessionId = channelSessionId(channelId);
     // Fence before inspecting descendants. A fresh idle-child continuation must not register itself
     // after this snapshot and then get erased by clearChildren() without being aborted.
     this.d.registry.beginParentAbort(sessionId);
-    // Before tearing children down: a workflow ORIGINATING here (including a node's self-expansion)
-    // must stop launching nodes, or it respawns fresh children the moment an aborted one settles.
-    await this.d.cancelWorkflows?.(sessionId);
     try {
+      // Before tearing children down: a workflow ORIGINATING here (including a node's self-expansion)
+      // must stop launching nodes, or it respawns fresh children the moment an aborted one settles.
+      // INSIDE the try: this reaches into the plugin registry, and if that throws (a reload racing the
+      // abort) an outer position would leave the fence held forever — permanently marking the session as
+      // aborting, so every later delegation from it is refused until the daemon restarts.
+      await this.d.cancelWorkflows?.(sessionId);
       const ch = this.d.registry.channelGet(channelId);
       if (!ch) {
         if (this.d.registry.isActiveChild(sessionId)) this.d.registry.requestPendingAbort(sessionId);
@@ -581,18 +611,42 @@ export class ChannelSessionService {
       // prompt settles and throws, so the delegate plugin records ERROR rather than DONE/empty output.
       if (this.d.registry.isActiveChild(ch.sessionId)) this.d.registry.requestPendingAbort(ch.sessionId);
       for (const child of this.d.registry.childrenOf(ch.sessionId)) {
-        if (isChannelSession(child)) await this.abortTree(channelIdOf(child), seen);
+        if (isChannelSession(child)) await this.abortTree(channelIdOf(child), seen, reason);
       }
       this.d.registry.clearChildren(ch.sessionId);
       // Match owner-chat stop semantics: queued steering belongs to the interrupted turn and a parked
       // AskUserQuestion must reject before PI aborts, otherwise `/stop` can leave prompt() hanging.
       ch.session.clearQueue();
       clearDeliveredUserEchoes(ch);
-      this.d.elicitation?.cancelForSession(ch.sessionId, 'aborted');
+      this.d.elicitation?.cancelForSession(ch.sessionId, reason);
       await abortSessionWork(ch.session).catch(() => { /* nothing in flight / already settling */ });
     } finally {
       this.d.registry.endParentAbort(sessionId);
     }
+  }
+
+  /** Reset some/all channel sessions the SAFE way — unlike the old synchronous `channelDisposeAll()`
+   *  (which held no per-channel lock, aborted no turn and waited for nothing), this fences out new
+   *  delegated work, cancels any workflow DAG, releases a parked question and aborts an in-flight turn —
+   *  the exact same tree teardown a platform `/stop` does — BEFORE disposing, and only under the
+   *  channel's own lock so a concurrent send() cannot straddle the teardown.
+   *
+   *  `ownerFilter` narrows the reset to the channel sessions owned by one user (a personality change,
+   *  which must not touch anyone else's room); omitted, every channel is reset (a plugin reload, which
+   *  genuinely is global). */
+  async resetChannels(reason: string, ownerFilter?: (ownerUserId: number) => boolean): Promise<void> {
+    const targets = this.d.registry.channelEntries()
+      .filter(([, ch]) => !ownerFilter || ownerFilter(this.d.store.getSession(ch.sessionId)?.user_id ?? -1))
+      .map(([channelId]) => channelId);
+    await Promise.all(targets.map(async (channelId) => {
+      await this.abortTree(channelId, new Set(), reason);
+      // The abort above interrupts any turn but does not itself remove the record — a concurrent send()
+      // that is already mid-turn is still running its callback under the channel lock, so queue the
+      // actual dispose behind it instead of tearing the record down out from under that turn.
+      await this.d.registry.withLock(channelSessionId(channelId), async () => {
+        this.d.registry.channelDispose(channelId);
+      });
+    }));
   }
 
   /** Compact a channel session's context (a platform `/compact` slash), serialized against its turns so

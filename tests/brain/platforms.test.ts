@@ -193,16 +193,18 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
   // the 32 000-char total. The scope must still normalize (the child runs), and everything shortened has
   // to say so — a child silently missing half its role has no way to know.
   it('keeps role, context and channel fragment inside the scope budget, marking what it had to cut', async () => {
-    const context = Array.from({ length: 12 }, (_, i) => `block-${i}:${'c'.repeat(2_150)}`);
+    // Sized to overflow the scope budget on purpose — the point of this test is what happens when the
+    // sections together do NOT fit, so the load has to stay past the ceiling as that ceiling is raised.
+    const context = Array.from({ length: 12 }, (_, i) => `block-${i}:${'c'.repeat(6_000)}`);
     const sent = await runDelegateWith(
-      { prompt: `ROLE:${'r'.repeat(19_995)}`, context },
+      { prompt: `ROLE:${'r'.repeat(59_995)}`, context },
       `You are talking on Discord in #general.${'f'.repeat(400)}`,
     );
     const appends = sent.delegatedAccess?.promptAppend ?? [];
     expect(normalizeDelegatedExecutionScope(sent.delegatedAccess)).toBeDefined();
     expect(appends.length).toBeLessThanOrEqual(16);
     for (const chunk of appends) expect(chunk.length).toBeLessThanOrEqual(8_000);
-    expect(appends.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThanOrEqual(32_000);
+    expect(appends.reduce((n, chunk) => n + chunk.length, 0)).toBeLessThanOrEqual(120_000);
     // The role still leads the appends, and the parent's context blocks all survive.
     expect(appends[0]).toContain('ROLE:');
     for (const block of context) expect(appends.join('\n')).toContain(block.slice(0, 20));
@@ -424,6 +426,44 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
       origin: { sessionId: 'brain-1-gone', userId: 1 }, access: { admin: true, projectIds: [] } } as never, 'wake up');
     expect(reply).toBe('channel reply');
     expect(sent?.channelId).toBe('cron-job-1'); // today's channel-keyed session
+  });
+
+  // A proactive push that reached nobody used to resolve like a successful one, so the cron scheduler
+  // deleted the pending delivery it had promised to retry and the finished result was lost for good.
+  describe('proactive notify', () => {
+    const orchestratorWith = async (adapters: { name: string; notify?: (t: string) => Promise<void> }[]) => {
+      const orch = new PlatformOrchestrator({
+        plugins: async () => ({ platforms: adapters.map((a) => ({ ...a, listen: () => {}, connect: async () => {} })) }) as never,
+        platformOwner: () => 1,
+        identity: linkedResolver(false),
+        channels: { send: async () => 'ok', fragmentFor: () => '' } as never,
+      });
+      await orch.startAll();
+      return orch;
+    };
+
+    it('reports failure when EVERY notification sink threw', async () => {
+      const orch = await orchestratorWith([
+        { name: 'discord', notify: async () => { throw new Error('discord 500'); } },
+        { name: 'telegram', notify: async () => { throw new Error('telegram timeout'); } },
+      ]);
+      await expect(orch.notify('the report')).rejects.toThrow(/discord 500.*telegram timeout/);
+    });
+
+    it('stays fail-open when one sink is down but another delivered', async () => {
+      const delivered: string[] = [];
+      const orch = await orchestratorWith([
+        { name: 'discord', notify: async () => { throw new Error('discord 500'); } },
+        { name: 'telegram', notify: async (t: string) => { delivered.push(t); } },
+      ]);
+      await expect(orch.notify('the report')).resolves.toBeUndefined();
+      expect(delivered).toEqual(['the report']);
+    });
+
+    it('resolves when no platform has a notification channel at all', async () => {
+      const orch = await orchestratorWith([{ name: 'cron' }]);
+      await expect(orch.notify('the report')).resolves.toBeUndefined();
+    });
   });
 
   it('a LINKED sender with no disabled tools gets an undefined tool policy (no restriction)', async () => {

@@ -163,7 +163,7 @@ describe('openDb — snake_case → TitleCase tool rename', () => {
     mid.close();
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools).toBe('run_command');
-    expect(db.pragma('user_version', { simple: true })).toBe(6); // every one-shot migration is done
+    expect(db.pragma('user_version', { simple: true })).toBe(9); // every one-shot migration is done
   });
 
   it("rewrites a platform role's tool allow-list, keeping the unrestricted markers intact", () => {
@@ -204,7 +204,7 @@ describe('openDb — snake_case → TitleCase tool rename', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('mcp__chrome_devtools__click,mcp__chrome_devtools__performance_analyze_insight,mcp_ghost_thing,Bash');
-    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
   });
 
   it('prefers the longest matching server, so one name cannot be split by another\'s prefix', () => {
@@ -228,7 +228,7 @@ describe('openDb — snake_case → TitleCase tool rename', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('mcp_chrome_devtools_click');
-    expect(db.pragma('user_version', { simple: true })).toBe(6); // still marked done — there was nothing to do
+    expect(db.pragma('user_version', { simple: true })).toBe(9); // still marked done — there was nothing to do
   });
 
   it('leaves a corrupt permissions blob exactly as found', () => {
@@ -313,7 +313,7 @@ describe('openDb — registry plugin tool rename (v3)', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('Bash,todo_write');
-    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
   });
 
   it('names the image tools verb-first, the way a one-tool plugin is named', () => {
@@ -337,7 +337,7 @@ describe('openDb — registry plugin tool rename (v3)', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('GenerateImage,EditImage,Bash');
-    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
   });
 });
 
@@ -371,7 +371,7 @@ describe('openDb — session-event kinds (v5)', () => {
   it('accepts a cwd marker on a database that predates the kind, carrying the old markers across', () => {
     const path = seedPre5();
     const db = openDb(path);
-    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
 
     expect(() => insertCwd(db)).not.toThrow();
     expect(db.prepare('SELECT event_id, kind, detail, created_at FROM brain_session_events ORDER BY event_id').all())
@@ -391,7 +391,7 @@ describe('openDb — session-event kinds (v5)', () => {
     const path = seedPre5();
     openDb(path).close();     // v5 runs here
     const db = openDb(path);  // ...and must not rebuild the table a second time
-    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
     expect(() => insertCwd(db)).not.toThrow();
     expect(db.prepare('SELECT COUNT(*) AS n FROM brain_session_events').get()).toEqual({ n: 2 });
   });
@@ -419,7 +419,7 @@ describe('openDb — drop personality tables (v6)', () => {
   it('drops both personality tables (and their indexes) on a database that predates the collapse', () => {
     const path = seedPre6();
     const db = openDb(path);
-    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
     expect(hasTable(db, 'personality_profiles')).toBe(false);
     expect(hasTable(db, 'personality_active_profiles')).toBe(false);
     // The index went with its table — no orphan left behind.
@@ -428,8 +428,136 @@ describe('openDb — drop personality tables (v6)', () => {
 
   it('is a no-op on a fresh database that never had the tables (idempotent)', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
     expect(hasTable(db, 'personality_profiles')).toBe(false);
     expect(hasTable(db, 'personality_active_profiles')).toBe(false);
+  });
+});
+
+describe('openDb — monotonic user ids (v7)', () => {
+  const addUser = (db: Database.Database, username: string): number =>
+    Number(db.prepare("INSERT INTO users (username, password_hash) VALUES (?, 'x')").run(username).lastInsertRowid);
+
+  /** A DB as it stood before user ids were made monotonic: `users` rebuilt by hand WITHOUT
+   *  AUTOINCREMENT (that missing keyword is the whole point of the fixture), three users seeded, and
+   *  user_version parked at 6 so only v7 is armed. */
+  function seedPre7(): string {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'pre7.db');
+    const db = openDb(path);
+    db.exec('DROP TABLE users');
+    db.exec(`CREATE TABLE users (
+      id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      is_admin INTEGER NOT NULL DEFAULT 0,
+      allowed_execs TEXT NOT NULL DEFAULT '',
+      disabled_tools TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      avatar TEXT NOT NULL DEFAULT '',
+      default_exec TEXT NOT NULL DEFAULT '',
+      advisor_exec TEXT NOT NULL DEFAULT '',
+      advisor_autostart INTEGER NOT NULL DEFAULT 1
+    )`);
+    db.prepare("INSERT INTO users (id, username, password_hash, is_admin, email, created_at) VALUES (1, 'alice', 'h1', 1, 'a@x', '2026-01-01 09:00:00')").run();
+    db.prepare("INSERT INTO users (id, username, password_hash) VALUES (2, 'bob', 'h2')").run();
+    db.prepare("INSERT INTO users (id, username, password_hash) VALUES (3, 'carol', 'h3')").run();
+    db.pragma('user_version = 6');
+    db.close();
+    return path;
+  }
+
+  // Guards the fixture itself: if this ever stops reproducing the reuse, the migration test below would
+  // pass for the wrong reason — it would be asserting against a database that was never broken.
+  it('the pre-migration table really does recycle a deleted id (the bug being fixed)', () => {
+    const path = seedPre7();
+    const db = new Database(path); // opened raw — openDb would migrate it out from under the assertion
+    db.prepare('DELETE FROM users WHERE id = 3').run();
+    expect(addUser(db, 'dave')).toBe(3); // carol's id, handed straight to a different person
+    db.close();
+  });
+
+  it('rebuilds a legacy table, preserving every row, id and column value', () => {
+    const db = openDb(seedPre7());
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
+    expect(db.prepare('SELECT id, username, password_hash, is_admin, email, created_at FROM users ORDER BY id').all())
+      .toEqual([
+        { id: 1, username: 'alice', password_hash: 'h1', is_admin: 1, email: 'a@x', created_at: '2026-01-01 09:00:00' },
+        { id: 2, username: 'bob', password_hash: 'h2', is_admin: 0, email: '', created_at: expect.any(String) },
+        { id: 3, username: 'carol', password_hash: 'h3', is_admin: 0, email: '', created_at: expect.any(String) },
+      ]);
+    // The UNIQUE on username came across with the rebuild rather than being left behind on the old table.
+    expect(() => addUser(db, 'alice')).toThrow(/UNIQUE/i);
+  });
+
+  it('never hands a deleted user id to the next account', () => {
+    const db = openDb(seedPre7());
+    db.prepare('DELETE FROM users WHERE id = 3').run();  // delete the HIGHEST id — the reusable one
+    expect(addUser(db, 'dave')).toBe(4);                 // 4, not carol's 3
+    // Deleting the new highest again still moves forward, so the counter is genuinely monotonic and
+    // not merely one-off correct.
+    db.prepare('DELETE FROM users WHERE id = 4').run();
+    expect(addUser(db, 'erin')).toBe(5);
+  });
+
+  it('holds through the real UserStore path, not just raw inserts', () => {
+    const path = seedPre7();
+    const store = new UserStore(openDb(path));
+    store.delete(3);
+    expect(store.create('dave', 'pw').id).toBe(4);
+  });
+
+  // The case a plain rebuild gets WRONG, found by review against the live database: a user deleted
+  // BEFORE the migration leaves rows behind, but is gone from `users`, so seeding sqlite_sequence from
+  // the surviving rows puts the counter BELOW that id and the next account is handed the departed
+  // user's data. Production really is in this state (brain_sessions.user_id = 4, no user 4).
+  it('never reissues an id that a deleted user left referenced elsewhere', () => {
+    const path = seedPre7();
+    const seeded = new Database(path);
+    // User 4 existed, was deleted, and left a conversation behind — the row `users` no longer explains.
+    seeded.prepare("INSERT INTO brain_sessions (id, user_id, title) VALUES ('brain-4-orphan', 4, 'gone user')").run();
+    seeded.close();
+
+    const db = openDb(path);
+    // Highest SURVIVING user is 3; the highest REFERENCED user is 4. Handing out 4 would inherit the
+    // orphaned conversation, so the counter must clear it.
+    expect(addUser(db, 'dave')).toBe(5);
+    // …and the orphaned row is left untouched: unreachable is the goal, deletion is a separate decision.
+    expect(db.prepare("SELECT user_id FROM brain_sessions WHERE id = 'brain-4-orphan'").get()).toEqual({ user_id: 4 });
+  });
+
+  // v8: a database migrated by the FIRST version of v7 is already AUTOINCREMENT but its counter was
+  // seeded only from surviving users, so it still hands out a referenced id. v7 cannot fix it (a version
+  // never runs twice), so v8 re-seeds. The live database was found in exactly this state.
+  it('repairs a counter left below a referenced id by the earlier v7', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'v7-early.db');
+    const seeded = openDb(path); // fresh: already AUTOINCREMENT, user_version at the current max
+    seeded.prepare("INSERT INTO users (id, username, password_hash) VALUES (3, 'carol', 'h')").run();
+    seeded.prepare("INSERT INTO brain_sessions (id, user_id, title) VALUES ('brain-9-orphan', 9, 'gone')").run();
+    seeded.prepare("UPDATE sqlite_sequence SET seq = 3 WHERE name = 'users'").run(); // as the early v7 left it
+    seeded.pragma('user_version = 7'); // ran v7, never saw the seed fix
+    seeded.close();
+
+    const db = openDb(path);
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
+    expect(addUser(db, 'dave')).toBe(10); // clears the orphaned 9 rather than reissuing it
+  });
+
+  it('leaves a fresh database alone — already monotonic, nothing to rebuild', () => {
+    const db = openDb(':memory:');
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
+    const a = addUser(db, 'alice');
+    db.prepare('DELETE FROM users WHERE id = ?').run(a);
+    expect(addUser(db, 'bob')).toBe(a + 1);
+  });
+
+  it('runs once: a second open does not rebuild the table or disturb the counter', () => {
+    const path = seedPre7();
+    openDb(path).close();      // v7 runs here
+    const db = openDb(path);   // ...and must not rebuild a second time
+    expect(db.pragma('user_version', { simple: true })).toBe(9);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM users').get()).toEqual({ n: 3 });
+    expect(addUser(db, 'dave')).toBe(4); // counter survived the reopen, so it did not restart at max(id)
   });
 });

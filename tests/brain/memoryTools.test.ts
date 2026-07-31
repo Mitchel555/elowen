@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { buildMemoryTools } from '../../src/brain/tools/memoryTools.js';
 import { openDb } from '../../src/store/db.js';
 import { MemoryStore } from '../../src/store/memoryStore.js';
@@ -6,6 +6,7 @@ import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
 import { MemoryCategorizer } from '../../src/brain/memoryCategorizer.js';
 import { MemoryService } from '../../src/brain/memoryService.js';
 import type { EmbeddingService } from '../../src/embeddings/embeddingService.js';
+import type { InferenceClient } from '../../src/inference/types.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import type { TurnIdentity } from '../../src/plugins/policyContext.js';
 import type { Policy } from '../../src/plugins/policy.js';
@@ -30,6 +31,20 @@ function toolset() {
   const service = new MemoryService({ store, embeddings, embeddingConfig: () => null });
   // No inference wired → categorizer.configured() is false (recategorize reports "not configured").
   const categorizer = new MemoryCategorizer({ categories, memories: store, inference: () => null });
+  const tools = buildMemoryTools({ store, service, categories, categorizer });
+  return { store, categories, byName: (n: string) => tools.find((t) => t.name === n)! };
+}
+
+/** The same toolset with a categorization model wired, so the write path's fire-and-forget classification
+ *  resolves to a real category instead of short-circuiting on an unconfigured categorizer. */
+function toolsetWithCategorizer(reply: string) {
+  const db = openDb(':memory:');
+  const store = new MemoryStore(db);
+  const categories = new MemoryCategoryStore(db);
+  const embeddings = { embed: async () => new Float32Array([0, 0, 0]) } as unknown as EmbeddingService;
+  const service = new MemoryService({ store, embeddings, embeddingConfig: () => null });
+  const inference: InferenceClient = { model: 'fake-model', decide: vi.fn(async () => ({ text: reply })) };
+  const categorizer = new MemoryCategorizer({ categories, memories: store, inference: () => inference });
   const tools = buildMemoryTools({ store, service, categories, categorizer });
   return { store, categories, byName: (n: string) => tools.find((t) => t.name === n)! };
 }
@@ -59,6 +74,19 @@ describe('buildMemoryTools', () => {
     const del = await run(OWNER, () => byName('MemoryCategoryDelete').execute('d', { id }));
     expect(txt(del)).toMatch(/Deleted category/);
     expect(categories.list(1)).toHaveLength(0);
+  });
+
+  it('MemoryAdd categorizes the memory it just stored', async () => {
+    // Classification used to hang off the post-turn curator alone, so a memory the agent stored through
+    // this tool stayed uncategorized no matter how many categories the user had.
+    const { store, categories, byName } = toolsetWithCategorizer('Infra');
+    const catId = categories.create(1, { name: 'Infra', description: 'servers, ports' }).id;
+
+    await run(OWNER, () => byName('MemoryAdd').execute('c1', { body: 'The daemon listens on port 4400.' }));
+
+    const id = store.list(1)[0]!.id;
+    // Deliberately fire-and-forget: storing a fact must not wait on a model round-trip.
+    await vi.waitFor(() => expect(store.get(1, id)?.category_id).toBe(catId));
   });
 
   it('a non-owner channel turn cannot touch categories', async () => {

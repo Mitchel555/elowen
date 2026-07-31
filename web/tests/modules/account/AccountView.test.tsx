@@ -120,4 +120,139 @@ describe('AccountView', () => {
     // from <Activity> hidden→visible is deferred, so wait for it rather than asserting synchronously.
     await waitFor(() => expect(screen.getByText('Friendly')).toBeVisible());
   });
+
+  it('never reseeds the profile form over edits typed while a /auth/me refetch is in flight', async () => {
+    let serverName = 'Bob';
+    let patches = 0;
+    let gets = 0;
+    // Hold the refetch the autosave's invalidation triggers, so the user can keep typing while the
+    // stale response is on the wire — the exact window where a blind reseed types over them.
+    const gate: { release: (() => void) | null } = { release: null };
+    server.use(
+      http.get('*/api/auth/me', async () => {
+        gets += 1;
+        if (gets > 1) await new Promise<void>((resolve) => { gate.release = resolve; });
+        return HttpResponse.json({ user: meUser({ name: serverName }) });
+      }),
+      http.patch('*/api/auth/me', async ({ request }) => {
+        const body = await request.json() as { name?: string };
+        patches += 1;
+        serverName = body.name ?? serverName;
+        return HttpResponse.json(meUser({ name: serverName }));
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: [], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper, client } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    const nameInput = await screen.findByDisplayValue('Bob');
+    fireEvent.change(nameInput, { target: { value: 'Bob Renamed' } });
+    await waitFor(() => expect(patches).toBe(1), { timeout: 3000 });
+    await waitFor(() => expect(gate.release).not.toBeNull());
+
+    // Still typing while the refetch hangs.
+    fireEvent.change(nameInput, { target: { value: 'Bob Renamed Twice' } });
+    gate.release?.();
+
+    await waitFor(() => expect(client.getQueryData(['me'])).toMatchObject({ user: { name: 'Bob Renamed' } }));
+    expect(nameInput).toHaveValue('Bob Renamed Twice');
+    // Let the second edit's autosave land while the handlers are still installed.
+    await waitFor(() => expect(patches).toBe(2), { timeout: 3000 });
+  });
+
+  it('saves only the edited field, so a change made elsewhere survives', async () => {
+    // Another window renames the user while this form is being used to edit the e-mail. The autosave
+    // must not carry its stale copy of the name back to the server.
+    const stored = { name: 'Bob', email: 'bob@example.com' };
+    let patched: Record<string, unknown> | null = null;
+    server.use(
+      http.get('*/api/auth/me', () => HttpResponse.json({ user: meUser(stored) })),
+      http.patch('*/api/auth/me', async ({ request }) => {
+        patched = await request.json() as Record<string, unknown>;
+        if (typeof patched.name === 'string') stored.name = patched.name;
+        if (typeof patched.email === 'string') stored.email = patched.email;
+        return HttpResponse.json(meUser(stored));
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: [], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    const emailInput = await screen.findByDisplayValue('bob@example.com');
+    stored.name = 'Bob Renamed Elsewhere'; // the external change, made before this form's save goes out
+    fireEvent.change(emailInput, { target: { value: 'new@example.com' } });
+
+    await waitFor(() => expect(patched).not.toBeNull(), { timeout: 3000 });
+    expect(patched).toEqual({ email: 'new@example.com' });
+    expect(stored.name).toBe('Bob Renamed Elsewhere');
+    // The untouched field keeps following /auth/me, so the refetch shows the external name — while the
+    // edited field still holds what was typed here.
+    expect(await screen.findByDisplayValue('Bob Renamed Elsewhere')).toBeInTheDocument();
+    expect(emailInput).toHaveValue('new@example.com');
+  });
+
+  it('adopts a value another window wrote while this form\'s own save was in flight', async () => {
+    // The saved edit is settled, not an edit in progress: once the refetch reports someone else's newer
+    // name, this form must follow it instead of keeping its own echo and writing it back on the next save.
+    const stored = { name: 'Bob', email: 'bob@example.com' };
+    const patches: Record<string, unknown>[] = [];
+    const gate: { release: (() => void) | null } = { release: null };
+    let gets = 0;
+    server.use(
+      http.get('*/api/auth/me', async () => {
+        gets += 1;
+        // Hold the refetch the save's invalidation triggers — the window another window writes into.
+        if (gets === 2) await new Promise<void>((resolve) => { gate.release = resolve; });
+        return HttpResponse.json({ user: meUser(stored) });
+      }),
+      http.patch('*/api/auth/me', async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        patches.push(body);
+        if (typeof body.name === 'string') stored.name = body.name;
+        if (typeof body.email === 'string') stored.email = body.email;
+        return HttpResponse.json({ user: meUser(stored) });
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: [], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    const nameInput = await screen.findByDisplayValue('Bob');
+    fireEvent.change(nameInput, { target: { value: 'Bob From Here' } });
+    await waitFor(() => expect(patches).toHaveLength(1), { timeout: 3000 });
+    await waitFor(() => expect(gate.release).not.toBeNull());
+
+    stored.name = 'Bob From The Other Window'; // written elsewhere while the refetch hangs
+    gate.release?.();
+
+    expect(await screen.findByDisplayValue('Bob From The Other Window')).toBeInTheDocument();
+
+    // Editing an unrelated field now must not carry the superseded name back to the server.
+    fireEvent.change(await screen.findByDisplayValue('bob@example.com'), { target: { value: 'new@example.com' } });
+    await waitFor(() => expect(patches).toHaveLength(2), { timeout: 3000 });
+    expect(patches[1]).toEqual({ email: 'new@example.com' });
+    expect(stored.name).toBe('Bob From The Other Window');
+  });
+
+  it('shows a retryable error instead of an infinite skeleton when /auth/me fails', async () => {
+    let attempts = 0;
+    server.use(
+      http.get('*/api/auth/me', () => {
+        attempts += 1;
+        return attempts === 1 ? HttpResponse.json({ error: 'boom' }, { status: 500 }) : HttpResponse.json({ user: meUser() });
+      }),
+      http.get('*/api/config', () => HttpResponse.json({ allowedExecs: ['sonnet'], customModels: [], hiddenPresets: [], autopilot: {}, providers: {}, defaults: {} })),
+      http.get('*/api/brain/models', () => HttpResponse.json([])),
+    );
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><EffectsProvider><UiScaleProvider><ToastProvider><AccountView /></ToastProvider></UiScaleProvider></EffectsProvider></Wrapper>);
+
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByText('@bob')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByText('@bob')).toBeInTheDocument());
+  });
 });

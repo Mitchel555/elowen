@@ -144,7 +144,4 @@ export class LiveSessionRegistry<T extends { sessionId: string; session: { dispo
       this.channels.delete(oldestIdle[0]);
     }
   }
-  channelDisposeAll(): void {
-    for (const [id] of [...this.channels]) this.channelDispose(id);
-  }
 }

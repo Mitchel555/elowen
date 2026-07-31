@@ -1,8 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlugins, discoverPlugins } from '../../src/plugins/loader.js';
 import { builtinToolMetas, BUILTIN_TOOL_PLAN_SAFE } from '../../src/brain/tools/index.js';
+
+// Loading every bundled plugin imports each one's module graph; that costs ~1.9s idle against
+// vitest's 5s default, and under the full suite's parallel load it crossed the line and timed out.
+vi.setConfig({ testTimeout: 30_000 });
 
 const log = { info() {}, warn() {}, error() {} };
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');

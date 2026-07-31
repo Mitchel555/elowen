@@ -6,6 +6,8 @@ import { runWithPolicy, type TurnIdentity } from '../../src/plugins/policyContex
 import type { Policy } from '../../src/plugins/policy.js';
 import type { PluginRegistry } from '../../src/plugins/registry.js';
 import type { DelegatedChildSummary } from '../../src/store/brainDelegationStore.js';
+import type { SubagentProgressEvent } from '../../src/plugins/api.js';
+import type { SubagentUpdate } from '../../src/brain/events.js';
 
 const log = { info() {}, warn() {}, error() {} };
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -22,35 +24,82 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
    *  standing in for the store is also the assertion that scoping happens host-side. */
   let byParent: Map<string, DelegatedChildSummary[]>;
   let asked: { parent: string; limit?: number }[];
+  let read: { parent: string; child: string }[];
   let continued: { parent: string; child: string; text: string }[];
+  /** Progress the host feeds back through the callback the plugin now passes down — a test sets it to
+   *  drive one tool + token update before the continuation resolves. */
+  let continueProgress: ((onEvent?: (e: SubagentProgressEvent) => void) => void) | undefined;
+  /** Children the host currently considers live. In production this is LiveRegistry's child map, and the
+   *  SAME map a `running` progress update writes to — which is exactly how a continuation could end up
+   *  refused by its own progress row. The mock host below refuses a live child just as the real one does. */
+  let liveChildren: Set<string>;
+  let readResult: string | Error;
   let reply: string | Error;
+  let stopped: { parent: string; child: string }[];
+  let stopResult: { stopped: boolean } | Error;
 
   beforeEach(async () => {
     byParent = new Map();
     asked = [];
+    read = [];
     continued = [];
+    continueProgress = undefined;
+    liveChildren = new Set();
+    stopped = [];
+    readResult = 'the stored final answer';
     reply = 'the sub-agent answered';
+    stopResult = { stopped: true };
     reg = await loadPlugins({
       dirs: [join(repoRoot, 'plugins')], enabled: ['subagent'], logger: log,
       delegatedChildren: {
         runs: (parent, limit) => { asked.push({ parent, limit }); return byParent.get(parent) ?? []; },
-        continue: async (parent, childSessionId, text) => {
+        read: (parent, childSessionId) => {
+          read.push({ parent, child: childSessionId });
+          if (readResult instanceof Error) throw readResult;
+          return readResult;
+        },
+        continue: async (parent, childSessionId, text, _access, onEvent) => {
+          // The real host refuses a child with a turn in flight rather than steering it (two drivers on
+          // one transcript is a race with no owner). Its guards run synchronously before the first await,
+          // so this mock checks synchronously too.
+          if (liveChildren.has(childSessionId)) {
+            throw new Error('that sub-agent is still running — wait for it to finish before sending it more');
+          }
           continued.push({ parent, child: childSessionId, text });
+          continueProgress?.(onEvent);
           if (reply instanceof Error) throw reply;
           return reply;
+        },
+        stop: async (parent, childSessionId) => {
+          stopped.push({ parent, child: childSessionId });
+          if (stopResult instanceof Error) throw stopResult;
+          return stopResult;
         },
       },
     });
   });
 
-  const call = (name: string, params: Record<string, unknown>, sessionId?: string) => {
+  const call = (
+    name: string,
+    params: Record<string, unknown>,
+    sessionId?: string,
+    emitSubagent?: (u: SubagentUpdate) => void,
+  ) => {
     const tool = reg.tools.find((t) => t.name === name)!;
     return runWithPolicy(
       adminPolicy,
       () => (tool as unknown as { execute: (id: string, p: unknown) => Promise<{ content: { text: string }[]; details?: Record<string, unknown> }> })
         .execute('call', params),
-      { identity: owner, ...(sessionId ? { sessionId } : {}) },
+      { identity: owner, ...(sessionId ? { sessionId } : {}), ...(emitSubagent ? { emitSubagent } : {}) },
     );
+  };
+
+  /** The production emitter's one relevant effect: a `running` update marks the child live, a terminal one
+   *  clears it. Without an emitter bound (most tests here) the plugin's progress pushes are no-ops, which
+   *  is precisely why the self-refusal never showed up in this suite before. */
+  const registerLive = (u: SubagentUpdate): void => {
+    if (u.status === 'running') liveChildren.add(u.sessionId);
+    else liveChildren.delete(u.sessionId);
   };
 
   describe('DelegateList', () => {
@@ -106,6 +155,55 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
     });
   });
 
+  describe('DelegateRead', () => {
+    it('pages stored text with exact ranges and an unambiguous next offset', async () => {
+      readResult = 'abcdefghij';
+
+      const first = await call('DelegateRead', {
+        id: 'brain-ch-subagent-sub-dlg-abc', offset: 3, limit: 4,
+      }, 'brain-1');
+      expect(read).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-sub-dlg-abc' }]);
+      expect(first.content[0]!.text).toContain('10 characters total');
+      expect(first.content[0]!.text).toContain('returned range [3, 7)');
+      expect(first.content[0]!.text).toContain('"offset":7');
+      expect(first.content[0]!.text).toMatch(/\n\ndefg$/);
+      expect(first.details).toMatchObject({
+        offset: 3, end: 7, totalLength: 10, returnedLength: 4, hasMore: true, nextOffset: 7,
+      });
+
+      const last = await call('DelegateRead', {
+        id: 'brain-ch-subagent-sub-dlg-abc', offset: 7, limit: 4,
+      }, 'brain-1');
+      expect(last.content[0]!.text).toContain('returned range [7, 10)');
+      expect(last.content[0]!.text).toContain('complete remaining text');
+      expect(last.content[0]!.text).toMatch(/\n\nhij$/);
+      expect(last.details).toMatchObject({
+        offset: 7, end: 10, totalLength: 10, returnedLength: 3, hasMore: false,
+      });
+      expect(last.details?.nextOffset).toBeUndefined();
+    });
+
+    it('returns an unknown id as a readable recoverable error instead of throwing', async () => {
+      readResult = new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+      const res = await call('DelegateRead', { id: 'brain-ch-subagent-nope' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/use DelegateList/);
+    });
+
+    it('returns missing final text as a readable recoverable error instead of throwing', async () => {
+      readResult = new Error('that sub-agent has not produced final assistant text yet — wait for it to finish, then try DelegateRead again');
+      const res = await call('DelegateRead', { id: 'brain-ch-subagent-sub-running' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/wait for it to finish/);
+    });
+
+    it('refuses outside a conversation turn rather than falling back to another parent', async () => {
+      const res = await call('DelegateRead', { id: 'brain-ch-subagent-sub-dlg-abc' });
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(read).toEqual([]);
+    });
+  });
+
   describe('DelegateContinue', () => {
     it('sends the follow-up to that child and returns what it answered', async () => {
       reply = 'checked the tests too — all green';
@@ -131,6 +229,42 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       expect(res.content[0]!.text).toMatch(/still running/);
     });
 
+    // The progress row and the host's "is this child busy?" guard read and write the SAME live-child
+    // registry. Raising the row before asking the host therefore made every continuation report ITSELF as
+    // busy: the operator saw "that sub-agent is still running" for a child that had long finished.
+    it('does not report itself busy through the progress row it just raised', async () => {
+      reply = 'picked up where I left off';
+      const res = await call('DelegateContinue',
+        { id: 'brain-ch-subagent-sub-dlg-abc', message: 'now check the tests' }, 'brain-1', registerLive);
+
+      expect(res.content[0]!.text).toBe('picked up where I left off');
+      expect(continued).toEqual([{
+        parent: 'brain-1', child: 'brain-ch-subagent-sub-dlg-abc', text: 'now check the tests',
+      }]);
+    });
+
+    it('asks the host first, then raises the running row — and clears it when done', async () => {
+      // Pins the ordering the fix depends on, so it cannot be swapped back without a red test.
+      const order: string[] = [];
+      continueProgress = () => { order.push('host-asked'); };
+      await call('DelegateContinue', { id: 'brain-ch-subagent-sub-dlg-abc', message: 'go on' }, 'brain-1',
+        (u) => { order.push(`row:${u.status}`); registerLive(u); });
+
+      expect(order).toEqual(['host-asked', 'row:running', 'row:done']);
+      // The row still gets raised, so a live continuation is visible in the rail rather than running blind.
+      expect(liveChildren.has('brain-ch-subagent-sub-dlg-abc')).toBe(false);
+    });
+
+    it('still refuses a child that genuinely has a turn in flight', async () => {
+      // The guard must keep working: two agents driving one transcript is a race with no owner.
+      liveChildren.add('brain-ch-subagent-busy');
+      const res = await call('DelegateContinue', { id: 'brain-ch-subagent-busy', message: 'hi' }, 'brain-1', registerLive);
+
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/still running/);
+      expect(continued).toEqual([]);
+    });
+
     it('refuses outside a conversation turn', async () => {
       const res = await call('DelegateContinue', { id: 'brain-ch-subagent-x', message: 'hi' });
       expect(res.content[0]!.text).toMatch(/^Error: /);
@@ -141,6 +275,66 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       const res = await call('DelegateContinue', { id: 'brain-ch-subagent-x', message: '   ' }, 'brain-1');
       expect(res.content[0]!.text).toMatch(/^Error: /);
       expect(continued).toEqual([]);
+    });
+
+    // The bug: a continuation ran invisibly because no progress reached the parent, so the rail never
+    // showed it as a running sub-agent the way a first Delegate does. It must raise a running row keyed on
+    // THIS tool call, reflect the child's live tool/token progress, and settle to done.
+    it('surfaces the follow-up as a running sub-agent and fans its progress out to the host', async () => {
+      reply = 'refined and re-checked';
+      continueProgress = (onEvent) => {
+        onEvent?.({ type: 'tool', name: 'Read', detail: 'a.ts' });
+        onEvent?.({ type: 'idle', usage: { totalTokens: 500 } });
+      };
+      const updates: SubagentUpdate[] = [];
+      const tool = reg.tools.find((t) => t.name === 'DelegateContinue')!;
+      const res = await runWithPolicy(
+        adminPolicy,
+        () => (tool as unknown as { execute: (id: string, p: unknown) => Promise<{ content: { text: string }[] }> })
+          .execute('call-42', { id: 'brain-ch-subagent-x', message: 'refine it' }),
+        { identity: owner, sessionId: 'brain-1', emitSubagent: (u) => updates.push(u) },
+      );
+
+      expect(res.content[0]!.text).toBe('refined and re-checked');
+      // A running row appears up front, keyed on this call id and the child's session (drill-in target).
+      expect(updates[0]).toMatchObject({ id: 'call-42', sessionId: 'brain-ch-subagent-x', status: 'running' });
+      expect(updates.some((u) => u.status === 'running' && u.tools === 1 && u.detail === 'Read a.ts')).toBe(true);
+      expect(updates.some((u) => u.tokens === 500)).toBe(true);
+      expect(updates.at(-1)).toMatchObject({ status: 'done' });
+    });
+  });
+
+  describe('DelegateStop', () => {
+    it('stops that child and reports success', async () => {
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-sub-dlg-abc' }, 'brain-1');
+      expect(stopped).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-sub-dlg-abc' }]);
+      expect(res.content[0]!.text).toBe('Stopped.');
+    });
+
+    it('anchors the stop on the CURRENT conversation, never on a caller-supplied parent', async () => {
+      await call('DelegateStop', { id: 'brain-ch-subagent-x' }, 'brain-2');
+      expect(stopped[0]!.parent).toBe('brain-2');
+    });
+
+    it('reports a child that already finished as nothing to stop, not an error', async () => {
+      stopResult = { stopped: false };
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-x' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Nothing to stop/);
+    });
+
+    // A refusal (foreign child, unknown id) has to come back as a readable result the agent can act on,
+    // not as a thrown tool failure — same contract as DelegateRead/DelegateContinue.
+    it('reports a host refusal as an actionable error instead of throwing', async () => {
+      stopResult = new Error('unknown sub-agent for this conversation — use DelegateList to choose an id from this conversation');
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-someone-elses' }, 'brain-1');
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(res.content[0]!.text).toMatch(/unknown sub-agent/);
+    });
+
+    it('refuses outside a conversation turn rather than falling back to another parent', async () => {
+      const res = await call('DelegateStop', { id: 'brain-ch-subagent-x' });
+      expect(res.content[0]!.text).toMatch(/^Error: /);
+      expect(stopped).toEqual([]);
     });
   });
 });

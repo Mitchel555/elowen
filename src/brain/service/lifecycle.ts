@@ -8,12 +8,36 @@ import { DEFAULT_AUTO_COMPACT_PCT } from '../session/liveBrain.js';
 import type { LiveBrain, SpawnOpts } from '../session/liveBrain.js';
 import { rolloverDue } from '../session/idleRollover.js';
 import { decideVisionHop } from '../visionFallback.js';
-import { defaultUserSessionId, freshUserSessionId, isNonUserSession, isChannelSession, channelIdOf } from '../sessionId.js';
+import { defaultUserSessionId, freshUserSessionId, isNonUserSession, isOwnedUserSession, isChannelSession, channelIdOf } from '../sessionId.js';
 import type { BrainDeps } from '../brainDeps.js';
 import type { ClientAttachments } from './attachments.js';
 import type { GoalLoopService } from './goalLoop.js';
 import { clientDir, gitProjectRoot } from './workDir.js';
 import { recordSessionEvent } from './sessionEvents.js';
+
+/** Prompt/cadence state that survives an IN-PLACE respawn — switchModel, restart and the vision hop all
+ *  rehydrate the SAME conversation from SQLite, so from the model's side nothing happened: these fields
+ *  must return unchanged or the model gets re-sent an orientation/directive it already has. Deliberately
+ *  excludes `yoloOverride` and the pending reasoning marker — their own field docs say a respawn resets
+ *  them to the persisted default — and is never used by rollover, which opens a brand-new EMPTY
+ *  conversation (see maybeRollover): copying it there would make TurnContextBuilder.modeTemplateFor()
+ *  emit a sparse mode instruction claiming the full text is already earlier in THAT conversation's
+ *  history, which is never true for a fresh id. */
+interface InPlaceRespawnState {
+  lastTurnMode: LiveBrain['lastTurnMode'];
+  orientedForCompaction: LiveBrain['orientedForCompaction'];
+  modeReminderTurns: LiveBrain['modeReminderTurns'];
+}
+
+function captureInPlaceRespawnState(b: LiveBrain): InPlaceRespawnState {
+  return { lastTurnMode: b.lastTurnMode, orientedForCompaction: b.orientedForCompaction, modeReminderTurns: b.modeReminderTurns };
+}
+
+function applyInPlaceRespawnState(fresh: LiveBrain, state: InPlaceRespawnState): void {
+  fresh.lastTurnMode = state.lastTurnMode;
+  fresh.orientedForCompaction = state.orientedForCompaction;
+  fresh.modeReminderTurns = state.modeReminderTurns;
+}
 
 interface LifecycleDeps {
   store: BrainStore;
@@ -56,7 +80,7 @@ export class ConversationLifecycle {
    *  channel/task session (mirrors the /brain/subagent/send validation). Returns the id or throws. */
   ownedUserSession(userId: number, sessionId: string): string {
     const row = this.d.store.getSession(sessionId);
-    if (!row || row.user_id !== userId || isNonUserSession(sessionId)) throw new Error('unknown session');
+    if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
     return sessionId;
   }
 
@@ -220,7 +244,7 @@ export class ConversationLifecycle {
    *  directory (validated, then stamped as the session's work_dir); `spawnCwd` is an internal carry-over
    *  (respawn keeping its previous workDir) that must NOT be stamped — a cwd-less web session stays
    *  cwd-less. Serialized per conversation: two concurrent spawns would leak one PI session. */
-  async ensureLive(userId: number, sessionId: string, o: { provider?: string; model?: string; clientCwd?: string; spawnCwd?: string; explicitResume?: boolean; fast?: boolean; thinkingLevel?: string | null } = {}): Promise<void> {
+  async ensureLive(userId: number, sessionId: string, o: { provider?: string; model?: string; clientCwd?: string; spawnCwd?: string; explicitResume?: boolean; fast?: boolean; thinkingLevel?: string | null; reapplyModelPreference?: boolean } = {}): Promise<void> {
     // A HEALTHY live conversation needs no spawn, so it must not queue on the session lock to find that
     // out: a running turn holds that lock for its full duration (turnRunner), which would leave a
     // relaunched CLI unable to resume into its own in-flight work until the turn ended or was aborted.
@@ -242,14 +266,36 @@ export class ConversationLifecycle {
         if (o.explicitResume) already.interactedAt = Date.now();
         return; // idempotent resume of a live conversation
       }
-      // Model selection: an explicit start option wins, then a Git-project pick, then the user's
-      // global override, then the configured default. Each persisted candidate is validated so a model
-      // revoked from the user's allow-list falls through rather than blocking the brain.
+      // Model selection: an explicit start option wins, then the model this conversation was ALREADY
+      // running on, then a Git-project pick, then the user's global override, then the configured
+      // default. Each persisted candidate is validated so a model revoked from the user's allow-list
+      // falls through rather than blocking the brain.
       const userCfg = this.d.userSettings?.(userId);
       const policy = this.d.policy?.(userId) ?? { allowedProjectIds: 'all' as const, allowedPaths: () => [] };
       const projectRoot = gitProjectRoot(policy, o.clientCwd ?? o.spawnCwd);
+      // A respawn is ROUTINE — the last client detaching, a settings save, a plugin reload, the idle
+      // reaper, a daemon restart all cause one — and each used to re-resolve the model from the global
+      // or project preference, silently overwriting an explicit `/model` pick with no session event to
+      // show for it. A conversation that has already been spoken in therefore keeps its own pair.
+      // Requires BOTH ids: a model alone does not identify a provider, and resolveBrainModelRoute falls
+      // back to providers[0] when none is given, which could restore the model against the wrong one.
+      // Rows written before `provider` existed are simply skipped and heal on their next spawn.
+      // Deliberately NOT applied to the vision model: `visionFallback` lives only in memory, so after a
+      // restart the row still names a temporary hop and honouring it would make the hop permanent.
+      // `reapplyModelPreference` is set by a restart that exists BECAUSE the model setting changed —
+      // honouring the pin there would leave the user staring at a settings page reporting one model
+      // while the chat kept running another.
+      const storedRow = o.reapplyModelPreference ? undefined : this.d.store.getSession(sessionId);
+      const storedModel = storedRow?.model;
+      const storedProvider = storedRow?.provider;
+      const stored = storedModel && storedProvider
+        && storedModel !== userCfg?.visionModel
+        && this.d.store.lastMessageAt(sessionId) !== undefined
+        ? { provider: storedProvider, model: storedModel }
+        : undefined;
       const candidates = [
         { provider: o.provider, model: o.model },
+        stored,
         projectRoot ? this.d.projectModelPreference?.(userId, projectRoot) : undefined,
         { provider: userCfg?.modelProvider, model: userCfg?.model },
       ];
@@ -302,7 +348,11 @@ export class ConversationLifecycle {
       const previous = this.d.sessions.get(sessionId);
       const prevWorkDir = previous?.workDir; // the switch must not move the session cwd
       const prevFast = previous?.requestProfile.fast;
-      const carried = previous?.listeners; // non-tap direct subscribers; taps re-attach via the spawner
+      // In-place respawn: the model switch rehydrates the SAME conversation, so its prompt/cadence state
+      // survives — see InPlaceRespawnState. Listener ownership lives in ClientAttachments; the spawner
+      // restores every genuinely attached transport for this session id on its own (see spawner.ts), so
+      // there is nothing to carry here.
+      const prevState = previous ? captureInPlaceRespawnState(previous) : undefined;
       const policy = this.d.policy?.(userId) ?? { allowedProjectIds: 'all' as const, allowedPaths: () => [] };
       // No in-flight turn can be running here: a send holds serial(send-<id>)→serial(<id>) across the whole
       // prompt() (turnRunner), and this switch runs under the same serial(sessionId) lock — so it only
@@ -310,29 +360,27 @@ export class ConversationLifecycle {
       // The respawn then rehydrates that output from SQLite, so no in-flight output is lost.
       this.d.sessions.dispose(sessionId);
       const userCfg = this.d.userSettings?.(userId);
-      const live = await this.d.spawn({
-        sessionId,
-        ownerUserId: userId,
-        selection: sel, // the explicit pick wins over the user's saved default
-        policy,
-        fast: prevFast,
-        autoCompact: !!userCfg?.autoCompact,
-        autoCompactAtPct: userCfg?.autoCompactAt ?? DEFAULT_AUTO_COMPACT_PCT,
-        clientCwd: prevWorkDir,
-      });
+      let live: LiveBrain;
+      try {
+        live = await this.d.spawn({
+          sessionId,
+          ownerUserId: userId,
+          selection: sel, // the explicit pick wins over the user's saved default
+          policy,
+          fast: prevFast,
+          autoCompact: !!userCfg?.autoCompact,
+          autoCompactAtPct: userCfg?.autoCompactAt ?? DEFAULT_AUTO_COMPACT_PCT,
+          clientCwd: prevWorkDir,
+        });
+      } catch (error) {
+        // The respawn that would have carried an active goal forward never happened — pause it instead of
+        // leaving it `active` with a cancelled timer and no chance left to reschedule.
+        this.d.goals.pauseForRespawnFailure(sessionId, error);
+        throw error;
+      }
       live.interactedAt = Date.now(); // a model switch is a deliberate touch — don't idle-roll it over
-      // The user's mode survives the respawn: a host-initiated delivery reads it (buildScope) to stay
-      // clamped, so dropping it here would silently rearm a plan turn's withheld tools.
-      live.lastTurnMode = previous?.lastTurnMode;
-      // Which compaction the model was already oriented for survives the respawn: without it a model
-      // switch would re-send an orientation the model already has.
-      live.orientedForCompaction = previous?.orientedForCompaction;
-      live.modeReminderTurns = previous?.modeReminderTurns; // a respawn is not a reason to restate the mode
+      if (prevState) applyInPlaceRespawnState(live, prevState);
       this.d.sessions.set(sessionId, live);
-      // Carry the previous live's direct listeners onto the fresh one (mirrors maybeRollover/maybeVisionHop):
-      // open SSE taps are already re-attached by the spawner (sessionTaps), so this covers the non-tap
-      // subscribe() listeners. `listeners` is a Set keyed by reference, so re-adding a tap is a no-op.
-      if (carried) for (const l of carried) live.listeners.add(l);
       // The switch respawned the session, so record the change on the FRESH live (the old one is disposed):
       // a visible transcript marker + a one-shot notice so the agent knows its model changed next turn. This
       // publishes a `session-event` on the live stream — every attached client refetches history + status
@@ -344,6 +392,8 @@ export class ConversationLifecycle {
       }
       // A bound (explicit-session) switch must not move the active pointer — the two-tier rule.
       if (!session) this.d.sessions.setActive(userId, sessionId);
+      // The respawn succeeded: give a still-active goal a driver again (see resumeAfterRespawn).
+      this.d.goals.resumeAfterRespawn(userId, sessionId);
       return { model: live.model };
     });
   }
@@ -370,31 +420,39 @@ export class ConversationLifecycle {
     if (b.session.isStreaming || this.d.sessions.hasActiveChildren(b.sessionId)
         || this.d.attachments.hasLiveStableClient(b.sessionId)
         || !rolloverDue({ lastMessageAt: this.d.store.lastMessageAt(b.sessionId), interactedAt: b.interactedAt, now: Date.now() })) return b;
-    const carried = b.listeners;
     const oldId = b.sessionId;
     const wasActive = this.activeSessionId(userId) === oldId;
     const freshId = freshUserSessionId(userId);
     // Publish the identity transition to attachment bookkeeping before the first async spawn boundary.
     // A quit POST can race while ensureLive awaits provider/session setup; it must already resolve the
     // old client-visible id to `freshId` rather than concluding that the disposed predecessor is gone.
+    // This is also what carries every genuinely attached transport (subscribe + taps) onto the fresh
+    // session id — the spawner restores them from ClientAttachments, so nothing else has to.
     this.d.attachments.retarget(oldId, freshId);
     this.d.goals.cancelGoalContinuation(oldId);
     this.d.elicitation.cancelForSession(oldId, 'session stopped');
     this.d.sessions.dispose(oldId);
-    await this.ensureLive(userId, freshId, { clientCwd });
+    try {
+      await this.ensureLive(userId, freshId, { clientCwd });
+    } catch (error) {
+      // The spawn failed: the fresh id never became live, so unwind the identity transition back onto the
+      // old id. The old runtime is already gone (its dispose above is real, not undoable), but leaving
+      // attachments pointed at the old id means the NEXT ensureLive/send simply respawns it there — instead
+      // of the current client staying permanently dark behind a fresh id nothing will ever spawn into (see
+      // the sol review finding 6). The active pointer is untouched here on purpose: it only moves below,
+      // after a successful respawn, so on failure it is still exactly where it was before this call.
+      this.d.attachments.retarget(freshId, oldId);
+      throw error;
+    }
     const fresh = this.d.sessions.get(freshId);
     if (!fresh) throw new Error('brain not started for user');
     // The pointer follows the rollover only when it pointed at the rolled-over conversation — a bound
     // send on a non-active conversation must not hijack the pointer from another client.
     if (wasActive) this.d.sessions.setActive(userId, freshId);
-    // Attached listener sets were re-keyed before spawn so both the spawner and a racing stop request see
-    // the replacement identity. Carry the raw live listeners as well (non-client internal listeners).
-    for (const l of carried) fresh.listeners.add(l);
-    // Same client, same mode toggle — carry it so a delivery into the rolled-over conversation stays
-    // clamped (buildScope reads it).
-    fresh.lastTurnMode = b.lastTurnMode;
-    fresh.orientedForCompaction = b.orientedForCompaction;
-    fresh.modeReminderTurns = b.modeReminderTurns;
+    // Rollover opens a brand-new EMPTY conversation — deliberately NOT an in-place respawn: it must not
+    // carry the old one's prompt/cadence state (lastTurnMode/orientedForCompaction/modeReminderTurns).
+    // Doing so would make TurnContextBuilder.modeTemplateFor() emit a sparse mode instruction claiming the
+    // full text is already earlier in THIS conversation's history, which is never true for a fresh id.
     fresh.replay.publish({ type: 'session', sessionId: fresh.sessionId });
     return fresh;
   }
@@ -413,7 +471,9 @@ export class ConversationLifecycle {
     if (hop.action === 'none') return b;
     const hopId = b.sessionId;
     const prevWorkDir = b.workDir; // survive the respawn — the hop must not move the session cwd
-    const listeners = b.listeners; // direct web subscribers are not sessionTaps; carry them explicitly
+    // In-place respawn (same id) — see InPlaceRespawnState. Listener ownership lives in ClientAttachments,
+    // so the spawner restores every attached transport for this session id on its own.
+    const prevState = captureInPlaceRespawnState(b);
     const returnProfile = hop.action === 'hop'
       ? {
           provider: b.providerId,
@@ -425,28 +485,30 @@ export class ConversationLifecycle {
     this.d.goals.cancelGoalContinuation(hopId);
     this.d.elicitation.cancelForSession(hopId, 'session stopped');
     this.d.sessions.dispose(hopId);
-    await this.ensureLive(userId, hopId, {
-      clientCwd,
-      spawnCwd: prevWorkDir,
-      // Fast belongs to the original conversation profile. Never send priority-service metadata to a
-      // temporary fallback (which may be non-OAuth); restore the exact prior value on hop-back.
-      fast: hop.action === 'hop' ? false : returnProfile?.fast,
-      ...(hop.action === 'hop'
-        ? { provider: hop.provider, model: hop.model }
-        : returnProfile
-          ? {
-              provider: returnProfile.provider,
-              model: returnProfile.model,
-              thinkingLevel: returnProfile.thinkingLevel ?? null,
-            }
-          : {}),
-    });
+    try {
+      await this.ensureLive(userId, hopId, {
+        clientCwd,
+        spawnCwd: prevWorkDir,
+        // Fast belongs to the original conversation profile. Never send priority-service metadata to a
+        // temporary fallback (which may be non-OAuth); restore the exact prior value on hop-back.
+        fast: hop.action === 'hop' ? false : returnProfile?.fast,
+        ...(hop.action === 'hop'
+          ? { provider: hop.provider, model: hop.model }
+          : returnProfile
+            ? {
+                provider: returnProfile.provider,
+                model: returnProfile.model,
+                thinkingLevel: returnProfile.thinkingLevel ?? null,
+              }
+            : {}),
+      });
+    } catch (error) {
+      this.d.goals.pauseForRespawnFailure(hopId, error);
+      throw error;
+    }
     const fresh = this.d.sessions.get(hopId);
     if (!fresh) throw new Error('brain not started for user');
-    for (const listener of listeners) fresh.listeners.add(listener);
-    fresh.lastTurnMode = b.lastTurnMode; // the hop is not a mode change (buildScope reads it)
-    fresh.orientedForCompaction = b.orientedForCompaction;
-    fresh.modeReminderTurns = b.modeReminderTurns;
+    applyInPlaceRespawnState(fresh, prevState);
     // Mark the fallback active only if the respawn actually reached the requested vision model (not the
     // configured default because the vision model was unavailable/disallowed) — so the NEXT text turn
     // hops back. Provider matters too: two configured entries can expose the same model id.
@@ -455,6 +517,7 @@ export class ConversationLifecycle {
       fresh.visionFallback = reachedFallback;
       if (reachedFallback) fresh.visionFallbackReturn = returnProfile;
     }
+    this.d.goals.resumeAfterRespawn(userId, hopId);
     return fresh;
   }
 
@@ -490,19 +553,14 @@ export class ConversationLifecycle {
     const targetSessionId = this.resolveStreamSession(userId, sessionId, clientId, clientGeneration);
     const row = this.d.store.getSession(targetSessionId);
     if (!row || row.user_id !== userId) throw new Error('unknown session');
-    const { sessionTaps } = this.d.attachments;
     const initialLive = this.liveFor(targetSessionId);
     let detached = false;
     const off = (): void => {
       if (detached) return;
       detached = true;
+      // detachTransport removes the persistent ClientAttachments-owned record (sessionTaps included), so
+      // no later respawn ever re-attaches this listener again — see ClientAttachments.sessionTaps.
       this.d.attachments.detachTransport(listener);
-      // Rollover can re-key (or merge) the original tap set, so remove from every key rather than the
-      // captured pre-rollover id. This also avoids leaving an empty replacement tap set behind.
-      for (const [id, set] of sessionTaps) {
-        set.delete(listener);
-        if (set.size === 0) sessionTaps.delete(id);
-      }
       // An idle rollover may have CARRIED this listener onto a replacement session (send() moves
       // subscribers so open streams survive) — sweep every live user session, then the channel bucket.
       for (const [, live] of this.d.sessions.liveEntries()) live.listeners.delete(listener);
@@ -512,9 +570,6 @@ export class ConversationLifecycle {
     if (!this.d.attachments.attach(userId, targetSessionId, listener, off, clientId, clientGeneration)) {
       throw new Error('stale client stream');
     }
-    let taps = sessionTaps.get(targetSessionId);
-    if (!taps) { taps = new Set(); sessionTaps.set(targetSessionId, taps); }
-    taps.add(listener);
     initialLive?.listeners.add(listener); // the session may already be running — attach now
     return off;
   }
@@ -523,33 +578,58 @@ export class ConversationLifecycle {
    *  No-op when not running. History survives — it rehydrates from SQLite on the fresh start. Respawns
    *  the SAME conversation in place (never a cwd re-resolution — this is a settings reload, not a
    *  client boot) and carries the previous workDir over without stamping it. */
-  async restart(userId: number): Promise<void> {
+  /** `reapplyModelPreference` — the caller changed the user's MODEL setting, so the conversation must
+   *  drop the model it was pinned to and re-resolve from preference. Every other restart (plugin
+   *  reload, personality change) deliberately leaves the pin alone: reloading a plugin is no reason to
+   *  move a conversation off the model its user picked. */
+  async restart(userId: number, opts: { reapplyModelPreference?: boolean } = {}): Promise<void> {
     const b = this.activeLive(userId);
     if (!b) return;
     const sessionId = b.sessionId;
     // Release a parked AskUserQuestion first, else `settled` waits out its full timeout.
     this.d.elicitation.cancelForSession(sessionId, 'session restarted');
     await this.d.sessions.settled(sessionId); // let an in-flight turn settle before disposing the session
+    // The active pointer (or this very session) can move during that await — a settings save racing a
+    // conversation switch, or a second concurrent respawn winning the race. Restart only the EXACT
+    // instance it captured, verified still registered under sessionId; never re-resolve "which session"
+    // through activeLive() or stop() (both would answer against whatever is active/live NOW, which is how
+    // a restart could tear down an unrelated conversation — see the sol review finding 1). A session that
+    // moved on is not this restart's problem to finish; whatever replaced it owns its own lifecycle.
+    if (this.d.sessions.get(sessionId) !== b) return;
     const prevWorkDir = b.workDir; // the restart must not move the session cwd
     const prevFast = b.requestProfile.fast;
-    // The same per-session state the other respawn sites hand over. A settings reload is the LEAST
-    // eventful respawn there is — from the model's side nothing happened at all — so it must not
-    // re-deliver an orientation the model already read, nor restate a mode directive it can still see.
-    const prevMode = b.lastTurnMode;
-    const prevOriented = b.orientedForCompaction;
-    const prevModeTurns = b.modeReminderTurns;
-    this.stop(userId);
-    await this.ensureLive(userId, sessionId, { spawnCwd: prevWorkDir, fast: prevFast });
-    const fresh = this.activeLive(userId);
+    // In-place respawn (same id) — see InPlaceRespawnState. A settings reload is the LEAST eventful
+    // respawn there is (from the model's side nothing happened at all), so it must not re-deliver an
+    // orientation the model already read, nor restate a mode directive it can still see. Listener
+    // ownership lives in ClientAttachments; the spawner restores every attached transport on its own.
+    const prevState = captureInPlaceRespawnState(b);
+    this.d.goals.cancelGoalContinuation(sessionId);
+    this.d.sessions.dispose(sessionId);
+    try {
+      await this.ensureLive(userId, sessionId, { spawnCwd: prevWorkDir, fast: prevFast, reapplyModelPreference: opts.reapplyModelPreference });
+    } catch (error) {
+      this.d.goals.pauseForRespawnFailure(sessionId, error);
+      throw error;
+    }
+    const fresh = this.d.sessions.get(sessionId);
     if (fresh) {
-      fresh.lastTurnMode = prevMode;
-      fresh.orientedForCompaction = prevOriented;
-      fresh.modeReminderTurns = prevModeTurns;
+      applyInPlaceRespawnState(fresh, prevState);
+      // The respawn succeeded: give a still-active goal a driver again (see resumeAfterRespawn).
+      this.d.goals.resumeAfterRespawn(userId, sessionId);
     }
   }
 
   stop(userId: number): void {
     const b = this.activeLive(userId);
-    if (b) { this.d.goals.cancelGoalContinuation(b.sessionId); this.d.elicitation.cancelForSession(b.sessionId, 'session stopped'); this.d.sessions.dispose(b.sessionId); }
+    if (b) {
+      this.d.goals.cancelGoalContinuation(b.sessionId);
+      // A definitive stop has no reschedule coming (unlike a same-id respawn) — flip an active goal to
+      // paused so the row stops claiming a driver that no longer exists. reconcileGoal is the same rule
+      // start()'s switch-away guard already uses; it only pauses when there is genuinely no timer, which
+      // cancelGoalContinuation above just guaranteed.
+      this.d.goals.reconcileGoal(b.sessionId, 'interrupted (session stopped)');
+      this.d.elicitation.cancelForSession(b.sessionId, 'session stopped');
+      this.d.sessions.dispose(b.sessionId);
+    }
   }
 }

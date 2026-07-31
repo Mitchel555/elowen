@@ -44,7 +44,10 @@ export function ChatView() {
 
   return (
     <>
-      <ChatDeckHero />
+      {/* The stat hero is desktop-only: on a phone its icon + wrapping stat row just ate vertical space and
+          scrolled away (it is not sticky), and every stat it shows is already reachable in the telemetry
+          drawer. `mobile === false` (not `!mobile`) so it never flashes in during the pre-measure commit. */}
+      {mobile === false ? <ChatDeckHero /> : null}
       <div
         ref={surfaceRef}
         style={fillHeight ? { minHeight: fillHeight } : undefined}
@@ -59,7 +62,10 @@ export function ChatView() {
           />
         </div>
         {mobile === false && railShown ? <TelemetryPanel variant="column" onOpenWorkflow={openDag} /> : null}
-        <ChatHistoryRail variant="drawer" open={historyOpen} onClose={() => setHistoryOpen(false)} />
+        {/* On a phone the global TopBar is gone (see Shell), so the drawer that lists conversations is also
+            the only way back to the rest of the app — it carries a "← dashboard" link. Desktop keeps the
+            TopBar, so the link would be redundant there. */}
+        <ChatHistoryRail variant="drawer" open={historyOpen} onClose={() => setHistoryOpen(false)} homeLink={mobile === true} />
         {mobile === true ? (
           <TelemetryPanel variant="drawer" open={telemetryOpen} onClose={() => setTelemetryOpen(false)} onOpenWorkflow={openDag} />
         ) : null}

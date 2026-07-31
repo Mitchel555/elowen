@@ -130,7 +130,7 @@ export function groupToolItems(items: ToolItem[]): ToolGroup[] {
   return groups;
 }
 
-export type YouTurn = { role: 'you'; text: string };
+export type YouTurn = { role: 'you'; text: string; id?: string };
 export type ElowenTurn = { role: 'elowen'; segments: Segment[]; streaming: boolean;
   /** True while the model is writing a tool call whose marker has not yet rendered — a live-only hint set
    *  by `tool_authoring` and cleared by the first `tool` of the turn. Never persisted (history turns are
@@ -187,7 +187,7 @@ export function turnsFromHistory(msgs: HistoryMessage[]): ChatTurn[] {
       continue;
     }
     if (m.role === 'user') {
-      if (m.text.trim()) turns.push({ role: 'you', text: m.text });
+      if (m.text.trim()) turns.push({ role: 'you', text: m.text, ...(m.id ? { id: m.id } : {}) });
       continue;
     }
     const segments: Segment[] = [];

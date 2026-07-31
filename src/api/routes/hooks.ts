@@ -1,4 +1,5 @@
 import { logger } from '../../shared/logger.js';
+import { bodyLimitBytes } from '../validation.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { ElowenApp, RouteContext } from '../context.js';
 import type { PluginHttpRequest } from '../../plugins/api.js';
@@ -15,15 +16,15 @@ const log = logger('hooks');
  *  Teams plugin validates Microsoft's JWT), and unknown mounts 404 without revealing what exists. */
 export function registerHookRoutes(app: ElowenApp, ctx: RouteContext): void {
   const { d } = ctx;
+  // Registered before the dispatcher so the cap is applied while the body is still being read: the
+  // handler below buffers it whole, and a chunked webhook carries no content-length to check first.
+  app.use('/hooks/*', bodyLimitBytes(MAX_HOOK_BODY_BYTES));
   app.all('/hooks/*', async (c) => {
     const registry = await d.plugins?.get().catch(() => undefined);
     const match = registry?.httpRoute(c.req.path.slice('/hooks/'.length));
     if (!match) return c.json({ error: 'not found' }, 404);
 
-    const declared = Number(c.req.header('content-length') ?? '0');
-    if (declared > MAX_HOOK_BODY_BYTES) return c.json({ error: 'payload too large' }, 413);
     const raw = Buffer.from(await c.req.arrayBuffer());
-    if (raw.byteLength > MAX_HOOK_BODY_BYTES) return c.json({ error: 'payload too large' }, 413);
 
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((value, key) => { headers[key.toLowerCase()] = value; });

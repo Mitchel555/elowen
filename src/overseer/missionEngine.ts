@@ -100,10 +100,11 @@ export class MissionEngine {
   /** Hard-stop a mission's active work: kill the live tmux session of every in-progress child
    *  and revert it to open. Without this, pausing/disengaging only flips the mission state while
    *  the agent keeps running — so the UI still reads as "running". A later resume re-spawns from
-   *  open. Returns the number of agents stopped. */
+   *  open. A child whose session outlived the kill keeps its in_progress status (see below). Returns
+   *  the number of agents actually stopped. */
   async stopRunning(epicId: string): Promise<number> {
     const live = new Set(await this.d.tmux.list());
-    let stopped = 0;
+    const attempted: { id: string; session: string | null }[] = [];
     for (const t of this.children(epicId)) {
       if (t.status !== 'in_progress') continue;
       const agent = t.labels.find((l) => l.startsWith('agent:'))?.slice('agent:'.length);
@@ -111,9 +112,25 @@ export class MissionEngine {
       // Guard the kill: if the session exited between `list()` and here, the driver rejects — without
       // the catch one dead session would abort the loop and strand the remaining children in_progress
       // forever (the UI would still read "running"). Mirror overseerAgent.stop / janitor.
-      if (session && live.has(session)) { try { await this.d.tmux.kill(session); } catch { /* already gone — fine */ } }
-      this.d.tasks.setStatus(t.id, 'open');
-      this.d.bus.publish({ type: 'task', taskId: t.id, status: 'open' });
+      if (session && live.has(session)) { try { await this.d.tmux.kill(session); } catch { /* verified below */ } }
+      attempted.push({ id: t.id, session });
+    }
+    // Verify the kills actually landed before reverting anything. A kill that did NOT take (the driver
+    // rejected, or swallowed a tmux failure) leaves the agent alive and still writing in the checkout;
+    // flipping its task to 'open' would advertise the phase as re-spawnable and let a resume put a second
+    // agent on the same files. Such a task stays in_progress — the stuck detector reverts it once its
+    // session is really gone. Re-listed once, and only when we killed something.
+    const stillLive = attempted.some((a) => a.session && live.has(a.session))
+      ? new Set(await this.d.tmux.list())
+      : new Set<string>();
+    let stopped = 0;
+    for (const { id, session } of attempted) {
+      if (session && stillLive.has(session)) {
+        log.error(`mission stop: session ${session} survived the kill — leaving task ${id} in_progress`);
+        continue;
+      }
+      this.d.tasks.setStatus(id, 'open');
+      this.d.bus.publish({ type: 'task', taskId: id, status: 'open' });
       stopped++;
     }
     return stopped;
@@ -199,7 +216,10 @@ export class MissionEngine {
     this.d.missions.setState(id, 'paused');
     this.d.bus.publish({ type: 'mission', missionId: id, state: 'paused' });
     await this.d.overseer?.stop(id); // a paused mission keeps no parked overseer; resume restarts it
-    await this.d.missionGit?.cleanup(id); // free the worktree; resume re-provisions it via onEngage
+    // The worktree is deliberately KEPT. A phase's work is only committed when the phase closes, so the
+    // running phase this pause just stopped has uncommitted changes in it — and cleanup() removes the
+    // worktree with `git worktree remove --force`, which would destroy them irrecoverably. Resume picks
+    // the same worktree back up; freeing it is what an explicit disengage (or /admin/cleanup) is for.
   }
 
   /** Resume a paused mission: flip active, re-park the overseer (pause stopped it), then tick so it
@@ -211,7 +231,8 @@ export class MissionEngine {
     this.d.bus.publish({ type: 'mission', missionId: id, state: 'active' });
     const epic = this.d.tasks.get(m.epic_id);
     const project = epic ? this.d.projects.get(epic.project_id) : null;
-    // Pause freed the worktree, so re-provision it (no-op when PR mode is off or it still exists).
+    // Re-provision the worktree only if it is gone (pause keeps it; /admin/cleanup may have freed it).
+    // No-op when PR mode is off or the mission still holds one.
     await this.d.missionGit?.onEngage(id, m.epic_id);
     if (project) await this.d.overseer?.start(id, project.id, project.path);
     await this.tick(id);

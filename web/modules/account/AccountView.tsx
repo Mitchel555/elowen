@@ -3,6 +3,7 @@ import { Activity, useCallback, useState, useEffect, useRef, type ReactNode } fr
 import { UserCog, Mail, Cpu, Upload, ShieldCheck, User as UserIcon, KeyRound, ZoomIn, Bell, Sparkles, AtSign, Brain, MessageCircle, SquareTerminal } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { ElowenApiError } from '../../lib/elowenClient';
+import type { ProfilePatch } from '../../lib/types';
 import { useMe, useConfig, useMyCliSettings, useBrainModels } from '../../lib/queries';
 import { useUpdateMe, useUploadAvatar, useChangePassword, useSaveMyCliSettings } from '../../lib/mutations';
 import { allModels } from '../../lib/execPresets';
@@ -19,7 +20,7 @@ import { BrainModelField } from '../../components/ui/BrainModelField';
 import { Toggle } from '../../components/ui/Toggle';
 import { Slider } from '../../components/ui/Slider';
 import { ModuleHeader } from '../../components/ui/ModuleHeader';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
@@ -164,25 +165,56 @@ export function AccountView() {
   const [pushOn, setPushOn] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
 
-  const [formSeeded, setFormSeeded] = useState(false);
+  // What /auth/me last reported for each profile field. It is both the dirty marker and the diff base:
+  // a field still equal to its baseline is untouched, so it keeps following the server, while a field
+  // the user has changed holds their text — a later refetch (e.g. the autosave's own invalidation) must
+  // never type over an edit in progress. Tracking it per field, not per form, is what keeps a value
+  // changed elsewhere (another window, another device) from being written back from this form's stale
+  // copy when the user saves an unrelated field. The id resets the whole form when the identity changes.
+  const [profileBase, setProfileBase] = useState<{ id: number; name: string; email: string; default_exec: string } | null>(null);
+  // What this form last wrote for each field. A value the user changed no longer equals its baseline, so
+  // without this it reads as an edit in progress forever — even once it has been saved and acknowledged.
+  // The baseline then adopts whatever the refetch reports (another window's newer value) while the input
+  // keeps the settled edit, and the next save carries it back out, silently undoing that other window.
+  const profileSent = useRef<ProfilePatch>({});
   useEffect(() => {
-    if (me.data?.user) {
-      setName(me.data.user.name);
-      setEmail(me.data.user.email);
-      setDefaultExec(me.data.user.default_exec);
-      setFormSeeded(true);
+    const user = me.data?.user;
+    if (!user) return;
+    const server = { id: user.id, name: user.name, email: user.email, default_exec: user.default_exec };
+    if (profileBase && profileBase.id === server.id) {
+      if (profileBase.name === server.name && profileBase.email === server.email && profileBase.default_exec === server.default_exec) return;
+      // Follow the server whenever the field holds nothing but a settled value: its baseline, or this
+      // form's own last write coming back as an echo. Anything else is the user's unsaved text.
+      const sent = profileSent.current;
+      setName((cur) => (cur === profileBase.name || cur.trim() === sent.name ? server.name : cur));
+      setEmail((cur) => (cur === profileBase.email || cur.trim() === sent.email ? server.email : cur));
+      setDefaultExec((cur) => (cur === profileBase.default_exec || cur === sent.default_exec ? server.default_exec : cur));
+    } else {
+      setName(server.name);
+      setEmail(server.email);
+      setDefaultExec(server.default_exec);
     }
-  }, [me.data]);
+    setProfileBase(server);
+  }, [me.data, profileBase]);
 
-  // Auto-persist the profile shortly after any change — no Save button.
+  // Auto-persist the profile shortly after any change — no Save button. Only the changed fields go out;
+  // `savable` holds the save entirely when nothing differs, so adopting a server-side change does not
+  // bounce it straight back as a write.
+  const profilePatch: ProfilePatch = {};
+  if (profileBase) {
+    if (name.trim() !== profileBase.name) profilePatch.name = name.trim();
+    if (email.trim() !== profileBase.email) profilePatch.email = email.trim();
+    if (defaultExec !== profileBase.default_exec) profilePatch.default_exec = defaultExec;
+  }
   const profileSave = useAutoSaveStatus([name, email, defaultExec], async () => {
     try {
-      await updateMe.mutateAsync({ name: name.trim(), email: email.trim(), default_exec: defaultExec });
+      await updateMe.mutateAsync(profilePatch);
+      profileSent.current = { ...profileSent.current, ...profilePatch };
     } catch (error) {
       toast(t.account.saveError, 'error');
       throw error;
     }
-  }, { ready: formSeeded });
+  }, { ready: profileBase !== null, savable: Object.keys(profilePatch).length > 0 });
 
   // Seed the Elowen-AI default once cliSettings load; thereafter local state is the source of truth.
   useEffect(() => {
@@ -249,6 +281,9 @@ export function AccountView() {
     }
   };
 
+  if (me.isError) {
+    return <div className="flex w-full min-w-0 flex-col"><ModuleHeader title={t.account.title} icon={UserCog} /><ErrorState message={t.common.daemonUnreachable} onRetry={() => me.refetch()} /></div>;
+  }
   if (me.isLoading || !me.data?.user) {
     return <div className="flex w-full min-w-0 flex-col"><ModuleHeader title={t.account.title} icon={UserCog} /><LoadingState /></div>;
   }

@@ -57,6 +57,15 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // Mirror of `drafts` for save continuations: they run after a network round-trip, by which time the
+  // closure they were created in holds a stale copy. It is written together with the state, never from
+  // an effect — a continuation that read a mirror one keystroke behind would retire a draft that
+  // already holds newer text, so the mirror must not depend on when React flushes effects.
+  const draftsRef = useRef(drafts);
+  const updateDrafts = (fn: (d: Record<string, string>) => Record<string, string>) => {
+    draftsRef.current = fn(draftsRef.current);
+    setDrafts(draftsRef.current);
+  };
   const [dirtyPaths, setDirtyPaths] = useState<Set<string>>(new Set());
   // On mobile the file tree is hidden by default in fullscreen (it eats too much of the narrow
   // viewport); a toggle surfaces it as an overlay. On desktop the tree is always visible.
@@ -113,7 +122,7 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   const selectInTree = (p: string) => { if (commit) setSelected(p); else openFile(p); };
   const onChange = (v: string) => {
     if (selected == null) return;
-    setDrafts((d) => ({ ...d, [selected]: v }));
+    updateDrafts((d) => ({ ...d, [selected]: v }));
     setDirtyPaths((s) => { const n = new Set(s); v !== serverContent ? n.add(selected) : n.delete(selected); return n; });
   };
   const toggle = (p: string) => setExpanded((s) => { const n = new Set(s); n.has(p) ? n.delete(p) : n.add(p); return n; });
@@ -133,13 +142,28 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   // Reset the tree overlay whenever it stops being relevant (exit fullscreen, or switch to desktop).
   useEffect(() => { if (!fullscreen || !mobile) setShowTree(false); }, [fullscreen, mobile]);
 
+  // Cmd+S doesn't block on a pending write, so several saves can overlap. Each one awaits its OWN
+  // promise: `mutate(…, { onSuccess })` would attach the callbacks to the hook's single observer, and
+  // the next save would detach them — the earlier file's draft would never be retired and its failure
+  // would never reach a toast.
   const save = () => {
     if (selected == null) return;
     const path = selected;
-    write.mutate({ id: projectId, path, content: value }, {
-      onSuccess: () => { setDrafts((d) => { const n = { ...d }; delete n[path]; return n; }); setDirtyPaths((s) => { const n = new Set(s); n.delete(path); return n; }); toast(t.projects.fileSaved.replace('{path}', path)); },
-      onError: (e) => toast(String(e), 'error'),
-    });
+    const sent = value;
+    void write.mutateAsync({ id: projectId, path, content: sent }).then(
+      () => {
+        // The user can keep typing while the write is in flight, and the draft is what the pane
+        // renders. Retire it only when it still holds exactly what we sent — otherwise clearing it
+        // would drop those newer keystrokes and fall back to the saved content.
+        const current = draftsRef.current[path];
+        if (current === undefined || current === sent) {
+          updateDrafts((d) => { const n = { ...d }; delete n[path]; return n; });
+          setDirtyPaths((s) => { const n = new Set(s); n.delete(path); return n; });
+        }
+        toast(t.projects.fileSaved.replace('{path}', path));
+      },
+      (e: unknown) => toast(String(e), 'error'),
+    );
   };
 
   const closeTab = (p: string) => {
@@ -154,7 +178,7 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   const forgetPath = (path: string) => {
     const under = (x: string) => x === path || x.startsWith(path + '/');
     setOpenTabs((tabs) => tabs.filter((x) => !under(x)));
-    setDrafts((d) => { const n = { ...d }; for (const k of Object.keys(n)) if (under(k)) delete n[k]; return n; });
+    updateDrafts((d) => { const n = { ...d }; for (const k of Object.keys(n)) if (under(k)) delete n[k]; return n; });
     setDirtyPaths((s) => { const n = new Set([...s].filter((x) => !under(x))); return n; });
     setSelected((s) => (s && under(s) ? null : s));
   };
@@ -162,7 +186,7 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   const remapPath = (from: string, to: string) => {
     const remap = (x: string) => (x === from ? to : x.startsWith(from + '/') ? to + x.slice(from.length) : x);
     setOpenTabs((tabs) => tabs.map(remap));
-    setDrafts((d) => { const n: Record<string, string> = {}; for (const [k, v] of Object.entries(d)) n[remap(k)] = v; return n; });
+    updateDrafts((d) => { const n: Record<string, string> = {}; for (const [k, v] of Object.entries(d)) n[remap(k)] = v; return n; });
     setDirtyPaths((s) => new Set([...s].map(remap)));
     setSelected((s) => (s ? remap(s) : s));
   };

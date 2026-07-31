@@ -128,43 +128,46 @@ describe('web slash commands: work mode + rename', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
-  it('offers the plan decision once a plan is submitted and implements it in build mode', async () => {
-    renderChat();
-    await waitFor(() => expect(FakeES.instances.length).toBe(1));
+  // The decision itself now comes from the DAEMON (the work mode rides the snapshot's control frame), so
+  // these two drive the mode the way the daemon reports it and use the composer's own `/plan` only for
+  // what it still owns: the mode pill and the mode the next send is stamped with.
+  async function submitPlanInPlanMode(): Promise<void> {
     await runSlash('plan');
-    const es = FakeES.instances[0]!;
+    const es = FakeES.instances[0];
+    if (!es) throw new Error('no stream opened');
     act(() => {
+      es.emit({ type: 'snapshot', history: [], events: [], control: { streaming: false, pendingAsk: null, workMode: 'plan', pendingPlan: null } });
       es.emit({ type: 'tool', name: 'ExitPlanMode', id: 'call-1' });
       es.emit({ type: 'tool_end', id: 'call-1', plan: '1. read\n2. write' });
       es.emit({ type: 'idle' });
     });
-    const implement = await screen.findByTestId('chat-plan-decision');
-    await act(async () => { fireEvent.click(implement.querySelector('button')!); });
+  }
+
+  it('offers the plan decision once a plan is submitted and implements it in build mode', async () => {
+    renderChat();
+    await waitFor(() => expect(FakeES.instances.length).toBe(1));
+    await submitPlanInPlanMode();
+    await screen.findByTestId('plan-decision-implement');
+    await act(async () => { fireEvent.click(screen.getByTestId('plan-decision-implement')); });
     await waitFor(() => expect(sendBodies.length).toBe(1));
     expect(sendBodies[0]).toMatchObject({ text: 'Implement the plan you proposed above.', mode: 'build' });
-    // Approving leaves plan mode, so the decision row and the mode pill are gone.
-    await waitFor(() => expect(screen.queryByTestId('chat-plan-decision')).toBeNull());
+    // Approving leaves plan mode, so the decision and the mode pill are gone.
+    await waitFor(() => expect(screen.queryByTestId('plan-decision-implement')).toBeNull());
     expect(screen.queryByTestId('chat-work-mode')).toBeNull();
   });
 
   it('keeps the plan decision available when approving it fails', async () => {
-    // Leaving plan mode up front removed this row the moment a send failed, so the plan was still waiting
-    // but the only button that could approve it was gone. The mode must follow the daemon's acceptance.
+    // Leaving plan mode up front removed this control the moment a send failed, so the plan was still
+    // waiting but the only button that could approve it was gone. The mode follows the daemon's acceptance.
     server.use(http.post('*/api/brain/send', () => HttpResponse.json({ error: 'nope' }, { status: 500 })));
     renderChat();
     await waitFor(() => expect(FakeES.instances.length).toBe(1));
-    await runSlash('plan');
-    const es = FakeES.instances[0]!;
-    act(() => {
-      es.emit({ type: 'tool', name: 'ExitPlanMode', id: 'call-1' });
-      es.emit({ type: 'tool_end', id: 'call-1', plan: '1. read\n2. write' });
-      es.emit({ type: 'idle' });
-    });
-    const row = await screen.findByTestId('chat-plan-decision');
-    await act(async () => { fireEvent.click(row.querySelector('button')!); });
+    await submitPlanInPlanMode();
+    await screen.findByTestId('plan-decision-implement');
+    await act(async () => { fireEvent.click(screen.getByTestId('plan-decision-implement')); });
 
     // Still approvable, and still in plan mode — the failed attempt changed nothing.
-    expect(await screen.findByTestId('chat-plan-decision')).toBeInTheDocument();
+    expect(await screen.findByTestId('plan-decision-implement')).toBeInTheDocument();
     expect(screen.getByTestId('chat-work-mode')).toBeInTheDocument();
 
     // And a retry works once the daemon accepts it.
@@ -172,8 +175,8 @@ describe('web slash commands: work mode + rename', () => {
       sendBodies.push((await request.json()) as Record<string, unknown>);
       return HttpResponse.json({ ok: true }, { status: 202 });
     }));
-    await act(async () => { fireEvent.click(screen.getByTestId('chat-plan-decision').querySelector('button')!); });
+    await act(async () => { fireEvent.click(screen.getByTestId('plan-decision-implement')); });
     await waitFor(() => expect(sendBodies.length).toBe(1));
-    await waitFor(() => expect(screen.queryByTestId('chat-plan-decision')).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId('plan-decision-implement')).toBeNull());
   });
 });

@@ -45,6 +45,18 @@ html[data-effects='full'] .card-interactive:hover { transform: translateY(-1px);
    the mobile home indicator (safe-area inset; 0 on devices/desktops without one). */
 .chat-composer-safe { padding-bottom: env(safe-area-inset-bottom); }
 
+/* Phone fullscreen turns the transcript into an inner scroll box (the page itself does not scroll there);
+   a permanent bar down its edge reads as stray page chrome on a phone, so hide it — the swipe still
+   scrolls. Only used in that overlay; elsewhere the platform scrollbar stays. */
+.chat-scroll-hide { scrollbar-width: none; }
+.chat-scroll-hide::-webkit-scrollbar { display: none; }
+
+/* The fullscreen chat is a fixed overlay, but the shell's scroll container behind it still holds a
+   viewport-tall placeholder — so it kept its own scrollbar, which showed through as a stray bar down the
+   edge (its reserved gutter did the same). Lock that scroller while the overlay is up; the transcript
+   inside does the scrolling. Released the moment fullscreen ends. */
+.chat-fullscreen-lock main { overflow: hidden; scrollbar-gutter: auto; }
+
 /* Wide content in assistant prose (markdown tables, fenced code) scrolls inside its own box so the page
    never scrolls sideways at narrow / mobile widths. */
 .chat-markdown table, .chat-markdown pre { display: block; max-width: 100%; overflow-x: auto; }
@@ -648,7 +660,10 @@ html[data-effects='full'] .hero-cosmos__orb::after { animation: spatial-ember-fl
    node layer over one SVG edge layer, exactly like the cosmos fields' pods over their filaments. Edges
    borrow the filament stroke vocabulary so the graph reads as the same surface, not a bolted-on chart. */
 .wf-dag__edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
-.wf-dag__edge { fill: none; stroke: rgb(255 82 54 / 0.24); stroke-width: 1.5; }
+.wf-dag__edge { fill: none; stroke: rgb(255 82 54 / 0.42); stroke-width: 1.5; }
+/* The arrowhead states the direction of a dependency. It inherits nothing from the stroke (a marker is
+   its own painting context), so its fill is set here and tracks the edge's resting tone. */
+.wf-dag__arrowhead { fill: rgb(255 82 54 / 0.55); }
 /* An edge feeding a RUNNING node carries the dashed flow stroke — the eye lands on live work first. */
 .wf-dag__edge--live { stroke: rgb(255 154 98 / 0.7); stroke-dasharray: 3 34; }
 .wf-dag__node--running { box-shadow: 0 0 0 1px var(--color-accent), 0 0 18px rgb(255 82 54 / 0.22); }

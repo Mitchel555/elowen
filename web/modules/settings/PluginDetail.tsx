@@ -2,7 +2,7 @@
 import { Activity as ReactActivity, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, Circle, Settings2, SlidersHorizontal, Sparkles, Activity, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingState, ErrorState } from '../../components/ui/states';
 import { Segmented } from '../../components/ui/Segmented';
 import { AutoSaveStatus } from '../../components/ui/AutoSaveStatus';
 import { MotionReveal } from '../../components/ui/Motion';
@@ -172,10 +172,12 @@ function PluginWorkspace({ name, detail, contributions, logs, hookExecutions, on
 /** Plugin detail is a tabbed workspace. Loading stays outside `PluginWorkspace` so the draft hook is
  *  always mounted with a complete detail object and never violates hook ordering during refetches. */
 export function PluginDetail({ name, onBack }: { name: string; onBack: () => void }) {
-  const { data, isLoading } = usePluginDetail(name);
+  const { t } = useTranslation();
+  const { data, isLoading, isError, refetch } = usePluginDetail(name);
   const { data: contributions } = usePluginContributions(name);
   const { data: logs } = usePluginLogs(name);
   const { data: hookExecutions } = usePluginHookExecutions(name);
+  if (isError) return <SettingsGroup><SettingsState tone="danger"><ErrorState message={t.common.daemonUnreachable} onRetry={() => refetch()} /></SettingsState></SettingsGroup>;
   if (isLoading || !data) return <SettingsGroup><SettingsState><LoadingState /></SettingsState></SettingsGroup>;
   return <PluginWorkspace key={name} name={name} detail={data} contributions={contributions} logs={logs} hookExecutions={hookExecutions} onBack={onBack} />;
 }

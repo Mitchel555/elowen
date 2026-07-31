@@ -23,7 +23,7 @@ export const PLAN_MAX_CHARS = 16_000;
  *  per plan turn buys a guarantee that holds no matter how the instance got here.
  *
  *  This matters because of what plan mode withholds: the model is told to write its plan to this path,
- *  but Write does not create parent directories and `mkdir -p` is denied by the read-only shell clamp.
+ *  but Write does not create parent directories and `mkdir -p` is denied by the non-destructive shell clamp.
  *  Without this the model would hit ENOENT with no tool able to fix it. */
 export function ensurePlanDir(sessionId: string): boolean {
   try {

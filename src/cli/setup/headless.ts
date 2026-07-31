@@ -7,6 +7,7 @@ import { writeMarker } from './marker.js';
 import { webBaseUrl } from '../installInfo.js';
 import { getBrainProviders, keepProvider, putEmbeddedExec } from './steps/shared.js';
 import { realRunner } from '../install/runner.js';
+import { flagValue, requireFlagValues } from '../flags.js';
 import { provisionOllama } from '../provision/ollama.js';
 import { installTsServer, TS_SERVER_COMMAND, TS_SERVER_INSTALL_HINT } from './steps/lsp.js';
 import { commandExists } from '../../lsp/servers.js';
@@ -19,13 +20,11 @@ import type { ReadinessCheck } from '../doctor.js';
  *  is E2E-tested, since the modal TUI needs a real TTY). Prints a readiness matrix and exits non-zero on a
  *  hard failure (bad/missing required input), so a caller can branch on it. */
 export async function runHeadlessSetup(base: string, env: NodeJS.ProcessEnv, args: string[]): Promise<void> {
-  // Reject an unknown --memory value loudly (matching how --provider dies), instead of silently coercing
-  // it to 'skip' and leaving memory unconfigured while the run reports success.
-  const rawMemory = flagValue(args, '--memory');
-  if (rawMemory !== undefined && !(MEMORY_MODES as readonly string[]).includes(rawMemory)) {
-    return die(`Unknown --memory "${rawMemory}". Use one of: ${MEMORY_MODES.join(', ')}.`);
-  }
-  const o = parseFlags(args, env);
+  // Parsing is a hard gate, before a single request is made: a malformed flag must stop the run while
+  // nothing has been created yet, not halfway through onboarding.
+  let o: HeadlessOpts;
+  try { o = parseHeadlessFlags(args, env); }
+  catch (e) { return die(msg(e)); }
   const ctx: WizardCtx = { base, fetchFn: fetch, answers: {} };
 
   // ── Account ──────────────────────────────────────────────────────────────────────────────────
@@ -199,22 +198,29 @@ export interface HeadlessOpts {
   lsp: boolean;
 }
 
-/** The value following `--name`, or undefined. A following token that itself starts with `--` is treated
- *  as a MISSING value (not the value) — so a forgotten argument (`--admin-password --provider openai`)
- *  never silently becomes the literal `--provider`, it just reads as absent. */
-export function flagValue(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  if (i < 0 || i + 1 >= args.length) return undefined;
-  const v = args[i + 1]!;
-  return v.startsWith('--') ? undefined : v;
-}
-
 const MEMORY_MODES = ['reuse', 'openrouter', 'skip'] as const;
 
-export function parseFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts {
+const isMemoryMode = (v: string): v is HeadlessOpts['memory'] => (MEMORY_MODES as readonly string[]).includes(v);
+
+/** Every flag here takes a VALUE. Written without one it used to fall through to a default or to nothing
+ *  at all, which on an unattended setup is the worst kind of failure: `--provider --api-key sk-x` left the
+ *  provider unconfigured and the run still printed "Setup complete". Same contract as `elowen install`. */
+const VALUE_FLAGS = [
+  '--admin-user', '--admin-password', '--project', '--project-slug', '--provider',
+  '--api-key', '--base-url', '--model', '--memory', '--memory-key', '--embedding-model',
+] as const;
+
+/** Pure flag gate for the non-interactive setup — throws on the first malformed flag, touching nothing.
+ *  It is exported because `elowen setup` has to run it BEFORE `bringUp`: bringing the daemon up can
+ *  restart a live service, and a typo must not cost a restart the run is about to abort on anyway. */
+export function parseHeadlessFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts {
+  requireFlagValues(args, VALUE_FLAGS);
   const val = (name: string): string | undefined => flagValue(args, name);
   const has = (name: string): boolean => args.includes(name);
-  const memory = (val('--memory') ?? 'skip') as HeadlessOpts['memory'];
+  // Reject an unknown --memory value loudly (matching how --provider dies), instead of coercing it to
+  // 'skip' and leaving memory unconfigured while the run reports success.
+  const memory = val('--memory') ?? 'skip';
+  if (!isMemoryMode(memory)) throw new Error(`Unknown --memory "${memory}". Use one of: ${MEMORY_MODES.join(', ')}.`);
   return {
     adminUser: val('--admin-user') ?? (env.ELOWEN_ADMIN_USER) ?? 'admin',
     adminPassword: val('--admin-password') ?? (env.ELOWEN_ADMIN_PASSWORD),
@@ -227,7 +233,7 @@ export function parseFlags(args: string[], env: NodeJS.ProcessEnv): HeadlessOpts
     apiKey: val('--api-key') ?? (env.ELOWEN_API_KEY),
     baseUrl: val('--base-url'),
     model: val('--model'),
-    memory: (MEMORY_MODES as readonly string[]).includes(memory) ? memory : 'skip',
+    memory,
     memoryKey: val('--memory-key') ?? (env.ELOWEN_OPENROUTER_KEY),
     embeddingModel: val('--embedding-model') ?? RECOMMENDED_EMBEDDING_MODEL,
     skipTest: has('--skip-test'),

@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  recordSessionEvent, drainSessionNotices,
+  recordSessionEvent, drainSessionNotices, recordSubagentFinishMarker,
   scheduleReasoningMarker, flushReasoningMarker, REASONING_MARKER_DEBOUNCE_MS,
 } from '../../src/brain/service/sessionEvents.js';
 import type { BrainStore, BrainSessionEvent, SessionEventKind } from '../../src/store/brainStore.js';
 import type { LiveBrain } from '../../src/brain/session/liveBrain.js';
-import type { BrainEvent } from '../../src/brain/events.js';
+import type { BrainEvent, SubagentUpdate } from '../../src/brain/events.js';
 
 function fakeLive(published: BrainEvent[]): LiveBrain {
   return {
@@ -81,6 +81,73 @@ describe('recordSessionEvent', () => {
   });
 });
 
+// A delegated sub-agent's terminal state drops a DISPLAY-ONLY marker into the timeline (no model-facing
+// notice — the model gets the child's result separately). It must fire exactly once, on the transition
+// into a terminal state, and carry the child session id so a later DelegateContinue can address it.
+describe('recordSubagentFinishMarker', () => {
+  const subUpdate = (over: Partial<SubagentUpdate> = {}): SubagentUpdate => ({
+    id: 'call-1', sessionId: 'brain-ch-subagent-sub-dlg-abc', status: 'done', task: 'Explore the repo',
+    tools: 3, seconds: 12, ...over,
+  });
+
+  it('records one display marker on running→done, carrying the child id and task, with NO model notice', () => {
+    const published: BrainEvent[] = [];
+    const live = fakeLive(published);
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', (event) => live.replay.publish(event), 'running', subUpdate({ status: 'done' }));
+
+    const detail = JSON.stringify({ session: 'brain-ch-subagent-sub-dlg-abc', task: 'Explore the repo', status: 'done' });
+    expect(store.appended).toEqual([{ kind: 'subagent', detail }]);
+    expect(published).toEqual([{ type: 'session-event', id: 'evt-1', kind: 'subagent', detail, at: '2026-07-16T09:01:00.000Z' }]);
+    // Display-only: unlike recordSessionEvent it must never queue a "the user …" notice.
+    expect(live.pendingSessionNotices).toBeUndefined();
+  });
+
+  it('marks an error finish with status error', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ status: 'error' }));
+    const detail = JSON.stringify({ session: 'brain-ch-subagent-sub-dlg-abc', task: 'Explore the repo', status: 'error' });
+    expect(store.appended).toEqual([{ kind: 'subagent', detail }]);
+  });
+
+  it('never marks a running tick', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, undefined, subUpdate({ status: 'running' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  // upsertSubagentRun rewrites the row and returns true even for a repeated 'done', so a second terminal
+  // update must be recognised by its prior status and add nothing — else the timeline stacks duplicates.
+  it('is idempotent when the previous status was already terminal', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'done', subUpdate({ status: 'done' }));
+    recordSubagentFinishMarker(store, 's1', () => {}, 'error', subUpdate({ status: 'error' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  it('records nothing in a conversation that has no turns yet', () => {
+    const store = fakeStore(false);
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ status: 'done' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  it('clips a long task to its first non-empty line, bounded', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ task: `${'A'.repeat(200)}\nsecond line`, status: 'done' }));
+    const [entry] = store.appended;
+    const task = (JSON.parse(entry?.detail ?? '{}') as { task: string }).task;
+    expect(task.length).toBeLessThanOrEqual(80);
+    expect(task.endsWith('…')).toBe(true);
+  });
+
+  it('uses the first non-empty line of a multi-line task', () => {
+    const store = fakeStore();
+    recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ task: '\n\n  Fix the bug  \nmore', status: 'done' }));
+    const [entry] = store.appended;
+    expect((JSON.parse(entry?.detail ?? '{}') as { task: string }).task).toBe('Fix the bug');
+  });
+});
+
 // The reasoning-effort marker is DEBOUNCED: ctrl+r cycling fires one change per keypress, and the level
 // itself applies immediately — only the visible marker waits until the level sat unchanged for the window,
 // so a burst coalesces into one marker showing where the user settled.
@@ -145,20 +212,54 @@ describe('scheduleReasoningMarker', () => {
   });
 });
 
+// Prepare/commit (finding 7): the buffer must NOT be cleared until the caller confirms the prompt
+// carrying the block actually reached the provider — the same contract drainPostCompactionContext uses.
+// Clearing eagerly (the old one-shot shape) meant a failure between the drain and the prompt call left
+// the visible marker in the transcript while the model was never told, and a notice queued concurrently
+// (a settings save racing this turn's prompt assembly) was silently dropped.
 describe('drainSessionNotices', () => {
-  it('emits one <system-reminder> for the queued notices, then clears the buffer (one-shot)', () => {
+  it('emits one <system-reminder> for the queued notices and leaves the buffer untouched until commit', () => {
     const live = { pendingSessionNotices: ['switched the work mode to Workflow', 'set your reasoning effort to high'] } as unknown as LiveBrain;
-    const reminder = drainSessionNotices(live);
+    const { block, commit } = drainSessionNotices(live);
 
-    expect(reminder).toContain('<session-changes>');
-    expect(reminder).toContain('- The user switched the work mode to Workflow.');
-    expect(reminder).toContain('- The user set your reasoning effort to high.');
-    expect(reminder).toContain('<instruction>');
+    expect(block).toContain('<session-changes>');
+    expect(block).toContain('- The user switched the work mode to Workflow.');
+    expect(block).toContain('- The user set your reasoning effort to high.');
+    expect(block).toContain('<instruction>');
+    // Not cleared yet — a caller that never commits (a failed prompt) must see it again next time.
+    expect(live.pendingSessionNotices).toEqual(['switched the work mode to Workflow', 'set your reasoning effort to high']);
+
+    commit();
     expect(live.pendingSessionNotices).toEqual([]);
-    expect(drainSessionNotices(live)).toBe('');
   });
 
-  it('returns an empty string when nothing is queued', () => {
-    expect(drainSessionNotices({} as unknown as LiveBrain)).toBe('');
+  it('returns an empty block and a no-op commit when nothing is queued', () => {
+    const live = {} as unknown as LiveBrain;
+    const { block, commit } = drainSessionNotices(live);
+    expect(block).toBe('');
+    expect(() => commit()).not.toThrow();
+  });
+
+  it('a failed/aborted turn that never commits leaves the notices intact for the next attempt', () => {
+    const live = { pendingSessionNotices: ['switched your model to anthropic/claude'] } as unknown as LiveBrain;
+    const { block } = drainSessionNotices(live); // prepared for a prompt that then throws — commit is never called
+    expect(block).toContain('switched your model to anthropic/claude');
+
+    const second = drainSessionNotices(live); // the next attempt sees the SAME notice, not an empty buffer
+    expect(second.block).toContain('switched your model to anthropic/claude');
+    second.commit();
+    expect(live.pendingSessionNotices).toEqual([]);
+  });
+
+  it('commit removes only the captured prefix — a notice queued concurrently (while the prompt is in flight) survives', () => {
+    const live = { pendingSessionNotices: ['switched your model to anthropic/claude'] } as unknown as LiveBrain;
+    const { commit } = drainSessionNotices(live);
+    // A concurrent settings save queues a second notice AFTER this turn's snapshot was captured but
+    // before its prompt delivery is confirmed.
+    live.pendingSessionNotices!.push('switched the work mode to Plan');
+
+    commit();
+
+    expect(live.pendingSessionNotices).toEqual(['switched the work mode to Plan']);
   });
 });

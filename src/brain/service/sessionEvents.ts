@@ -1,9 +1,17 @@
 import type { BrainStore, SessionEventKind } from '../../store/brainStore.js';
+import type { BrainEvent, SubagentUpdate } from '../events.js';
 import type { LiveBrain } from '../session/liveBrain.js';
+
+/** The one session-event kind that is display-only: a sub-agent's terminal marker. Unlike the owner-driven
+ *  kinds it carries NO model-facing notice (the model receives the child's actual result separately via
+ *  `subagent-result`), so it never goes through recordSessionEvent — only recordDisplayMarker. */
+type DisplayOnlyKind = 'subagent';
+type NoticeKind = Exclude<SessionEventKind, DisplayOnlyKind>;
+type SessionEventFrame = Extract<BrainEvent, { type: 'session-event' }>;
 
 /** The model-facing wording for each change — a predicate completing "the user …". Kept terse; the
  *  turn-context builder wraps the collected notices in one <system-reminder>. */
-const NOTICE: Record<SessionEventKind, (detail: string) => string> = {
+const NOTICE: Record<NoticeKind, (detail: string) => string> = {
   model: (d) => `switched your model to ${d}`,
   mode: (d) => `switched the work mode to ${d}`,
   rename: (d) => `renamed this conversation to "${d}"`,
@@ -26,7 +34,7 @@ export function recordSessionEvent(
   store: BrainStore,
   sessionId: string,
   live: LiveBrain | undefined,
-  kind: SessionEventKind,
+  kind: NoticeKind,
   detail: string,
 ): void {
   const clean = detail.trim();
@@ -39,6 +47,53 @@ export function recordSessionEvent(
   if (!live) return;
   live.replay.publish({ type: 'session-event', id: event.id, kind: event.kind, detail: event.detail, at: event.at });
   (live.pendingSessionNotices ??= []).push(NOTICE[kind](clean));
+}
+
+/** Persist + publish a DISPLAY-ONLY session marker — the two visible parts of recordSessionEvent without
+ *  the third (the model-facing notice). `publish` is passed rather than a LiveBrain because a display
+ *  marker has no live-only side effect to guard: it is safe with or without a connected client (the row is
+ *  what a reconnect reads). The empty-conversation guard is kept so a marker never stacks above the first
+ *  message. */
+export function recordDisplayMarker(
+  store: BrainStore,
+  sessionId: string,
+  publish: (event: SessionEventFrame) => void,
+  kind: DisplayOnlyKind,
+  detail: string,
+): void {
+  const clean = detail.trim();
+  if (!clean) return;
+  if (!store.lastMessageAt(sessionId)) return;
+  const event = store.appendSessionEvent(sessionId, kind, clean);
+  publish({ type: 'session-event', id: event.id, kind: event.kind, detail: event.detail, at: event.at });
+}
+
+/** Longest task line carried in a sub-agent marker's detail. The full task lives on the durable
+ *  brain_subagent_runs row; the marker only needs enough to recognise which delegation just finished. */
+const SUBAGENT_MARKER_TASK_MAX = 80;
+
+/** First non-empty line of a task, clipped — the human-readable half of a sub-agent marker's label. */
+function shortSubagentTask(task: string): string {
+  const firstLine = task.split('\n').map((line) => line.trim()).find(Boolean) ?? '';
+  return firstLine.length > SUBAGENT_MARKER_TASK_MAX ? `${firstLine.slice(0, SUBAGENT_MARKER_TASK_MAX - 1)}…` : firstLine;
+}
+
+/** Drop a display-only marker into the timeline when a delegated sub-agent reaches a terminal state —
+ *  but only on the running→terminal TRANSITION, so a repeated terminal update (upsertSubagentRun always
+ *  re-writes the row and returns true) cannot stack a second marker. `prevStatus` is the child's status
+ *  read from the store BEFORE the upsert that carries this update. The marker's detail is small JSON
+ *  carrying the child session id (for a later DelegateContinue), a clipped task line, and the outcome. */
+export function recordSubagentFinishMarker(
+  store: BrainStore,
+  sessionId: string,
+  publish: (event: SessionEventFrame) => void,
+  prevStatus: 'running' | 'done' | 'error' | undefined,
+  update: SubagentUpdate,
+): void {
+  if (update.status !== 'done' && update.status !== 'error') return;
+  if (prevStatus === 'done' || prevStatus === 'error') return;
+  const detail = JSON.stringify({ session: update.sessionId, task: shortSubagentTask(update.task), status: update.status });
+  recordDisplayMarker(store, sessionId, publish, 'subagent', detail);
 }
 
 /** How long the reasoning level must sit unchanged before its marker lands. Cycling with ctrl+r fires
@@ -75,17 +130,35 @@ export function flushReasoningMarker(store: BrainStore, live: LiveBrain): void {
   recordSessionEvent(store, live.sessionId, live, 'reasoning', live.thinkingLabels[pending.level] ?? pending.level);
 }
 
-/** Drain the queued session-change notices into a single model-facing <system-reminder>, clearing the
- *  buffer (one-shot). Returns '' when nothing is queued. Placed under the user message like the mode
- *  reminder — it is volatile per-turn context the agent should adapt to, not durable history. */
-export function drainSessionNotices(live: LiveBrain): string {
+/** Prepare the queued session-change notices into a single model-facing <system-reminder>, WITHOUT
+ *  clearing the buffer yet — the same prepare/commit contract as `drainPostCompactionContext`. Returns
+ *  `{ block: '', commit: noop }` when nothing is queued. Placed under the user message like the mode
+ *  reminder — it is volatile per-turn context the agent should adapt to, not durable history.
+ *
+ *  Clearing the buffer here (as the previous one-shot version did) looked equivalent to clearing it once
+ *  the prompt was actually handed to the provider, and it was not: the scheduling directory, template
+ *  rendering, the client-generation check or the prompt call itself can still fail AFTER the buffer is
+ *  emptied, leaving the visible marker in the transcript while the model is never told about the change.
+ *  `commit` removes only the prefix captured HERE, so a notice queued concurrently — while this turn's
+ *  prompt is still being assembled or in flight — survives and is delivered on a later turn instead of
+ *  being silently dropped by a blind clear. */
+export function drainSessionNotices(live: LiveBrain): { block: string; commit: () => void } {
   const notices = live.pendingSessionNotices;
-  if (!notices || notices.length === 0) return '';
-  live.pendingSessionNotices = [];
-  const rows = notices.map((n) => `- The user ${n}.`).join('\n');
-  return '<system-reminder>\n<session-changes>\n'
+  if (!notices || notices.length === 0) return { block: '', commit: () => {} };
+  const captured = notices.length;
+  const rows = notices.slice(0, captured).map((n) => `- The user ${n}.`).join('\n');
+  const block = '<system-reminder>\n<session-changes>\n'
     + `${rows}\n</session-changes>\n`
     + '<instruction>These settings changed since your last reply. Work under the new settings from now on '
     + '(e.g. a new work mode or model) and do not re-confirm them with the user.</instruction>\n'
     + '</system-reminder>';
+  // Committed only once the prompt carrying this block has actually reached the provider (see the
+  // caller). Removing just the captured prefix — not clearing the whole array — means a notice pushed by
+  // a concurrent settings change in that window is not lost with it.
+  const commit = (): void => {
+    const current = live.pendingSessionNotices;
+    if (!current) return;
+    live.pendingSessionNotices = current.length > captured ? current.slice(captured) : [];
+  };
+  return { block, commit };
 }

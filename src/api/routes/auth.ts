@@ -59,10 +59,14 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
     const u = c.get('user');
     const b = await parseBody(c, profilePatchSchema);
     if (typeof b.default_exec === 'string' && b.default_exec) {
-      // The preferred default must be one the user is actually allowed to run.
-      const globalOk = d.config.get().allowedExecs.includes(b.default_exec);
-      const personalOk = u.allowed_execs.length === 0 || u.allowed_execs.includes(b.default_exec);
-      if (!globalOk || !personalOk) return c.json({ error: 'exec not allowed' }, 400);
+      // The preferred default must be one the user is actually allowed to run — asked through the SHARED
+      // rule, not a second copy of it. The copy that used to live here had drifted from
+      // isExecAllowedForUser in two ways: it had no admin bypass, and it applied the global allow-list to
+      // `elowen:` brain execs, which are bounded by the configured providers instead. So a model the
+      // brain picker offered could not be saved as the default here.
+      if (!isExecAllowedForUser(u, d.config.get().allowedExecs, b.default_exec)) {
+        return c.json({ error: 'exec not allowed' }, 400);
+      }
     }
     return c.json(users.setProfile(u.id, { name: b.name, email: b.email, default_exec: b.default_exec }));
   });
@@ -198,7 +202,13 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
     // turn retrying against a flaky model relay) would otherwise stall the PATCH for minutes and leave the
     // web "saving" indicator hung. Fire-and-forget with error logging; both re-apply paths are serialized
     // in the brain, so overlapping saves queue safely.
-    const reapply = patch.personalityBody !== undefined ? d.brain?.applyPersonalityChange(u.id) : d.brain?.restart(u.id);
+    // A conversation normally keeps the model it was running on across a respawn (see ensureLive). That
+    // pin must NOT survive the save that changes the model setting itself, or the page would report one
+    // model while the chat kept using another — so this restart says so explicitly.
+    const modelChanged = patch.model !== undefined || patch.modelProvider !== undefined;
+    const reapply = patch.personalityBody !== undefined
+      ? d.brain?.applyPersonalityChange(u.id)
+      : d.brain?.restart(u.id, { reapplyModelPreference: modelChanged });
     void Promise.resolve(reapply).catch((e) => console.warn(`cli-settings: live re-apply for user ${u.id} failed: ${e instanceof Error ? e.message : String(e)}`));
     return c.json({ ...d.userSettings.cliSettings(u.id), serverDefault: serverDefaultModel() });
   });
@@ -310,7 +320,7 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
       throw e;
     }
   });
-  app.delete('/users/:id', (c) => {
+  app.delete('/users/:id', async (c) => {
     // Admin-only — mirrors POST/PATCH /users. Without this a non-admin could delete other users
     // and cascade-wipe their settings/personality/memory.
     const actor = c.get('user');
@@ -321,17 +331,27 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
     // Never delete the admin: it would lock out assignment management and (on restart) silently
     // re-elect another user as admin. The flag must be transferred deliberately first.
     if (users.isAdmin(id)) return c.json({ error: 'cannot delete the admin' }, 400);
-    users.delete(id);
+    // Teardown order is load-bearing: kill what is RUNNING first, drop the user's data next, and remove
+    // the user row LAST.
+    //   • The advisor is a full agent CLI in its own tmux (`elowen-advisor-<id>`) holding shell access.
+    //     Nothing else ever reaps it, so leaving it up keeps a deleted account's agent running.
+    //     advisor.stop() also needs the user row (it clears advisor_autostart).
+    //   • Brain-session teardown resolves each conversation's `brain_terminals` binding to kill its
+    //     `elowen chat` tmux and revoke that terminal's token. users.delete() wipes `brain_terminals`,
+    //     so running it first leaves the binding unresolvable and the terminal alive.
+    // Deleting the user row last also makes a failed cleanup safely retryable: every step below is
+    // idempotent, and while the row still exists the admin can simply repeat the request.
+    await d.advisor?.stop(id);
+    // Dispose any live conversations (+ their terminals/processes) for the user, then hard-delete ALL of
+    // their brain data and push devices. Without this a deleted user's private transcripts and browser
+    // subscriptions survive.
+    d.brain?.deleteAllManagedSessions(id);
     d.userSettings?.removeForUser(id); // drop the user's CLI/brain settings (incl. personalityBody) so no orphan rows linger
     d.memoryStore?.removeForUser(id); // hard-delete the user's memories (+cascade embeddings) and audit events
     d.memoryCategoryStore?.removeForUser(id); // drop the user's memory categories so no orphan rows linger
-    // Dispose any live conversations (+ their terminals/processes) for the user, then hard-delete ALL of
-    // their brain data and push devices. Without this a deleted user's private transcripts and browser
-    // subscriptions survive — and because users.id is a reused SQLite rowid, the next-created user would
-    // inherit them (their sessions, their notifications).
-    d.brain?.deleteAllManagedSessions(id);
     d.brainStore?.removeForUser(id);
     d.pushSubscriptions?.removeAllForUser(id);
+    users.delete(id);
     return c.json({ ok: true });
   });
 
@@ -434,7 +454,16 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
     app.post('/users/:id/projects', async (c) => {
       if (!adminOnly(c)) return c.json({ error: 'forbidden' }, 403);
       const { projectId } = await parseBody(c, projectAssignSchema);
-      up.assign(Number(c.req.param('id')), Number(projectId));
+      const userId = Number(c.req.param('id'));
+      const pid = Number(projectId);
+      // Both sides must exist BEFORE the grant is written. `user_projects` has no foreign keys and
+      // `projects.id` is a plain rowid (no AUTOINCREMENT, unlike `users`), so a row pointing at an id
+      // that does not exist yet is not inert: whichever project is created next can receive that id and
+      // silently inherit the grant. Home-project tolerance mirrors resolveTarget — a legacy
+      // single-project daemon may have no `projects` row for it.
+      if (!users.get(userId)) return c.json({ error: 'user not found' }, 404);
+      if (pid !== d.project.id && !d.projects?.get(pid)) return c.json({ error: 'project not found' }, 404);
+      up.assign(userId, pid);
       return c.json({ ok: true });
     });
     app.delete('/users/:id/projects/:pid', (c) => {

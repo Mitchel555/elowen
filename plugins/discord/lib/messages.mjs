@@ -12,6 +12,7 @@ const mono = (s) => '`' + s + '`';
 export const MESSAGES = {
   en: {
     ...SHARED_MESSAGES.en,
+    error: (detail) => `⚠️ ${detail}`,
     newConversation: '🆕 Fresh conversation started in this channel.',
     pickModel: '🧠 Pick the model for this channel:',
     modelPlaceholder: 'Choose a model…',
@@ -40,6 +41,7 @@ export const MESSAGES = {
   },
   cs: {
     ...SHARED_MESSAGES.cs,
+    error: (detail) => `⚠️ ${detail}`,
     newConversation: '🆕 V tomto kanálu začíná nová konverzace.',
     pickModel: '🧠 Vyberte model pro tento kanál:',
     modelPlaceholder: 'Vyberte model…',
@@ -68,6 +70,7 @@ export const MESSAGES = {
   },
   sk: {
     ...SHARED_MESSAGES.sk,
+    error: (detail) => `⚠️ ${detail}`,
     newConversation: '🆕 V tomto kanáli začína nová konverzácia.',
     pickModel: '🧠 Vyberte model pre tento kanál:',
     modelPlaceholder: 'Vyberte model…',

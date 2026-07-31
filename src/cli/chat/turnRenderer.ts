@@ -66,8 +66,20 @@ export function toolRowSpec(name: string, detail?: string): { glyph: string; tit
 
 const blockFill = (text: string, width: number): string => paintRow(chatTheme().modalBg, text, width);
 
-/** One-line description of a session-change marker (model/mode/rename/reasoning/cwd), rendered as a faint
- *  centered-ish row in the transcript. The verb varies by kind; the detail is the new value. */
+/** A sub-agent finish marker's detail is small JSON (see recordSubagentFinishMarker). Parse defensively:
+ *  a malformed row falls back to the raw string rather than throwing on a render path. */
+function parseSubagentMarker(detail: string): { task: string; status: string } | null {
+  try {
+    const raw: unknown = JSON.parse(detail);
+    if (!raw || typeof raw !== 'object') return null;
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.status !== 'string') return null;
+    return { task: typeof obj.task === 'string' ? obj.task : '', status: obj.status };
+  } catch { return null; }
+}
+
+/** One-line description of a session-change marker (model/mode/rename/reasoning/cwd/subagent), rendered as
+ *  a faint centered-ish row in the transcript. The verb varies by kind; the detail is the new value. */
 function sessionEventLabel(kind: string, detail: string): string {
   const value = terminalInlineText(detail);
   switch (kind) {
@@ -78,6 +90,13 @@ function sessionEventLabel(kind: string, detail: string): string {
     // The daemon stores the resolved absolute path; shorten it the same way the status row does, so the
     // marker and the chip below it never disagree about where the conversation is.
     case 'cwd': return `cwd → ${prettyCwd(value)}`;
+    case 'subagent': {
+      const marker = parseSubagentMarker(detail);
+      if (!marker) return value;
+      const verb = marker.status === 'error' ? 'sub-agent failed' : 'sub-agent done';
+      const task = terminalInlineText(marker.task);
+      return task ? `${verb} · ${task}` : verb;
+    }
     default: return value;
   }
 }
@@ -204,8 +223,10 @@ export class TurnRenderer {
               // then its `$ cmd · done` shell affordance follows.
               add(`${TOOL_INDENT}${color.faint(SHOWN_OUTPUT_CONNECTOR)} ${color.faint('$')} ${color.dim(truncateToWidth(command, Math.max(12, width - 14), '…'))} ${color.faint(turn.streaming && item === lastToolItem ? '· running…' : '· done')}`);
               if (item.progress) {
+                // Shell output is CONTENT, not decoration, so it takes the dim (muted) tier rather than
+                // faint — a readable contrast for the machine's actual words, not a background whisper.
                 for (const line of terminalPlainText(item.progress).split('\n').slice(-PROGRESS_TAIL_ROWS)) {
-                  add(`${TOOL_OUTPUT_INDENT}${color.faint(truncateToWidth(line, Math.max(12, width - 14), '…'))}`);
+                  add(`${TOOL_OUTPUT_INDENT}${color.dim(truncateToWidth(line, Math.max(12, width - 14), '…'))}`);
                 }
               }
             } else {
@@ -229,7 +250,9 @@ export class TurnRenderer {
         if (rows.length > 0 && rows.at(-1)?.line !== '') addBlank();
         add(`  ${color.warning(expanded ? '▾' : '▸')} ${color.warning(label)} ${color.faint('click')} ${color.dim(truncateToWidth(first, Math.max(12, width - 32), '…'))}`, 'thought', key);
         if (expanded) {
-          for (const line of wrapTextWithAnsi(reasoning, Math.max(1, width - 6))) add(`    ${color.faint(line)}`);
+          // The expanded reasoning body is CONTENT the user chose to read — dim (muted), not faint, so it
+          // clears the same readability bar as the shell output above rather than fading into the panel.
+          for (const line of wrapTextWithAnsi(reasoning, Math.max(1, width - 6))) add(`    ${color.dim(line)}`);
         }
         addBlank();
         continue;

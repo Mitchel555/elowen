@@ -114,6 +114,64 @@
       "hint": "Max chunks embedded in a single indexing pass, so a large repo spreads across passes instead of hammering the provider."
     },
     {
+      "key": "sec_schedule",
+      "label": "Scheduled re-indexing",
+      "type": "section",
+      "hint": "A background timer that refreshes the index on its own, so a repository bigger than one pass keeps catching up without anyone running CodebaseReindex."
+    },
+    {
+      "key": "scheduledReindex",
+      "label": "Re-index on a schedule",
+      "type": "boolean",
+      "default": false,
+      "hint": "Off by default: the timer spends the embedding provider unattended. Turn it on once the scope and interval below suit you."
+    },
+    {
+      "key": "reindexIntervalMinutes",
+      "label": "Interval (minutes)",
+      "type": "number",
+      "min": 5,
+      "max": 1440,
+      "step": 5,
+      "placeholder": "60",
+      "default": 60,
+      "hint": "How often the background refresh runs. One tick costs at most repositories × passes × embeds-per-pass chunk embeddings.",
+      "visibleWhen": { "key": "scheduledReindex", "equals": true }
+    },
+    {
+      "key": "reindexScope",
+      "label": "Which repositories",
+      "type": "enum",
+      "default": "indexed",
+      "options": [
+        { "value": "indexed", "label": "Everything already indexed" },
+        { "value": "listed", "label": "Only the paths listed below" }
+      ],
+      "hint": "Whether the schedule refreshes every repository already present in the index, or only the ones you name.",
+      "visibleWhen": { "key": "scheduledReindex", "equals": true }
+    },
+    {
+      "key": "reindexRepos",
+      "label": "Repository paths",
+      "type": "textarea",
+      "placeholder": "/var/www/my-project",
+      "hint": "One absolute repository path per line (or comma-separated). A path that is not a readable directory is skipped and logged.",
+      "visibleWhen": { "key": "reindexScope", "equals": "listed" }
+    },
+    {
+      "key": "reindexMaxPassesPerRepo",
+      "label": "Passes per repository per tick",
+      "type": "number",
+      "min": 1,
+      "max": 20,
+      "step": 1,
+      "placeholder": "4",
+      "default": 4,
+      "advanced": true,
+      "hint": "Upper bound on consecutive passes spent on one repository in a single tick. A repository with nothing left to index stops early, so this only caps the worst case.",
+      "visibleWhen": { "key": "scheduledReindex", "equals": true }
+    },
+    {
       "key": "sec_model",
       "label": "Embedding model",
       "type": "section",

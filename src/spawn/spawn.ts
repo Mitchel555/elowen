@@ -10,7 +10,16 @@ const log = logger('spawn');
 
 /** How a spawned agent reaches back to the daemon to close its task. `cli` is the full elowen
  *  invocation: the global `elowen` command in production, or `node <dist/cli/index.js>` in a checkout. */
-export interface ElowenCliConfig { cli: string; url: string; token: string }
+export interface ElowenCliConfig {
+  cli: string;
+  url: string;
+  /** The shared, task-unbound agent token. Used for launches whose id is not a task row (overseer,
+   *  pilot) and whenever no per-task minting is wired (tests, embedded callers). */
+  token: string;
+  /** Mints/reuses the agent token bound to a REAL task, so the API can pin that worker to its own
+   *  task. Returns undefined when the id is not a task (overseer/pilot/advisor launches). */
+  tokenForTask?: (taskId: string) => string | undefined;
+}
 /** Per-program binary override + extra args + permission-bypass toggle + resume toggle (configured in
  *  Settings → Providers). `skipPermissions` and `resume` default to true at the config layer;
  *  undefined here means "use the built-in default" (bypass on / resume on). */
@@ -46,10 +55,13 @@ export class SpawnService {
     // in a checkout). Shared by the close commands and the worker preamble's read-only verbs.
     const cli = elowen ? elowen.cli : undefined;
     const closeCommand = elowen ? `${elowen.cli} close ${input.taskId}` : undefined;
+    // A worker reaches back with a token minted for ITS task, so the daemon can refuse it on anyone
+    // else's task; a launch whose id is no task row (overseer, pilot) keeps the shared service token.
+    const tokenFor = (e: ElowenCliConfig): string => e.tokenForTask?.(input.taskId) ?? e.token;
     // Merge any caller-supplied env (e.g. ELOWEN_PLAN_JOB / ELOWEN_MISSION for reasoning agents) on top
     // of the daemon-reach env. ELOWEN_TASK lets a worker run `elowen ask` without passing its own id;
     // reasoning agents ignore it. extraEnv alone still flows through when no elowen config is present.
-    const env = elowen ? { ELOWEN_URL: elowen.url, ELOWEN_TOKEN: elowen.token, ELOWEN_TASK: input.taskId, ...input.extraEnv } : input.extraEnv;
+    const env = elowen ? { ELOWEN_URL: elowen.url, ELOWEN_TOKEN: tokenFor(elowen), ELOWEN_TASK: input.taskId, ...input.extraEnv } : input.extraEnv;
     const provider = this.d.providers?.(input.spec.program);
     // Resume only when the recorded session is for THIS spawn's program (the operator may have
     // switched the task's exec since) and the provider hasn't disabled resume. Otherwise cold start.
@@ -74,7 +86,7 @@ export class SpawnService {
     } catch (e) {
       // A tmux failure message embeds the argv INCLUDING `-e ELOWEN_TOKEN=<token>`; never let the raw
       // token escape into a thrown error or log (mirrors terminalService). Scrub it, then re-throw sanitized.
-      const token = elowen?.token;
+      const token = elowen ? tokenFor(elowen) : undefined;
       const reason = token ? String((e as Error)?.message ?? e).split(token).join('***') : String((e as Error)?.message ?? e);
       log.warn(`agent spawn failed for ${session} (task ${input.taskId}): ${reason}`);
       throw new Error('agent spawn failed');

@@ -12,6 +12,7 @@ const mono = (s) => '`' + s + '`';
 export const MESSAGES = {
   en: {
     ...SHARED_MESSAGES.en,
+    error: (detail) => `⚠️ ${detail}`,
     newConversation: '🆕 Fresh conversation started in this chat.',
     pickModel: '🧠 Pick the model for this chat',
     modelSet: (m) => `✅ Model set to *${m}*.`,
@@ -41,6 +42,7 @@ export const MESSAGES = {
   },
   cs: {
     ...SHARED_MESSAGES.cs,
+    error: (detail) => `⚠️ ${detail}`,
     newConversation: '🆕 V tomto chatu začíná nová konverzace.',
     pickModel: '🧠 Vyberte model pro tento chat',
     modelSet: (m) => `✅ Model nastaven na *${m}*.`,
@@ -70,6 +72,7 @@ export const MESSAGES = {
   },
   sk: {
     ...SHARED_MESSAGES.sk,
+    error: (detail) => `⚠️ ${detail}`,
     newConversation: '🆕 V tomto chate začína nová konverzácia.',
     pickModel: '🧠 Vyberte model pre tento chat',
     modelSet: (m) => `✅ Model nastavený na *${m}*.`,

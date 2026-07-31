@@ -15,7 +15,7 @@ import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { ModuleHeader } from '../../components/ui/ModuleHeader';
 import { LoadingState, ErrorState, EmptyState } from '../../components/ui/states';
 import { useTranslation } from '../../lib/i18n';
-import { ContextMenu, DIVIDER, type ContextMenuState } from '../../components/ui/ContextMenu';
+import { ContextMenu, DIVIDER, type ContextMenuState, type MenuEntry } from '../../components/ui/ContextMenu';
 import { ProjectEditor } from './editor/ProjectEditor';
 import { ProjectIcon } from '../../components/ui/ProjectIcon';
 import { ProjectIconPicker } from './ProjectIconPicker';
@@ -67,14 +67,15 @@ export function ProjectsView() {
     setCtxMenu({
       x: e.clientX,
       y: e.clientY,
-      items: [
-        { label: t.projects.ctxOpenEditor, icon: Code2, onClick: () => openProjectEditor(p.id, null) },
-        { label: t.projects.ctxEditProject, icon: Pencil, onClick: () => { setSelectedId(p.id); openEdit(p); } },
-        DIVIDER,
-        { label: t.projects.ctxCopyPath, icon: Copy, onClick: () => { navigator.clipboard.writeText(p.path); toast(t.projects.ctxPathCopied); } },
-        DIVIDER,
-        { label: t.projects.ctxRemove, icon: Trash2, danger: true, onClick: () => setRemoving(p) },
-      ],
+      items: projectActionGroups(p).flatMap((group, i): MenuEntry[] => [
+        ...(i > 0 ? [DIVIDER] : []),
+        ...group.map((action): MenuEntry => ({
+          label: action.label,
+          icon: action.icon,
+          onClick: action.onSelect,
+          danger: action.tone === 'danger',
+        })),
+      ]),
     });
   }
 
@@ -91,16 +92,18 @@ export function ProjectsView() {
   // Per-project GitHub PR-flow override: null = inherit the global default, true/false = force on/off.
   const [editPrEnabled, setEditPrEnabled] = useState<boolean | null>(null);
   const openEdit = (p: Project) => { setEditProject(p); setEditPath(p.path); setEditNotes(p.notes); setEditPrEnabled(p.pr_enabled); };
-  const projectActions = (p: Project): ActionMenuItem[] => [
-    {
-      label: t.projects.ctxOpenEditor,
-      icon: Code2,
-      onSelect: () => openProjectEditor(p.id, null),
-    },
-    { label: t.projects.ctxEditProject, icon: Pencil, onSelect: () => { setSelectedId(p.id); openEdit(p); } },
-    { label: t.projects.ctxCopyPath, icon: Copy, onSelect: () => { void navigator.clipboard.writeText(p.path); toast(t.projects.ctxPathCopied); } },
-    { label: t.projects.ctxRemove, icon: Trash2, tone: 'danger', onSelect: () => setRemoving(p) },
+  // The single source of truth for a project's actions, offered identically by the row's hover menu and by
+  // the right-click menu. Grouped rather than flat because only the right-click menu draws dividers, and a
+  // second copy of the list is exactly how the two menus drifted apart before.
+  const projectActionGroups = (p: Project): ActionMenuItem[][] => [
+    [
+      { label: t.projects.ctxOpenEditor, icon: Code2, onSelect: () => openProjectEditor(p.id, null) },
+      { label: t.projects.ctxEditProject, icon: Pencil, onSelect: () => { setSelectedId(p.id); openEdit(p); } },
+    ],
+    [{ label: t.projects.ctxCopyPath, icon: Copy, onSelect: () => { void navigator.clipboard.writeText(p.path); toast(t.projects.ctxPathCopied); } }],
+    [{ label: t.projects.ctxRemove, icon: Trash2, tone: 'danger', onSelect: () => setRemoving(p) }],
   ];
+  const projectActions = (p: Project): ActionMenuItem[] => projectActionGroups(p).flat();
   // Project whose icon is being chosen (drives the icon-picker modal, stacked over the edit modal).
   const [iconFor, setIconFor] = useState<Project | null>(null);
 

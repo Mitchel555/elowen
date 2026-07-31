@@ -35,6 +35,26 @@ async function mountWith(jobs: CronJob[]) {
   fireEvent.click(await screen.findByText('digest'));
 }
 
+describe('CronJobsEditor — error state', () => {
+  it('shows a retryable error instead of an infinite skeleton', async () => {
+    let attempts = 0;
+    server.use(
+      http.get('*/api/plugins/cronjob/jobs', () => {
+        attempts += 1;
+        return attempts === 1 ? HttpResponse.json({ error: 'boom' }, { status: 500 }) : HttpResponse.json([job({})]);
+      }),
+      http.get('*/api/plugins/discord/channels', () => HttpResponse.json(CHANNELS)),
+      http.get('*/api/brain/models', () => HttpResponse.json(MODELS)),
+    );
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><ToastProvider><CronJobsEditor /></ToastProvider></Wrapper>);
+
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('digest')).toBeInTheDocument();
+  });
+});
+
 /** The trash icon of row `index`, then the dialog's confirm (both are labelled "Delete job"). */
 const deleteRow = async (index: number) => {
   fireEvent.click(screen.getAllByRole('button', { name: 'Delete job' })[index]!);

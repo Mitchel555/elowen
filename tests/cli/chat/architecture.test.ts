@@ -128,6 +128,14 @@ describe('chat production architecture boundaries', () => {
     expect(source('chatViewport.ts')).not.toMatch(/\b(indexedHistoryTurns|cachedHistoryRows|setScrollFromRow)\s*\(/);
   });
 
+  it('has no dead leader dispatch branch (keys.ts filters "leader" out of every action lookup)', () => {
+    // directAction/leaderAction both exclude 'leader', and LeaderState.resolve() only ever calls
+    // leaderAction — so dispatchAction can never be invoked with 'leader'. See keys.ts:247-250.
+    expect(source('keys.ts')).toMatch(/directAction:\s*\(data\)\s*=>\s*KEYBIND_ACTIONS\.find\(\(a\)\s*=>\s*a\s*!==\s*'leader'/);
+    expect(source('keys.ts')).toMatch(/leaderAction:\s*\(data\)\s*=>\s*KEYBIND_ACTIONS\.find\(\s*\n\s*\(a\)\s*=>\s*a\s*!==\s*'leader'/);
+    expect(source('chatComposition.ts')).not.toMatch(/case\s+'leader':/);
+  });
+
   it('routes every detached UI/client operation through the application lifetime', () => {
     for (const file of ['commands.ts', 'pickers.ts', 'flows.ts', 'chatComposition.ts']) {
       expect(source(file), file).not.toMatch(/\bvoid\s+(?:client|readClipboardImage|runLocalShell)\b/);

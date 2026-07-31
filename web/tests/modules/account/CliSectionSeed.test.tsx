@@ -7,8 +7,8 @@ import type { CliSettings, PermissionSettings } from '../../../lib/types';
 
 // Mutable query state so a test can flip in a fresh server object (a refetch) and assert the seed
 // guard does NOT re-seed over a local edit.
-const state = vi.hoisted(() => ({ cli: null as CliSettings | null, perm: null as PermissionSettings | null }));
-const mocks = vi.hoisted(() => ({ saveCli: vi.fn(), savePermissions: vi.fn() }));
+const state = vi.hoisted(() => ({ cli: null as CliSettings | null, perm: null as PermissionSettings | null, cliError: false }));
+const mocks = vi.hoisted(() => ({ saveCli: vi.fn(), savePermissions: vi.fn(), refetchCli: vi.fn() }));
 
 vi.mock('../../../lib/mutations', () => ({
   useSaveMyCliSettings: () => ({ mutate: mocks.saveCli, mutateAsync: mocks.saveCli }),
@@ -16,7 +16,7 @@ vi.mock('../../../lib/mutations', () => ({
 }));
 vi.mock('../../../lib/queries', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  useMyCliSettings: () => ({ data: state.cli, isLoading: false }),
+  useMyCliSettings: () => ({ data: state.cliError ? undefined : state.cli, isLoading: false, isError: state.cliError, refetch: mocks.refetchCli }),
   useMyPermissions: () => ({ data: state.perm, isLoading: false }),
   useBrainModels: () => ({ data: [
     {
@@ -46,8 +46,21 @@ const renderSection = () => render(<ToastProvider><CliSection /></ToastProvider>
 beforeEach(() => {
   state.cli = { ...CLI };
   state.perm = { ...PERMISSIONS };
+  state.cliError = false;
   mocks.saveCli.mockReset();
   mocks.savePermissions.mockReset();
+  mocks.refetchCli.mockReset();
+});
+
+describe('CliSection — error state', () => {
+  it('shows a retryable error instead of a permanent skeleton', () => {
+    state.cliError = true;
+    renderSection();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByRole('slider', { name: en.cli.thinkingLabel })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(mocks.refetchCli).toHaveBeenCalledOnce();
+  });
 });
 
 describe('CliSection — seed guard', () => {

@@ -7,7 +7,6 @@ function fakeRunner(present: string[]): Runner {
     which: async (cmd: string) => (present.includes(cmd) ? `/usr/sbin/${cmd}` : null),
     exec: async () => ({ code: 0, stdout: '', stderr: '' }),
     writeFile: async () => {},
-    exists: async () => false,
   };
 }
 

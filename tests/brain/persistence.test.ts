@@ -223,6 +223,26 @@ describe('brain persistence', () => {
     expect(sm.getEntries().length).toBeGreaterThanOrEqual(1);
   });
 
+  // A stored row that parses to `null`, a scalar or a roleless object would enter the live session as a
+  // message with no `role` — where persistCompaction and PI's own request building both throw on it. Such
+  // a row must be skipped like a syntactically corrupt one, leaving the rest of the history replayable.
+  it('rehydrate skips rows that parse but are not messages, keeping the healthy history', () => {
+    const raw = (id: string, role: string, content: string) =>
+      db.prepare('INSERT INTO brain_messages (id, session_id, parent_id, role, content) VALUES (?, ?, NULL, ?, ?)')
+        .run(id, 's1', role, content);
+    projectUserTurn(store, 's1', 'earlier q');
+    raw('null-row', 'user', 'null');
+    raw('number-row', 'assistant', '42');
+    raw('array-row', 'assistant', '[{"role":"assistant"}]');
+    raw('roleless-row', 'assistant', '{"content":"orphan"}');
+    raw('broken-row', 'assistant', '{"role":');
+    projectEvent(store, 's1', { type: 'agent_end', willRetry: false, messages: [{ role: 'assistant', content: 'later a' }] } as never);
+
+    const messages = rehydrate(store, 's1', process.cwd()).buildSessionContext().messages;
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(messages.every((m) => m !== null && typeof m === 'object')).toBe(true);
+  });
+
   it('persistCompaction keeps the CLEAN store tail (never the live prompted text) + a divider, and rehydrate replays the shrunk context', () => {
     // A full pre-compaction log in the store — the CLEAN rows projectUserTurn/projectEvent wrote.
     projectUserTurn(store, 's1', 'q1');

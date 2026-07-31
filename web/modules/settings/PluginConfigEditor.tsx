@@ -365,7 +365,7 @@ function LabeledField({ label, hint, help, risk, riskLabel, children }: {
  *  one Config collapsible or one collapsible per declared `section`. Secrets are write-only (a
  *  placeholder shows they are set) and saving hot-reloads the brain. Also hosts the cronjob/skills
  *  special sections, whose content is data (jobs.json / .md files), not config schema. */
-export type PluginConfigMode = 'setup' | 'behavior' | 'advanced';
+type PluginConfigMode = 'setup' | 'behavior' | 'advanced';
 
 export function PluginConfigEditor({ detail, fieldLabel, fieldHint, fieldOptions, riskText, draft, mode = 'behavior' }: {
   name: string;

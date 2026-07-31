@@ -109,10 +109,8 @@ export class MemoryCurator {
         }
         const row = this.store.add(userId, { body, kind: op.kind, importance: op.importance, source: 'agent' },
           'agent', 'curator: new durable fact', model);
-        // Fire-and-forget auto-categorization of the NEW memory only (not the near-duplicate refresh
-        // above). classifyMemory already swallows+logs every failure; the .catch is belt-and-suspenders
-        // so it never rejects into the op batch.
-        if (this.categorizer) void this.categorizer.classifyMemory(userId, row.id, 'agent').catch(() => { /* best-effort */ });
+        // Auto-categorize the NEW memory only (not the near-duplicate refresh above).
+        this.categorizer?.classifyNewMemory(userId, row.id, 'agent');
         return;
       }
       case 'update': {

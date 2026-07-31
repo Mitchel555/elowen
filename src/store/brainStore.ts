@@ -12,7 +12,7 @@ import {
   sameDelegatedExecutionScope,
   type DelegatedExecutionScope,
 } from '../brain/delegatedScope.js';
-import { BrainUsageStore, rollupDroppedUsage } from './brainUsageStore.js';
+import { BrainUsageStore, numeric, rollupDroppedUsage } from './brainUsageStore.js';
 import { BrainDelegationStore } from './brainDelegationStore.js';
 import type { BrainCard, BrainGoalState } from '../brain/events.js';
 
@@ -25,7 +25,7 @@ export { syntheticRestartResultId } from './brainDelegationStore.js';
 export type { BrainWorkflowRun } from './brainDelegationStore.js';
 
 export interface BrainSessionRow {
-  id: string; user_id: number; title: string; model: string; work_dir: string; parent_session_id: string | null;
+  id: string; user_id: number; title: string; model: string; provider: string; work_dir: string; parent_session_id: string | null;
   delegated_access: string | null;
   created_at: string; updated_at: string;
 }
@@ -58,7 +58,7 @@ export type BrainGoalRow = BrainGoalState;
  *  the table's CHECK constraint in schema.sql — a kind the type allows but the boundary rejects writes
  *  fine and then vanishes on the next reload, which no compiler catches: the boundary narrows a `string`
  *  from SQLite, so a stale check there stays perfectly well-typed. */
-export const SESSION_EVENT_KINDS = ['model', 'mode', 'rename', 'reasoning', 'cwd'] as const;
+export const SESSION_EVENT_KINDS = ['model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent'] as const;
 export type SessionEventKind = typeof SESSION_EVENT_KINDS[number];
 /** Narrow a kind read back from SQLite. The stored value is only ever `string` to the type system. */
 const isSessionEventKind = (kind: string): kind is SessionEventKind =>
@@ -92,7 +92,13 @@ export class BrainStore {
    *  same owner: the relation is later traversed for billing, so accepting a foreign/missing parent
    *  would either leak another user's spend or silently lose the child's. Nested parents are valid. */
   createSession(input: {
-    id: string; userId: number; title?: string; model: string; parentSessionId?: string | null;
+    id: string; userId: number; title?: string; model: string;
+    /** CONFIG provider entry id the session starts on. Written HERE as well as in touchSession: without
+     *  it a brand-new conversation carries a model with no provider, and the pair-restore on respawn
+     *  (see ConversationLifecycle.ensureLive) skips it — so the very first respawn would still lose the
+     *  model, which is the bug that restore exists to prevent. */
+    provider?: string;
+    parentSessionId?: string | null;
     /** Immutable execution boundary for a newly-created delegated child. */
     delegatedAccess?: DelegatedExecutionScope;
   }): BrainSessionRow {
@@ -109,10 +115,11 @@ export class BrainStore {
         if (parent.user_id !== input.userId) throw new Error('parent brain session belongs to another user');
       }
       this.db.prepare(
-        `INSERT INTO brain_sessions (id, user_id, title, model, parent_session_id, delegated_access)
-         VALUES (@id, @user_id, @title, @model, @parent_session_id, @delegated_access)`
+        `INSERT INTO brain_sessions (id, user_id, title, model, provider, parent_session_id, delegated_access)
+         VALUES (@id, @user_id, @title, @model, @provider, @parent_session_id, @delegated_access)`
       ).run({
         id: input.id, user_id: input.userId, title: input.title ?? '', model: input.model,
+        provider: input.provider ?? '',
         parent_session_id: parentSessionId,
         delegated_access: delegatedAccess ? JSON.stringify(delegatedAccess) : null,
       });
@@ -204,10 +211,18 @@ export class BrainStore {
 
   /** Cumulative token total per session (summed from each stored assistant message's usage) for the
    *  session-management panel. One grouped query — no N+1. Sessions with no usage-bearing messages
-   *  come back 0. Persisted messages only, so a mid-turn session reads slightly stale (acceptable). */
+   *  come back 0. Persisted messages only, so a mid-turn session reads slightly stale (acceptable).
+   *  The `json_valid` guard is load-bearing: `json_extract` THROWS on a malformed `content` row (one
+   *  corrupt message would otherwise fail this query for the WHOLE user), so a bad row is isolated —
+   *  contributes 0 — instead of crashing every session's total. NULL (no message, via the LEFT JOIN)
+   *  also fails `json_valid` and falls to the same 0 branch, so the join's "session with no messages"
+   *  case is unaffected. The field itself goes through the shared {@link numeric} read, so a
+   *  numeric-looking STRING (which SUM() would silently coerce) counts here exactly as it counts in the
+   *  usage views and in `rollupDroppedUsage` — otherwise this panel and the Stats page disagree about
+   *  the same session, and compacting it would change this total. */
   tokenTotals(userId: number): Record<string, number> {
     const rows = this.db.prepare(
-      `SELECT s.id AS id, COALESCE(SUM(json_extract(m.content, '$.usage.totalTokens')), 0) AS tokens
+      `SELECT s.id AS id, COALESCE(SUM(CASE WHEN json_valid(m.content) THEN ${numeric('m.content', '$.usage.totalTokens')} ELSE 0 END), 0) AS tokens
          FROM brain_sessions s LEFT JOIN brain_messages m ON m.session_id = s.id
         WHERE s.user_id = ? GROUP BY s.id`
     ).all(userId) as { id: string; tokens: number }[];
@@ -239,6 +254,22 @@ export class BrainStore {
   deleteMessage(sessionId: string, messageId: string): boolean {
     return this.db.prepare('DELETE FROM brain_messages WHERE id = ? AND session_id = ?')
       .run(messageId, sessionId).changes > 0;
+  }
+
+  /** Delete a message AND every message after it in the same session (by rowid, the canonical transcript
+   *  order) — literally to the END of the session, not to the end of a turn: the SQL has no upper bound.
+   *  Used to discard a whole aborted user turn: the user row plus any partial assistant output its
+   *  agent_end persisted before the abort landed — deleting only the user row would leave an answer
+   *  fragment with no question after a reconnect. Safe only because the caller passes the TRAILING user
+   *  turn (discard is refused once the turn produced output), so there is nothing later to lose; handing
+   *  it an id from the middle of a transcript would take out everything below it. Returns the number of
+   *  rows removed (0 if the id is unknown / in another session). */
+  deleteMessagesFrom(sessionId: string, fromId: string): number {
+    const row = this.db.prepare('SELECT rowid FROM brain_messages WHERE id = ? AND session_id = ?')
+      .get(fromId, sessionId) as { rowid: number } | undefined;
+    if (!row) return 0;
+    return this.db.prepare('DELETE FROM brain_messages WHERE session_id = ? AND rowid >= ?')
+      .run(sessionId, row.rowid).changes;
   }
 
   /** Mirror ONE message the moment PI finishes it, so a daemon restart mid-turn no longer discards the
@@ -341,6 +372,16 @@ export class BrainStore {
       .all(sessionId) as BrainMessageRow[];
   }
 
+  /** The newest turn's rows only — everything after the last user message (or the whole session when it
+   *  has none yet). Lets a hot status poll read a still-pending plan off durable history without loading
+   *  the entire conversation the way getMessages does. */
+  getLatestTurn(sessionId: string): BrainMessageRow[] {
+    const floor = (this.db.prepare("SELECT MAX(rowid) AS r FROM brain_messages WHERE session_id = ? AND role = 'user'")
+      .get(sessionId) as { r: number | null }).r ?? 0;
+    return this.db.prepare('SELECT * FROM brain_messages WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC')
+      .all(sessionId, floor) as BrainMessageRow[];
+  }
+
   /** Persist a display card (ctx.emitCard) so the panel outlives the live session — closing the chat
    *  disposes the session, and a memory-only todo list would die with it. An upsert keeps the row's
    *  rowid, so re-emitting a card updates it in place without jumping to the end of the panel. */
@@ -421,6 +462,18 @@ export class BrainStore {
    *  see {@link BrainDelegationStore.getWorkflowRuns}. */
   getWorkflowRuns(parentSessionId: string): ReturnType<BrainDelegationStore['getWorkflowRuns']> {
     return this.delegation.getWorkflowRuns(parentSessionId);
+  }
+
+  /** Parent sessions with a durable delegation row still marked `running` (the boot reconcile's input) —
+   *  see {@link BrainDelegationStore.runningDelegationParentSessionIds}. */
+  runningDelegationParentSessionIds(): string[] {
+    return this.delegation.runningDelegationParentSessionIds();
+  }
+
+  /** Boot-reconcile fallback for `running` rows whose child relation no longer resolves — see
+   *  {@link BrainDelegationStore.terminalizeOrphanedSubagentRuns}. */
+  terminalizeOrphanedSubagentRuns(parentSessionId: string): number {
+    return this.delegation.terminalizeOrphanedSubagentRuns(parentSessionId);
   }
 
   /** Append a display-only session-event marker (model/mode/rename/reasoning change). Insertion order
@@ -537,11 +590,16 @@ export class BrainStore {
     this.db.prepare("UPDATE brain_sessions SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, id);
   }
 
-  touchSession(id: string, model?: string): void {
+  /** Stamp the conversation as touched, optionally recording the provider+model it is now running on.
+   *  `provider` is the CONFIG entry id and is written alongside the model so a later respawn can restore
+   *  the exact pair — a model id on its own does not identify a provider. An omitted `provider` clears
+   *  the stored one rather than leaving a stale entry id pointing at a model it no longer goes with. */
+  touchSession(id: string, model?: string, provider?: string): void {
     if (model === undefined) {
       this.db.prepare("UPDATE brain_sessions SET updated_at = datetime('now') WHERE id = ?").run(id);
     } else {
-      this.db.prepare("UPDATE brain_sessions SET updated_at = datetime('now'), model = ? WHERE id = ?").run(model, id);
+      this.db.prepare("UPDATE brain_sessions SET updated_at = datetime('now'), model = ?, provider = ? WHERE id = ?")
+        .run(model, provider ?? '', id);
     }
   }
 

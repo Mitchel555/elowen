@@ -39,8 +39,16 @@ function fakeDeps() {
     }),
     subscribe: (l: (e: unknown) => void) => { listeners.push(l); return () => {}; },
     setModel: vi.fn(), dispose: vi.fn(), abort: vi.fn(async () => {}),
-    sendCustomMessage: vi.fn(async () => {
-      messages.push({ role: 'assistant', content: 'processed sub-agent result', stopReason: 'stop' } as never);
+    // Mirrors PI's three shapes. Streaming: the message only enters the agent's queue — no turn, and it
+    // reaches the transcript later, when the loop injects it (tests drive that with `injectSteeredCustom`).
+    // Idle + triggerTurn: PI appends it and runs a turn. Idle without: it is appended, nothing runs.
+    __steeredCustom: [] as Record<string, unknown>[],
+    sendCustomMessage: vi.fn(async (message: Record<string, unknown>, options?: { triggerTurn?: boolean }) => {
+      if (session.isStreaming) { session.__steeredCustom.push(message); return; }
+      messages.push({ role: 'custom', ...message } as never);
+      if (options?.triggerTurn) {
+        messages.push({ role: 'assistant', content: 'processed sub-agent result', stopReason: 'stop' } as never);
+      }
     }),
     abortCompaction: vi.fn(), abortBranchSummary: vi.fn(), messages, isStreaming: false, isCompacting: false,
     _checkCompaction: nativeCheck,
@@ -52,6 +60,7 @@ function fakeDeps() {
     // mirror (reconciled on that event) stays aligned with this text-only backlog.
     __emitQueue: () => listeners.forEach((l) => l({ type: 'queue_update', steering: session.__queue.slice(), followUp: [] })),
     steer: vi.fn(async (t: string) => { session.__queue.push(t); session.__emitQueue(); }),
+    setSteeringMode: vi.fn(),
     getSteeringMessages: () => session.__queue,
     getFollowUpMessages: () => [] as string[],
     get pendingMessageCount() { return session.__queue.length; },
@@ -95,6 +104,12 @@ function fakeDeps() {
         type: 'message_start',
         message: { role: 'user', content: [{ type: 'text', text }], timestamp: Date.now() },
       }));
+    },
+    /** PI's loop injecting the queued steering messages into the context, before the next model call. */
+    injectSteeredCustom: () => {
+      for (const message of session.__steeredCustom.splice(0)) {
+        session.messages.push({ role: 'custom', ...message } as never);
+      }
     },
     /** Raw DB handle so tests can backdate stored rows (the idle-rollover cutoff). */
     db,
@@ -189,6 +204,31 @@ describe('BrainService', () => {
     await svc.send({ userId: 1, text: 'three', mode: 'plan', session: 'brain-1' });     // unchanged — no marker
     await svc.send({ userId: 1, text: 'four', mode: 'workflow', session: 'brain-1' });  // plan → workflow
     expect(modes()).toEqual(['Plan', 'Workflow']);
+  });
+
+  it('a failed turn does not lose a pending session-change notice — it survives to the next attempt, then is delivered exactly once (finding 7)', async () => {
+    // Regression: drainSessionNotices used to clear the buffer BEFORE the prompt was actually handed to
+    // the provider, so a failure between the drain and the prompt call silently dropped the notice —
+    // the visible marker stayed in the transcript while the model was never told about the change.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'first', mode: 'build', session: 'brain-1' }); // gives lastMessageAt a value
+    svc.renameSession(1, 'brain-1', 'New Title'); // queues a one-shot 'rename' notice on the live session
+
+    d.session.prompt.mockRejectedValueOnce(new Error('provider down'));
+    await expect(svc.send({ userId: 1, text: 'second', mode: 'build', session: 'brain-1' })).rejects.toThrow('provider down');
+
+    // The failed attempt must not have consumed the notice — the retry still carries it.
+    await svc.send({ userId: 1, text: 'third', mode: 'build', session: 'brain-1' });
+    const thirdPrompt = d.session.prompt.mock.calls.at(-1)![0] as string;
+    expect(thirdPrompt).toContain('<session-changes>');
+    expect(thirdPrompt).toContain('renamed this conversation to "New Title"');
+
+    // Delivered exactly once: committed after the successful prompt, so a further turn carries nothing.
+    await svc.send({ userId: 1, text: 'fourth', mode: 'build', session: 'brain-1' });
+    const fourthPrompt = d.session.prompt.mock.calls.at(-1)![0] as string;
+    expect(fourthPrompt).not.toContain('<session-changes>');
   });
 
   it('start creates a session row and reports running', async () => {
@@ -423,7 +463,10 @@ describe('BrainService', () => {
     expect(d.store.getSubagentRuns(sessionId)[0]).toMatchObject({ resultDelivery: 'acknowledged' });
   });
 
-  it('defers a result while the parent is streaming and delivers it on the next turn (never parks a follow-up)', async () => {
+  it('steers a result into the RUNNING parent turn, and acknowledges it once the context holds it', async () => {
+    // A background agent that finishes mid-turn must reach the parent before its next model call, not a
+    // whole turn later: PI injects a steering message into the context between rounds, so the parent folds
+    // the result into the work it is already doing.
     const d = fakeDeps();
     const svc = new BrainService(d as never);
     const { sessionId } = await svc.start(1);
@@ -434,15 +477,54 @@ describe('BrainService', () => {
 
     d.session.isStreaming = true; // a parent turn is in flight
     runner.acceptSubagentCompletion(sessionId, 1, { id: 'res-stream', toolCallId: 'call-stream', sessionId: child, status: 'done', task: 'inspect', result: 'all clear', tools: 1, seconds: 1 });
-    // The deferred drain must settle (release its guard) WITHOUT ever touching PI's custom-message seam.
+
+    await vi.waitFor(() => expect(d.session.sendCustomMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customType: 'subagent-result',
+        display: false,
+        content: expect.stringContaining('<subagent-result'),
+      }),
+      { triggerTurn: false, deliverAs: 'steer' },
+    ));
+    // PI accepting a steer is not proof the parent's context holds it — a stop clearing the queue would
+    // erase it — so the durable row stays pending, without spending a delivery attempt on it.
     await vi.waitFor(() => expect(runner.resultDrains.has(sessionId)).toBe(false));
-    expect(d.session.sendCustomMessage).not.toHaveBeenCalled();
     expect(d.store.pendingSubagentResults(sessionId)[0]?.attempts).toBe(0);
 
-    d.session.isStreaming = false; // the parent turn finished
+    d.injectSteeredCustom(); // the running turn's loop injected it
+    d.session.isStreaming = false;
     await svc.send({ userId: 1, text: 'anything', session: sessionId });
+
+    // The post-turn drain finds it in the transcript: acknowledged, never sent a second time.
     await vi.waitFor(() => expect(d.store.pendingSubagentResults(sessionId)).toEqual([]));
     expect(d.session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(d.store.getSubagentRuns(sessionId)[0]).toMatchObject({ resultDelivery: 'acknowledged' });
+  });
+
+  it('re-delivers a steered result the parent never received', async () => {
+    // The flip side of steering without waiting: a stop clears PI's queue, so the steered message never
+    // reaches the context. The row must still be pending, and the post-turn drain must deliver it for real
+    // rather than acknowledge a result the parent has never seen.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    const child = 'brain-ch-subagent-cleared';
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.upsertSubagentRun(sessionId, { id: 'call-cleared', sessionId: child, status: 'done', task: 'inspect', tools: 1, seconds: 1, background: true, autoDeliver: true });
+    const runner = (svc as unknown as { turnRunner: { acceptSubagentCompletion(parent: string, userId: number, result: unknown): void; resultDrains: Set<string> } }).turnRunner;
+
+    d.session.isStreaming = true;
+    runner.acceptSubagentCompletion(sessionId, 1, { id: 'res-cleared', toolCallId: 'call-cleared', sessionId: child, status: 'done', task: 'inspect', result: 'all clear', tools: 1, seconds: 1 });
+    await vi.waitFor(() => expect(d.session.sendCustomMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runner.resultDrains.has(sessionId)).toBe(false));
+
+    d.session.__steeredCustom.length = 0; // the stop dropped it before the loop could inject it
+    d.session.isStreaming = false;
+    await svc.send({ userId: 1, text: 'anything', session: sessionId });
+
+    await vi.waitFor(() => expect(d.store.pendingSubagentResults(sessionId)).toEqual([]));
+    expect(d.session.sendCustomMessage).toHaveBeenCalledTimes(2);
+    expect(d.session.sendCustomMessage.mock.calls.at(-1)?.[1]).toEqual({ triggerTurn: true, deliverAs: 'followUp' });
     expect(d.store.getSubagentRuns(sessionId)[0]).toMatchObject({ resultDelivery: 'acknowledged' });
   });
 
@@ -1072,6 +1154,91 @@ describe('BrainService', () => {
     expect(svc.queueList(1)).toEqual([]);
     expect(d.session.abortCompaction).toHaveBeenCalledOnce();
     expect(d.session.abortBranchSummary).toHaveBeenCalledOnce();
+  });
+
+  it('discards the just-sent user turn when Esc lands before the turn produces any output', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string; text?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string; text?: string }));
+    // A turn that admits (publishes the 'you' bubble + projects the durable row) but hangs before any
+    // output — the exact window Esc targets. No agent_end, so turnProducedOutput stays false.
+    d.session.prompt = vi.fn(async (_t: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+    });
+    await svc.send({ userId: 1, text: 'discard me', display: 'discard me' });
+    const durableId = seen.find((e) => e.type === 'user')?.durableId;
+    expect(durableId).toBeTruthy();
+    expect(d.store.getMessages('brain-1').some((m) => m.id === durableId)).toBe(true);
+
+    await svc.abort(1);
+
+    // The daemon deletes the durable row and tells clients to pull the bubble + restore the composer text.
+    expect(seen.find((e) => e.type === 'discard_user')).toMatchObject({ durableId, text: 'discard me' });
+    expect(d.store.getMessages('brain-1').some((m) => m.id === durableId)).toBe(false);
+  });
+
+  it('discards the aborted turn AND any partial assistant fragment its agent_end persisted', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string }));
+    d.session.prompt = vi.fn(async (_t: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+    });
+    await svc.send({ userId: 1, text: 'discard me', display: 'discard me' });
+    const durableId = seen.find((e) => e.type === 'user')?.durableId;
+    if (!durableId) throw new Error('expected a durable user row');
+    // A token that raced the cancel: agent_end persisted a partial assistant row AFTER the user row.
+    d.store.appendMessage({ id: 'frag', sessionId: 'brain-1', parentId: durableId, role: 'assistant', content: { text: 'partial answer' } });
+    expect(d.store.getMessages('brain-1').some((m) => m.id === 'frag')).toBe(true);
+
+    await svc.abort(1);
+
+    // Both the user row AND the orphan fragment are gone — never an answer left without its question.
+    expect(d.store.getMessages('brain-1').length).toBe(0);
+  });
+
+  it('releases the discard guard even when the abort teardown throws (session must not go mute)', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string }));
+    d.session.prompt = vi.fn(async (_t: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+      options?.preflightResult?.(true);
+    });
+    await svc.send({ userId: 1, text: 'discard me', display: 'discard me' });
+
+    // The teardown throws AFTER the guard is armed; the finally must still release the guard + lastAdmitted.
+    d.session.clearQueue = vi.fn(() => { throw new Error('teardown boom'); });
+    await expect(svc.abort(1)).rejects.toThrow('teardown boom');
+
+    // Guard released: a follow-up abort finds nothing to discard (lastAdmitted was cleared), so it emits NO
+    // discard_user. A stuck guard would have left lastAdmitted armed and let this second abort fire one.
+    d.session.clearQueue = vi.fn();
+    await svc.abort(1);
+    expect(seen.filter((e) => e.type === 'discard_user').length).toBe(0);
+  });
+
+  it('keeps the user turn when the turn has already settled — nothing to discard', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const seen: { type: string; durableId?: string }[] = [];
+    svc.subscribe(1, (e) => seen.push(e as { type: string; durableId?: string }));
+    // The default fake prompt runs to agent_end → idle, which clears lastAdmitted: a later Esc has nothing
+    // to discard, so the settled turn's user row must survive.
+    await svc.send({ userId: 1, text: 'answered', display: 'answered' });
+    const durableId = seen.find((e) => e.type === 'user')?.durableId;
+    expect(durableId).toBeTruthy();
+
+    await svc.abort(1);
+
+    expect(seen.some((e) => e.type === 'discard_user')).toBe(false);
+    expect(d.store.getMessages('brain-1').some((m) => m.id === durableId)).toBe(true);
   });
 
   it('queueRecall pops the LAST pending message by value and returns its text (the ↑-recall / ctrl+x pop)', async () => {
@@ -2009,6 +2176,32 @@ describe('BrainService', () => {
     expect(await variant('four')).toBe('cli/plan-mode-sparse');
   });
 
+  // Admission rolls a rejected turn's user row back, so the mode state it carried has to roll back with
+  // it: a turn the model never received cannot be what the sparse line means by "earlier in this
+  // conversation". Otherwise a failed FIRST plan turn consumed the entry and every later plan turn got a
+  // one-liner pointing at rules that were never delivered.
+  it('does not confirm the mode of a turn that never reached the model', async () => {
+    const d = fakeDeps();
+    d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
+      name.startsWith('cli/') ? name : `PERSONA:${name}:${vars.userName}`,
+    );
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const variant = async (text: string): Promise<string | undefined> => {
+      d.prompts.render.mockClear();
+      await svc.send({ userId: 1, text, mode: 'plan', session: 'brain-1' });
+      return (d.prompts.render.mock.calls.map((c) => c[0] as string)).find((n) => n.startsWith('cli/'));
+    };
+
+    d.session.prompt.mockRejectedValueOnce(new Error('provider refused the turn'));
+    await expect(svc.send({ userId: 1, text: 'outline it', mode: 'plan', session: 'brain-1' }))
+      .rejects.toThrow('provider refused the turn');
+
+    // Still ENTERING plan mode, because nothing has entered it yet.
+    expect(await variant('outline it again')).toBe('cli/plan-mode');
+    expect(await variant('and continue')).toBe('cli/plan-mode-sparse');
+  });
+
   it('plan mode hides mutating tools from the model for that turn', async () => {
     const d = fakeDeps();
     d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
@@ -2426,6 +2619,77 @@ describe('BrainService', () => {
     }
   });
 
+  // A respawn is routine (last client detaching, settings save, plugin reload, idle reaper, daemon
+  // restart). Each one used to re-resolve the model from the global/project preference, silently
+  // discarding an explicit /model pick — the conversation came back on a different model with nothing
+  // in the transcript to explain it. The directory deliberately has NO .git, so there is no project
+  // preference to lean on: the ONLY thing that can carry the pick is the session's own stored pair.
+  it('keeps the model a spoken-in conversation was running on across a respawn', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elowen-model-sticky-'));
+    try {
+      const d = fakeDeps();
+      d.config = { providers: [{ id: 'relay', label: 'Relay', type: 'openai' as const, baseUrl: 'http://x/v1', models: ['m', 'other'], apiKey: 'k' }] };
+      const svc = new BrainService(d as never);
+
+      const started = await svc.start(1, { cwd: dir });
+      await svc.send({ userId: 1, text: 'first' }); // only a spoken-in conversation keeps its model
+      await svc.switchModel(1, { provider: 'relay', model: 'other' });
+      await svc.restart(1);
+
+      // Without the stored pair this respawn re-resolves to the configured default 'm'.
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('other');
+      expect(d.store.getSession(started.sessionId)?.provider).toBe('relay'); // the pair, not just the model id
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The case the test above MASKED: it called switchModel first, which routes through the store's
+  // "existing row" path and backfilled the provider. A conversation started explicitly on a model and
+  // never switched must carry the pair from creation, or its first respawn still loses the model.
+  it('carries the pair from session creation, without a switchModel to backfill it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elowen-model-new-'));
+    try {
+      const d = fakeDeps();
+      d.config = { providers: [{ id: 'relay', label: 'Relay', type: 'openai' as const, baseUrl: 'http://x/v1', models: ['m', 'other'], apiKey: 'k' }] };
+      const svc = new BrainService(d as never);
+
+      const started = await svc.start(1, { cwd: dir, provider: 'relay', model: 'other' });
+      expect(d.store.getSession(started.sessionId)?.provider).toBe('relay'); // written at INSERT, not only on update
+      await svc.send({ userId: 1, text: 'first' });
+      await svc.restart(1);
+
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('other');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The pin must not defeat the very save that changes the model: the settings page would report one
+  // model while the conversation kept running another.
+  it('drops the pin when the restart is because the model setting itself changed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'elowen-model-reapply-'));
+    try {
+      const d = fakeDeps();
+      d.config = { providers: [{ id: 'relay', label: 'Relay', type: 'openai' as const, baseUrl: 'http://x/v1', models: ['m', 'other'], apiKey: 'k' }] };
+      const svc = new BrainService(d as never);
+
+      await svc.start(1, { cwd: dir });
+      await svc.send({ userId: 1, text: 'first' });
+      await svc.switchModel(1, { provider: 'relay', model: 'other' });
+
+      await svc.restart(1, { reapplyModelPreference: true });
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('m'); // back to preference
+
+      // …while an ordinary restart (plugin reload, personality change) still respects the pin.
+      await svc.switchModel(1, { provider: 'relay', model: 'other' });
+      await svc.restart(1);
+      expect((d.createSession.mock.calls.at(-1)![0] as { model: { id: string } }).model.id).toBe('other');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps project model preferences isolated, explicit starts winning and revoked picks falling back', async () => {
     const first = mkdtempSync(join(tmpdir(), 'elowen-model-project-a-'));
     const second = mkdtempSync(join(tmpdir(), 'elowen-model-project-b-'));
@@ -2558,12 +2822,12 @@ describe('BrainService', () => {
     await svc.send({ userId: 1, text: 'ahoj' });
     const second = await svc.start(1, { fresh: true });
     await svc.send({ userId: 1, text: 'a second real conversation' });
-    svc.deleteSession(1, first.sessionId);
+    await svc.deleteSession(1, first.sessionId);
     expect(svc.listSessions(1).map((s) => s.id)).toEqual([second.sessionId]);
     expect(d.store.getMessages(first.sessionId)).toHaveLength(0);
     d.store.createSession({ id: 'brain-77', userId: 77, model: 'm' });
-    expect(() => svc.deleteSession(1, 'brain-77')).toThrow(/unknown session/);
-    expect(() => svc.deleteSession(1, 'brain-ch-x')).toThrow(/unknown session/);
+    await expect(svc.deleteSession(1, 'brain-77')).rejects.toThrow(/unknown session/);
+    await expect(svc.deleteSession(1, 'brain-ch-x')).rejects.toThrow(/unknown session/);
   });
 
   it('status exposes usage numbers for the active conversation', async () => {
@@ -2921,6 +3185,54 @@ describe('BrainService personality layering', () => {
     await svc.applyPersonalityChange(1);
     expect(d.session.dispose).toHaveBeenCalled(); // owner disposed on restart + channel dropped
     expect(d.createSession.mock.calls.length).toBe(before + 1); // owner respawned once
+  });
+
+  it('applyPersonalityChange resets only the changing user\'s channels — another user\'s channel session survives untouched', async () => {
+    // Regression (Tier 1 #4): the old channelDisposeAll() dropped EVERY channel on the daemon regardless
+    // of owner, even though persona is resolved per channel-session owner at spawn.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const registry = (svc as unknown as { sessions: { channelGet(id: string): { sessionId: string } | undefined } }).sessions;
+    await svc.channelSend({ channelId: 'disc-1', ownerUserId: 1, policy: { allowedProjectIds: 'all' as const, allowedPaths: () => [] } }, 'ahoj');
+    await svc.channelSend({ channelId: 'disc-2', ownerUserId: 2, policy: { allowedProjectIds: 'all' as const, allowedPaths: () => [] } }, 'ahoj');
+    const otherChannelBefore = registry.channelGet('disc-2');
+    expect(otherChannelBefore).toBeDefined();
+
+    await svc.applyPersonalityChange(1);
+
+    expect(registry.channelGet('disc-1')).toBeUndefined(); // the changing user's channel was reset
+    expect(registry.channelGet('disc-2')).toBe(otherChannelBefore); // untouched — same live object
+  });
+
+  it('applyPersonalityChange releases a channel parked on a question instead of leaving it to time out', async () => {
+    // Regression (Tier 1 #4): unlike reloadPlugins, applyPersonalityChange never called
+    // elicitation.cancelAll(), so a channel parked on AskUserQuestion hung until its 5-minute timeout.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const internals = svc as unknown as {
+      elicitation: {
+        ask: (sessionId: string, questions: { question: string; header: string; multiSelect: boolean; options: never[] }[], emit: () => void) => Promise<unknown>;
+        pendingForSession: (sessionId: string) => unknown;
+      };
+    };
+    let parked!: () => void;
+    const isParked = new Promise<void>((r) => { parked = r; });
+    d.session.prompt.mockImplementationOnce(async () => {
+      const answer = internals.elicitation.ask('brain-ch-disc-1', [{
+        question: 'Continue?', header: 'Continue', multiSelect: false, options: [],
+      }], () => {});
+      parked();
+      await answer.catch(() => undefined); // the reset must be what rejects this
+    });
+
+    const turn = svc.channelSend({ channelId: 'disc-1', ownerUserId: 1, policy: { allowedProjectIds: 'all' as const, allowedPaths: () => [] } }, 'ahoj');
+    await isParked;
+    expect(internals.elicitation.pendingForSession('brain-ch-disc-1')).not.toBeNull();
+
+    await svc.applyPersonalityChange(1);
+
+    expect(internals.elicitation.pendingForSession('brain-ch-disc-1')).toBeNull();
+    await turn;
   });
 });
 
@@ -3395,7 +3707,7 @@ describe('sub-agent session tap + owner steering', () => {
     };
 
     expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
-      .toEqual({ streaming: false, pendingAsk: null });
+      .toEqual({ streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null });
 
     d.session.isStreaming = true;
     void internals.elicitation.ask(sessionId, [{
@@ -3409,7 +3721,114 @@ describe('sub-agent session tap + owner steering', () => {
     internals.elicitation.cancelForSession(sessionId);
     d.session.isStreaming = false;
     expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
-      .toEqual({ streaming: false, pendingAsk: null });
+      .toEqual({ streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null });
+  });
+
+  // Plan mode's decision lives in no client: the mode is stamped per send and the plan is a tool call, so
+  // a surface that was not attached when the turn ran — a reloaded tab, a second browser, the web while
+  // the plan was submitted from the CLI — can only learn that one is waiting from the daemon.
+  it('publishes the work mode and the plan awaiting a decision on both the status and the snapshot', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    expect(svc.status(1)).toMatchObject({ workMode: 'build', pendingPlan: null });
+
+    await svc.send({ userId: 1, text: 'outline the migration', mode: 'plan' });
+    d.store.appendMessage({
+      id: 'plan-call', sessionId: 'brain-1', parentId: null, role: 'assistant',
+      content: { role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'ExitPlanMode', arguments: { plan: '# Ship it' } }] },
+    });
+    d.store.appendMessage({
+      id: 'plan-result', sessionId: 'brain-1', parentId: null, role: 'toolResult',
+      content: { role: 'toolResult', toolCallId: 'call-1', details: { plan: '# Ship it' } },
+    });
+
+    expect(svc.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+    expect(svc.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot.control)
+      .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+
+    // Approving it is an ordinary build turn, so the decision clears itself — nothing has to remember it.
+    await svc.send({ userId: 1, text: 'Implement the plan you proposed above.', mode: 'build' });
+    expect(svc.status(1)).toMatchObject({ workMode: 'build', pendingPlan: null });
+  });
+
+  // A redeploy restarts the daemon mid-decision: the live session and its in-memory lastTurnMode are gone,
+  // but the submitted plan still sits in durable history. The modal has to come back on reconnect — the
+  // regression the user hit was the daemon reporting 'build'/null because the mode stamp did not survive.
+  it('restores a pending plan from durable history after a daemon restart drops the live mode stamp', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'outline the migration', mode: 'plan' });
+    d.store.appendMessage({
+      id: 'plan-call', sessionId: 'brain-1', parentId: null, role: 'assistant',
+      content: { role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'ExitPlanMode', arguments: { plan: '# Ship it' } }] },
+    });
+    d.store.appendMessage({
+      id: 'plan-result', sessionId: 'brain-1', parentId: null, role: 'toolResult',
+      content: { role: 'toolResult', toolCallId: 'call-1', details: { plan: '# Ship it' } },
+    });
+    expect(svc.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+
+    // Restart: a fresh service over the same durable store has no live brain and no mode stamp, exactly as
+    // after a redeploy. activeSessionId falls back to the stored session, and the decision must return.
+    const afterRestart = new BrainService(d as never);
+    expect(afterRestart.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+    expect(afterRestart.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot.control)
+      .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
+  });
+
+  // planState reads durable history to recover a plan a restart's lost stamp would strand, but a LIVE
+  // build-mode conversation (the common poll) has no plan by definition, so it must trust the in-memory
+  // stamp and never touch the DB — the only index there is on session_id.
+  it('keeps the build-mode status poll off the durable history read', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const spy = vi.spyOn(d.store, 'getLatestTurn');
+    expect(svc.status(1)).toMatchObject({ workMode: 'build', pendingPlan: null });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  // A web send has no bound client, so the user may have left the browser — notify their phone. A bound CLI
+  // send is watched live in the terminal, so it must NOT notify. `notifyTurnComplete` is the daemon's push
+  // seam; enablement is implicit (no subscription ⇒ the notifier sends nothing).
+  it('notifies the phone only for a web-started owner turn, never a bound CLI one', async () => {
+    const notified: { userId: number; title: string }[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string) => void }).notifyTurnComplete =
+      (userId, title) => notified.push({ userId, title });
+    const svc = new BrainService(d as never);
+
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'ship it from the web' });
+    expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
+
+    notified.length = 0;
+    const cli = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
+    await svc.send({ userId: 1, text: 'from the cli', session: cli.sessionId, client: { id: 'cli-a', generation: 1 } });
+    expect(notified).toEqual([]);
+  });
+
+  // `fromWeb` only means "not from a bound CLI", which is equally true of the browser tab the user is
+  // reading right now. Buzzing their phone about an answer they are watching arrive is pure noise, so an
+  // attached client stream — the web tab's own SSE — suppresses it.
+  it('stays quiet when a client stream is still watching the web turn', async () => {
+    const notified: { userId: number; title: string }[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string) => void }).notifyTurnComplete =
+      (userId, title) => notified.push({ userId, title });
+    const svc = new BrainService(d as never);
+
+    const started = await svc.start(1);
+    const off = svc.tapSession(1, started.sessionId, () => {});
+    await svc.send({ userId: 1, text: 'ship it while I watch' });
+    expect(notified).toEqual([]);
+
+    // Once the tab is gone the very same send does notify — that is the case the feature exists for.
+    off();
+    await svc.send({ userId: 1, text: 'ship it after I left' });
+    expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
   });
 
   it('windows the snapshot history AFTER removing journaled rows, with a cursor the lazy-load can continue', async () => {
@@ -3534,6 +3953,24 @@ describe('sub-agent session tap + owner steering', () => {
     await svc.restart(1); // disposes the live session and spawns a fresh one
     await svc.send({ userId: 1, text: 'again' });
     expect(got).toContain('idle'); // the tap re-attached to the NEW live entry
+  });
+
+  // Regression for the sol review (finding 1/4): restart() used to omit the listener carry its sibling
+  // respawns (switchModel, maybeRollover, maybeVisionHop) performed, so a subscribe() listener (the web
+  // dock's plain SSE, unlike a CLI tap) stayed recorded as attached while the fresh live sent it nothing.
+  it('a subscribe() listener (not a tap) also follows its session across a restart', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const got: string[] = [];
+    const off = svc.subscribe(1, (e) => got.push(e.type));
+    await svc.send({ userId: 1, text: 'hi' });
+    expect(got).toContain('idle');
+    got.length = 0;
+    await svc.restart(1); // disposes the live session and spawns a fresh one
+    await svc.send({ userId: 1, text: 'again' });
+    expect(got).toContain('idle'); // the subscribe() listener re-attached to the NEW live entry too
+    off();
   });
 
   it('sendToSubagent refuses foreign sessions and non-subagent kinds', async () => {
@@ -3716,7 +4153,7 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     expect(d.session.sendCustomMessage).toHaveBeenCalled();
   });
 
-  it('reconcile terminalizes a foreground orphan and surfaces it in history without a hidden delivery turn', async () => {
+  it('boot reconcile terminalizes a foreground orphan and surfaces it in history without a hidden delivery turn', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
     const { sessionId } = await svc.start(1);
@@ -3727,38 +4164,137 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     });
     d.store.upsertSubagentRun(sessionId, { id: 'delegate-fg', sessionId: 'brain-ch-subagent-fg', status: 'running', task: 'inspect', tools: 1, seconds: 5 });
 
-    // childrenOf is empty (a restart drops every live registration) → the running row is a dead orphan.
-    await svc.start(1);
+    // A restart is a NEW service over the same store — that, not a start() on the live one, is what drops
+    // the in-memory registrations and makes the running row a dead orphan.
+    const restarted = new BrainService(d as never);
+    restarted.reconcileDelegationsOnBoot();
 
     expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-fg')?.status).toBe('error');
     expect(d.store.pendingSubagentResults(sessionId)).toEqual([]);
     expect(d.session.sendCustomMessage).not.toHaveBeenCalled();
-    expect(svc.history(1).flatMap((turn) => turn.segments ?? [])
+    expect(restarted.history(1).flatMap((turn) => turn.segments ?? [])
       .some((segment) => segment.kind === 'tool' && segment.sub?.status === 'error')).toBe(true);
   });
 
-  it('reconcile delivers a synthetic restart result only for an autoDeliver orphan', async () => {
+  it('boot reconcile terminalizes a workflow on a channel session no owner start() ever opens', async () => {
+    // The lazy per-session sweep hung off start(), which a channel/task session never reaches — its row
+    // stayed 'running' in the DB forever and only a display transform hid it, so the phantom came back the
+    // moment the origin went live again. A boot reconcile repairs the row itself.
+    const d = fakeDeps();
+    d.store.createSession({ id: 'brain-ch-discord-general', userId: 1, model: 'm' });
+    d.store.upsertWorkflowRun('brain-ch-discord-general', {
+      id: 'wf-1', toolCallId: 'call-wf', title: 'ship it', status: 'running',
+      nodes: [{ id: 'n1', task: 'build', status: 'running', deps: [] }],
+    });
+
+    new BrainService(d as never).reconcileDelegationsOnBoot();
+
+    const stored = d.store.getWorkflowRuns('brain-ch-discord-general')[0];
+    expect(stored?.status).toBe('cancelled');
+    expect(stored?.nodes[0]?.status).toBe('error');
+  });
+
+  it('boot reconcile survives a corrupt delegation row and still repairs every other session', async () => {
+    // The scan reads status straight out of the stored JSON. Without the json_valid guard one unparseable
+    // row would throw inside SQLite and abort the whole boot reconcile, leaving every other phantom behind.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: 'brain-ch-subagent-corrupt', userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.createSession({ id: 'brain-ch-subagent-orphan', userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.upsertSubagentRun(sessionId, { id: 'delegate-corrupt', sessionId: 'brain-ch-subagent-corrupt', status: 'running', task: 'a', tools: 1, seconds: 1 });
+    d.store.upsertSubagentRun(sessionId, { id: 'delegate-orphan', sessionId: 'brain-ch-subagent-orphan', status: 'running', task: 'b', tools: 1, seconds: 1 });
+    d.db.prepare("UPDATE brain_subagent_runs SET state = 'not json' WHERE tool_call_id = 'delegate-corrupt'").run();
+
+    new BrainService(d as never).reconcileDelegationsOnBoot();
+
+    expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-orphan')?.status).toBe('error');
+  });
+
+  it('boot reconcile terminalizes a running row whose child session no longer resolves', async () => {
+    // getSubagentRuns only returns a row backed by a LIVE direct same-owner child, and upsertSubagentRun
+    // revalidates the same relation before writing. A row whose child vanished (or changed hands) is
+    // therefore invisible to the per-run sweep and unwritable through it — it claimed `running` forever.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: 'brain-ch-subagent-vanished', userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.upsertSubagentRun(sessionId, { id: 'delegate-vanished', sessionId: 'brain-ch-subagent-vanished', status: 'running', task: 'watch', tools: 2, seconds: 4 });
+    // Straight at the row, not via deleteSession: that path cleans the run rows up, which is exactly the
+    // invariant a legacy row or an externally modified DB does not carry.
+    d.db.prepare("DELETE FROM brain_sessions WHERE id = 'brain-ch-subagent-vanished'").run();
+
+    new BrainService(d as never).reconcileDelegationsOnBoot();
+
+    const state = d.db.prepare("SELECT state FROM brain_subagent_runs WHERE tool_call_id = 'delegate-vanished'")
+      .get() as { state: string } | undefined;
+    expect(JSON.parse(state?.state ?? '{}')).toMatchObject({ status: 'error', task: 'watch', tools: 2, seconds: 4 });
+  });
+
+  it('leaves a running delegation alone when a client merely reconnects', async () => {
+    // Opening the web chat calls start() again in the SAME process. The running row looks exactly like the
+    // orphan above — no live child registration this call can see — but the delegation is alive and well.
+    // Terminalizing it here killed real work from the outside, six workflow nodes at a time.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: 'brain-ch-subagent-live', userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.upsertSubagentRun(sessionId, { id: 'delegate-live', sessionId: 'brain-ch-subagent-live', status: 'running', task: 'long job', tools: 1, seconds: 5, background: true, autoDeliver: true });
+
+    await svc.start(1);
+
+    expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-live')?.status).toBe('running');
+    expect(d.store.pendingSubagentResults(sessionId)).toEqual([]);
+    expect(d.session.sendCustomMessage).not.toHaveBeenCalled();
+  });
+
+  it('leaves a live delegation alone on the FIRST start() of a session revived by send()', async () => {
+    // A session can come alive without start(): a bound CLI send, or a cron wake-up's originSend. Its
+    // delegation then registers, and the user opens the web chat — the first start() of that session in
+    // this process. The lazy sweep read exactly that as a restart and killed live work.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    d.store.createSession({ id: 'brain-1', userId: 1, model: 'm' });
+    d.store.createSession({ id: 'brain-ch-subagent-live', userId: 1, model: 'm', parentSessionId: 'brain-1' });
+    await svc.send({ userId: 1, text: 'go and do the long job', session: 'brain-1' });
+    d.store.upsertSubagentRun('brain-1', { id: 'delegate-live', sessionId: 'brain-ch-subagent-live', status: 'running', task: 'long job', tools: 1, seconds: 5, background: true, autoDeliver: true });
+
+    await svc.start(1);
+
+    expect(d.store.getSubagentRuns('brain-1').find((r) => r.toolCallId === 'delegate-live')?.status).toBe('running');
+    expect(d.store.pendingSubagentResults('brain-1')).toEqual([]);
+  });
+
+  it('boot reconcile enqueues a synthetic restart result only for an autoDeliver orphan, delivered on next open', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
     const { sessionId } = await svc.start(1);
     d.store.createSession({ id: 'brain-ch-subagent-auto', userId: 1, model: 'm', parentSessionId: sessionId });
     d.store.upsertSubagentRun(sessionId, { id: 'delegate-auto', sessionId: 'brain-ch-subagent-auto', status: 'running', task: 'watch', tools: 1, seconds: 3, background: true, autoDeliver: true });
 
-    await svc.start(1);
+    const restarted = new BrainService(d as never);
+    restarted.reconcileDelegationsOnBoot();
 
     expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-auto')?.status).toBe('error');
+    // Boot only makes it durable — draining here would respawn every orphaned conversation at startup.
+    expect(d.store.pendingSubagentResults(sessionId)).toHaveLength(1);
+    expect(d.session.sendCustomMessage).not.toHaveBeenCalled();
+
+    await restarted.start(1);
+
     await vi.waitFor(() => expect(d.session.sendCustomMessage).toHaveBeenCalled());
     await vi.waitFor(() => expect(d.store.pendingSubagentResults(sessionId)).toEqual([]));
   });
 
-  it('reconcile terminalizes a background non-autoDeliver orphan without a synthetic result', async () => {
+  it('boot reconcile terminalizes a background non-autoDeliver orphan without a synthetic result', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
     const { sessionId } = await svc.start(1);
     d.store.createSession({ id: 'brain-ch-subagent-bg', userId: 1, model: 'm', parentSessionId: sessionId });
     d.store.upsertSubagentRun(sessionId, { id: 'delegate-bg', sessionId: 'brain-ch-subagent-bg', status: 'running', task: 'build', tools: 1, seconds: 2, background: true });
 
-    await svc.start(1);
+    const restarted = new BrainService(d as never);
+    restarted.reconcileDelegationsOnBoot();
 
     expect(d.store.getSubagentRuns(sessionId).find((r) => r.toolCallId === 'delegate-bg')?.status).toBe('error');
     expect(d.store.pendingSubagentResults(sessionId)).toEqual([]);
@@ -4322,7 +4858,7 @@ describe('BrainService — background processes', () => {
     const other = fakeHandle('4', 'brain-2', 2);
     for (const handle of [parentProc, childProc, grandchildProc, other]) processRegistry.register(handle);
 
-    svc.deleteSession(1, sessionId);
+    await svc.deleteSession(1, sessionId);
 
     expect([parentProc.killed, childProc.killed, grandchildProc.killed]).toEqual([true, true, true]);
     expect(other.killed).toBe(false); // another user's conversation is untouched
@@ -4505,6 +5041,94 @@ describe('BrainService.bindChannelContext (/context move-binding)', () => {
     expect(d.store.getMessages(archived[0]!.id).some((m) => JSON.parse(m.content).content === 'prior channel chat')).toBe(true);
   });
 
+  describe('refuses a non-quiescent session (Tier 2 #13: the smallest safe fix)', () => {
+    // Regression: bindChannelContext used to re-key ANY owned session regardless of work in flight —
+    // orphaning a running turn's stream, a delegated child, a background process, or an active goal, all
+    // still keyed on the OLD id. Each case below: reject while busy, then succeed once quiescent again.
+
+    it('a turn in flight', async () => {
+      const d = fakeDeps();
+      const svc = new BrainService(d as never);
+      await svc.start(1);
+      const chosen = await freshSpoken(svc, 'busy turn');
+      d.session.isStreaming = true;
+
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).rejects.toThrow('work in progress');
+      expect(d.store.getSession(chosen)?.user_id).toBe(1); // untouched — still where it was
+
+      d.session.isStreaming = false;
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).resolves.toMatchObject({ title: expect.any(String) });
+    });
+
+    it('an attached client stream', async () => {
+      const d = fakeDeps();
+      const svc = new BrainService(d as never);
+      await svc.start(1);
+      const chosen = await freshSpoken(svc, 'watched conversation');
+      const off = svc.subscribe(1, () => {}); // attaches to the active (chosen) conversation
+
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).rejects.toThrow('work in progress');
+      expect(d.store.getSession(chosen)?.user_id).toBe(1);
+
+      off();
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).resolves.toMatchObject({ title: expect.any(String) });
+    });
+
+    it('an active goal', async () => {
+      const d = fakeDeps();
+      const svc = new BrainService(d as never);
+      await svc.start(1);
+      const chosen = await freshSpoken(svc, 'goal-driven conversation');
+      const goal = await svc.setGoal(1, 'keep going', { turnBudget: 8 });
+      expect(goal.session_id).toBe(chosen);
+
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).rejects.toThrow('work in progress');
+      expect(d.store.getSession(chosen)?.user_id).toBe(1);
+
+      svc.goalAction(1, 'pause', chosen);
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).resolves.toMatchObject({ title: expect.any(String) });
+    });
+
+    it('a running background process', async () => {
+      const d = fakeDeps();
+      const svc = new BrainService(d as never);
+      await svc.start(1);
+      const chosen = await freshSpoken(svc, 'has a background job');
+      const handle: ProcessHandle = {
+        id: 'bind-proc-1', command: 'sleep 1', cwd: '/w', startedAt: '2026-01-01T00:00:00Z',
+        sessionId: chosen, userId: 1, running: () => true, exitCode: () => null, readAll: () => '',
+        kill() {},
+      };
+      processRegistry.register(handle);
+      try {
+        await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).rejects.toThrow('work in progress');
+        expect(d.store.getSession(chosen)?.user_id).toBe(1);
+
+        processRegistry.remove('bind-proc-1');
+        await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).resolves.toMatchObject({ title: expect.any(String) });
+      } finally {
+        processRegistry.remove('bind-proc-1'); // idempotent — belt and braces if an assertion above threw
+      }
+    });
+
+    it('an active delegated child', async () => {
+      const d = fakeDeps();
+      const svc = new BrainService(d as never);
+      await svc.start(1);
+      const chosen = await freshSpoken(svc, 'has a running child');
+      const sessions = (svc as unknown as {
+        sessions: { setChildRunning(parent: string, child: string, running: boolean): void };
+      }).sessions;
+      sessions.setChildRunning(chosen, 'brain-ch-subagent-bind-child', true);
+
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).rejects.toThrow('work in progress');
+      expect(d.store.getSession(chosen)?.user_id).toBe(1);
+
+      sessions.setChildRunning(chosen, 'brain-ch-subagent-bind-child', false);
+      await expect(svc.bindChannelContext(1, 'discord-c1', chosen)).resolves.toMatchObject({ title: expect.any(String) });
+    });
+  });
+
   it('listContextSessions withholds the bare default while listSessions still includes it (web history rail unaffected)', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
@@ -4622,6 +5246,76 @@ describe('retention janitor — pending cron wake-up protection', () => {
     await svc.purgeStaleSessionsForUser(1, 30);
     expect(d.store.getSession('brain-1-parent')).toBeUndefined();       // parent purged
     expect(d.store.getSession('brain-ch-subagent-abc')).toBeUndefined(); // child purged WITH it (previously leaked)
+  });
+});
+
+describe('BrainService.readSubagent (a parent recovering a stored final result)', () => {
+  const SCOPE = { admin: true, projectIds: [], owner: true, permissionBoundary: null };
+
+  async function seed(child = 'brain-ch-subagent-sub-read-1') {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId, delegatedAccess: SCOPE });
+    const sessions = (svc as unknown as {
+      sessions: { setChildRunning(parent: string, child: string, running: boolean): void };
+    }).sessions;
+    return { d, svc, sessionId, child, sessions };
+  }
+
+  it('reads its own child\'s final stored assistant text', async () => {
+    const { d, svc, sessionId, child } = await seed();
+    d.store.appendMessage({
+      id: 'assistant-final', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: [{ type: 'text', text: 'full durable report' }] },
+    });
+
+    expect(svc.readSubagent(sessionId, child)).toBe('full durable report');
+  });
+
+  it('finds the real answer behind a later failed follow-up that left an empty assistant row', async () => {
+    // Regression: a `DelegateContinue` attempt that errors (bad model route, dropped connection) still
+    // appends its own assistant row — with no extracted text — AFTER the child's actual final report.
+    // Scanning only the last row (as `lastAssistantText` does) would then see nothing and wrongly claim
+    // the child never produced an answer, exactly what happened recovering a truncated report on 2026-07-27.
+    const { d, svc, sessionId, child } = await seed();
+    d.store.appendMessage({
+      id: 'assistant-final', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: [{ type: 'text', text: 'the real final report' }] },
+    });
+    d.store.appendMessage({
+      id: 'assistant-failed-followup', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: [], stopReason: 'error', errorMessage: 'model not available' },
+    });
+
+    expect(svc.readSubagent(sessionId, child)).toBe('the real final report');
+  });
+
+  it('refuses a running child even when an earlier assistant message is already stored', async () => {
+    const { d, svc, sessionId, child, sessions } = await seed();
+    d.store.appendMessage({
+      id: 'assistant-partial', sessionId: child, parentId: null, role: 'assistant',
+      content: { content: 'an earlier turn, not the current final result' },
+    });
+    sessions.setChildRunning(sessionId, child, true);
+
+    expect(() => svc.readSubagent(sessionId, child)).toThrow(/still running/);
+  });
+
+  it('refuses a child of a different parent even when both parents have the same owner', async () => {
+    const { d, svc, sessionId } = await seed();
+    d.store.createSession({ id: 'brain-1-sibling-read', userId: 1, model: 'm' });
+    d.store.createSession({
+      id: 'brain-ch-subagent-sub-other-read', userId: 1, model: 'm',
+      parentSessionId: 'brain-1-sibling-read', delegatedAccess: SCOPE,
+    });
+    d.store.appendMessage({
+      id: 'other-assistant-final', sessionId: 'brain-ch-subagent-sub-other-read', parentId: null, role: 'assistant',
+      content: { content: 'secret sibling report' },
+    });
+
+    expect(() => svc.readSubagent(sessionId, 'brain-ch-subagent-sub-other-read'))
+      .toThrow(/unknown sub-agent for this conversation/);
   });
 });
 
@@ -4747,5 +5441,63 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
       const [opts] = send.mock.calls[0] as unknown as [{ toolPolicy?: { deny?: Set<string> } }];
       expect([...(opts.toolPolicy?.deny ?? [])]).toContain('Bash');
     });
+  });
+});
+
+// Regression (2026-07-28): a runaway sub-agent could only be stopped by tearing down the WHOLE delegation
+// tree (Esc on the owner conversation) or restarting the daemon — there was no way to end one specific
+// child without collateral damage. `abortTree`'s existing recursive teardown already does the right thing
+// for one channel session; this is just the missing entry point onto it, guarded by the same parent-owns-
+// child check as readSubagent/continueSubagent.
+describe('BrainService.stopSubagent (targeted teardown of one runaway or finished child)', () => {
+  async function seed(child = 'brain-ch-subagent-sub-stop-1') {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId });
+    const abort = vi.fn(async () => undefined);
+    (svc as unknown as { channelService: { abort: unknown } }).channelService.abort = abort;
+    const sessions = (svc as unknown as {
+      sessions: { setChildRunning(parent: string, child: string, running: boolean): void };
+    }).sessions;
+    return { d, svc, sessionId, child, abort, sessions };
+  }
+
+  it('tears down a still-running child via the channel abort tree', async () => {
+    const { svc, sessionId, child, abort, sessions } = await seed();
+    sessions.setChildRunning(sessionId, child, true);
+
+    await expect(svc.stopSubagent(sessionId, child)).resolves.toEqual({ stopped: true });
+    // channelIdOf strips the `brain-ch-` prefix — the same id abortTree's own channel lookup expects.
+    expect(abort).toHaveBeenCalledWith('subagent-sub-stop-1');
+  });
+
+  it('reports nothing to stop for a child that already finished, without calling abort', async () => {
+    const { svc, sessionId, child, abort } = await seed();
+    // Never marked running — the default for a completed (or never-started) delegation.
+
+    await expect(svc.stopSubagent(sessionId, child)).resolves.toEqual({ stopped: false });
+    expect(abort).not.toHaveBeenCalled();
+  });
+
+  it('refuses a sub-agent belonging to a different conversation', async () => {
+    const { d, svc, sessionId, abort } = await seed();
+    d.store.createSession({ id: 'brain-1-sibling-stop', userId: 1, model: 'm' });
+    d.store.createSession({ id: 'brain-ch-subagent-sub-other-stop', userId: 1, model: 'm', parentSessionId: 'brain-1-sibling-stop' });
+
+    await expect(svc.stopSubagent(sessionId, 'brain-ch-subagent-sub-other-stop'))
+      .rejects.toThrow(/unknown sub-agent for this conversation/);
+    expect(abort).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown id and a session that is not a sub-agent at all', async () => {
+    const { d, svc, sessionId, abort } = await seed();
+    d.store.createSession({ id: 'brain-ch-discord-stop', userId: 1, model: 'm', parentSessionId: sessionId });
+
+    await expect(svc.stopSubagent(sessionId, 'brain-ch-subagent-nope-stop'))
+      .rejects.toThrow(/unknown sub-agent for this conversation/);
+    await expect(svc.stopSubagent(sessionId, 'brain-ch-discord-stop'))
+      .rejects.toThrow(/unknown sub-agent for this conversation/);
+    expect(abort).not.toHaveBeenCalled();
   });
 });

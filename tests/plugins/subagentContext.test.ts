@@ -22,10 +22,10 @@ const DEFAULT_CONTEXT_TOTAL_CHARS = limits.resolveContextTotalChars(undefined);
 
 // The delegated-scope normalizer (src/brain/delegatedScope.ts) rejects the WHOLE scope — the delegation
 // then fails closed — when a prompt chunk exceeds 8 000 chars, there are more than 16 of them, or they
-// total over 32 000. These are the numbers the plugin's own ceilings must stay under.
+// total over 120 000. These are the numbers the plugin's own ceilings must stay under.
 const SCOPE_MAX_PROMPT_CHARS = 8_000;
 const SCOPE_MAX_PROMPT_CHUNKS = 16;
-const SCOPE_MAX_PROMPT_TOTAL_CHARS = 32_000;
+const SCOPE_MAX_PROMPT_TOTAL_CHARS = 120_000;
 
 describe('delegateContextChunks', () => {
   it('returns nothing for empty, whitespace, or non-string input', () => {
@@ -120,7 +120,9 @@ describe('delegateContextChunks', () => {
       Array.from({ length: 12 }, (_, i) => `dependency-${i}:${'y'.repeat(9_000)}`),
       MAX_CONTEXT_TOTAL_CHARS,
     );
-    const role = `ROLE:${'r'.repeat(19_995)}`; // a user-authored agent file, bounded by nothing upstream
+    // Sized to overflow the scope budget on purpose: this test is about what happens when the sections
+    // together do NOT fit, so it has to stay past the ceiling as that ceiling is raised.
+    const role = `ROLE:${'r'.repeat(59_995)}`; // a user-authored agent file, bounded by nothing upstream
     const fragment = `You are talking on Discord in #general.${'f'.repeat(1_000)}`;
     const packed = packDelegatedPromptAppend([role, ...context, fragment]);
     const scope = normalizeDelegatedExecutionScope({

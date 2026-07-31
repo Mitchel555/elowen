@@ -82,6 +82,31 @@ describe('makeOverseer', () => {
     expect(launch).not.toHaveBeenCalled();
   });
 
+  it('start() and ensure() racing each other still park exactly one overseer', async () => {
+    // engage, the mission tick's ensure and the watchdog all call park concurrently. The guard is a
+    // check-then-act across an await, so without serialization both callers see the session missing and
+    // launch — and the second `tmux new-session` throws "duplicate session", crashing its caller.
+    const live: string[] = [];
+    const launch = vi.fn(async (arg: { agentName: string }) => {
+      live.push(`elowen-${arg.agentName}`);
+      return { session: `elowen-${arg.agentName}` };
+    });
+    const list = vi.fn(async () => [...live]);
+    const ctl = makeOverseer({ spawn: { launch } as never, tmux: { kill: vi.fn(), list } as never, config: cfg('claude:opus'), queue: new DecisionQueue() });
+    await Promise.all([ctl.start('m1', 1, '/repo'), ctl.ensure('m1', 1, '/repo'), ctl.ensure('m1', 1, '/repo')]);
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed park does not poison the next one', async () => {
+    const launch = vi.fn()
+      .mockRejectedValueOnce(new Error('spawn failed'))
+      .mockResolvedValueOnce({ session: 'elowen-overseer-m1' });
+    const ctl = makeOverseer({ spawn: { launch } as never, tmux: { kill: vi.fn(), list: vi.fn().mockResolvedValue([]) } as never, config: cfg('claude:opus'), queue: new DecisionQueue() });
+    await expect(ctl.start('m1', 1, '/repo')).rejects.toThrow('spawn failed');
+    await ctl.ensure('m1', 1, '/repo');
+    expect(launch).toHaveBeenCalledTimes(2);
+  });
+
   it('start() is a no-op when overseerExec is empty (relay fallback)', async () => {
     const launch = vi.fn();
     const ctl = makeOverseer({ spawn: { launch } as never, tmux: { kill: vi.fn(), list: vi.fn().mockResolvedValue([]) } as never, config: cfg(''), queue: new DecisionQueue() });

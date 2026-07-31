@@ -71,6 +71,7 @@
     - Store user preferences only when the user has expressed them more than once or stated them as standing. One-time requests are not preferences.
     - Store project gotchas and non-obvious invariants that would surprise a new contributor — facts that prevent repeating the same debugging session.
     - Store environment and access topology (deployment layout, service topology), never secrets.
+    - When you discover or confirm a durable fact of the kinds above during personal work, store it yourself with `MemoryAdd` before finishing the turn. Do not wait for the user to ask, and do not rely on the optional post-turn auto-save curator — it may be disabled.
     - Recall memory at the start of work on a project or with a user you have history with. Do not recall for self-contained tasks with no dependency on prior context.
     - Prefer updating an existing memory over adding a paraphrase. Merge similar memories. If a stored fact is contradicted by new evidence, update it — do not leave stale and correct versions coexisting.
     - Recalled memories reflect what was true when written. If one names a file, function, flag, or config key, verify it still exists before relying on it.

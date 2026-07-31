@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useQueryClient } from '@tanstack/react-query';
-import { Plus, Search, Trash2, X, MoreVertical, Pencil, Download } from 'lucide-react';
+import { Plus, Search, Trash2, X, MoreVertical, Pencil, Download, ArrowLeft } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
 import { useToast } from '../../components/ui/Toast';
 import { elowenClient } from '../../lib/elowenClient';
@@ -30,11 +31,14 @@ const MENU_ITEM = 'flex items-center gap-2 rounded px-2 py-1.5 text-left text-sm
  *  (BrainChatProvider) so there is never a second session list or a second mutation surface. Delete goes
  *  through the controller (it re-targets the active conversation); rename/export/search hit the client
  *  directly (pure metadata / read-only), mirroring Fáze 1's search split. */
-export function ChatHistoryRail({ variant, open = false, onClose, className }: {
+export function ChatHistoryRail({ variant, open = false, onClose, className, homeLink = false }: {
   variant: 'rail' | 'drawer' | 'dropdown';
   open?: boolean;
   onClose?: () => void;
   className?: string;
+  // On a phone /chat hides the global TopBar, so this drawer becomes the only way back to the app — it
+  // then shows a "← dashboard" link at its top. Off everywhere the TopBar still carries navigation.
+  homeLink?: boolean;
 }) {
   const { t, locale } = useTranslation();
   const { toast } = useToast();
@@ -108,6 +112,16 @@ export function ChatHistoryRail({ variant, open = false, onClose, className }: {
 
   const body = (
     <div className="flex min-h-0 flex-1 flex-col">
+      {homeLink ? (
+        <Link
+          href="/dash"
+          onClick={onClose}
+          className="flex items-center gap-2 border-b border-border px-2 py-2 text-sm text-text-muted transition-colors hover:bg-elevated hover:text-text"
+        >
+          <ArrowLeft size={16} aria-hidden />
+          <span className="truncate">{t.nav.dashboard}</span>
+        </Link>
+      ) : null}
       {variant !== 'dropdown' ? (
         <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{t.chat.historyTitle}</span>

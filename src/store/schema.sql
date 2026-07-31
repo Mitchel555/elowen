@@ -53,8 +53,12 @@ CREATE TABLE IF NOT EXISTS mission_pr (
   fix_rounds INTEGER NOT NULL DEFAULT 0, last_feedback TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL);
+-- `id` is AUTOINCREMENT, not a bare rowid: ownership columns (tasks.created_by, missions.created_by)
+-- reference it, and a plain rowid is REUSED after the highest-numbered user is deleted — the next
+-- account created would silently inherit the deleted user's attribution. AUTOINCREMENT keeps the
+-- counter monotonic in sqlite_sequence so an id is never handed out twice. See db.ts v7.
 CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),
   is_admin INTEGER NOT NULL DEFAULT 0,
   allowed_execs TEXT NOT NULL DEFAULT '',
@@ -69,6 +73,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS auth_tokens (
   token TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
   scope TEXT NOT NULL DEFAULT 'full',
+  -- The task an 'agent'-scoped token was minted for; NULL for every other token (see db.ts).
+  task_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS user_projects (
@@ -143,6 +149,12 @@ CREATE TABLE IF NOT EXISTS brain_sessions (
   user_id INTEGER NOT NULL,
   title TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
+  -- The CONFIG provider entry id the conversation last ran on (BrainProviderEntry.id, not the registry
+  -- provider name). Stored beside `model` because a model id alone is ambiguous: two configured entries
+  -- can expose the same id, and resolveBrainModelRoute falls back to providers[0] when no provider is
+  -- given — so a respawn restoring only the model could reach a different provider than the one the
+  -- conversation was actually running on. Empty on rows written before this column existed.
+  provider TEXT NOT NULL DEFAULT '',
   -- The client-reported working directory the conversation belongs to (validated realpath; empty =
   -- cwd-less, e.g. web-dock sessions). Drives the CLI's default-start resolution: a CLI launched in a
   -- directory resumes the most recent unattached conversation with a matching work_dir.
@@ -226,7 +238,7 @@ CREATE TABLE IF NOT EXISTS brain_cards (
 CREATE TABLE IF NOT EXISTS brain_session_events (
   session_id TEXT NOT NULL,
   event_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd')),
+  kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent')),
   detail TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (session_id, event_id)

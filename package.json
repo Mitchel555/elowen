@@ -1,6 +1,6 @@
 {
   "name": "elowen",
-  "version": "0.27.78",
+  "version": "0.27.79",
   "description": "Elowen is a self-hosted personal AI agent you talk to: chat, act, automate and extend from the CLI, web, Discord, Telegram, Microsoft Teams or WhatsApp.",
   "license": "MIT",
   "type": "module",
@@ -40,7 +40,7 @@
     "README.md"
   ],
   "scripts": {
-    "prebuild": "node scripts/dist-integrity.mjs clean && npm run languages-check --silent",
+    "prebuild": "npm run languages-check --silent && node scripts/dist-integrity.mjs clean",
     "build": "tsc -p tsconfig.json && cp src/store/schema.sql dist/store/ && cp -r prompts dist/ && cp -r plugins dist/",
     "postbuild": "node scripts/dist-integrity.mjs chmod-bins && node scripts/dist-integrity.mjs verify",
     "check:dist": "node scripts/dist-integrity.mjs verify",
@@ -68,6 +68,7 @@
     "test:e2e:whatsapp": "npm run build --silent && node scripts/tests/whatsapp-e2e/whatsapp-roundtrip.mjs",
     "test:e2e:delegate": "npm run build --silent && node scripts/tests/delegate-e2e/run.mjs",
     "test:e2e:subagent": "npm run build --silent && node scripts/tests/subagent-e2e/run.mjs",
+    "test:e2e:workflow": "npm run build --silent && node scripts/tests/workflow-e2e/run.mjs",
     "test:install": "node scripts/install-smoke/run.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

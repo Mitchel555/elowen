@@ -45,4 +45,27 @@ describe('PlanJobStore', () => {
     expect(s.get(old.id)).toBeNull();              // long-settled job evicted
     expect(s.get(stillPlanning.id)).not.toBeNull(); // in-flight job retained regardless of age
   });
+
+  it('settles an in-flight job whose Pilot never came back, instead of polling "planning" forever', () => {
+    // Only the Pilot's `plan submit` settles a job. When its session dies (crash, killed pane) nothing
+    // else ever does, so the client polls a job that will never answer and the map keeps it for the
+    // daemon's lifetime. Past the planning window it must read as a definite failure.
+    let now = 0;
+    const s = new PlanJobStore(() => now);
+    const j = s.create({ goal: 'g', projectId: 1, epicId: null, dryRun: false });
+    now += 59 * 60_000;
+    expect(s.get(j.id)!.status).toBe('planning'); // still within the window — a slow plan is untouched
+    now += 2 * 60_000;
+    expect(s.get(j.id)!.status).toBe('failed');
+    expect(s.get(j.id)!.error).toBe('plan_timed_out');
+  });
+
+  it('prunes an in-flight job that timed out long ago (the map cannot grow unbounded)', () => {
+    let now = 0;
+    const s = new PlanJobStore(() => now);
+    const abandoned = s.create({ goal: 'g', projectId: 1, epicId: null, dryRun: false });
+    now += 61 * 60_000;
+    s.create({ goal: 'fresh', projectId: 1, epicId: null, dryRun: false }); // triggers prune
+    expect(s.get(abandoned.id)).toBeNull();
+  });
 });

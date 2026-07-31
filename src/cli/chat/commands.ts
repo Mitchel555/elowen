@@ -20,7 +20,7 @@ export function resolveThinkingLevel(value: string, levels: string[], labels: Re
 
 /** Local slash-command routing: returns the recognized command (with its argument) or null for a
  *  regular chat message. Pure, so the command surface is unit-testable without a TTY. */
-export function parseCommand(text: string): { cmd: 'quit' | 'new' | 'stop' | 'status' | 'stats' | 'restart' | 'sessions' | 'resume' | 'rename' | 'delete' | 'model' | 'reasoning' | 'fast' | 'theme' | 'cd' | 'editor' | 'keybinds' | 'statusline' | 'lsp' | 'tdd' | 'mcp' | 'skills' | 'tools' | 'goal' | 'subgoal' | 'compact' | 'plan' | 'build' | 'workflow' | 'yolo' | 'paste' | 'export' | 'help'; arg?: string } | null {
+export function parseCommand(text: string): { cmd: 'quit' | 'new' | 'stop' | 'status' | 'stats' | 'restart' | 'sessions' | 'resume' | 'rename' | 'delete' | 'model' | 'reasoning' | 'fast' | 'theme' | 'maskot' | 'cd' | 'editor' | 'keybinds' | 'statusline' | 'lsp' | 'tdd' | 'mcp' | 'skills' | 'tools' | 'goal' | 'subgoal' | 'compact' | 'plan' | 'build' | 'workflow' | 'yolo' | 'paste' | 'export' | 'help'; arg?: string } | null {
   const m = /^\/(\w+)(?:\s+(.+))?$/.exec(text.trim());
   if (!m) return null;
   switch (m[1]) {
@@ -38,6 +38,7 @@ export function parseCommand(text: string): { cmd: 'quit' | 'new' | 'stop' | 'st
     case 'reasoning': return { cmd: 'reasoning', arg: m[2] };
     case 'fast': return { cmd: 'fast', arg: m[2] };
     case 'theme': return { cmd: 'theme', arg: m[2] };
+    case 'maskot': return { cmd: 'maskot', arg: m[2] };
     case 'cd': return { cmd: 'cd', arg: m[2] };
     case 'editor': return { cmd: 'editor' };
     case 'keybinds': return { cmd: 'keybinds' };
@@ -380,6 +381,18 @@ export function wireSubmit(
             return;
           }
           pickers.openThemePicker();
+          return;
+        }
+        case 'maskot': {
+          // CLI-local appearance toggle: bare "/maskot" flips it, "/maskot on|off" forces. Persisted to
+          // cli-prefs.json only — never mirrored to the server (unlike /reasoning show), because the
+          // mascot is purely local chrome and a server mirror would fight the web dock.
+          const arg = command.arg?.trim().toLowerCase();
+          if (arg && arg !== 'on' && arg !== 'off') { rt.notice = color.dim('usage: /maskot · /maskot on · /maskot off'); render(); return; }
+          rt.showMascot = arg === 'on' ? true : arg === 'off' ? false : !rt.showMascot;
+          savePrefs({ showMascot: rt.showMascot });
+          rt.notice = color.dim(rt.showMascot ? 'Mascot shown' : 'Mascot hidden — /maskot brings it back');
+          render();
           return;
         }
         case 'editor': {

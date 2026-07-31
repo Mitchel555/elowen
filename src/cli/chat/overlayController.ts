@@ -11,6 +11,9 @@ export interface SuggestionGeometry {
   input: Component;
   notice: string;
   budget: LayoutBudget | null;
+  /** `/maskot` preference — the start-screen input sits higher when the flame is hidden, so the overlay
+   *  anchor must follow it or the slash suggestions detach from the input box. */
+  showMascot: boolean;
 }
 
 export type OverlayOptionsSource = OverlayOptions | (() => OverlayOptions);
@@ -211,7 +214,7 @@ export class OverlayController {
       const screenRows = Math.max(1, geometry.rows - TOP_RULE_ROWS);
       const inputRows = Math.min(geometry.input.render(boxWidth).length, Math.max(0, screenRows - 1));
       const noticeRows = geometry.notice ? geometry.notice.split('\n').length : 0;
-      const top = TOP_RULE_ROWS + startScreenInputTop(screenRows, inputRows, noticeRows) + inputRows;
+      const top = TOP_RULE_ROWS + startScreenInputTop(screenRows, inputRows, noticeRows, geometry.showMascot) + inputRows;
       const maxHeight = constrainRows(Math.min(15, Math.max(1, geometry.rows - top)));
       return {
         anchor: 'top-left', width: boxWidth, maxHeight,

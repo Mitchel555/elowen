@@ -25,6 +25,7 @@ export interface ChatStateSeed {
   processes?: ProcessInfo[];
   goal?: GoalView | null;
   showThoughts?: boolean;
+  showMascot?: boolean;
   mentionFrecency?: FrecencyMap;
   /** Locale for localized action labels (the composing-tool hint). Defaults to English. */
   locale?: ComposeLocale;
@@ -74,6 +75,8 @@ export class ChatState {
   private goalCommandRevision = 0;
   listed: { id: string; title: string }[] = [];
   showThoughts: boolean;
+  /** Show the flame mascot (start screen + rail). Local CLI-only chrome, toggled by `/maskot`. */
+  showMascot: boolean;
   /** Locale for localized CLI action labels — resolved once at startup, read by the render frame loop. */
   readonly locale: ComposeLocale;
   pendingImages: PendingImage[] = [];
@@ -99,6 +102,7 @@ export class ChatState {
     this.processes = seed.processes ?? [];
     this.currentGoal = seed.goal ?? null;
     this.showThoughts = seed.showThoughts ?? true;
+    this.showMascot = seed.showMascot ?? true;
     this.locale = seed.locale ?? 'en';
     this.mentionFrecency = seed.mentionFrecency ?? {};
   }

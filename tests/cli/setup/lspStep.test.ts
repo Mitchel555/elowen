@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { runLspStep, TS_SERVER_COMMAND } from '../../../src/cli/setup/steps/lsp.js';
 import type { WizardCtx } from '../../../src/cli/setup/types.js';
@@ -16,6 +16,12 @@ import * as p from '../../../src/cli/ui/prompts.js';
 const ctx = (): WizardCtx => ({ base: 'http://x', fetchFn: fetch, answers: {} });
 
 describe('cli/setup wizard LSP step', () => {
+  // vi.mock hoists ONE `select` mock for the whole file, so its call log carries from test to test. The
+  // first case asserts it was never called, which only held because it happened to run first — under a
+  // different order (vitest --sequence.shuffle, or simply another worker interleaving) it saw the calls
+  // the other cases made.
+  beforeEach(() => { vi.clearAllMocks(); });
+
   it('completes immediately (no prompt, no install) when the server is already on PATH', async () => {
     const c = ctx();
     const install = vi.fn();

@@ -15,3 +15,96 @@ export const pushUnsubscribeSchema = z.object({
 export const systemRestartSchema = z.object({
   target: z.enum(['daemon', 'web']),
 });
+
+/** Well-formed `{ bin, args, skipPermissions?, resume? }` provider entry. `bin`/`args` must be strings —
+ *  a non-string `bin` reaches `accessSync()`/a spawn call downstream and throws; the two flags default to
+ *  true when omitted, mirroring `ConfigStore.sanitizeProviders`' own default so a partial patch keeps
+ *  working exactly as before. */
+const providerConfigPatchSchema = z.object({
+  bin: z.string(),
+  args: z.string(),
+  skipPermissions: z.boolean().default(true),
+  resume: z.boolean().default(true),
+});
+
+/** The operator-tunable brain limits, all optional (a partial patch tunes one knob without resetting the
+ *  rest — `ConfigStore.clampBrainLimits` does the actual per-field clamp). */
+const brainLimitsPatchSchema = z.object({
+  toolOutputMaxLines: z.number().optional(),
+  toolOutputMaxChars: z.number().optional(),
+  toolResultInlineBytes: z.number().optional(),
+  elicitationTimeoutMs: z.number().optional(),
+  memoryRecallCount: z.number().optional(),
+  memoryRecallChars: z.number().optional(),
+  goalTurnBudget: z.number().optional(),
+  goalMaxTurns: z.number().optional(),
+  channelSessionCap: z.number().optional(),
+  delegateContextChars: z.number().optional(),
+});
+
+/** A patch to the daemon config (PUT /config, admin-only). Mirrors `ConfigPatch` field-for-field so a
+ *  malformed value is rejected with a clear 400 instead of reaching the store as a supposed
+ *  string/number/boolean it never was — the old `await c.req.json() as ConfigPatch` cast let e.g.
+ *  `modelNotes: { sonnet: 7 }` sail straight through and crash `modelsBlock()`'s `.trim()` downstream
+ *  (review-api-store-sol, finding 7). `brain.providers`/`brain.agentName` stay `unknown` here because
+ *  `ConfigPatch` itself declares them that way — `sanitizeBrainProviders` is their real guard, and the
+ *  same element-level sanitisers additionally run when reading stored JSON, since a database written by
+ *  an older build can already hold a bad value. */
+export const configPatchSchema = z.object({
+  allowedExecs: z.array(z.string()).optional(),
+  customModels: z.array(z.object({ label: z.string(), exec: z.string() })).optional(),
+  hiddenPresets: z.array(z.string()).optional(),
+  modelNotes: z.record(z.string(), z.string()).optional(),
+  autopilot: z.object({
+    model: z.string().optional(),
+    overseerModel: z.string().optional(),
+    apiUrl: z.string().optional(),
+    providerId: z.string().optional(),
+    apiKey: z.string().optional(),
+    notes: z.string().optional(),
+    prompt: z.string().optional(),
+    pilotExec: z.string().optional(),
+    overseerExec: z.string().optional(),
+    reviewOnDone: z.boolean().optional(),
+    tddMode: z.boolean().optional(),
+    prEnabled: z.boolean().optional(),
+    prBaseBranch: z.string().optional(),
+    prAutoOpen: z.boolean().optional(),
+    prVerifyCommand: z.string().optional(),
+    ghToken: z.string().optional(),
+  }).optional(),
+  providers: z.record(z.string(), providerConfigPatchSchema).optional(),
+  defaults: z.object({
+    exec: z.string().optional(),
+    autonomy: z.string().optional(),
+    maxSessions: z.number().optional(),
+  }).optional(),
+  security: z.object({ tokenTtlDays: z.number().optional() }).optional(),
+  sessionRetention: z.object({ enabled: z.boolean().optional(), days: z.number().optional() }).optional(),
+  autoUpdate: z.boolean().optional(),
+  lspEnabled: z.boolean().optional(),
+  plugins: z.object({
+    enabled: z.array(z.string()).optional(),
+    removed: z.array(z.string()).optional(),
+    config: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+  }).optional(),
+  brain: z.object({
+    providers: z.unknown().optional(),
+    agentName: z.unknown().optional(),
+    maxSteps: z.number().optional(),
+    modelContextWindows: z.record(z.string(), z.number()).optional(),
+    limits: brainLimitsPatchSchema.optional(),
+    hiddenOauth: z.array(z.string()).optional(),
+  }).optional(),
+  embedding: z.object({
+    providerId: z.string().optional(),
+    model: z.string().optional(),
+    baseUrl: z.string().optional(),
+    dimensions: z.number().nullable().optional(),
+  }).optional(),
+  categorization: z.object({
+    providerId: z.string().optional(),
+    model: z.string().optional(),
+    baseUrl: z.string().optional(),
+  }).optional(),
+});

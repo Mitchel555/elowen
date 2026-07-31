@@ -1,6 +1,7 @@
 import type { Db } from './db.js';
 import type { WorkflowNode, WorkflowUpdate } from '../brain/events.js';
 import { isSubagentSession } from '../brain/sessionId.js';
+import { logger } from '../shared/logger.js';
 
 /** Validated latest UI state of one delegated child. The child id is a first-class indexed column in
  *  brain_subagent_runs; this JSON state contains only bounded display data. */
@@ -77,6 +78,22 @@ export const syntheticRestartResultId = (parentSessionId: string, toolCallId: st
 
 const bounded = (value: string, max: number): string => value.length <= max ? value : value.slice(0, max);
 
+/** The delivery-path twin of `bounded` for the one field a parent reads as the ANSWER: an over-long result
+ *  keeps its END, because a report's conclusion is its last paragraph. Head-first is still right everywhere a
+ *  bound produces a preview (a task line, a snapshot row) and for an error, which leads with what broke.
+ *
+ *  Deliberate mirror of `clipTail` in plugins/subagent/lib/results.mjs — a plugin may not import daemon
+ *  sources and the daemon may not import a plugin's ESM, so the two carry the same note and the same
+ *  arithmetic. tests/store/brainStore.test.ts asserts they agree character for character. */
+const truncationNote = (dropped: number): string =>
+  `[truncated: first ${dropped} chars dropped, end kept — read it in full with DelegateRead]\n`;
+const boundedTail = (value: string, max: number): string => {
+  if (value.length <= max) return value;
+  const kept = Math.max(0, max - truncationNote(value.length).length);
+  // `slice(-0)` is `slice(0)` — the whole string — so a zero-width tail has to be spelled out.
+  return `${truncationNote(value.length - kept)}${kept === 0 ? '' : value.slice(-kept)}`;
+};
+
 // Bounds for a persisted workflow snapshot, mirroring the engine's own limits (dag.mjs MAX_NODES /
 // MAX_ID_CHARS, workflow.mjs SNAPSHOT_TASK_PREVIEW). The whole DAG re-fans on every tool event of every
 // node, so an unbounded blob would be a write amplifier as much as a DoS: `deps` dominates the ceiling,
@@ -134,6 +151,7 @@ function normalizeWorkflowState(raw: unknown): BrainWorkflowRun | undefined {
   if (typeof o.toolCallId !== 'string' || !o.toolCallId || o.toolCallId.length > 512) return undefined;
   if (o.status !== 'running' && o.status !== 'done' && o.status !== 'error' && o.status !== 'cancelled') return undefined;
   if (o.title !== undefined && typeof o.title !== 'string') return undefined;
+  if (o.background !== undefined && typeof o.background !== 'boolean') return undefined;
   if (!Array.isArray(o.nodes) || o.nodes.length > MAX_WORKFLOW_NODES) return undefined;
   const nodes: WorkflowNode[] = [];
   const seen = new Set<string>();
@@ -148,6 +166,11 @@ function normalizeWorkflowState(raw: unknown): BrainWorkflowRun | undefined {
     toolCallId: o.toolCallId,
     ...(typeof o.title === 'string' ? { title: bounded(o.title, 200) } : {}),
     status: o.status,
+    // Load-bearing, not display trivia: BrainService.sparedChildSessionIds reads it to spare a background
+    // workflow's node sessions from a parent abort, exactly as it spares a detached delegate's child.
+    // Dropping it here silently turned that sparing into dead code, so any stop/detach on the origin
+    // conversation killed every node of a running background workflow.
+    ...(o.background === true ? { background: true } : {}),
     nodes,
   };
 }
@@ -202,7 +225,7 @@ function normalizeSubagentResult(raw: unknown): Omit<BrainSubagentResult, 'paren
   return {
     id: o.id, toolCallId: o.toolCallId, sessionId: o.sessionId, status: o.status,
     task: bounded(o.task, 8_000),
-    ...(typeof o.result === 'string' ? { result: bounded(o.result, 100_000) } : {}),
+    ...(typeof o.result === 'string' ? { result: boundedTail(o.result, 100_000) } : {}),
     ...(typeof o.error === 'string' ? { error: bounded(o.error, 100_000) } : {}),
     tools: o.tools, ...(typeof o.tokens === 'number' ? { tokens: o.tokens } : {}), seconds: o.seconds,
     ...(typeof o.model === 'string' ? { model: bounded(o.model, 512) } : {}),
@@ -228,7 +251,9 @@ function normalizeWorkflowCompletion(
     toolCallId: o.toolCallId,
     status: o.status === 'done' ? 'done' : 'error',
     task: bounded(title, 8_000),
-    result: bounded(o.result, 100_000),
+    // A DAG summary is every node's result end to end, so it is the one payload here that really can exceed
+    // the ceiling — and cutting its head costs the FIRST nodes, not the last ones the parent was waiting for.
+    result: boundedTail(o.result, 100_000),
   };
 }
 
@@ -418,6 +443,43 @@ export class BrainDelegationStore {
     return out;
   }
 
+  /** Every parent session holding a sub-agent run or workflow row still marked `running`. Read ONCE at
+   *  daemon boot, where such a row is by definition a restart orphan — the in-memory registrations that
+   *  drove it died with the process. Deliberately not scoped to a user: the boot reconcile must reach the
+   *  channel and task sessions no owner `start()` ever visits. The `json_valid` guard is load-bearing —
+   *  `json_extract` THROWS on a malformed row, which would fail the query for every other session too. */
+  runningDelegationParentSessionIds(): string[] {
+    const rows = this.db.prepare(
+      `SELECT DISTINCT parent_session_id AS id FROM brain_subagent_runs
+        WHERE json_valid(state) AND json_extract(state, '$.status') = 'running'
+       UNION
+       SELECT DISTINCT parent_session_id AS id FROM brain_workflows
+        WHERE json_valid(state) AND json_extract(state, '$.status') = 'running'`
+    ).all() as { id: string }[];
+    return rows.map((row) => row.id);
+  }
+
+  /** Terminalize the `running` rows of one parent whose child relation no longer resolves — the child
+   *  session is gone, changed hands, or is no longer a direct child of this parent. Such a row is
+   *  invisible to getSubagentRuns (which JOINs the live relation), so the boot reconcile's per-run sweep
+   *  cannot reach it, and upsertSubagentRun would refuse to repair it for exactly the same reason: the
+   *  delegation would claim `running` in the DB forever. Only the status is rewritten, so the rest of the
+   *  recorded state survives. `json_valid` guards the rewrite — `json_set` on a malformed row yields NULL,
+   *  which would destroy the state instead of repairing it. Returns how many rows were repaired. */
+  terminalizeOrphanedSubagentRuns(parentSessionId: string): number {
+    return this.db.prepare(
+      `UPDATE brain_subagent_runs
+          SET state = json_set(state, '$.status', 'error'), updated_at = datetime('now')
+        WHERE parent_session_id = ?
+          AND json_valid(state) AND json_extract(state, '$.status') = 'running'
+          AND NOT EXISTS (
+            SELECT 1 FROM brain_sessions p
+              JOIN brain_sessions c ON c.id = brain_subagent_runs.child_session_id
+             WHERE p.id = brain_subagent_runs.parent_session_id
+               AND c.parent_session_id = p.id AND c.user_id = p.user_id)`
+    ).run(parentSessionId).changes;
+  }
+
   /** Persist a terminal child result before any attempt to wake the parent. Stable result/tool ids make
    * duplicate plugin callbacks idempotent; the durable direct-child relation is revalidated here. */
   enqueueSubagentResult(parentSessionId: string, raw: unknown): boolean {
@@ -503,8 +565,21 @@ export class BrainDelegationStore {
        AND parent_session_id = ? ORDER BY created_at, rowid`
     ).all(parentSessionId) as Record<string, unknown>[];
     return rows.flatMap((row): BrainSubagentResult[] => {
-      let payload: Record<string, unknown>;
-      try { payload = JSON.parse(String(row.payload)) as Record<string, unknown>; } catch { return []; }
+      // `null` and bare scalars are valid JSON, so parsing is not enough: reading `payload.result` off a
+      // `null` throws and kills the WHOLE drain, leaving every pending result of this parent undelivered
+      // over one bad row. Only an object payload is usable; anything else drops just its own row.
+      let parsed: unknown;
+      try { parsed = JSON.parse(String(row.payload)); } catch { parsed = undefined; }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        // The row stays pending but can never be delivered, so without this line the parent simply never
+        // hears back and nothing distinguishes that from a child still working. Mirrors the ingress-side
+        // "dropped sub-agent result" error in turnRunner: a lost result is never silent.
+        logger('brain-store').warn(
+          `unusable payload for pending delegated result ${String(row.result_id)} (parent ${parentSessionId}, tool ${String(row.tool_call_id)}) — dropped from the drain`
+        );
+        return [];
+      }
+      const payload = parsed as Record<string, unknown>;
       // A workflow row has no child session and a whole-DAG summary body, so it is read directly rather
       // than through the sub-agent validator (which requires a non-empty child sessionId).
       if (row.kind === 'workflow') {

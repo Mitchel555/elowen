@@ -2,14 +2,15 @@
 // slash-command/inline-keyboard interactions, voice (STT/TTS) and outbound posting. Mirrors the Discord
 // adapter feature-for-feature; the transport is grammY's Bot API instead of the Discord gateway/REST.
 import { Bot, InputFile, GrammyError } from 'grammy';
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { parseModelExec, buildReplyContext, stripForSpeech, withoutFooter } from './format.mjs';
 import { senderIds, senderIsAdmin, matchesId, displayNameOf } from './ids.mjs';
 import { buildAskKeyboard } from './ask.mjs';
 import { MESSAGES } from './messages.mjs';
 import { LiveMessage, postWithImages } from './stream.mjs';
-import { resolveDisplaySettings, updateDisplayOverrides } from './display.mjs';
+import { resolveDisplaySettings, updateDisplayOverrides, observesLiveEvents } from './display.mjs';
+import { buildRoleAccess, applyVisionModel } from '../../_shared/access.mjs';
+import { resolveImageFiles } from '../../_shared/images.mjs';
+import { voiceCreds, transcribeBuffer } from '../../_shared/voice.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
 import { isSteered } from '../../_shared/turnResult.mjs';
 
@@ -26,14 +27,6 @@ const CONTEXT_MAX = 200;                 // upper bound of own conversations the
 /** Read a numeric config field, clamped to [min,max], falling back to `def` when unset/invalid. */
 function cfgNum(cfg, key, def, min, max) {
   return Math.min(Math.max(Number(cfg?.[key]) || def, min), max);
-}
-
-/** A rolePolicy's extra per-role instructions, spliced into the turn's system prompt. */
-function rolePrompt(policy) {
-  const parts = [];
-  if (policy.name) parts.push(`The user you are talking to has the "${policy.name}" role.`);
-  if (policy.prompt) parts.push(policy.prompt);
-  return parts.join('\n') || undefined;
 }
 
 /** Coerce a user-supplied chat target into what grammY expects: a numeric id (private/group/channel) or
@@ -196,24 +189,7 @@ export class TelegramAdapter {
     const policies = Array.isArray(this.cfg.rolePolicies) ? this.cfg.rolePolicies : [];
     const match = policies.find((p) => p.roleId && ids.some((id) => matchesId(p.roleId, id)));
     if (!match) return { access: undefined };
-    const st = this.state.get(String(chatId));
-    const chosen = st.model;
-    return {
-      access: {
-        // admin:true = the operator's admin identity — full project scope + the full plugin toolset
-        // (trusted-chat). It does NOT grant the owner's Elowen* control-plane tools or API token: a shared
-        // group is never the verified owner's own chat, whatever policy the sender matched.
-        admin: match.admin === true,
-        projectIds: (match.projectIds ?? []).map(Number),
-        prompt: rolePrompt(match),
-        model: chosen ? { provider: chosen.provider, model: chosen.model } : undefined,
-        // Per-chat reasoning effort (set via /reasoning); empty = the model default.
-        thinkingLevel: typeof st.thinkingLevel === 'string' ? st.thinkingLevel : undefined,
-        fast: st.fast === true,
-        // Per-role tool allowlist (undefined or ['*'] = everything the session would normally get).
-        tools: Array.isArray(match.tools) && match.tools.length > 0 ? match.tools : undefined,
-      },
-    };
+    return { access: buildRoleAccess(match, this.state.get(String(chatId))) };
   }
 
   // ── inbound ──
@@ -316,8 +292,7 @@ export class TelegramAdapter {
 
     const reactions = this.cfg.reactions !== false;
     const display = resolveDisplaySettings(this.cfg, this.state.get(String(chatId)));
-    const observesLiveEvents = display.toolActivity !== 'off' || display.answerMode === 'live' || this.cfg.showReasoning === true;
-    const stream = observesLiveEvents ? new LiveMessage(this, chatId, m.message_id, from.id, display) : null;
+    const stream = observesLiveEvents(display, this.cfg) ? new LiveMessage(this, chatId, m.message_id, from.id, display) : null;
     // Even with live streaming OFF, AskUserQuestion must still render its choice message — otherwise the
     // parked turn hangs until the timeout. Route events through the stream when present, else handle only `ask`.
     const onEvent = stream
@@ -330,13 +305,7 @@ export class TelegramAdapter {
     // Image turns steer to the configured vision model — the chat's normal model may be text-only.
     const vision = images.length ? parseModelExec(this.cfg.visionModel) : null;
     let turnAccess = access;
-    if (vision) {
-      const models = await this.listModels().catch(() => []);
-      const visionOption = models.find((mo) => mo.model === vision.model && (!vision.provider || mo.provider === vision.provider));
-      // Fast belongs to the normal chat profile. A non-OAuth vision hop clears it only for this temporary
-      // request; persisted chat state stays untouched and resumes on the normal model.
-      turnAccess = { ...access, model: vision, ...(!visionOption?.fastAvailable ? { fast: false } : {}) };
-    }
+    if (vision) turnAccess = applyVisionModel(access, vision, await this.listModels().catch(() => []));
 
     try {
       const replyText = await this.handler(
@@ -361,7 +330,7 @@ export class TelegramAdapter {
       clearInterval(typing);
       if (stream) await stream.fail(e?.message ?? e); // settle live tools before the error reply lands below them
       if (reactions) void this.react(chatId, m.message_id, '👎').catch(() => {});
-      await this.reply(chatId, `⚠️ ${e?.message ?? e}`, m.message_id).catch(() => {});
+      await this.reply(chatId, this.msg.error(e?.message ?? e), m.message_id).catch(() => {});
     }
   }
 
@@ -725,17 +694,7 @@ export class TelegramAdapter {
   /** Load up to the configured cap (default MAX_UPLOAD_IMAGES) of generated images by validated name from
    *  the image plugins' data dirs. A missing/unreadable file is skipped silently. */
   resolveImageFiles(names) {
-    const files = [];
-    const cap = cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10);
-    for (const name of names.slice(0, cap)) {
-      for (const dir of this.imageDirs) {
-        const p = join(dir, name);
-        if (!existsSync(p)) continue;
-        try { files.push({ name, data: readFileSync(p) }); } catch { /* unreadable → skip */ }
-        break;
-      }
-    }
-    return files;
+    return resolveImageFiles(this.imageDirs, names, cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10));
   }
 
   // ── voice ──
@@ -743,30 +702,17 @@ export class TelegramAdapter {
   /** Resolve the voice provider's credentials (central brain provider chosen in config) → { apiKey,
    *  baseUrl }, or null when unset/keyless. baseUrl carries the audio endpoints (e.g. …/v1). */
   voiceCreds() {
-    const id = typeof this.cfg.voiceProvider === 'string' ? this.cfg.voiceProvider.trim() : '';
-    if (!id) return null;
-    const p = this.resolveProvider(id);
-    if (!p?.apiKey || !p.baseUrl) return null;
-    return { apiKey: p.apiKey, baseUrl: String(p.baseUrl).replace(/\/+$/, '') };
+    return voiceCreds(this.cfg, this.resolveProvider);
   }
 
-  /** Transcribe one audio clip via Whisper — download the Telegram file, then multipart it to the
-   *  provider's /audio/transcriptions. Returns the trimmed text, or null when empty/oversized/keyless. */
+  /** Transcribe one audio clip via Whisper — download the Telegram file, then hand the buffer to the
+   *  provider. Returns the trimmed text, or null when empty/keyless; throws when the clip is oversized. */
   async transcribe(clip) {
     const creds = this.voiceCreds();
     if (!creds) return null;
     if ((clip.size ?? 0) > MAX_AUDIO_BYTES) throw new Error('audio over Whisper size limit');
     const buf = await this.downloadFile(clip.fileId);
-    const form = new FormData();
-    form.append('file', new Blob([buf], { type: clip.type || 'audio/ogg' }), clip.name || 'audio.ogg');
-    form.append('model', String(this.cfg.sttModel || 'whisper-1'));
-    const res = await fetch(`${creds.baseUrl}/audio/transcriptions`, {
-      method: 'POST', headers: { authorization: `Bearer ${creds.apiKey}` }, body: form,
-    });
-    if (!res.ok) throw new Error(`STT HTTP ${res.status}`);
-    const j = await res.json().catch(() => ({}));
-    const t = typeof j?.text === 'string' ? j.text.trim() : '';
-    return t || null;
+    return transcribeBuffer(creds, buf, { name: clip.name, type: clip.type, model: this.cfg.sttModel });
   }
 
   /** Whether spoken replies are on for a chat: the per-chat /voice toggle wins, else cfg.tts. */

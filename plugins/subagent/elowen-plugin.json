@@ -11,10 +11,14 @@
       "DelegateResult",
       "DelegateModels",
       "DelegateList",
+      "DelegateRead",
       "DelegateContinue",
+      "DelegateStop",
       "WorkflowStart",
       "WorkflowAddNodes",
-      "WorkflowStatus"
+      "WorkflowStatus",
+      "WorkflowResume",
+      "WorkflowStop"
     ],
     "platforms": [
       "subagent"
@@ -26,16 +30,21 @@
     "DelegateResult": "\ud83d\udce5",
     "DelegateModels": "\ud83e\udd1d",
     "DelegateList": "\ud83d\udccb",
+    "DelegateRead": "\ud83d\udcd6",
     "DelegateContinue": "\u2709\ufe0f",
+    "DelegateStop": "\ud83d\uded1",
     "WorkflowStart": "\ud83d\udd00",
     "WorkflowAddNodes": "\u2795",
-    "WorkflowStatus": "\ud83d\udcca"
+    "WorkflowStatus": "\ud83d\udcca",
+    "WorkflowResume": "\u25b6\ufe0f",
+    "WorkflowStop": "\ud83d\uded1"
   },
   "planSafe": [
     "DelegateStatus",
     "DelegateResult",
     "DelegateModels",
     "DelegateList",
+    "DelegateRead",
     "WorkflowStatus"
   ]
 }

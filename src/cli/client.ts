@@ -14,7 +14,6 @@ export class ElowenClient {
   createTask(input: unknown) { return this.req('/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }); }
   ready() { return this.req('/tasks/ready'); }
   sessions() { return this.req('/sessions'); }
-  engage(input: unknown) { return this.req('/missions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }); }
   close(taskId: string, opts?: { summary?: string; outcome?: string }) {
     return this.req(`/tasks/${encodeURIComponent(taskId)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 'closed', result_summary: opts?.summary, outcome: opts?.outcome }) });
   }

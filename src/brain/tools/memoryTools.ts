@@ -91,6 +91,9 @@ function memoryAdd(d: MemoryToolDeps) {
         { body, kind: p.kind, importance: p.importance, source: 'user' },
         `user:${userId}`, 'added via MemoryAdd tool',
       );
+      // Categorization used to hang off the post-turn curator alone, so a memory the agent stored through
+      // this tool stayed uncategorized forever. Same fire-and-forget the curator has always done.
+      d.categorizer.classifyNewMemory(userId, row.id, `user:${userId}`);
       return text(`Stored memory #${row.id}.`);
     },
   });

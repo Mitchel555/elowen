@@ -241,4 +241,67 @@ describe('admin gates & input validation (batch 1 audit fixes)', () => {
     expect(cleanup).toHaveBeenCalledWith('m-elowen-ep'); // but the worktree is still freed
     expect(db.prepare('SELECT COUNT(*) c FROM mission_pr').get()).toEqual({ c: 0 }); // cascade pruned the row
   });
+
+  it('DELETE /tasks/:id removes an epic\'s mission WITHOUT the ?subtree=1 flag — decided by the task\'s real type', async () => {
+    const disengage = vi.fn().mockResolvedValue(undefined);
+    const cleanup = vi.fn().mockResolvedValue(undefined);
+    const { app, adminTok, tasks, db } = setup({ engine: { disengage }, missionGit: { cleanup } });
+    tasks.create({ id: 'elowen-ep2', project_id: 1, title: 'Epic', type: 'epic' });
+    tasks.create({ id: 'elowen-c3', project_id: 1, title: 'C3', parent_id: 'elowen-ep2' });
+    db.prepare("INSERT INTO missions (id,epic_id,autonomy,state) VALUES ('m-elowen-ep2','elowen-ep2','L3','active')").run();
+
+    // Deliberately no ?subtree=1 — a plain delete of an epic must still disengage its mission and free
+    // its worktree BEFORE the rows disappear, not just remove the mission row from the DB.
+    const res = await app.request('/tasks/elowen-ep2', { method: 'DELETE', headers: { authorization: `Bearer ${adminTok}` } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, tasks: 2 });
+    expect(disengage).toHaveBeenCalledWith('m-elowen-ep2');
+    expect(cleanup).toHaveBeenCalledWith('m-elowen-ep2');
+    expect(tasks.get('elowen-ep2')).toBeNull();
+    expect(tasks.get('elowen-c3')).toBeNull();
+    expect(db.prepare('SELECT COUNT(*) c FROM missions').get()).toEqual({ c: 0 });
+  });
+
+  it('DELETE /tasks/:id stops a running leaf task\'s own tmux session before removing the row', async () => {
+    const { app, adminTok, tasks, tmux } = setup();
+    tasks.create({ id: 'elowen-leaf', project_id: 1, title: 'Leaf', labels: ['agent:Nova'] });
+    tasks.setStatus('elowen-leaf', 'in_progress');
+    tmux.setPane('elowen-Nova', ''); // simulate the live agent session
+
+    const res = await app.request('/tasks/elowen-leaf', { method: 'DELETE', headers: { authorization: `Bearer ${adminTok}` } });
+    expect(res.status).toBe(200);
+    expect(await tmux.list()).not.toContain('elowen-Nova'); // its agent was stopped, not orphaned
+    expect(tasks.get('elowen-leaf')).toBeNull();
+  });
+
+  it('POST /admin/cleanup frees a paused mission\'s worktree even though it is not "live"', async () => {
+    const cleanup = vi.fn().mockResolvedValue(undefined);
+    const { app, adminTok, tasks, db } = setup({ missionGit: { cleanup } });
+    tasks.create({ id: 'elowen-paused-ep', project_id: 1, title: 'Epic', type: 'epic' });
+    // 'paused' is not in MissionStore.live() ('active'/'stalled' only), so the disengage sweep never
+    // reaches it — but it still holds a worktree (pause keeps it for resume). cleanup() must still run.
+    db.prepare("INSERT INTO missions (id,epic_id,autonomy,state) VALUES ('m-elowen-paused-ep','elowen-paused-ep','L3','paused')").run();
+
+    const res = await app.request('/admin/cleanup', post(adminTok, {}));
+    expect(res.status).toBe(200);
+    expect(cleanup).toHaveBeenCalledWith('m-elowen-paused-ep');
+  });
+
+  it('PATCH /tasks/:id addDep 400s on a dangling or cross-project edge, applies a valid one', async () => {
+    const { app, adminTok, tasks, db } = setup();
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (2,'other','/o2')").run();
+    tasks.create({ id: 'elowen-a', project_id: 1, title: 'A' });
+    tasks.create({ id: 'elowen-b', project_id: 1, title: 'B' });
+    tasks.create({ id: 'elowen-foreign', project_id: 2, title: 'Foreign' });
+
+    const dangling = await app.request('/tasks/elowen-a', patch(adminTok, { addDep: 'nope' }));
+    expect(dangling.status).toBe(400);
+    const cross = await app.request('/tasks/elowen-a', patch(adminTok, { addDep: 'elowen-foreign' }));
+    expect(cross.status).toBe(400);
+    expect(tasks.depsFor('elowen-a')).toEqual([]);
+
+    const ok = await app.request('/tasks/elowen-a', patch(adminTok, { addDep: 'elowen-b' }));
+    expect(ok.status).toBe(200);
+    expect(tasks.depsFor('elowen-a')).toEqual(['elowen-b']);
+  });
 });

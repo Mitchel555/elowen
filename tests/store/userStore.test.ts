@@ -48,8 +48,25 @@ describe('UserStore', () => {
     const u = users.create('a', 'x');
     const full = users.issueToken(u.id);                       // default scope
     const agent = users.issueToken(u.id, 'agent');
-    expect(users.principalForToken(full)).toEqual({ user: expect.objectContaining({ id: u.id }), scope: 'full' });
+    expect(users.principalForToken(full)).toEqual({ user: expect.objectContaining({ id: u.id }), scope: 'full', taskId: null });
     expect(users.principalForToken(agent)?.scope).toBe('agent');
+  });
+  it('binds a per-task agent token to its task and keeps it apart from the shared service token', () => {
+    const u = users.create('a', 'x');
+    const shared = users.ensureAgentToken(u.id);
+    const forA = users.ensureAgentTokenForTask(u.id, 'task-a');
+    const forB = users.ensureAgentTokenForTask(u.id, 'task-b');
+    expect(new Set([shared, forA, forB]).size).toBe(3);
+    expect(users.principalForToken(forA)).toMatchObject({ scope: 'agent', taskId: 'task-a' });
+    expect(users.principalForToken(shared)?.taskId).toBeNull();
+    // Reused within TTL, so a re-spawn / daemon restart keeps the same worker credential valid.
+    expect(users.ensureAgentTokenForTask(u.id, 'task-a')).toBe(forA);
+    // A boot-time ensureAgentToken must neither return nor sweep away a live worker's bound token.
+    expect(users.ensureAgentToken(u.id)).toBe(shared);
+    users.revokeToken(shared);
+    expect(users.ensureAgentToken(u.id)).not.toBe(forA);
+    expect(users.principalForToken(forA)?.taskId).toBe('task-a');
+    expect(users.principalForToken(forB)?.taskId).toBe('task-b');
   });
   it('ensureAgentToken reuses an existing valid agent token across restarts, mints when absent', () => {
     const u = users.create('a', 'x');
@@ -85,6 +102,28 @@ describe('UserStore', () => {
     expect(store.count()).toBe(0);
     expect(store.principalForToken(t)).toBeNull();
     expect(db.prepare('SELECT COUNT(*) c FROM user_projects WHERE user_id = ?').get(u.id)).toEqual({ c: 0 });
+  });
+
+  // Regression (review-api-store-sol finding 3): `users.id` is a plain rowid, not AUTOINCREMENT, so a
+  // deleted user's id is typically reused by the next-created account. Before this fix a task's or
+  // mission's `created_by` kept pointing at that id, so the NEW account silently inherited the old
+  // owner's prompt attribution and mission notifications. The rows themselves must survive — only the
+  // attribution is cleared, exactly like a task surviving its epic's deletion elsewhere in the store.
+  it('nulls created_by on tasks and missions instead of leaving it to be inherited by a reused id', () => {
+    const db = openDb(':memory:');
+    const store = new UserStore(db);
+    const u = store.create('a', 'x');
+    db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/var/www/elowen')").run();
+    db.prepare("INSERT INTO tasks (id,project_id,title,created_by) VALUES ('t1',1,'Task',?)").run(u.id);
+    db.prepare("INSERT INTO missions (id,epic_id,autonomy,created_by) VALUES ('m1','t1','manual',?)").run(u.id);
+
+    store.delete(u.id);
+
+    expect(db.prepare('SELECT created_by FROM tasks WHERE id = ?').get('t1')).toEqual({ created_by: null });
+    expect(db.prepare('SELECT created_by FROM missions WHERE id = ?').get('m1')).toEqual({ created_by: null });
+    // The rows themselves are untouched — this clears attribution, it does not cascade-delete work.
+    expect(db.prepare('SELECT COUNT(*) c FROM tasks').get()).toEqual({ c: 1 });
+    expect(db.prepare('SELECT COUNT(*) c FROM missions').get()).toEqual({ c: 1 });
   });
 
   it('ensureAdvisorToken reuses a valid advisor token and resolves as full scope', () => {

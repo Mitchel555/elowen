@@ -72,6 +72,19 @@ describe('TranscriptModel', () => {
     expect(model.turnAt(3)).toEqual({ role: 'event', events: [{ id: 'evt-3', kind: 'model', detail: 'anthropic/claude' }] });
   });
 
+  it('discards a you-turn from behind an interleaved marker, not only when it is the trailing turn', () => {
+    const model = new TranscriptModel([]);
+    model.apply({ type: 'user', text: 'aborted question', durableId: 'dur-1' });
+    // A display marker lands AFTER the bubble (a user turn starts a fresh marker block), so the you-turn is
+    // no longer the last turn — popping only a trailing you-turn would leave it stranded.
+    expect(model.apply({ type: 'session-event', id: 'evt-1', kind: 'mode', detail: 'Workflow', at: '2026-07-16T09:00:00.000Z' })).toBe(true);
+    expect(model.apply({ type: 'discard_user', durableId: 'dur-1', text: 'aborted question' })).toBe(true);
+    // The you bubble is gone; the interleaved marker turn survives.
+    const roles: string[] = [];
+    for (let i = 0; i < model.turnCount; i++) { const turn = model.turnAt(i); if (turn) roles.push(turn.role); }
+    expect(roles).not.toContain('you');
+  });
+
   it('collapses a consecutive run of durable markers from history into one turn', () => {
     const model = new TranscriptModel([
       { role: 'user', text: 'hi' },

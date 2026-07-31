@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openDb, type Db } from '../../src/store/db.js';
 import { BrainStore, SESSION_EVENT_KINDS, syntheticRestartResultId } from '../../src/store/brainStore.js';
+import { rollupDroppedUsage } from '../../src/store/brainUsageStore.js';
 import { planSlug } from '../../src/shared/planSlug.js';
+
+// The delivery path's tail truncation is a deliberate mirror of the subagent plugin's (neither side can
+// import the other). Loading the plugin copy here is what keeps the two from drifting apart.
+const { clipTail } = await import(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../plugins/subagent/lib/results.mjs')
+) as { clipTail(text: string, limit: number): string };
 
 describe('BrainStore', () => {
   let store: BrainStore;
@@ -236,6 +245,46 @@ describe('BrainStore', () => {
     })).toBe(false);
   });
 
+  // The last bound a delegated result passes before it is delivered to the parent. Over the ceiling it keeps
+  // its END — a report's conclusion is its last paragraph — and says so in the same words the plugin uses.
+  it('keeps the END of an over-long result on the delivery path, exactly as the plugin does', () => {
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+    store.upsertSubagentRun('root', {
+      id: 'delegate-1', sessionId: 'child', status: 'done', task: 'inspect', tools: 1, seconds: 1,
+    });
+    const conclusion = 'CONCLUSION: the lock is never released on the error path.';
+    const report = `OPENING: how I looked.\n${'y'.repeat(120_000)}\n${conclusion}`;
+    expect(store.enqueueSubagentResult('root', {
+      id: 'dlg-long', toolCallId: 'delegate-1', sessionId: 'child', status: 'done', task: 'inspect',
+      result: report, tools: 1, seconds: 1,
+    })).toBe(true);
+
+    const stored = store.pendingSubagentResults('root')[0]!.result!;
+    expect(stored.endsWith(conclusion)).toBe(true);
+    expect(stored).not.toContain('OPENING: how I looked.');
+    expect(stored).toMatch(/^\[truncated: first \d+ chars dropped, end kept — read it in full with DelegateRead\]\n/);
+    expect(stored.length).toBeLessThanOrEqual(100_000);
+    expect(stored).toBe(clipTail(report, 100_000)); // the two copies must not drift
+  });
+
+  // A DAG summary is every node's result end to end, so it is the payload that really can exceed the
+  // ceiling — and cutting its head costs the FIRST nodes, not the last ones the parent was waiting for.
+  it('keeps the END of an over-long workflow summary too', () => {
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    expect(store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wfcall-1', status: 'done', nodes: [] })).toBe(true);
+    const lastNode = '[write] DONE\nthe document is published.';
+    const summary = `[gather] DONE\n${'y'.repeat(120_000)}\n${lastNode}`;
+    expect(store.enqueueWorkflowResult('root', {
+      id: 'wf-1', toolCallId: 'wfcall-1', status: 'done', result: summary,
+    })).toBe(true);
+
+    const stored = store.pendingSubagentResults('root')[0]!.result!;
+    expect(stored.endsWith(lastNode)).toBe(true);
+    expect(stored).not.toContain('[gather] DONE');
+    expect(stored).toBe(clipTail(summary, 100_000));
+  });
+
   describe('workflow results share the delegated-result inbox with a kind discriminator', () => {
     it('accepts a workflow completion linked to a known (parent, tool-call) DAG and reads it kind-aware', () => {
       store.createSession({ id: 'root', userId: 1, model: 'm' });
@@ -289,6 +338,52 @@ describe('BrainStore', () => {
       expect(pending.map((row) => row.kind).sort()).toEqual(['subagent', 'workflow']);
       expect(pending.find((row) => row.kind === 'subagent')).toMatchObject({ id: 'dlg-1', sessionId: 'child', result: 'clear' });
       expect(pending.find((row) => row.kind === 'workflow')).toMatchObject({ id: 'wf-1', sessionId: '', result: 'dag done' });
+    });
+
+    // `null` and bare scalars are valid JSON, so a payload that parses is not necessarily readable: the
+    // workflow branch reads `payload.result` directly, and one such row used to throw out of the whole
+    // drain — leaving every healthy pending result of that parent undelivered forever.
+    it('drops a payload that is not an object without killing the rest of the drain', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+      store.upsertSubagentRun('root', { id: 'dlg-call', sessionId: 'child', status: 'done', task: 'inspect', tools: 1, seconds: 1 });
+      expect(store.enqueueSubagentResult('root', {
+        id: 'dlg-1', toolCallId: 'dlg-call', sessionId: 'child', status: 'done', task: 'inspect', result: 'clear', tools: 1, seconds: 1,
+      })).toBe(true);
+      const corruptPayload = (resultId: string, payload: string) =>
+        db.prepare(
+          `INSERT INTO brain_subagent_results
+             (result_id, parent_session_id, tool_call_id, child_session_id, kind, workflow_id, status, task, payload)
+           VALUES (?, 'root', ?, '', 'workflow', ?, 'done', 'dag', ?)`
+        ).run(resultId, `wf-call-${resultId}`, resultId, payload);
+      corruptPayload('wf-null', 'null');
+      corruptPayload('wf-number', '7');
+      corruptPayload('wf-broken', '{oops');
+
+      const pending = store.pendingSubagentResults('root');
+      expect(pending.map((row) => row.id)).toEqual(['dlg-1']);
+      expect(pending[0]).toMatchObject({ result: 'clear' });
+    });
+
+    // Dropping the row is right, dropping it SILENTLY is not: the parent is simply never woken, which is
+    // indistinguishable from a delegate still working. The warning is the only trace such a loss leaves.
+    it('warns about the result it drops so the loss is traceable', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        store.createSession({ id: 'root', userId: 1, model: 'm' });
+        store.upsertWorkflowRun('root', { id: 'wf-1', toolCallId: 'wf-call', status: 'running', nodes: [] });
+        db.prepare(
+          `INSERT INTO brain_subagent_results
+             (result_id, parent_session_id, tool_call_id, child_session_id, kind, workflow_id, status, task, payload)
+           VALUES ('wf-1', 'root', 'wf-call', '', 'workflow', 'wf-1', 'done', 'dag', '{oops')`
+        ).run();
+
+        expect(store.pendingSubagentResults('root')).toEqual([]);
+        expect(warn.mock.calls.map((call) => String(call[0])).join('\n'))
+          .toMatch(/unusable payload for pending delegated result wf-1 .*parent root.*tool wf-call/);
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 
@@ -365,6 +460,27 @@ describe('BrainStore', () => {
     const msgs = store.getMessages('s1');
     expect(msgs.map((m) => m.id)).toEqual(['m1', 'm2']);
     expect(JSON.parse(msgs[0]!.content)).toEqual({ text: 'hi' });
+  });
+
+  it('deleteMessagesFrom removes a row and every message after it, keeping earlier ones', () => {
+    store.createSession({ id: 's1', userId: 7, model: 'm' });
+    store.appendMessage({ id: 'a1', sessionId: 's1', parentId: null, role: 'assistant', content: { text: 'earlier reply' } });
+    store.appendMessage({ id: 'u1', sessionId: 's1', parentId: null, role: 'user', content: { text: 'aborted question' } });
+    store.appendMessage({ id: 'frag', sessionId: 's1', parentId: 'u1', role: 'assistant', content: { text: 'partial answer' } });
+
+    // Discarding the aborted turn: from the user row onward (the row + its partial assistant fragment).
+    expect(store.deleteMessagesFrom('s1', 'u1')).toBe(2);
+    expect(store.getMessages('s1').map((m) => m.id)).toEqual(['a1']);
+  });
+
+  it('deleteMessagesFrom returns 0 for an unknown id or a foreign session, deleting nothing', () => {
+    store.createSession({ id: 's1', userId: 7, model: 'm' });
+    store.createSession({ id: 's2', userId: 7, model: 'm' });
+    store.appendMessage({ id: 'u1', sessionId: 's1', parentId: null, role: 'user', content: { text: 'q' } });
+    expect(store.deleteMessagesFrom('s1', 'nope')).toBe(0);
+    // The id exists but in another session — the session guard must stop it deleting across sessions.
+    expect(store.deleteMessagesFrom('s2', 'u1')).toBe(0);
+    expect(store.getMessages('s1').map((m) => m.id)).toEqual(['u1']);
   });
 
   it('scopes sessions per user', () => {
@@ -874,6 +990,22 @@ describe('BrainStore', () => {
         expect(days.find((d) => d.day === '2026-06-20')?.tokens).toBe(5);
       });
 
+      it('leaves an UNDATED dropped row undated, so compaction cannot conjure spend onto a new day', () => {
+        const compactMs = Date.parse('2026-06-20T00:00:00Z');
+        store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+        // A legacy assistant row carrying usage but NO `$.timestamp`: the day/model views exclude it
+        // (`ts IS NOT NULL`) BEFORE the compaction, so they must still exclude it after — dating its
+        // bucket would make a compaction add historical spend to the day it happened to run on.
+        store.appendMessage({
+          id: 'undated', sessionId: 'brain-a', parentId: null, role: 'assistant',
+          content: { role: 'assistant', model: 'claude-opus-4-8', usage: { totalTokens: 70, cost: { total: 0.07 } } },
+        });
+        usageMsg('brain-a', 'keep', { totalTokens: 5, cost: 0.005 }, compactMs, 'claude-opus-4-8');
+        store.compactSessionMessages('brain-a', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary', summary: 's', timestamp: compactMs } }, 1);
+        expect(store.usageByModel(1)[0]!.usage.total).toBe(5);
+        expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(5);
+      });
+
       it('chains across a second compaction without losing the earlier rollup', () => {
         store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
         usageMsg('brain-a', 'a', { totalTokens: 100, cost: 0.1 });
@@ -894,6 +1026,97 @@ describe('BrainStore', () => {
         store.compactSessionMessages('brain-a', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary' } }, 1);
         expect(JSON.parse(store.getMessages('brain-a')[0]!.content)).not.toHaveProperty('usageRollup');
       });
+    });
+  });
+
+  describe('corrupt message content', () => {
+    // appendMessage always stringifies, so only a hand-edited DB, a truncated restore or a partial write
+    // leaves a row like these. SQLite's json_extract/json_each THROW on malformed JSON, so without the
+    // json_valid guards ONE such row fails the whole aggregate and every session of that user loses its
+    // numbers — the bad row must contribute nothing instead.
+    const raw = (id: string, sessionId: string, role: string, content: string) =>
+      db.prepare('INSERT INTO brain_messages (id, session_id, parent_id, role, content) VALUES (?, ?, NULL, ?, ?)')
+        .run(id, sessionId, role, content);
+    const healthy = (id: string, sessionId: string, totalTokens: number, cost: number) =>
+      store.appendMessage({
+        id, sessionId, parentId: null, role: 'assistant',
+        content: {
+          role: 'assistant', model: 'claude-opus-4-8', timestamp: Date.parse('2026-01-10T00:00:00Z'),
+          usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens, cost: { total: cost } },
+        },
+      });
+
+    beforeEach(() => {
+      store.createSession({ id: 'brain-a', userId: 1, model: 'claude-opus-4-8' });
+      healthy('ok', 'brain-a', 100, 0.1);
+    });
+
+    it('isolates a malformed assistant row from usageByModel, usageByDay and tokenTotals', () => {
+      raw('bad', 'brain-a', 'assistant', '{"usage": {"totalTokens": 5');
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+      expect(store.tokenTotals(1)['brain-a']).toBe(100);
+    });
+
+    it('isolates a malformed compaction divider and a rollup that is not an array of buckets', () => {
+      raw('bad-divider', 'brain-a', 'compaction', '{"role": "compactionSummary", "usageRollup": [');
+      raw('scalar-rollup', 'brain-a', 'compaction', '{"role":"compactionSummary","usageRollup":"boom"}');
+      raw('scalar-bucket', 'brain-a', 'compaction', '{"role":"compactionSummary","usageRollup":["boom"]}');
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+    });
+
+    it('reads a JSON null row as carrying no usage rather than throwing', () => {
+      raw('null-row', 'brain-a', 'assistant', 'null');
+      raw('null-divider', 'brain-a', 'compaction', 'null');
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.tokenTotals(1)['brain-a']).toBe(100);
+    });
+
+    // Validity is not the same as the right TYPE. SQLite coerces a numeric-looking STRING in SUM(), while
+    // rollupDroppedUsage() (which re-folds these very fields when a compaction drops the rows) counts only
+    // real numbers — so an untyped read makes a session's historical totals CHANGE when it is compacted.
+    it('ignores usage fields that are strings rather than numbers, so compaction cannot move the totals', () => {
+      raw('numeric-string', 'brain-a', 'assistant', JSON.stringify({
+        role: 'assistant', model: 'claude-opus-4-8', timestamp: Date.parse('2026-01-10T00:00:00Z'),
+        usage: { totalTokens: '500', output: '400', cost: { total: '9.9' } }, durationMs: '1000',
+      }));
+      raw('word-string', 'brain-a', 'assistant', JSON.stringify({
+        role: 'assistant', model: 'claude-opus-4-8', timestamp: Date.parse('2026-01-10T00:00:00Z'),
+        usage: { totalTokens: 'lots' },
+      }));
+      const [row] = store.usageByModel(1);
+      expect(row!.usage.total).toBe(100);
+      expect(row!.usage.output).toBe(2);
+      expect(row!.usage.costUsd).toBeCloseTo(0.1); // the "9.9" string never reaches the sum
+      expect(row!.usage.outputTps).toBeNull();     // nor does a stringly-typed duration fake a speed
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+      // The session panel reads the SAME field with its own SQL: an untyped read there would show 600
+      // next to the Stats page's 100 for one session, and drop back to 100 the moment it compacts.
+      expect(store.tokenTotals(1)['brain-a']).toBe(100);
+      // What the SQL counts must be exactly what a compaction of the same rows would carry forward.
+      expect(rollupDroppedUsage(store.getMessages('brain-a'))!.reduce((s, b) => s + b.totalTokens, 0)).toBe(100);
+    });
+
+    it('ignores a rollup bucket that is a scalar or a double-serialized object', () => {
+      const bucket = { model: 'claude-opus-4-8', totalTokens: 500, at: Date.parse('2026-01-10T00:00:00Z') };
+      // A bucket stored as a JSON STRING containing an object: `json_valid` says yes, `json_extract` reads
+      // right through it, so it used to be counted twice-serialized.
+      raw('serialized-bucket', 'brain-a', 'compaction', JSON.stringify({ role: 'compactionSummary', usageRollup: [JSON.stringify(bucket)] }));
+      raw('number-bucket', 'brain-a', 'compaction', JSON.stringify({ role: 'compactionSummary', usageRollup: [42] }));
+      raw('string-field-bucket', 'brain-a', 'compaction', JSON.stringify({
+        role: 'compactionSummary', usageRollup: [{ ...bucket, totalTokens: '500' }],
+      }));
+      expect(store.usageByModel(1)[0]!.usage.total).toBe(100);
+      expect(store.usageByDay(1, 3650).reduce((s, d) => s + d.tokens, 0)).toBe(100);
+    });
+
+    it('keeps descendantUsage summing the healthy rows of the tree', () => {
+      store.createSession({ id: 'child', userId: 1, model: 'claude-opus-4-8', parentSessionId: 'brain-a' });
+      healthy('child-ok', 'child', 40, 0.04);
+      raw('child-bad', 'child', 'assistant', '{"usage":');
+      raw('child-bad-divider', 'child', 'compaction', 'not json at all');
+      expect(store.descendantUsage('brain-a').totalTokens).toBe(40);
     });
   });
 
@@ -1192,6 +1415,22 @@ describe('BrainStore', () => {
       // Malformed variants of the new fields reject the snapshot rather than coercing.
       expect(store.upsertWorkflowRun('root', wf({ nodes: [{ id: 'a', task: 't', status: 'done', deps: [], startedAt: -5 }] }))).toBe(false);
       expect(store.upsertWorkflowRun('root', wf({ nodes: [{ id: 'a', task: 't', status: 'done', deps: [], result: 42 }] }))).toBe(false);
+    });
+
+    // Same whitelist hazard, one level up. `background` is not display trivia: sparedChildSessionIds
+    // reads it to spare a running background workflow's node sessions from a parent abort. While the
+    // whitelist dropped it the sparing was dead code, so any stop or detach on the origin conversation
+    // aborted every node of a background workflow that had been promised it keeps running.
+    it('round-trips the background flag that parent-abort sparing depends on', () => {
+      store.createSession({ id: 'root', userId: 1, model: 'm' });
+      store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+      expect(store.upsertWorkflowRun('root', wf({ background: true }))).toBe(true);
+      expect(store.getWorkflowRuns('root')[0]?.background).toBe(true);
+      // A foreground workflow must stay unflagged rather than acquire a falsy key.
+      expect(store.upsertWorkflowRun('root', wf({ id: 'wf-2', toolCallId: 'call-2' }))).toBe(true);
+      expect(store.getWorkflowRuns('root').find((r) => r.id === 'wf-2')?.background).toBeUndefined();
+      // Malformed rejects the snapshot rather than coercing, like the node-level fields above.
+      expect(store.upsertWorkflowRun('root', wf({ id: 'wf-3', toolCallId: 'call-3', background: 'yes' }))).toBe(false);
     });
 
     it('keeps only the newest snapshot per tool call, and binds a tool call to its first workflow id', () => {

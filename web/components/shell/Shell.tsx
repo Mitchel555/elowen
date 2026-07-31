@@ -111,11 +111,26 @@ function ShellLayout({ children }: { children: ReactNode }) {
             floating short of the window edge with dead space behind it, which reads as a bug rather than
             as breathing room. Routes that ARE documents keep the cap. */}
         <div className={`mx-auto flex w-full flex-col ${onChat ? '' : CONTENT_MAX}`}>
-          {/* Frameless page heading + global actions. In drawer mode it also opens mobile navigation. */}
-          <TopBar
-            onMenuClick={mode === 'drawer' ? () => setDrawerOpen(true) : undefined}
-            showLocation={false}
-          />
+          {/* Frameless page heading + global actions. In drawer mode it also opens mobile navigation. On
+              /chat at phone width the whole global bar is suppressed: the conversation already carries its
+              own bar, and stacking a second one above it (avatar, bell, search) crowds the small screen.
+              The way back into the rest of the app moves into the history drawer's "← dashboard" link. */}
+          {/* Suppressed by a CSS breakpoint rather than by the measured `mode`: `mode` follows the REGION
+              (window − dock), so a docked desktop window could fall under DRAWER_MAX while the viewport
+              stayed wide. The bar and its hamburger then vanished, while ChatView's replacement "back"
+              link — keyed off the VIEWPORT — never appeared, stranding the reader on /chat with no way
+              out. Being CSS it also holds from the first paint instead of flashing the bar before the
+              first measurement resolves.
+              The pixel value is deliberate and must stay in step with MOBILE_MAX_WIDTH (web/lib/useMobile.ts):
+              Tailwind's own `md` is 48rem, so a reader whose browser font is not 16px would push the CSS
+              boundary away from the pixel media query the hook runs — reopening exactly the gap with no
+              bar and no back link that this suppression exists to avoid. */}
+          <div className={onChat ? 'max-[767px]:hidden' : undefined}>
+            <TopBar
+              onMenuClick={mode === 'drawer' ? () => setDrawerOpen(true) : undefined}
+              showLocation={false}
+            />
+          </div>
           <div className="px-2 pb-8"><RouteTransition>{children}</RouteTransition></div>
         </div>
       </main>

@@ -41,6 +41,34 @@
       "label": "Embeddingov na priechod",
       "hint": "Max. počet blokov zaindexovaných v jednom priechode, aby sa veľký repozitár rozložil do viacerých priechodov a nezahltil poskytovateľa."
     },
+    "sec_schedule": {
+      "label": "Plánovaná reindexácia",
+      "hint": "Časovač na pozadí, ktorý index obnovuje sám, takže sa repozitár väčší než jeden priechod postupne doindexuje bez ručného spúšťania CodebaseReindex."
+    },
+    "scheduledReindex": {
+      "label": "Reindexovať podľa plánu",
+      "hint": "Predvolene vypnuté: časovač míňa u poskytovateľa embeddingov bez dozoru. Zapnite, keď vám bude vyhovovať rozsah a interval nižšie."
+    },
+    "reindexIntervalMinutes": {
+      "label": "Interval (minúty)",
+      "hint": "Ako často beží obnova na pozadí. Jeden tik stojí najviac počet repozitárov × priechodov × embeddingov na priechod."
+    },
+    "reindexScope": {
+      "label": "Ktoré repozitáre",
+      "hint": "Či plán obnovuje všetky repozitáre, ktoré už sú v indexe, alebo len tie, ktoré vypíšete.",
+      "options": {
+        "indexed": "Všetko, čo už je zaindexované",
+        "listed": "Len cesty vypísané nižšie"
+      }
+    },
+    "reindexRepos": {
+      "label": "Cesty k repozitárom",
+      "hint": "Jedna absolútna cesta na riadok (alebo oddelené čiarkou). Cesta, ktorá nie je čitateľný priečinok, sa preskočí a zaloguje."
+    },
+    "reindexMaxPassesPerRepo": {
+      "label": "Priechodov na repozitár a tik",
+      "hint": "Horná hranica po sebe idúcich priechodov nad jedným repozitárom v rámci jedného tiku. Repozitár, kde už nie je čo indexovať, skončí skôr — ide teda len o strop najhoršieho prípadu."
+    },
     "sec_model": {
       "label": "Model pre embeddingy",
       "hint": "Embedding model sa preberá z Nastavenia → Pamäť (jediný zdroj pravdy) — tu sa žiadny samostatný model nenastavuje. Zmena tohto modelu pri ďalšej reindexácii index prestavia."

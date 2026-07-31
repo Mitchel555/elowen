@@ -4,8 +4,6 @@
 // callback deadline is far shorter than a long agent turn). On top of plain chat: a stateful live tool
 // trace (edited in place), AskUserQuestion as Adaptive Cards, slash commands with card pickers, per-chat
 // model/reasoning/display settings and image round-trips.
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { ConnectorClient } from './connector.mjs';
 import { makeTokenVerifier } from './auth.mjs';
 import { matchesId, senderIds, senderIsAdmin, displayNameOf } from './ids.mjs';
@@ -15,7 +13,9 @@ import { LiveMessage, postWithImages } from './stream.mjs';
 import { buildAskCard, buildPickerCard, settledCard } from './cards.mjs';
 import { buildAppPackage } from './appPackage.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
-import { resolveDisplaySettings, updateDisplayOverrides } from '../../_shared/display.mjs';
+import { observesLiveEvents, resolveDisplaySettings, updateDisplayOverrides } from '../../_shared/display.mjs';
+import { applyVisionModel, buildRoleAccess } from '../../_shared/access.mjs';
+import { resolveImageFiles } from '../../_shared/images.mjs';
 
 /** The `/display` axes and their values — mirrors the resolution sets in _shared/display.mjs. */
 const DISPLAY_AXES = {
@@ -35,14 +35,6 @@ const CONTEXT_MAX = 40;
 /** Read a numeric config field, clamped to [min,max], falling back to `def` when unset/invalid. */
 function cfgNum(cfg, key, def, min, max) {
   return Math.min(Math.max(Number(cfg?.[key]) || def, min), max);
-}
-
-/** A rolePolicy's extra per-role instructions, spliced into the turn's system prompt. */
-function rolePrompt(policy) {
-  const parts = [];
-  if (policy.name) parts.push(`The user you are talking to has the "${policy.name}" role.`);
-  if (policy.prompt) parts.push(policy.prompt);
-  return parts.join('\n') || undefined;
 }
 
 export class MsTeamsAdapter {
@@ -165,21 +157,7 @@ export class MsTeamsAdapter {
     const policies = Array.isArray(this.cfg.rolePolicies) ? this.cfg.rolePolicies : [];
     const match = policies.find((p) => p.roleId && ids.some((id) => matchesId(p.roleId, id)));
     if (!match) return { access: undefined };
-    const st = this.state.get(String(conversationId));
-    const chosen = st.model;
-    return {
-      access: {
-        // admin:true = the operator's admin identity — full project scope + the full plugin toolset
-        // (trusted-chat). It does NOT grant the owner's Elowen* control-plane tools or API token.
-        admin: match.admin === true,
-        projectIds: (match.projectIds ?? []).map(Number),
-        prompt: rolePrompt(match),
-        model: chosen ? { provider: chosen.provider, model: chosen.model } : undefined,
-        thinkingLevel: typeof st.thinkingLevel === 'string' ? st.thinkingLevel : undefined,
-        fast: st.fast === true,
-        tools: Array.isArray(match.tools) && match.tools.length > 0 ? match.tools : undefined,
-      },
-    };
+    return { access: buildRoleAccess(match, this.state.get(String(conversationId))) };
   }
 
   /** The model selected for a conversation (per-chat override, else the catalog default). */
@@ -243,8 +221,7 @@ export class MsTeamsAdapter {
     const convoKey = `${conv.id}#${gen}`;
 
     const display = resolveDisplaySettings(this.cfg, this.state.get(String(conv.id)));
-    const observesLiveEvents = display.toolActivity !== 'off' || display.answerMode === 'live' || this.cfg.showReasoning === true;
-    const stream = observesLiveEvents ? new LiveMessage(this, conv.id, m.id, from.id, display) : null;
+    const stream = observesLiveEvents(display, this.cfg) ? new LiveMessage(this, conv.id, m.id, from.id, display) : null;
     // Even with live streaming OFF, AskUserQuestion must still render its card — otherwise the parked
     // turn hangs until the timeout. Route events through the stream when present, else handle only `ask`.
     const onEvent = stream
@@ -257,11 +234,7 @@ export class MsTeamsAdapter {
     // Image turns steer to the configured vision model — the chat's normal model may be text-only.
     const vision = images.length ? parseModelExec(this.cfg.visionModel) : null;
     let turnAccess = access;
-    if (vision) {
-      const models = await this.listModels().catch(() => []);
-      const visionOption = models.find((mo) => mo.model === vision.model && (!vision.provider || mo.provider === vision.provider));
-      turnAccess = { ...access, model: vision, ...(!visionOption?.fastAvailable ? { fast: false } : {}) };
-    }
+    if (vision) turnAccess = applyVisionModel(access, vision, await this.listModels().catch(() => []));
 
     try {
       const replyText = await this.handler(
@@ -354,17 +327,7 @@ export class MsTeamsAdapter {
 
   /** Generated-image files (by name, from the image plugins' data dirs) as upload-ready buffers. */
   resolveImageFiles(names) {
-    const files = [];
-    const cap = cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10);
-    for (const name of names.slice(0, cap)) {
-      for (const dir of this.imageDirs) {
-        const p = join(dir, name);
-        if (!existsSync(p)) continue;
-        try { files.push({ name, data: readFileSync(p) }); } catch { /* unreadable → skip */ }
-        break;
-      }
-    }
-    return files;
+    return resolveImageFiles(this.imageDirs, names, cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10));
   }
 
   /** Attach images as inline data-URI attachments (Teams renders these in the message body). */
