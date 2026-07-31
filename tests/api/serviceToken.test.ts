@@ -158,6 +158,15 @@ describe('an agent token is bound to the task it was spawned for', () => {
     expect(tasks.get('task-a')?.status).toBe('closed');
   });
 
+  it('answers a malformed task segment with a refusal, not a crash', async () => {
+    // The guard percent-decodes the segment to compare it with the bound task, and `%` alone makes
+    // decodeURIComponent throw. An agent can send that path, so a throw here would turn an
+    // authorisation decision into a 500 from the middleware.
+    const { app, aTok } = twoWorkers();
+    expect((await app.request('/tasks/%/guide', auth(aTok))).status).toBe(403);
+    expect((await app.request('/tasks/%zz', patch(aTok, { status: 'closed', outcome: 'ok' }))).status).toBe(403);
+  });
+
   it('lets a mission phase close its own parent epic, but not another epic', async () => {
     const s = setup();
     s.tasks.create({ id: 'epic-1', project_id: 1, title: 'mine', type: 'epic' });

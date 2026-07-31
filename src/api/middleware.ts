@@ -48,7 +48,11 @@ export function registerAuthGuards(app: ElowenApp, ctx: RouteContext): void {
   const targetTask = (path: string): string | null => {
     if (path === '/tasks' || path === '/tasks/ready') return null;
     const m = /^\/tasks\/([^/]+)/.exec(path);
-    return m?.[1] ? decodeURIComponent(m[1]) : null;
+    if (!m?.[1]) return null;
+    // A malformed escape (`/tasks/%`) makes decodeURIComponent throw, and throwing HERE would turn an
+    // authorisation decision into a 500 on a request an agent can send. The raw segment is no task id,
+    // so it simply fails the comparison below and the caller gets its 403.
+    try { return decodeURIComponent(m[1]); } catch { return m[1]; }
   };
   app.use('*', async (c, next) => {
     if (c.get('tokenScope') !== 'agent') return next();
