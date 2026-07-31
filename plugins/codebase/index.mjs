@@ -558,6 +558,19 @@ export function register(ctx) {
     return result ?? null;
   };
 
+  // Run `pass` for `repo` holding the same single-flight claim, but with the OPPOSITE skip semantics: an
+  // auto pass may be dropped when the claim is elsewhere, while a manual CodebaseReindex the operator typed
+  // must always happen — so it waits its turn instead. The wait is a loop, not one await: when the pass we
+  // queued behind finishes, a second waiter can have taken the claim before we are resumed.
+  const runExclusivePass = async (repo, pass) => {
+    for (let running = inFlight.get(repo); running; running = inFlight.get(repo)) await running;
+    let release = () => {};
+    const claim = new Promise((resolve) => { release = resolve; });
+    inFlight.set(repo, claim);
+    try { return await pass(); }
+    finally { inFlight.delete(repo); release(); }
+  };
+
   // Lazily refresh every stale-by-time repo a search touches, so the index rarely needs CodebaseReindex.
   const maybeAutoReindex = async (database, repos) => {
     if (!cfg.autoReindex || !ctx.embeddings.isConfigured()) return;
@@ -669,7 +682,7 @@ export function register(ctx) {
         const database = getDb();
         const results = [];
         for (const repo of targets) {
-          const r = await reindexRepo(ctx, database, repo, { cfg, budget: cfg.reindexEmbedBudget, full: !!p.full });
+          const r = await runExclusivePass(repo, () => reindexRepo(ctx, database, repo, { cfg, budget: cfg.reindexEmbedBudget, full: !!p.full }));
           setMeta(database, `reindex:${repo}`, String(Date.now()));
           results.push({ repo, ...r });
         }

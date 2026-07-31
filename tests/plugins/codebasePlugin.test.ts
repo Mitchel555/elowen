@@ -518,6 +518,54 @@ describe('codebase plugin — auto-reindex single-flight', () => {
     expect(state.calls).toBe(1);
   });
 
+  const manualReindex = (reg: PluginRegistry, repo: string, full = false) =>
+    runWithPolicy(adminPolicy(), () => runTool(reg, 'CodebaseReindex', { repo, full }), { workDir: repo });
+
+  it('a manual reindex waits for the in-flight pass instead of doubling it — and is never skipped', async () => {
+    const { dataRoot, repo } = seedRepo('sf3');
+    const { embedder, state, release } = gatedEmbedder();
+    const reg = await load(dataRoot, embedder);
+
+    const auto = search(reg, repo); // an admin search kicks a pass that parks inside embedBatch
+    await waitFor(() => state.calls > 0);
+
+    const manual = manualReindex(reg, repo, true); // full → real embedding work even though the pass indexed it
+    await new Promise((r) => setTimeout(r, 50));   // a claim-bypassing manual run would have parked by now
+    expect(state.calls).toBe(1);                   // the bug: the manual path calls reindexRepo directly → 2 passes
+    expect(state.maxConcurrent).toBe(1);           // ...embedding the same repo concurrently
+
+    release();
+    await auto;
+    const res = await manual;
+    expect(res.details.ok).toBe(true);
+    expect(res.details.chunksEmbedded as number).toBeGreaterThan(0); // unlike an auto pass, it still ran
+    expect(state.calls).toBe(2);
+    expect(state.maxConcurrent).toBe(1);
+  });
+
+  it('two manual reindexes queued behind the same pass do not overlap each other', async () => {
+    const { dataRoot, repo } = seedRepo('sf4');
+    const { embedder, state, release } = gatedEmbedder();
+    const reg = await load(dataRoot, embedder);
+
+    const auto = search(reg, repo);
+    await waitFor(() => state.calls > 0);
+
+    // Both manual runs queue behind the SAME parked pass, so both are resumed by its completion. Waiting on
+    // that one pass is not enough: whichever wakes second must re-check and queue behind the first.
+    const first = manualReindex(reg, repo, true);
+    const second = manualReindex(reg, repo, true);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(state.calls).toBe(1);
+
+    release();
+    await auto;
+    expect((await first).details.ok).toBe(true);
+    expect((await second).details.ok).toBe(true);
+    expect(state.calls).toBe(3);         // every explicitly requested run happened
+    expect(state.maxConcurrent).toBe(1); // but never two at once over the same repo
+  });
+
   it('a plugin reload does not restart a pass already in flight (the debounce marker is claimed up front)', async () => {
     const { dataRoot, repo } = seedRepo('sf2');
     const { embedder, state, release } = gatedEmbedder();
