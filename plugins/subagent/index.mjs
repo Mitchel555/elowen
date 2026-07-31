@@ -3,8 +3,6 @@
 // progress and eventual result can be read without holding the parent turn open. The child inherits
 // EXACTLY the caller's access (ctx.currentAccess), so delegation can never widen a scoped session.
 import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
@@ -153,49 +151,14 @@ const buildCollectReminder = (finished, stillRunning) => {
 
 export function register(ctx) {
   let run = null; // the host's channel handler, captured on connect
+  // A plugin reload replaces THIS closure wholesale — emitters, the `run` handler and the adapter behind
+  // them all die with the old registry — so the map deliberately does NOT outlive it. What matters is that
+  // no job is left silently running across that boundary, and the reload hook below handles exactly that:
+  // it settles every running job terminal and delivers its verdict to the parent. Persisting the map on
+  // top of that would only make DelegateStatus print a nicer sentence for the remainder of the retention
+  // window, in a conversation whose session just restarted anyway — and it would put sub-agent results on
+  // disk in a new hand-editable format to do it. Not worth either cost.
   const jobs = new Map();
-  // A plugin reload replaces THIS closure wholesale (emitters, the `run` handler and the whole adapter
-  // behind them die with the old registry), so the job registry is reload-boundary durable: the hook
-  // below settles every running job terminal and snapshots the map to ctx.dataDir()/jobs.json, and this
-  // load restores the snapshot so DelegateStatus/DelegateResult keep accounting for those ids through
-  // the retention window instead of answering "may have expired". Only TERMINAL entries are restorable —
-  // a restored job has no captured emitter to push progress or deliver results through, and the snapshot
-  // is only ever written after every running job was settled.
-  const TERMINAL_STATUSES = new Set(['done', 'error']);
-  const restoreJob = (raw) => {
-    // The snapshot is external data (hand-editable) — validate the shape instead of trusting it.
-    if (!raw || typeof raw !== 'object') return undefined;
-    const { id, toolCallId, status, task, originSessionId, originPrincipal, startedAt } = raw;
-    if (typeof id !== 'string' || typeof toolCallId !== 'string' || typeof task !== 'string'
-      || typeof originSessionId !== 'string' || typeof originPrincipal !== 'string'
-      || typeof startedAt !== 'number' || !TERMINAL_STATUSES.has(status)
-      || typeof raw.finishedAt !== 'number') return undefined;
-    return {
-      id, toolCallId, status, task,
-      sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
-      tools: typeof raw.tools === 'number' ? raw.tools : 0,
-      detail: typeof raw.detail === 'string' ? raw.detail : undefined,
-      tokens: typeof raw.tokens === 'number' ? raw.tokens : undefined,
-      model: typeof raw.model === 'string' ? raw.model : undefined,
-      originSessionId, originPrincipal,
-      background: raw.background === true,
-      autoDeliver: raw.autoDeliver === true,
-      startedAt,
-      finishedAt: raw.finishedAt,
-      result: typeof raw.result === 'string' ? raw.result : undefined,
-      error: typeof raw.error === 'string' ? raw.error : undefined,
-    };
-  };
-  const jobsFile = join(ctx.dataDir(), 'jobs.json');
-  try {
-    const parsed = JSON.parse(readFileSync(jobsFile, 'utf8'));
-    if (Array.isArray(parsed)) {
-      for (const raw of parsed) {
-        const job = restoreJob(raw);
-        if (job) jobs.set(job.id, job);
-      }
-    }
-  } catch { /* absent or unreadable snapshot — start with an empty registry */ }
 
   // Keep terminal answers long enough for a later parent turn to collect them, while bounding both
   // age and count. Running entries are never evicted; when all slots are live, a new spawn is refused.
@@ -850,32 +813,6 @@ export function register(ctx) {
       }
       if (running.length) {
         ctx.logger.warn(`subagent: ${running.length} delegation job(s) still running at plugin reload, interrupted: ${running.map((j) => j.id).join(', ')}`);
-      }
-      // Snapshot the terminal registry so the fresh instance keeps accounting for these ids during the
-      // retention window. Every running job was just settled above, so the file never holds a 'running'
-      // entry — a restored job could not emit, deliver or be cancelled (all captured functions died).
-      try {
-        writeFileSync(jobsFile, JSON.stringify([...jobs.values()].map((job) => ({
-          id: job.id,
-          toolCallId: job.toolCallId,
-          status: job.status,
-          task: job.task,
-          sessionId: job.sessionId,
-          tools: job.tools,
-          detail: job.detail,
-          tokens: job.tokens,
-          model: job.model,
-          originSessionId: job.originSessionId,
-          originPrincipal: job.originPrincipal,
-          background: job.background,
-          autoDeliver: job.autoDeliver,
-          startedAt: job.startedAt,
-          finishedAt: job.finishedAt,
-          result: job.result,
-          error: job.error,
-        }))));
-      } catch (e) {
-        ctx.logger.warn(`subagent job snapshot could not be persisted: ${errorText(e)}`);
       }
     },
   });

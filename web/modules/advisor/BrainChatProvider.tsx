@@ -38,15 +38,29 @@ const WORK_MODES: readonly BrainWorkMode[] = ['build', 'plan', 'workflow'];
  *  so both surfaces hand the model the same sentence. Model-facing, hence not translated. */
 const IMPLEMENT_PLAN_PROMPT = 'Implement the plan you proposed above.';
 
-/** Stable identity of a submitted plan: its ExitPlanMode call id, or the plan text for a call PI minted no
- *  id for. Mirror of the key the CLI dedupes its own plan decision on (`planDecisionRaisedFor`). */
-function planKey(plan: BrainPendingPlan | null): string | null {
-  return plan ? plan.id ?? plan.plan : null;
+/** djb2 — a short stable digest. Not a security hash; it only has to tell two plan bodies apart. */
+function digest(text: string): string {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  return `t${(h >>> 0).toString(36)}`;
 }
 
-/** localStorage slot: one decided-plan key per conversation id. Keyed by conversation because the fallback
- *  key is the plan TEXT, which legitimately repeats across chats. */
+/** Stable identity of a submitted plan: its ExitPlanMode call id, or a digest of the plan text for a call
+ *  PI minted no id for. Mirror of the key the CLI dedupes its own plan decision on
+ *  (`planDecisionRaisedFor`). The fallback is DIGESTED rather than the raw body because this key is
+ *  persisted: a plan runs to kilobytes, and storing whole ones would leave working content sitting in the
+ *  browser and could quietly exhaust the storage quota, after which nothing persists at all. */
+function planKey(plan: BrainPendingPlan | null): string | null {
+  return plan ? plan.id ?? digest(plan.plan) : null;
+}
+
+/** localStorage slot: one decided-plan key per conversation id. Keyed by conversation because the same
+ *  plan legitimately repeats across chats and a decision in one must not silence it in another. */
 const PLAN_DECISIONS_KEY = 'elowen.chat.planDecided';
+
+/** Decisions are only interesting for conversations still in reach; a browser that never clears this
+ *  would otherwise grow one entry per conversation forever. Oldest-written entries drop out first. */
+const MAX_PLAN_DECISIONS = 100;
 
 /** Accept only a JSON object mapping session ids to string plan keys; anything else (a foreign app version,
  *  a corrupt write) must not poison the decision state. */
@@ -930,7 +944,11 @@ function useBrainChatController(): BrainChatValue {
    *  session the plan belongs to — for implement that is the one captured at click time, not whatever a
    *  mid-flight rollover switched to. */
   const recordPlanDecision = (sessionId: string, key: string): void => {
-    setPlanDecisionsRaw(JSON.stringify({ ...planDecisions, [sessionId]: key }));
+    // Re-inserting the session id puts it last in insertion order, so trimming from the front drops the
+    // least recently decided conversations rather than an arbitrary one.
+    const { [sessionId]: _replaced, ...rest } = planDecisions;
+    const entries = [...Object.entries(rest), [sessionId, key] as const].slice(-MAX_PLAN_DECISIONS);
+    setPlanDecisionsRaw(JSON.stringify(Object.fromEntries(entries)));
   };
   const dismissPlan = (): void => { if (openPlanKey && activeSessionId) recordPlanDecision(activeSessionId, openPlanKey); };
   const implementPlan = (): void => {

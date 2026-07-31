@@ -13,14 +13,16 @@ interface Member {
   optional: boolean;
 }
 
-/** One mirrored pair: the web DTO in web/lib/types.ts and the daemon interface it copies.
- *  `exact` requires the member sets to be identical in both directions (User, MemoryCategory, ...);
- *  `subset` allows the web to omit fields it never renders (Task drops base_sha/head_sha/created_by). */
+/** One mirrored pair: the web DTO in web/lib/types.ts and the daemon interface it copies. Every daemon
+ *  field must be mirrored unless it is named in `allowMissing`. A blanket "the web may omit anything"
+ *  mode would stay silent on precisely the drift this test exists to catch — the daemon growing a field
+ *  the web never picks up, which is what the /auth/me incident was. Naming each omission keeps the
+ *  decision explicit and forces a fresh one when the daemon shape changes. */
 interface MirrorPair {
   web: string;
   daemonFile: string;
   daemon: string;
-  mode: 'exact' | 'subset';
+  allowMissing?: readonly string[];
 }
 
 /** The web suite runs with cwd = web/, but never assume it: walk up until the repo root (the dir that
@@ -40,19 +42,28 @@ const DAEMON_ROOT = join(repoRoot(), 'src/');
 const PAIRS: MirrorPair[] = [
   // The one that really drifted: GET /auth/me serves userStore.User (src/api/routes/auth.ts), and the
   // web renders it through this mirror. Both are exact copies today.
-  { web: 'User', daemonFile: `${DAEMON_ROOT}store/userStore.ts`, daemon: 'User', mode: 'exact' },
-  { web: 'Task', daemonFile: `${DAEMON_ROOT}store/types.ts`, daemon: 'Task', mode: 'subset' },
-  { web: 'Memory', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryRow', mode: 'exact' },
-  { web: 'MemoryCategory', daemonFile: `${DAEMON_ROOT}store/memoryCategoryStore.ts`, daemon: 'MemoryCategoryRow', mode: 'exact' },
-  { web: 'MemoryEvent', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryEventRow', mode: 'exact' },
-  { web: 'BrainLimits', daemonFile: `${DAEMON_ROOT}store/configStore.ts`, daemon: 'BrainLimits', mode: 'exact' },
-  { web: 'BrainUsage', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainUsage', mode: 'exact' },
-  // The web keeps only the goal fields it renders; the daemon's BrainGoalState has more.
-  { web: 'BrainGoal', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainGoalState', mode: 'subset' },
-  { web: 'CommitFileChange', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitFileChange', mode: 'exact' },
-  { web: 'CommitLogEntry', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitLogEntry', mode: 'exact' },
+  { web: 'User', daemonFile: `${DAEMON_ROOT}store/userStore.ts`, daemon: 'User' },
+  // The web lists and opens tasks; the git bookkeeping and the authoring principal never reach the UI.
+  { web: 'Task', daemonFile: `${DAEMON_ROOT}store/types.ts`, daemon: 'Task', allowMissing: ['base_sha', 'head_sha', 'created_by'] },
+  { web: 'Memory', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryRow' },
+  { web: 'MemoryCategory', daemonFile: `${DAEMON_ROOT}store/memoryCategoryStore.ts`, daemon: 'MemoryCategoryRow' },
+  { web: 'MemoryEvent', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryEventRow' },
+  { web: 'BrainLimits', daemonFile: `${DAEMON_ROOT}store/configStore.ts`, daemon: 'BrainLimits' },
+  { web: 'BrainUsage', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainUsage' },
+  // The goal card renders the goal itself and its progress. Ownership (the session and user it belongs
+  // to) is implicit in the stream the card is fed from, and the loop's working state — the unsubmitted
+  // draft, the last verdict and its evidence, the pause reason — is daemon-internal.
+  {
+    web: 'BrainGoal', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainGoalState',
+    allowMissing: [
+      'session_id', 'user_id', 'draft', 'last_verdict', 'last_evidence', 'paused_reason',
+      'created_at', 'updated_at',
+    ],
+  },
+  { web: 'CommitFileChange', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitFileChange' },
+  { web: 'CommitLogEntry', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitLogEntry' },
   // showThoughtsCli is optional on the web but always sent by the daemon — a tolerated relaxation.
-  { web: 'TerminalSettings', daemonFile: `${DAEMON_ROOT}store/terminalSettings.ts`, daemon: 'TerminalSettings', mode: 'exact' },
+  { web: 'TerminalSettings', daemonFile: `${DAEMON_ROOT}store/terminalSettings.ts`, daemon: 'TerminalSettings' },
 ];
 
 const normalize = (type: string): string => type.replace(/\s+/g, ' ').trim();
@@ -133,7 +144,9 @@ function comparePair(pair: MirrorPair): string[] {
   for (const [name, daemonMember] of daemonMembers) {
     const webMember = webMembers.get(name);
     if (!webMember) {
-      if (pair.mode === 'exact') errors.push(`daemon ${pair.daemon}.${name} missing on web ${pair.web}`);
+      if (!pair.allowMissing?.includes(name)) {
+        errors.push(`daemon ${pair.daemon}.${name} missing on web ${pair.web} — mirror it, or add it to allowMissing if the web deliberately does not render it`);
+      }
       continue;
     }
     if (!typesCompatible(daemonMember.type, webMember.type)) {
