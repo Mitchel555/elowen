@@ -1,14 +1,16 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { access, constants } from 'node:fs/promises';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, basename } from 'node:path';
+import { dirname, basename, join } from 'node:path';
 import { isNewer } from './version.js';
-import { start, stop } from './launcher.js';
+import { start, stop, isAlive } from './launcher.js';
 import { readInstallInfo } from './installInfo.js';
 import { SERVICES, systemctl } from './systemd.js';
 import { launchdRestart } from './launchd.js';
 import { hasLiveMission } from './missionGate.js';
+import { dataDir } from '../shared/paths.js';
 import { fetchLatestVersion } from '../shared/registry.js';
 
 const execFileAsync = promisify(execFile);
@@ -94,6 +96,46 @@ export interface UpdateDeps {
    *  restart now". Defaults to "no mission is live", so a mission that started during the install isn't
    *  killed by the restart. Injected for tests. */
   confirmReadyToRestart?: () => boolean;
+  /** File lock serialising concurrent update runs. Injected for tests; the real default writes
+   *  `update.lock` under ~/.config/elowen, next to the launcher's own start.lock. */
+  lock?: UpdateLockDeps;
+}
+
+/** The pieces of the cross-process update lock a test needs to control; defaults hit the real fs. */
+export interface UpdateLockDeps {
+  /** Absolute lock file path for a given env (the file lives under the same data dir as run.json). */
+  lockPath: (env: NodeJS.ProcessEnv) => string;
+  /** Whether the recorded holder pid is still alive — a dead one means the lock is stale and reclaimable. */
+  isAlive: (pid: number) => boolean;
+}
+
+const defaultUpdateLockDeps: UpdateLockDeps = {
+  lockPath: (env) => join(dataDir(env), 'update.lock'),
+  isAlive,
+};
+
+/** Serialise `elowen update` runs across processes (manual, menu, and the hourly --auto timer alike) with
+ *  a pid-stamped lock file. Two concurrent runs would both `npm install -g` and BOTH restart the services —
+ *  the second restart then killing the freshly-started ones — so the loser must fail fast instead of
+ *  racing. A lock whose recorded pid is gone (a crash between acquire and release) is stale: reclaim it,
+ *  exactly like the launcher's start.lock, so one hard kill can't jam every future update. */
+export function acquireUpdateLock(env: NodeJS.ProcessEnv, deps: UpdateLockDeps): () => void {
+  const path = deps.lockPath(env);
+  mkdirSync(dirname(path), { recursive: true });
+  for (;;) {
+    try {
+      writeFileSync(path, String(process.pid), { flag: 'wx' });
+      return () => { try { rmSync(path, { force: true }); } catch { /* already gone */ } };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      let holder = NaN;
+      try { holder = Number(readFileSync(path, 'utf8').trim()); } catch { /* vanished mid-read — next iteration acquires */ }
+      if (Number.isInteger(holder) && holder > 0 && deps.isAlive(holder)) {
+        throw new Error('another `elowen update` is already in progress — wait for it to finish and try again');
+      }
+      try { rmSync(path, { force: true }); } catch { /* raced with the holder's own release */ }
+    }
+  }
 }
 
 /** `restartDeferred`: the new version installed but a restart was withheld (a mission went live during
@@ -104,52 +146,60 @@ export interface UpdateResult { updated: boolean; from: string; to: string; rest
  *  the new binary takes over. The DB migrates itself on the next boot (openDb runs additive
  *  migrations), so no migration step is needed here. Returns what happened for the menu to report. */
 export async function update(env: NodeJS.ProcessEnv, deps: UpdateDeps): Promise<UpdateResult> {
-  const fetchFn = deps.fetch ?? fetch;
-  const latest = await fetchLatestVersion(fetchFn);
-  // Registry unreachable (null) → can't tell if newer, so treat as a no-op rather than throwing, which
-  // would redden the hourly update timer on a transient blip.
-  if (latest === null || !isNewer(latest, deps.current)) return { updated: false, from: deps.current, to: latest ?? deps.current };
+  // The whole run is mutually exclusive: the loser must not even reach the version check while the
+  // winner is mid-install, or it would "see" the newer version, install it again and restart a second
+  // time — undoing the winner's restart. Refusal happens here, before any work.
+  const release = acquireUpdateLock(env, deps.lock ?? defaultUpdateLockDeps);
+  try {
+    const fetchFn = deps.fetch ?? fetch;
+    const latest = await fetchLatestVersion(fetchFn);
+    // Registry unreachable (null) → can't tell if newer, so treat as a no-op rather than throwing, which
+    // would redden the hourly update timer on a transient blip.
+    if (latest === null || !isNewer(latest, deps.current)) return { updated: false, from: deps.current, to: latest ?? deps.current };
 
-  const install = deps.install ?? (() => reinstall());
-  await install();
+    const install = deps.install ?? (() => reinstall());
+    await install();
 
-  // A mission may have started during the install — re-check before the restart (which would kill its
-  // agents). If so, leave the freshly-installed binary in place to take over on the next restart/boot.
-  const readyToRestart = deps.confirmReadyToRestart ?? (() => !hasLiveMission(env));
-  if (!readyToRestart()) return { updated: true, from: deps.current, to: latest, restartDeferred: true };
+    // A mission may have started during the install — re-check before the restart (which would kill its
+    // agents). If so, leave the freshly-installed binary in place to take over on the next restart/boot.
+    const readyToRestart = deps.confirmReadyToRestart ?? (() => !hasLiveMission(env));
+    if (!readyToRestart()) return { updated: true, from: deps.current, to: latest, restartDeferred: true };
 
-  // A box provisioned by `elowen install` is systemd-managed — restart those units (sudo when not root).
-  // A plain launcher install has no install.json — fall back to stop/start of our own spawned daemon.
-  const restart = deps.restart ?? (async (e) => {
-    if (readInstallInfo()) {
-      // A macOS box provisioned by `elowen install` runs per-user launchd agents — kickstart them (the
-      // invoking user owns them, so no sudo and no --no-block dance is needed).
-      if (process.platform === 'darwin') {
-        const mac = await launchdRestart();
-        if (mac.code !== 0) throw new Error(`installed ${latest} but the launchd restart failed (code ${mac.code}) — services run the old build until restarted`);
+    // A box provisioned by `elowen install` is systemd-managed — restart those units (sudo when not root).
+    // A plain launcher install has no install.json — fall back to stop/start of our own spawned daemon.
+    const restart = deps.restart ?? (async (e) => {
+      if (readInstallInfo()) {
+        // A macOS box provisioned by `elowen install` runs per-user launchd agents — kickstart them (the
+        // invoking user owns them, so no sudo and no --no-block dance is needed).
+        if (process.platform === 'darwin') {
+          const mac = await launchdRestart();
+          if (mac.code !== 0) throw new Error(`installed ${latest} but the launchd restart failed (code ${mac.code}) — services run the old build until restarted`);
+          return;
+        }
+        // `--no-block`: a web-triggered update spawns this `elowen update` INSIDE elowen-daemon's systemd
+        // cgroup, so a blocking `systemctl restart elowen-daemon elowen-web` would have the daemon's own
+        // restart kill this process (and the waiting systemctl client) the instant elowen-daemon stops —
+        // before the elowen-web job is ever enqueued, leaving the web UI on the old build. With --no-block
+        // both jobs are handed to systemd (PID 1) up front and run to completion regardless of this
+        // process dying. (Cost: we can't observe the restart result — only that it was enqueued.)
+        const r = await systemctl('restart', '--no-block', ...SERVICES);
+        if (r.code === 0) return;
+        // A box provisioned before `--no-block` was added to the sudoers pin denies the new arg list
+        // (sudo matches arguments exactly), so the agent-user restart fails here. Fall back to the legacy
+        // command — which the old drop-in still permits — so self-update never hard-breaks. Re-running
+        // `elowen install` re-pins sudoers with --no-block and restores the elowen-web restart fix; until
+        // then a web-triggered update degrades to the old behavior (daemon restarts, web may not).
+        const legacy = await systemctl('restart', ...SERVICES);
+        if (legacy.code !== 0) throw new Error(`installed ${latest} but the restart failed (code ${legacy.code}) — services run the old build until restarted`);
         return;
       }
-      // `--no-block`: a web-triggered update spawns this `elowen update` INSIDE elowen-daemon's systemd
-      // cgroup, so a blocking `systemctl restart elowen-daemon elowen-web` would have the daemon's own
-      // restart kill this process (and the waiting systemctl client) the instant elowen-daemon stops —
-      // before the elowen-web job is ever enqueued, leaving the web UI on the old build. With --no-block
-      // both jobs are handed to systemd (PID 1) up front and run to completion regardless of this
-      // process dying. (Cost: we can't observe the restart result — only that it was enqueued.)
-      const r = await systemctl('restart', '--no-block', ...SERVICES);
-      if (r.code === 0) return;
-      // A box provisioned before `--no-block` was added to the sudoers pin denies the new arg list
-      // (sudo matches arguments exactly), so the agent-user restart fails here. Fall back to the legacy
-      // command — which the old drop-in still permits — so self-update never hard-breaks. Re-running
-      // `elowen install` re-pins sudoers with --no-block and restores the elowen-web restart fix; until
-      // then a web-triggered update degrades to the old behavior (daemon restarts, web may not).
-      const legacy = await systemctl('restart', ...SERVICES);
-      if (legacy.code !== 0) throw new Error(`installed ${latest} but the restart failed (code ${legacy.code}) — services run the old build until restarted`);
-      return;
-    }
-    await stop(e);
-    await start(e, { version: latest });
-  });
-  await restart(env);
+      await stop(e);
+      await start(e, { version: latest });
+    });
+    await restart(env);
 
-  return { updated: true, from: deps.current, to: latest };
+    return { updated: true, from: deps.current, to: latest };
+  } finally {
+    release();
+  }
 }

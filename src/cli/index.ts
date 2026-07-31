@@ -10,7 +10,8 @@ import { callElowenApi } from '../shared/apiClient.js';
 import { menu } from './menu.js';
 import { interactiveLogin, launchChat } from './chat/launch.js';
 import { resolveToken } from './chat/token.js';
-import { urlHealthy, waitHealthy } from './launcher.js';
+import { urlHealthy, waitHealthy, type ReadinessOpts } from './launcher.js';
+import { runCmd, SERVICES } from './systemd.js';
 import { flagValue as flag } from './flags.js';
 
 const BASE = (process.env.ELOWEN_URL) ?? 'http://localhost:4400';
@@ -121,15 +122,56 @@ export function cliEnvFor(
   return { ...env, ELOWEN_TOKEN: resolve(env) };
 }
 
-async function ensureDaemon() {
+/** Injectable seams for `ensureDaemon`, so its spawn decision is unit-testable without a real daemon
+ *  (or a real systemctl). Everything defaults to the real implementations. */
+export interface EnsureDaemonDeps {
+  urlHealthy: (url: string) => Promise<boolean>;
+  waitHealthy: (urls: string[], opts: ReadinessOpts) => Promise<boolean[]>;
+  spawn: typeof spawn;
+  /** Whether the elowen units exist as systemd unit files — the signal that a managed instance owns the
+   *  ports, so a detached spawn would race it rather than replace it. */
+  systemdKnown: () => Promise<boolean>;
+}
+
+/** Whether any elowen service has a unit file, i.e. the box is systemd-managed. `list-unit-files` is
+ *  read-only and answers for any user, so no sudo is involved; any failure (no systemd at PID 1 —
+ *  containers, macOS — or unreadable state) reads as "not managed", the safe direction: the managed check
+ *  only ever SUPPRESSES the detached spawn when a managed instance can be confirmed. `run` is injectable
+ *  for tests, matching launchdStatusText's pattern. */
+export async function systemdKnown(run: typeof runCmd = runCmd): Promise<boolean> {
+  // The patterns MUST carry the `.service` suffix: `list-unit-files elowen-daemon` matches nothing and
+  // exits 0 with "0 unit files listed", so without it this returns false on the very boxes it exists to
+  // detect — the managed check would never fire and the detached spawn it guards would always happen.
+  const r = await run('systemctl', ['list-unit-files', ...SERVICES.map((s) => `${s}.service`)]);
+  if (r.code !== 0) return false;
+  const listed = new Set(r.stdout.split('\n').map((l) => l.trim().split(/\s+/)[0]).filter(Boolean));
+  return SERVICES.some((s) => listed.has(`${s}.service`));
+}
+
+export async function ensureDaemon(deps: Partial<EnsureDaemonDeps> = {}) {
   if ((process.env.ELOWEN_AUTOSTART) === '0') return;
+  const urlHealthyFn = deps.urlHealthy ?? urlHealthy;
+  const waitHealthyFn = deps.waitHealthy ?? waitHealthy;
+  const spawnFn = deps.spawn ?? spawn;
+  const managed = deps.systemdKnown ?? systemdKnown;
   // `urlHealthy` requires an `ok` response — a bare non-throwing fetch previously read a 500 as healthy —
   // and bounds each probe so a half-open connection can't block an ordinary command.
-  if (await urlHealthy(`${BASE}/health`)) return;
+  if (await urlHealthyFn(`${BASE}/health`)) return;
+  // One failed probe is NOT evidence that nothing is running: a systemd-managed instance mid-start (or
+  // mid-restart) fails it transiently, and spawning on that evidence starts a SECOND daemon racing the
+  // managed one for the same port. Give the port a short polling window before deciding it is really down.
+  const [settled] = await waitHealthyFn([`${BASE}/health`], { budgetMs: 2500, pollMs: 250 });
+  if (settled) return;
+  // A systemd-provisioned box must never get a stray detached daemon — the unit owns :4400 and the spawn
+  // would fight it (and vice versa) on every boot. Surface the start command instead of spawning.
+  if (await managed()) {
+    const sudo = typeof process.getuid === 'function' && process.getuid() !== 0;
+    throw new Error(`elowen daemon is not running and the services are systemd-managed — start it with: ${sudo ? 'sudo ' : ''}systemctl start ${SERVICES.join(' ')}`);
+  }
   const entry = join(dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'index.js');
-  spawn(process.execPath, [entry], { detached: true, stdio: 'ignore' }).unref();
+  spawnFn(process.execPath, [entry], { detached: true, stdio: 'ignore' }).unref();
   // 5s TOTAL, not 50 probes that may each stall for their own timeout.
-  const [healthy] = await waitHealthy([`${BASE}/health`], { budgetMs: 5000 });
+  const [healthy] = await waitHealthyFn([`${BASE}/health`], { budgetMs: 5000 });
   if (!healthy) throw new Error('elowen daemon did not become healthy');
 }
 
