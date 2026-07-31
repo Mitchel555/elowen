@@ -63,7 +63,11 @@ function normalizeNode(raw, knownIds) {
 }
 
 /** Validate + normalize a fresh node list for `WorkflowStart`. Enforces: non-empty, bounded size,
- *  unique ids, known deps, no self-loop, and an acyclic graph. Returns `{ nodes }` or `{ error }`. */
+ *  unique ids, known deps, no self-loop, and an acyclic graph. Returns `{ nodes }` or `{ error }`.
+ *  A PER-NODE failure also carries the `index` it stopped on. Recovering that index from the message
+ *  alone is not possible — most of them name only the node's id, and two raw entries may carry the same
+ *  id (the duplicate rule fires only after the first faulty node is rejected), so a caller matching on
+ *  the id would point at the valid twin. */
 export function validateWorkflowNodes(raw) {
   if (!Array.isArray(raw) || raw.length === 0) return { error: 'a workflow needs at least one node' };
   if (raw.length > MAX_NODES) return { error: `too many nodes (max ${MAX_NODES})` };
@@ -71,10 +75,10 @@ export function validateWorkflowNodes(raw) {
   const knownIds = new Set(ids);
   const seen = new Set();
   const nodes = [];
-  for (const rawNode of raw) {
-    const { node, error } = normalizeNode(rawNode, knownIds);
-    if (error) return { error };
-    if (seen.has(node.id)) return { error: `duplicate node id "${node.id}"` };
+  for (let index = 0; index < raw.length; index += 1) {
+    const { node, error } = normalizeNode(raw[index], knownIds);
+    if (error) return { error, index };
+    if (seen.has(node.id)) return { error: `duplicate node id "${node.id}"`, index };
     seen.add(node.id);
     nodes.push(node);
   }

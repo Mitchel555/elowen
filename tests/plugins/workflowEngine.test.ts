@@ -1,4 +1,5 @@
 import { afterAll, describe, it, expect } from 'vitest';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -247,7 +248,30 @@ describe('workflow engine', () => {
     expect(launched).toEqual([]);
   });
 
+  it('locates the node the validator actually rejected when an id is repeated', async () => {
+    // Two entries may carry the same id: the duplicate-id rule only fires once a node normalizes, so a
+    // LATER twin that is itself malformed is rejected first and the error names an id that also belongs
+    // to a perfectly valid earlier node. Locating the offender by that id points the author at the node
+    // that is fine and says it is missing a field it has — worse than no location at all.
+    const { tools, launched } = harness();
+    const start = tools.get('WorkflowStart');
+    if (!start) throw new Error('WorkflowStart was not registered');
 
+    const twinMissingTask = workflowFile([
+      { id: 'research', task: 'research' },
+      { id: 'research' },
+    ]);
+    expect((await start.execute('twin-task', { nodesFile: twinMissingTask })).content[0]?.text)
+      .toBe(`Error: workflow file "${twinMissingTask}": node 2 ("research"): missing required field "task"; add a complete, non-empty string "task" to this node.`);
+
+    const twinBadDeps = workflowFile([
+      { id: 'research', task: 'research' },
+      { id: 'research', task: 'again', deps: ['ghost'] },
+    ]);
+    expect((await start.execute('twin-deps', { nodesFile: twinBadDeps })).content[0]?.text)
+      .toBe(`Error: workflow file "${twinBadDeps}": node 2 ("research"): depends on unknown node "ghost"; fix this node in the workflow file.`);
+    expect(launched).toEqual([]);
+  });
 
   it('runs a linear DAG in dependency order and returns every node result', async () => {
     const { tools, launched } = harness();
@@ -1214,6 +1238,102 @@ describe('WorkflowResume', () => {
     await new Promise((r) => setTimeout(r, 5));
 
     expect(warnings.some((w) => w.includes('s-a') && w.includes('could not be stopped'))).toBe(true);
+  });
+
+  it('stops a late child of a self-expansion node, whose turn is not the one that owns it', async () => {
+    // The host authorizes a stop against the session on the async-context stack, while every node child is
+    // registered under the workflow's ORIGIN. A workflow extended from inside a running node ticks under
+    // that NODE's turn, so an ambient stop names a session that does not own the child and is refused —
+    // and a child whose id surfaces after the cancellation is exactly the one nothing else can reach, so
+    // it keeps running tools and burning tokens unsupervised.
+    const turn = new AsyncLocalStorage<{ sessionId: string }>();
+    const tools = new Map<string, Tool>();
+    const snapshots: { id: string }[] = [];
+    const stopped: string[] = [];
+    const warnings: string[] = [];
+    /** The parent each child was registered under — the stand-in for the host's durable session relation. */
+    const parentOfChild = new Map<string, string>();
+    let releaseRoot = (): void => {};
+    const rootGate = new Promise<void>((r) => { releaseRoot = r; });
+    let releaseLeaf = (): void => {};
+    const leafGate = new Promise<void>((r) => { releaseLeaf = r; });
+    const run = async (
+      source: { access?: { parentSessionId?: string } },
+      task: string,
+      onEvent: (e: { type: string; sessionId: string }) => void,
+    ): Promise<string> => {
+      parentOfChild.set(`s-${task}`, source.access?.parentSessionId ?? '');
+      if (task === 'root') {
+        onEvent({ type: 'session', sessionId: 's-root' });
+        await rootGate;
+        return 'done:root';
+      }
+      // The leaf's id surfaces only after the gate: the host registers the delegated call before its first
+      // await but emits `session` after the spawn, and that window is what WorkflowStop cannot sweep.
+      await leafGate;
+      onEvent({ type: 'session', sessionId: 's-leaf' });
+      return 'done:leaf';
+    };
+    const ctx = {
+      dataDir: () => workflowFilesDir,
+      registerTool: (def: Tool) => { tools.set(def.name, def); },
+      registerControl: () => {},
+      // Faithful to BrainService.stopSubagent: the parent anchor is read from the turn on the stack, never
+      // taken from the caller, and a child naming a different parent is simply not addressable from it.
+      stopSubagent: async (id: string) => {
+        const parent = turn.getStore()?.sessionId;
+        if (!parent || parentOfChild.get(id) !== parent) {
+          throw new Error('unknown sub-agent for this conversation');
+        }
+        stopped.push(id);
+        return { stopped: true };
+      },
+      logger: { info() {}, warn(message: string) { warnings.push(message); } },
+      currentSessionId: () => turn.getStore()?.sessionId,
+      // A delegated node turn runs as the anonymous subagent principal, never the origin's.
+      currentIdentity: () => (turn.getStore()?.sessionId === 'brain-parent'
+        ? { elowenUserId: 1, platform: 'cli', userId: '1' }
+        : { platform: 'subagent', userId: 'subagent' }),
+      currentAccess: () => ({ toolPolicy: undefined }),
+      currentModel: () => ({ provider: 'p', model: 'm' }),
+      assertPathAllowed: assertTestPathAllowed,
+      workflowEmitter: () => (u: { id: string }) => { snapshots.push(u); },
+      workflowCompletionEmitter: () => () => {},
+      listModels: async () => [],
+      toolNames: () => ['Read'],
+    };
+    registerWorkflow(ctx, () => run, {
+      resolveDelegateTools: () => ({ allow: undefined }),
+      principalOf: (id: { elowenUserId?: number }) => (id.elowenUserId ? `elowen:${id.elowenUserId}` : 'subagent:subagent'),
+      delegateContextChunks,
+    });
+    const tool = (name: string): Tool => {
+      const found = tools.get(name);
+      if (!found) throw new Error(`${name} was not registered`);
+      return found;
+    };
+    const asTurn = async (sessionId: string, fn: () => Promise<unknown>): Promise<void> => {
+      await turn.run({ sessionId }, fn);
+    };
+
+    await asTurn('brain-parent', () => tool('WorkflowStart').execute('x1', {
+      nodesFile: workflowFile([{ id: 'root', task: 'root' }]), background: true,
+    }));
+    const wfId = snapshots[0]?.id;
+    if (!wfId) throw new Error('the workflow published no snapshot');
+    // The RUNNING node extends its own workflow, so the leaf is launched under the node's turn.
+    await asTurn('s-root', () => tool('WorkflowAddNodes').execute('x2', {
+      workflowId: wfId, nodes: [{ id: 'leaf', task: 'leaf' }],
+    }));
+    await asTurn('brain-parent', () => tool('WorkflowStop').execute('x3', { workflowId: wfId }));
+    expect(stopped).toEqual(['s-root']); // the leaf has no id yet — the sweep cannot see it
+
+    releaseLeaf();
+    releaseRoot();
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(stopped).toEqual(['s-root', 's-leaf']);
+    expect(warnings).toEqual([]);
   });
 
   it('reports nothing to resume once every node has already finished', async () => {

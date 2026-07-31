@@ -4,6 +4,7 @@
 // engine holds the DAG in memory (like delegate's background jobs) and streams the whole snapshot to the
 // parent's clients as `workflow` events on every state change. It does NOT emit `subagent` events, so a
 // workflow node never doubles up in the flat sub-agent panel.
+import { AsyncResource } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -73,35 +74,32 @@ const nodeLabel = (raw, index) => {
 
 /** Add file location to node-validation errors without creating a second set of node rules. The DAG
  *  validator remains the only authority that accepts or rejects nodes; this only turns its first failure
- *  into a location and repair instruction the caller can act on in the source file. */
-const actionableNodeError = (rawNodes, error) => {
+ *  into a location and repair instruction the caller can act on in the source file. `index` is that
+ *  validator's OWN offending-node index: searching the list for a node that matches the message instead
+ *  names the first entry carrying the id, which is the valid twin whenever an id is repeated. */
+const actionableNodeError = (rawNodes, error, index) => {
   if (error === 'a workflow needs at least one node') {
     return 'field "nodes" is empty; add at least one node object with required fields "id" and "task"';
   }
-  if (error === 'each node must be an object') {
-    const index = rawNodes.findIndex((node) => !isRecord(node));
-    return `${nodeLabel(rawNodes[index], index)}: must be an object with required fields "id" and "task"; replace this value with a node object`;
-  }
-  if (error === 'each node needs a non-empty string id') {
-    const index = rawNodes.findIndex((node) => !isRecord(node)
-      || typeof node.id !== 'string' || !node.id.trim());
-    const raw = rawNodes[index];
-    const issue = isRecord(raw) && !hasOwn(raw, 'id')
-      ? 'missing required field "id"'
-      : 'field "id" must be a non-empty string';
-    return `${nodeLabel(raw, index)}: ${issue}; add a unique non-empty string "id" to this node`;
-  }
-  for (let index = 0; index < rawNodes.length; index += 1) {
-    const raw = rawNodes[index];
-    if (!isRecord(raw) || typeof raw.id !== 'string') continue;
-    const id = raw.id.trim();
-    if (error === `node "${id}" needs a non-empty task`) {
+  const raw = index === undefined ? undefined : rawNodes[index];
+  if (raw !== undefined) {
+    if (error === 'each node must be an object') {
+      return `${nodeLabel(raw, index)}: must be an object with required fields "id" and "task"; replace this value with a node object`;
+    }
+    if (error === 'each node needs a non-empty string id') {
+      const issue = isRecord(raw) && !hasOwn(raw, 'id')
+        ? 'missing required field "id"'
+        : 'field "id" must be a non-empty string';
+      return `${nodeLabel(raw, index)}: ${issue}; add a unique non-empty string "id" to this node`;
+    }
+    const id = isRecord(raw) && typeof raw.id === 'string' ? raw.id.trim() : '';
+    if (id && error === `node "${id}" needs a non-empty task`) {
       const issue = !hasOwn(raw, 'task')
         ? 'missing required field "task"'
         : 'field "task" must be a non-empty string';
       return `${nodeLabel(raw, index)}: ${issue}; add a complete, non-empty string "task" to this node`;
     }
-    if (error.startsWith(`node "${id}" `)) {
+    if (id && error.startsWith(`node "${id}" `)) {
       return `${nodeLabel(raw, index)}: ${error.slice(`node "${id}" `.length)}; fix this node in the workflow file`;
     }
   }
@@ -363,12 +361,10 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         // lock and the spawn, so a child that was already launching when the run was cancelled surfaces its
         // id only now — too late for the sweep in WorkflowStop/reload, which can only see ids it has. Stop
         // it here instead, or it would keep running tools and burning tokens after an announced stop.
-        // The host scopes a stop to the turn it is called from, and this one runs on whatever turn happens
-        // to be on the stack — a NODE's own turn when the workflow was extended from inside one, while the
-        // child was registered under the origin session. The stop is then refused, and there is nothing
-        // here that can recover: report it instead of letting the rejection go unhandled.
+        // `wf.stopChild` carries the workflow's own origin turn, so this reaches the child no matter whose
+        // turn is on the stack; a stop the host still refuses is reported rather than dropped.
         if (wf.finished) {
-          ctx.stopSubagent?.(e.sessionId)?.catch((err) => ctx.logger.warn(
+          wf.stopChild(e.sessionId)?.catch((err) => ctx.logger.warn(
             `workflow ${wf.id}: node "${node.id}" child ${e.sessionId} could not be stopped after cancellation: ${errorText(err)}`));
         }
         snapshot(wf);
@@ -635,8 +631,8 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
           return ok(`Error: workflow file "${p.nodesFile}" field "${field}" must be a ${type}. Fix or remove that field, then call WorkflowStart again.`);
         }
       }
-      const { nodes, error } = validateWorkflowNodes(rawNodes);
-      if (error) return ok(`Error: workflow file "${p.nodesFile}": ${actionableNodeError(rawNodes, error)}.`);
+      const { nodes, error, index } = validateWorkflowNodes(rawNodes);
+      if (error) return ok(`Error: workflow file "${p.nodesFile}": ${actionableNodeError(rawNodes, error, index)}.`);
       const title = p.title !== undefined ? p.title : fileOptions.title;
       const context = p.context !== undefined ? p.context : fileOptions.context;
       const background = p.background !== undefined ? p.background : fileOptions.background;
@@ -667,6 +663,16 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         sharedContext: typeof context === 'string' && context.trim() ? context.trim() : undefined,
         originSessionId,
         originPrincipal,
+        // Abort one of this workflow's node children through the host. The host authorizes a stop against
+        // the turn on the async-context stack, and every node child is registered under `originSessionId`
+        // — but the engine keeps launching nodes long after the origin turn returned, and a self-expansion
+        // (WorkflowAddNodes) ticks under a NODE's turn, so an ambient stop is scoped to a session that
+        // does not own the child and is refused, leaving it running unsupervised. Everything else the
+        // engine needs from the origin turn is captured here as a value; this is the one call that has to
+        // be MADE in it, so it is bound to the origin's async context rather than the caller's. This
+        // widens nothing: it can only reach the origin's own children, exactly as WorkflowStop already
+        // does from the origin turn itself.
+        stopChild: AsyncResource.bind((sessionId) => ctx.stopSubagent?.(sessionId)),
         childSessions: new Set(),
         finished: false,
         finishedAt: undefined,
@@ -856,7 +862,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       let stopped = 0;
       for (const node of running) {
         try {
-          const res = await ctx.stopSubagent?.(node.sessionId);
+          const res = await wf.stopChild(node.sessionId);
           if (res?.stopped) stopped += 1;
         } catch (e) {
           // The DAG is already stopped; a child that cannot be aborted (already settled, unwired host) is
