@@ -42,6 +42,15 @@ const brainLimitsPatchSchema = z.object({
   delegateContextChars: z.number().optional(),
 });
 
+/** The operator-tunable runtime limits, all optional for the same reason as the brain limits above —
+ *  `ConfigStore.clampRuntimeLimits` owns the per-field clamp. */
+const runtimeLimitsPatchSchema = z.object({
+  localShellTimeoutMs: z.number().optional(),
+  memorySemanticFloorPerMille: z.number().optional(),
+  toolDeferThreshold: z.number().optional(),
+  eventRetentionDays: z.number().optional(),
+});
+
 /** A patch to the daemon config (PUT /config, admin-only). Mirrors `ConfigPatch` field-for-field so a
  *  malformed value is rejected with a clear 400 instead of reaching the store as a supposed
  *  string/number/boolean it never was — the old `await c.req.json() as ConfigPatch` cast let e.g.
@@ -95,6 +104,10 @@ export const configPatchSchema = z.object({
     modelContextWindows: z.record(z.string(), z.number()).optional(),
     limits: brainLimitsPatchSchema.optional(),
     hiddenOauth: z.array(z.string()).optional(),
+  }).optional(),
+  runtime: z.object({
+    limits: runtimeLimitsPatchSchema.optional(),
+    toolDeferralEnabled: z.boolean().optional(),
   }).optional(),
   embedding: z.object({
     providerId: z.string().optional(),

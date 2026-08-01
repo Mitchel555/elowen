@@ -231,7 +231,7 @@ export function compactNotice(result: { compacted: boolean; message?: string }):
 
 export function wireSubmit(
   rt: ChatState,
-  resources: Pick<ChatApplicationResources, 'client' | 'tui' | 'editor' | 'attachmentChips' | 'shellContext' | 'commandDefs' | 'lifetime'>,
+  resources: Pick<ChatApplicationResources, 'client' | 'tui' | 'editor' | 'attachmentChips' | 'shellContext' | 'commandDefs' | 'lifetime' | 'localShellTimeoutMs'>,
   actions: ChatApplicationActions,
   deps: {
     stream: StreamCoordinatorPort;
@@ -244,7 +244,8 @@ export function wireSubmit(
   const { client, tui, editor, attachmentChips, shellContext, commandDefs, lifetime } = resources;
   const { render, renderForced, refreshMeta, quit, suspendTerminal, resumeTerminal } = actions;
   const { stream, pickers } = deps;
-  const runShell = deps.runLocalShell ?? ((command, cwd, signal) => runLocalShell(command, cwd, undefined, signal));
+  const runShell = deps.runLocalShell
+    ?? ((command, cwd, signal) => runLocalShell(command, cwd, undefined, signal, { timeoutMs: resources.localShellTimeoutMs }));
   const readClipboard = deps.readClipboardImage ?? ((signal) => readClipboardImage(undefined, undefined, undefined, signal));
   const editExternal = deps.editTextExternally ?? editTextExternally;
   const runApplication: ChatTaskScope['runApplication'] = (operation, onFulfilled, onRejected) =>

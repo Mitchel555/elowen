@@ -224,6 +224,30 @@ export interface BrainLimits {
   delegateContextChars: number;
 }
 
+/** Operator-tunable runtime limits (Settings → Elowen AI → Runtime): each a whole number the daemon
+ *  clamps to a sane range. A SIBLING of `BrainLimits` rather than more fields on it: these govern the
+ *  daemon's surrounding runtime — the CLI's `!` escape, the memory relevance floor, the deferred-tool
+ *  policy and activity-log retention — not the per-turn brain budget, and `BrainLimits` already mixes
+ *  more domains than one editor should. Served inside `ElowenConfig.runtime` and PATCHed as a partial.
+ *
+ *  `memorySemanticFloorPerMille` is a cosine threshold carried in PER MILLE (300 = 0.30) because every
+ *  value in these groups is rounded to a whole number on save — a float would round to 0 and floor
+ *  nothing. `MemoryService` divides it back by 1000. */
+export interface RuntimeLimits {
+  localShellTimeoutMs: number;
+  memorySemanticFloorPerMille: number;
+  toolDeferThreshold: number;
+  eventRetentionDays: number;
+}
+
+/** The runtime block as served/patched: the numeric limits plus the deferral kill switch (its own field
+ *  because the group is uniformly numeric — one clamp loop, one slider table). */
+export interface RuntimeConfig {
+  limits: RuntimeLimits;
+  /** Global kill switch for deferred tools. `false` → nothing is ever withheld from the prompt. */
+  toolDeferralEnabled: boolean;
+}
+
 /** Statusline data for one live conversation: current context fill + session totals. The breakdown
  *  fields are the session's own cumulative sums; optional because tests and custom producers build
  *  partial literals — treat absence as 0/unknown. */

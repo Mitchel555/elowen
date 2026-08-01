@@ -402,6 +402,7 @@ describe('ChatApplication shutdown ownership', () => {
       processes: vi.fn(async () => []),
       terminalSettings: vi.fn(async () => null),
       commands: vi.fn(async () => []),
+      localShellTimeoutMs: vi.fn(async () => null),
       history: vi.fn(() => { enteredHistory(); return delayedHistory; }),
       rateLimits: vi.fn(async () => null),
       mcpServers: vi.fn(async () => []),

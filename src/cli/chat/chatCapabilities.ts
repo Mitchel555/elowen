@@ -37,6 +37,10 @@ export interface ChatApplicationResources {
   readonly shellContext: LocalShellBuffer;
   readonly mentionIndex: FileIndex;
   readonly commandDefs: SlashCommandDef[];
+  /** Timeout for a `!` local-shell command, resolved once at boot from the daemon config (Settings →
+   *  Elowen AI → Runtime) and falling back to LOCAL_SHELL_TIMEOUT_MS when the daemon serves none. Fixed
+   *  for the session: a `!` command must not change its deadline mid-run because a setting was saved. */
+  readonly localShellTimeoutMs: number;
   readonly termSettings: Awaited<ReturnType<BrainClient['terminalSettings']>> | null;
   /** Project chips for the status row. Mutable, not readonly: `/cd` moves the process mid-session and
    *  these must follow it, or the CLI would keep reporting a directory it has left. Re-derived on `/cd`

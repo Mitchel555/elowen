@@ -43,6 +43,8 @@ export interface ElowenConfig {
   autoUpdate: boolean;
   plugins?: { enabled: string[]; removed?: string[] };
   brain?: { providers: BrainProvider[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: BrainLimits; hiddenOauth?: string[] };
+  /** Operator-tunable runtime knobs — the sibling group of `brain.limits`; absent on an older daemon. */
+  runtime?: RuntimeConfig;
 }
 
 // Operator-tunable brain limits — shared with the daemon via the wire contract (re-exported from it
@@ -90,11 +92,11 @@ export interface BrainSearchHit { sessionId: string; sessionTitle: string; role:
 import type {
   ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef, AskQuestion, BrainStreamControl,
   BrainWorkMode, BrainPendingPlan,
-  User, BrainLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
+  User, BrainLimits, RuntimeConfig, RuntimeLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
   CommitFileChange, CommitLogEntry,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
-export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, BrainUsage, CommitFileChange, CommitLogEntry };
+export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, RuntimeConfig, RuntimeLimits, BrainUsage, CommitFileChange, CommitLogEntry };
 export type BrainMessage = BrainMessageView;
 // The memory DTOs keep their established web-side names while sharing the daemon's row shapes.
 export type Memory = MemoryRow;
@@ -190,6 +192,8 @@ export interface ConfigPatch {
   autoUpdate?: boolean;
   /** Wholesale brain provider list; an entry may carry `apiKey` to (re)set that provider's secret. */
   brain?: { providers?: (Omit<BrainProvider, 'apiKeySet'> & { apiKey?: string })[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
+  /** Runtime knobs merged per-field by the daemon, like the brain limits above. */
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean };
 }
 interface MissionPrInfo { branch: string; prNumber: number | null; prUrl: string | null; prState: string | null; fixRounds: number; lastFeedback: string | null }
 export interface UserPatch { is_admin?: boolean; allowed_execs?: string[]; disabled_tools?: string[] }

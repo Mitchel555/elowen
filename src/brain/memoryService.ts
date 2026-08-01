@@ -27,8 +27,13 @@ const DEFAULT_CHAR_BUDGET = 1500;
  *  memory is unrelated — dropping it stops a small memory store from injecting every fact into every
  *  prompt (and keeps the manual search box on-topic). Cosine-scale, tuned for the current embedding
  *  models: genuinely related pairs land well above (~0.5+), unrelated noise sits ~0.1–0.2. Only the raw
- *  `semantic` component is floored; importance/recency/usage still reorder whatever survives. */
+ *  `semantic` component is floored; importance/recency/usage still reorder whatever survives.
+ *  The operator can retune it (Settings → Elowen AI → Runtime); this is the value when nothing is wired. */
 const MIN_SEMANTIC = 0.3;
+
+/** The operator's floor travels as an integer per mille (300 = 0.30) because every configurable limit is
+ *  rounded to a whole number on save — a cosine float would round to 0 and floor nothing. */
+const PER_MILLE = 1000;
 
 /** Defaults for findSimilar(): at 0.85 cosine two bodies are near-duplicates for the curator/tool. */
 const DEFAULT_SIMILAR_THRESHOLD = 0.85;
@@ -122,17 +127,28 @@ export class MemoryService {
   /** Operator-tuned recall size (count + char budget) used when a caller doesn't pass its own opts —
    *  the per-turn recall path. Absent → the built-in defaults. */
   private readonly recallDefaults?: () => { count: number; chars: number };
+  /** Operator-tuned semantic relevance floor, in per mille of cosine similarity. Absent (or non-finite)
+   *  → {@link MIN_SEMANTIC}. Read per call so a Settings change applies without a restart. */
+  private readonly semanticFloorPerMille?: () => number;
 
   constructor(deps: {
     store: MemoryStore;
     embeddings: EmbeddingService;
     embeddingConfig: () => EmbeddingConfig | null;
     recallDefaults?: () => { count: number; chars: number };
+    semanticFloorPerMille?: () => number;
   }) {
     this.store = deps.store;
     this.embeddings = deps.embeddings;
     this.embeddingConfig = deps.embeddingConfig;
     this.recallDefaults = deps.recallDefaults;
+    this.semanticFloorPerMille = deps.semanticFloorPerMille;
+  }
+
+  /** The relevance floor on the cosine scale the scorers work in. */
+  private minSemantic(): number {
+    const configured = this.semanticFloorPerMille?.();
+    return typeof configured === 'number' && Number.isFinite(configured) ? configured / PER_MILLE : MIN_SEMANTIC;
   }
 
   /** Retrieve the most relevant memories for `queryText`. Vector path: embed the query, cosine-score
@@ -203,10 +219,11 @@ export class MemoryService {
     const cfg = this.activeConfig();
     if (cfg) {
       try {
+        const floor = this.minSemantic();
         const queryVec = await this.embeddings.embed(cfg, q);
         const hits = this.store.listActiveWithEmbeddings(userId)
           .map(({ memory, vector }) => ({ memory, similarity: cosine(queryVec, vector) }))
-          .filter((r) => r.similarity >= MIN_SEMANTIC)
+          .filter((r) => r.similarity >= floor)
           .sort((a, b) => b.similarity - a.similarity)
           .slice(0, limit)
           .map((r) => r.memory);
@@ -245,7 +262,7 @@ export class MemoryService {
     // Only memories actually related to the query are eligible for injection — an unrelated memory must
     // not ride recency/importance into the prompt. `ranked` stays whole so the debug UI still explains
     // every candidate (including the ones floored out).
-    const eligible = ranked.filter((c) => c.semantic >= MIN_SEMANTIC);
+    const eligible = ranked.filter((c) => c.semantic >= this.minSemantic());
     const picked = this.pack(eligible, maxCount, charBudget, true);
     this.store.markUsed(userId, picked.map((c) => c.memory.id));
     return {

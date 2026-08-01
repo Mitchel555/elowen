@@ -12,6 +12,7 @@ import { ActionMenu } from '../../components/ui/ActionMenu';
 import { SelectionSummary } from '../../components/ui/SelectionSummary';
 import { Modal, ModalBody } from '../../components/ui/Modal';
 import { BrainLimitsModal, BRAIN_LIMIT_DEFAULTS } from './BrainLimitsModal';
+import { RuntimeLimitsModal, RUNTIME_LIMIT_DEFAULTS } from './RuntimeLimitsModal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { LoadingState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
@@ -22,7 +23,7 @@ import { useUpdateConfig } from '../../lib/mutations';
 import { useAutoSaveStatus, type SaveStatus } from '../../lib/useAutoSaveStatus';
 import { useSaveBrainProviders, useBrainOauthDisconnect } from '../../lib/mutations';
 import { elowenClient } from '../../lib/elowenClient';
-import type { BrainProvider, BrainProviderType, OAuthFlowState, BrainLimits } from '../../lib/types';
+import type { BrainProvider, BrainProviderType, OAuthFlowState, BrainLimits, RuntimeConfig, RuntimeLimits } from '../../lib/types';
 import { SettingsGroup, SettingsRow, SettingsState } from './SettingsSurface';
 
 // UI-only icon slug per OAuth type. The daemon exposes the SUPPORTED type set (the keys of
@@ -299,6 +300,7 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
   const [flow, setFlow] = useState<OAuthFlowState | null>(null);
   const [modelsFor, setModelsFor] = useState<BrainProviderType | null>(null);
   const [limitsOpen, setLimitsOpen] = useState(false);
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [disconnectTarget, setDisconnectTarget] = useState<BrainProviderType | null>(null);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
@@ -353,19 +355,46 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
     catch (error) { toast(t.brain.saveError, 'error'); throw error; }
   }, { ready: limitsSeeded && !!limits });
 
-  const saveStatus: SaveStatus = [nameStatus, stepsStatus, limitsStatus].includes('error')
+  // The runtime knobs (the sibling group of the limits above) follow the same draft → autosave → report
+  // what the daemon actually applied cycle; only the numeric half can be clamped, so only it is compared.
+  const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
+  const [runtimeSeeded, setRuntimeSeeded] = useState(false);
+  const [appliedRuntime, setAppliedRuntime] = useState<Partial<RuntimeLimits>>({});
+  useEffect(() => {
+    if (config && !runtimeSeeded) {
+      setRuntime(config.runtime ?? { limits: RUNTIME_LIMIT_DEFAULTS, toolDeferralEnabled: true });
+      setRuntimeSeeded(true);
+    }
+  }, [config, runtimeSeeded]);
+  const { status: runtimeStatus, retry: retryRuntime } = useAutoSaveStatus([runtime], async () => {
+    if (!runtime) return;
+    try {
+      const saved = await updateConfig.mutateAsync({ runtime });
+      const effective = saved.runtime?.limits;
+      const clamped: Partial<RuntimeLimits> = {};
+      for (const key of Object.keys(runtime.limits) as (keyof RuntimeLimits)[]) {
+        const value = effective?.[key];
+        if (value !== undefined && value !== runtime.limits[key]) clamped[key] = value;
+      }
+      setAppliedRuntime(clamped);
+    }
+    catch (error) { toast(t.brain.saveError, 'error'); throw error; }
+  }, { ready: runtimeSeeded && !!runtime });
+
+  const saveStatus: SaveStatus = [nameStatus, stepsStatus, limitsStatus, runtimeStatus].includes('error')
     ? 'error'
-    : [nameStatus, stepsStatus, limitsStatus].includes('saving')
+    : [nameStatus, stepsStatus, limitsStatus, runtimeStatus].includes('saving')
       ? 'saving'
-      : [nameStatus, stepsStatus, limitsStatus].includes('saved') ? 'saved' : 'idle';
+      : [nameStatus, stepsStatus, limitsStatus, runtimeStatus].includes('saved') ? 'saved' : 'idle';
   useEffect(() => {
     const retry = saveStatus === 'error' ? () => {
       if (nameStatus === 'error') retryName();
       if (stepsStatus === 'error') retrySteps();
       if (limitsStatus === 'error') retryLimits();
+      if (runtimeStatus === 'error') retryRuntime();
     } : undefined;
     onSaveState?.('brain', saveStatus, retry);
-  }, [limitsStatus, nameStatus, onSaveState, retryLimits, retryName, retrySteps, saveStatus, stepsStatus]);
+  }, [limitsStatus, nameStatus, onSaveState, retryLimits, retryName, retryRuntime, retrySteps, runtimeStatus, saveStatus, stepsStatus]);
 
   if (!config) return <LoadingState />;
   const providers = config.brain?.providers ?? [];
@@ -451,6 +480,13 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
             </button>
           </SettingsRow>
         ) : null}
+        {runtime ? (
+          <SettingsRow label={t.brain.runtime.title} description={t.brain.runtime.hint} icon={Gauge}>
+            <button type="button" data-selection-manage className="spatial-inline-action" onClick={() => setRuntimeOpen(true)}>
+              <Gauge size={14} aria-hidden />{t.brain.runtime.manage}
+            </button>
+          </SettingsRow>
+        ) : null}
       </SettingsGroup>
       {limits && limitsOpen ? (
             <BrainLimitsModal
@@ -458,6 +494,15 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
               applied={appliedLimits}
               onChange={(fn) => setLimits((cur) => (cur ? fn(cur) : cur))}
               onClose={() => setLimitsOpen(false)}
+              presentation="drawer"
+            />
+      ) : null}
+      {runtime && runtimeOpen ? (
+            <RuntimeLimitsModal
+              runtime={runtime}
+              applied={appliedRuntime}
+              onChange={(fn) => setRuntime((cur) => (cur ? fn(cur) : cur))}
+              onClose={() => setRuntimeOpen(false)}
               presentation="drawer"
             />
       ) : null}

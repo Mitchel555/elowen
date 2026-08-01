@@ -19,7 +19,7 @@ import { HydrationNoticeOwner } from './hydrationNoticeOwner.js';
 import { loadInitialTranscript } from './initialTranscriptHydration.js';
 import { gitBranch, prettyCwd } from './projectDir.js';
 import { initKeymap } from './keys.js';
-import { LocalShellBuffer } from './localShell.js';
+import { LocalShellBuffer, LOCAL_SHELL_TIMEOUT_MS } from './localShell.js';
 import { FileIndex, loadMentionFrecency } from './mentions.js';
 import { ChatEditor } from './picker.js';
 import { createPickers } from './pickers.js';
@@ -177,12 +177,15 @@ export class ChatApplication {
     await client.start({ provider: options.model, session: options.session, fresh: options.fresh });
     if (this.stopped) return;
     const bootHydration = new AbortController();
-    const [boot, processes, termSettings, initialTranscript, serverCommands] = await Promise.all([
+    const [boot, processes, termSettings, initialTranscript, serverCommands, shellTimeoutMs] = await Promise.all([
       client.status().catch(() => null),
       client.processes().catch(() => []),
       client.terminalSettings().catch(() => null),
       loadInitialTranscript(client, hydrator, bootHydration.signal),
       client.commands().catch(() => commandsFor('cli', true)),
+      // The operator's `!` timeout. A failed/absent value keeps the built-in default — the local shell must
+      // stay usable against an older daemon, and offline is not a reason to refuse to run a command.
+      client.localShellTimeoutMs().catch(() => null),
     ]);
     bootHydration.abort();
     if (this.stopped) return;
@@ -237,6 +240,7 @@ export class ChatApplication {
       shellContext: new LocalShellBuffer(),
       mentionIndex: new FileIndex(process.cwd()),
       commandDefs, termSettings,
+      localShellTimeoutMs: shellTimeoutMs ?? LOCAL_SHELL_TIMEOUT_MS,
       cwdLabel: prettyCwd(),
       branchLabel: gitBranch(),
       lifetime: this.lifetime,

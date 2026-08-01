@@ -11,7 +11,7 @@ import type { MemoryStore } from '../store/memoryStore.js';
 import type { MemoryService } from './memoryService.js';
 import type { InferenceClient } from '../inference/types.js';
 import type { PermissionScope, PermissionSettings } from './toolPermissions.js';
-import type { BrainLimits } from '../store/configStore.js';
+import type { BrainLimits, RuntimeConfig } from '../store/configStore.js';
 import type { BrainResourceLoaderOptions } from './session/factory.js';
 import type { ProjectModelPreference } from '../store/userSettingStore.js';
 
@@ -67,6 +67,11 @@ export interface BrainDeps {
    *  memory recall size, goal turn budget + safety ceiling, live-channel cap. Read fresh so a config
    *  change applies without a restart. Absent (minimal/test wiring) → the built-in defaults. */
   brainLimits?: () => BrainLimits;
+  /** Operator-tunable runtime config (Settings → Elowen AI → Runtime). The brain consumes its
+   *  deferred-tool policy half — the threshold and the kill switch — when composing a session's tool set.
+   *  Read fresh so a config change applies to the next spawn without a restart. Absent (minimal/test
+   *  wiring) → the deferral policy's built-in defaults. */
+  runtimeConfig?: () => RuntimeConfig;
   /** Resolve a platform sender (e.g. a Discord id) to the Elowen user who claimed it in their account
    *  settings. Lets channel turns carry a verified identity line for registered users. */
   resolvePlatformUser?: (platform: string, platformUserId: string) => { id: number; name: string; username?: string; admin: boolean } | null;

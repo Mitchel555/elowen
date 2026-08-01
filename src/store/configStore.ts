@@ -2,11 +2,12 @@ import type { Db } from './db.js';
 import { defaultPromptTemplate } from '../overseer/planner.js';
 import { DEFAULT_BINS, EXEC_NOTES, KNOWN_EXECS, isAllowedExec } from '../shared/execs.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
-import type { BrainLimits } from '../shared/wireContract.js';
+import type { BrainLimits, RuntimeConfig, RuntimeLimits } from '../shared/wireContract.js';
 
 // The brain-limits shape is the daemon↔web wire contract (Settings → Elowen AI → Limits) — defined
-// once in src/shared and re-exported here, so the two can never drift.
-export type { BrainLimits };
+// once in src/shared and re-exported here, so the two can never drift. The runtime block is its sibling
+// group (Settings → Elowen AI → Runtime) and travels the same way.
+export type { BrainLimits, RuntimeConfig, RuntimeLimits };
 
 /** How the memory subsystem generates embeddings. `providerId` references a brain provider whose API
  *  key is reused (no second secret is stored). `baseUrl` optionally overrides the provider's endpoint;
@@ -76,6 +77,11 @@ export interface ElowenConfig {
    *  `maxSteps` caps the agent's per-run model round-trips; `modelContextWindows` lets the operator pin a
    *  max context window per Elowen AI model (`providerId/model`) for endpoints that don't report one. */
   brain: { providers: BrainProviderPublic[]; agentName: string; maxSteps: number; modelContextWindows: Record<string, number>; limits: BrainLimits; hiddenOauth: string[] };
+  /** Operator-tunable runtime knobs (Settings → Elowen AI → Runtime): the `!` shell timeout, the memory
+   *  relevance floor, the deferred-tool policy and activity-log retention. `limits.eventRetentionDays` is
+   *  the always-on twin of `sessionRetention.days` above — kept here, with the other numeric knobs, because
+   *  it is a pure ceiling with no opt-in of its own, where session retention is an off-by-default feature. */
+  runtime: RuntimeConfig;
   /** Memory embedding provider config (no secret — the API key comes from the referenced brain provider). */
   embedding: EmbeddingBlock;
   /** Memory categorization model (workspace-level; no secret — key reused from the brain provider). */
@@ -261,6 +267,49 @@ function clampBrainLimits(next: Partial<BrainLimits> | undefined, fallback: Brai
   return out;
 }
 
+/** Operator-tunable runtime limits — the sibling group of DEFAULT_BRAIN_LIMITS, for the knobs that
+ *  govern the runtime AROUND a turn rather than the turn's own budget. Consumed at: the chat CLI's `!`
+ *  escape (local shell timeout), MemoryService (semantic relevance floor), the deferred-tool policy
+ *  (LiveSessionSpawner) and the hourly activity-log purge (bootstrap). Same contract as the brain
+ *  limits: whole numbers, clamped per field, an unset/invalid field keeping the current value. */
+export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
+  localShellTimeoutMs: 30_000,
+  // 0.30 cosine, carried in per mille because the clamp rounds to a whole number — see RuntimeLimits.
+  memorySemanticFloorPerMille: 300,
+  toolDeferThreshold: 10,
+  eventRetentionDays: 30,
+};
+
+/** Whether deferred tools are computed at all. On by default — the threshold above already keeps small
+ *  MCP surfaces untouched; this is the prod-safety switch that turns the mechanism off wholesale. */
+const DEFAULT_TOOL_DEFERRAL_ENABLED = true;
+
+/** Every bound here is written out rather than derived from the default (the ±50% `band()` rule the brain
+ *  limits use): each of these four has a domain range that the default sits inside rather than centres —
+ *  a 10s floor is what makes a `!` timeout survivable, and cosine similarity has no meaning past ~0.8. */
+const RUNTIME_LIMIT_BOUNDS: Record<keyof RuntimeLimits, [min: number, max: number]> = {
+  localShellTimeoutMs: [10_000, 300_000],
+  memorySemanticFloorPerMille: [100, 800],
+  // Below 1 the threshold would defer a session holding a single MCP tool, which costs a prompt-cache
+  // break for nothing; past 100 no realistic MCP surface would ever engage it.
+  toolDeferThreshold: [1, 100],
+  eventRetentionDays: [1, 365],
+};
+
+/** Merge a (possibly partial, possibly malformed) runtime-limits patch onto `fallback` — same per-field
+ *  clamp + whole-number rounding as the brain limits, so a partial patch never wipes a sibling. */
+function clampRuntimeLimits(next: Partial<RuntimeLimits> | undefined, fallback: RuntimeLimits): RuntimeLimits {
+  const out = { ...fallback };
+  for (const key of Object.keys(RUNTIME_LIMIT_BOUNDS) as (keyof RuntimeLimits)[]) {
+    const v = next?.[key];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      const [min, max] = RUNTIME_LIMIT_BOUNDS[key];
+      out[key] = Math.min(max, Math.max(min, Math.round(v)));
+    }
+  }
+  return out;
+}
+
 /** Per-model context-window overrides, keyed `providerId/model`. Some endpoints don't report a reliable
  *  max token count, so the operator can pin one. Keep only positive whole numbers; drop anything else. */
 function sanitizeContextWindows(input: unknown): Record<string, number> {
@@ -320,6 +369,7 @@ const DEFAULT_CONFIG: ElowenConfig = {
   // up before changing it, which has to work on a fresh install or it is never there when it is needed.
   plugins: { enabled: ['files', 'terminal', 'askuser', 'runtime-context', 'skills', 'subagent', 'elowen-docs'], removed: [] },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED },
   embedding: { providerId: '', model: '', baseUrl: '', dimensions: null },
   categorization: { providerId: '', model: '', baseUrl: '' },
 };
@@ -345,6 +395,8 @@ interface Stored {
   plugins: { enabled: string[]; removed: string[]; config: Record<string, Record<string, unknown>> };
   /** Brain provider entries with plaintext API keys — stripped to `apiKeySet` in the public view. */
   brain: { providers: BrainProviderStored[]; agentName: string; maxSteps: number; modelContextWindows: Record<string, number>; limits: BrainLimits; hiddenOauth: string[] };
+  /** Runtime knobs. Holds no secret → surfaced verbatim in the public view. */
+  runtime: RuntimeConfig;
   /** Embedding provider config. Holds no secret (the key is reused from the brain provider), so this
    *  block is safe to surface verbatim in the public view. */
   embedding: EmbeddingBlock;
@@ -402,6 +454,7 @@ const defaultStored = (): Stored => ({
   webPush: null,
   plugins: { enabled: [...DEFAULT_CONFIG.plugins.enabled], removed: [], config: {} },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled },
   embedding: { ...DEFAULT_CONFIG.embedding },
   categorization: { ...DEFAULT_CONFIG.categorization },
 });
@@ -422,6 +475,8 @@ export interface ConfigPatch {
   /** Brain providers replace wholesale (the UI edits the full list). A patched entry with an empty/absent
    *  apiKey KEEPS the currently stored key for that id — the UI never sees (or resends) secrets. */
   brain?: { providers?: unknown; agentName?: unknown; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
+  /** Runtime knobs merged per-field (like the brain limits): a patch tuning one slider leaves the rest. */
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean };
   /** Embedding config is merged per-field (like autopilot); `dimensions: null` clears the width hint. */
   embedding?: { providerId?: string; model?: string; baseUrl?: string; dimensions?: number | null };
   /** Categorization config merged per-field (like embedding). */
@@ -483,6 +538,10 @@ export class ConfigStore {
           limits: clampBrainLimits(p.brain?.limits, d.brain.limits),
           hiddenOauth: sanitizeStringList(p.brain?.hiddenOauth),
         },
+        runtime: {
+          limits: clampRuntimeLimits(p.runtime?.limits, d.runtime.limits),
+          toolDeferralEnabled: typeof p.runtime?.toolDeferralEnabled === 'boolean' ? p.runtime.toolDeferralEnabled : d.runtime.toolDeferralEnabled,
+        },
         embedding: {
           providerId: typeof p.embedding?.providerId === 'string' ? p.embedding.providerId : d.embedding.providerId,
           model: typeof p.embedding?.model === 'string' ? p.embedding.model : d.embedding.model,
@@ -522,6 +581,8 @@ export class ConfigStore {
       // Only the enabled + removed lists surface; per-plugin config (possible secrets) stays daemon-side.
       plugins: { enabled: s.plugins.enabled, removed: s.plugins.removed },
       brain: { providers: s.brain.providers.map(({ apiKey, ...pub }) => ({ ...pub, apiKeySet: !!apiKey })), agentName: s.brain.agentName, maxSteps: s.brain.maxSteps, modelContextWindows: s.brain.modelContextWindows, limits: s.brain.limits, hiddenOauth: s.brain.hiddenOauth },
+      // No secret in the runtime block → expose verbatim (the CLI reads its `!` timeout from here).
+      runtime: s.runtime,
       // No secret in the embedding block (the key is reused from the brain provider) → expose verbatim.
       embedding: s.embedding,
       // Likewise no secret in the categorization block → expose verbatim.
@@ -625,6 +686,12 @@ export class ConfigStore {
         // Hidden OAuth types replace wholesale (the UI sends the full list); a display filter only, never
         // touching credentials or provider entries.
         hiddenOauth: patch.brain?.hiddenOauth !== undefined ? sanitizeStringList(patch.brain.hiddenOauth) : cur.brain.hiddenOauth,
+      },
+      // Same per-field merge + clamp as the brain limits above; the kill switch keeps its current value
+      // unless the patch carries a real boolean.
+      runtime: {
+        limits: clampRuntimeLimits(patch.runtime?.limits, cur.runtime.limits),
+        toolDeferralEnabled: typeof patch.runtime?.toolDeferralEnabled === 'boolean' ? patch.runtime.toolDeferralEnabled : cur.runtime.toolDeferralEnabled,
       },
       embedding: {
         providerId: patch.embedding?.providerId ?? cur.embedding.providerId,

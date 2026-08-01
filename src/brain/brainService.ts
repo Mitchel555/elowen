@@ -169,6 +169,7 @@ export class BrainService {
       get activePersonality() { return d.activePersonality; },
       get agentName() { return d.agentName; },
       get maxSteps() { return d.maxSteps; },
+      get runtimeConfig() { return d.runtimeConfig; },
       get memoryStore() { return d.memoryStore; },
       get memoryService() { return d.memoryService; },
       get memoryCategoryStore() { return d.memoryCategoryStore; },

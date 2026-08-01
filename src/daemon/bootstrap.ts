@@ -729,6 +729,9 @@ export async function buildApp(opts: BuildOpts) {
     store: memoryStore, embeddings, embeddingConfig,
     // Per-turn recall size is operator-tuned (Elowen AI → Limits); read live so a change applies without a restart.
     recallDefaults: () => ({ count: config.get().brain.limits.memoryRecallCount, chars: config.get().brain.limits.memoryRecallChars }),
+    // Relevance floor below which a memory counts as unrelated to the query (Elowen AI → Runtime), carried
+    // in per mille of cosine similarity. Read live, like the recall size above.
+    semanticFloorPerMille: () => config.get().runtime.limits.memorySemanticFloorPerMille,
   });
   // Background embedder: fills in missing/stale memory vectors so writes never block on the provider.
   // Driven off a startLoops tick below; no-ops until an embedding provider/model is configured.
@@ -850,6 +853,7 @@ export async function buildApp(opts: BuildOpts) {
         agentName: () => config.get().brain.agentName,
         maxSteps: () => config.get().brain.maxSteps,
         brainLimits: () => config.get().brain.limits,
+        runtimeConfig: () => config.get().runtime,
         resolvePlatformUser: (platform, platformUserId) => {
           if (!platformUserId) return null;
           // Discord ids are bare snowflakes; WhatsApp userIds are JIDs (e.g. "420778433908@s.whatsapp.net"
@@ -1101,8 +1105,12 @@ export async function buildApp(opts: BuildOpts) {
     purgeTokens();
     const stopTokenPurge = clock.setInterval(purgeTokens, 3_600_000);
     // Same for the activity timeline: every bus event is persisted (events.record), so without a
-    // retention sweep the `events` table grows without bound. Drop rows past the 30-day window hourly.
-    const purgeEvents = () => { try { events.purgeOlderThan(); } catch (e) { log.error('event purge failed', e); } };
+    // retention sweep the `events` table grows without bound. Drop rows past the operator's retention
+    // window (Elowen AI → Runtime) hourly; read live so a change applies on the next sweep.
+    const purgeEvents = () => {
+      try { events.purgeOlderThan(config.get().runtime.limits.eventRetentionDays); }
+      catch (e) { log.error('event purge failed', e); }
+    };
     purgeEvents();
     const stopEventPurge = clock.setInterval(purgeEvents, 3_600_000);
     // Optional session retention (admin, off by default): hourly, delete each user's own idle

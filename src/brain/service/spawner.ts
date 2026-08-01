@@ -35,6 +35,7 @@ interface SpawnerDeps {
   activePersonality?: BrainDeps['activePersonality'];
   agentName?: () => string;
   maxSteps?: () => number;
+  runtimeConfig?: BrainDeps['runtimeConfig'];
   memoryStore?: BrainDeps['memoryStore'];
   memoryService?: BrainDeps['memoryService'];
   memoryCategoryStore?: BrainDeps['memoryCategoryStore'];
@@ -136,8 +137,14 @@ export class LiveSessionSpawner {
     // withheld from the initial prompt and fetched on demand via ToolSearch. Computed from the RAW plugin
     // tools — gating preserves names, and only `mcp__*` names are ever deferrable — so it is stable whether
     // read before or after composition. Empty (the common case) → no ToolSearch tool, no awareness block,
-    // no change from before this existed.
-    const deferred = computeDeferredToolNames(pluginTools);
+    // no change from before this existed. Threshold and kill switch are operator-tunable (Settings →
+    // Elowen AI → Runtime), read here so a change applies to the next spawn; absent wiring keeps the
+    // policy's own defaults.
+    const runtime = this.d.runtimeConfig?.();
+    const deferred = computeDeferredToolNames(
+      pluginTools,
+      runtime ? { enabled: runtime.toolDeferralEnabled, threshold: runtime.limits.toolDeferThreshold } : {},
+    );
     const toolSearchHandle: ToolSearchHandle | undefined = deferred.size > 0 ? createToolSearchHandle(deferred) : undefined;
     const allTools = composeSessionTools({
       kind: opts.channel ? (opts.trustedChannel ? 'trusted-channel' : 'foreign-channel') : 'owner-chat',

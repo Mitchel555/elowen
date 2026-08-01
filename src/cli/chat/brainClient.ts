@@ -402,6 +402,18 @@ export class BrainClient {
     if (!res.ok) throw new Error(`elowen ${res.status} on /config`);
   }
 
+  /** The operator's `!` local-shell timeout from the public daemon config (Settings → Elowen AI →
+   *  Runtime). Null when the daemon serves no usable value — an older daemon has no runtime block at all —
+   *  so the caller keeps the CLI's built-in default rather than a timeout of NaN. */
+  async localShellTimeoutMs(): Promise<number | null> {
+    const res = await this.f(`${this.o.base}/config`, { headers: this.headers() });
+    if (res.status === 401) throw new Unauthorized();
+    if (!res.ok) throw new Error(`elowen ${res.status} on /config`);
+    const body = (await res.json()) as { runtime?: { limits?: { localShellTimeoutMs?: unknown } } };
+    const value = body.runtime?.limits?.localShellTimeoutMs;
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+  }
+
   /** Current global TDD mission mode flag from the public daemon config (the `/tdd` command). */
   async getTddMode(): Promise<boolean> {
     const res = await this.f(`${this.o.base}/config`, { headers: this.headers() });
