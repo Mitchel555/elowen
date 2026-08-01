@@ -58,7 +58,7 @@ export type BrainGoalRow = BrainGoalState;
  *  the table's CHECK constraint in schema.sql — a kind the type allows but the boundary rejects writes
  *  fine and then vanishes on the next reload, which no compiler catches: the boundary narrows a `string`
  *  from SQLite, so a stale check there stays perfectly well-typed. */
-export const SESSION_EVENT_KINDS = ['model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent'] as const;
+export const SESSION_EVENT_KINDS = ['model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent', 'workflow'] as const;
 export type SessionEventKind = typeof SESSION_EVENT_KINDS[number];
 /** Narrow a kind read back from SQLite. The stored value is only ever `string` to the type system. */
 const isSessionEventKind = (kind: string): kind is SessionEventKind =>
@@ -470,6 +470,13 @@ export class BrainStore {
    *  see {@link BrainDelegationStore.getWorkflowRuns}. */
   getWorkflowRuns(parentSessionId: string): ReturnType<BrainDelegationStore['getWorkflowRuns']> {
     return this.delegation.getWorkflowRuns(parentSessionId);
+  }
+
+  /** The persisted status of ONE workflow — the finish-marker guard reads only this, never the whole DAG
+   *  (getWorkflowRuns would parse every snapshot of the conversation on a live tick) — see
+   *  {@link BrainDelegationStore.workflowStatus}. */
+  workflowStatus(parentSessionId: string, workflowId: string): ReturnType<BrainDelegationStore['workflowStatus']> {
+    return this.delegation.workflowStatus(parentSessionId, workflowId);
   }
 
   /** Parent sessions with a durable delegation row still marked `running` (the boot reconcile's input) —

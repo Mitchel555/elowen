@@ -1,11 +1,12 @@
 import type { BrainStore, SessionEventKind } from '../../store/brainStore.js';
-import type { BrainEvent, SubagentUpdate } from '../events.js';
+import type { BrainEvent, SubagentUpdate, WorkflowUpdate } from '../events.js';
 import type { LiveBrain } from '../session/liveBrain.js';
 
-/** The one session-event kind that is display-only: a sub-agent's terminal marker. Unlike the owner-driven
- *  kinds it carries NO model-facing notice (the model receives the child's actual result separately via
- *  `subagent-result`), so it never goes through recordSessionEvent — only recordDisplayMarker. */
-type DisplayOnlyKind = 'subagent';
+/** The session-event kinds that are display-only: a sub-agent's or a workflow's terminal marker. Unlike
+ *  the owner-driven kinds they carry NO model-facing notice (the model receives the child's actual result
+ *  separately via `subagent-result`/`workflow-result`), so they never go through recordSessionEvent —
+ *  only recordDisplayMarker. */
+type DisplayOnlyKind = 'subagent' | 'workflow';
 type NoticeKind = Exclude<SessionEventKind, DisplayOnlyKind>;
 type SessionEventFrame = Extract<BrainEvent, { type: 'session-event' }>;
 
@@ -72,6 +73,10 @@ function recordDisplayMarker(
  *  brain_subagent_runs row; the marker only needs enough to recognise which delegation just finished. */
 const SUBAGENT_MARKER_TASK_MAX = 80;
 
+/** Longest title carried in a workflow marker's detail. The full title lives on the durable
+ *  brain_workflows snapshot; the marker only needs enough to recognise which DAG just finished. */
+const WORKFLOW_MARKER_TITLE_MAX = 80;
+
 /** First non-empty line of a task, clipped — the human-readable half of a sub-agent marker's label. */
 function shortSubagentTask(task: string): string {
   const firstLine = task.split('\n').map((line) => line.trim()).find(Boolean) ?? '';
@@ -94,6 +99,36 @@ export function recordSubagentFinishMarker(
   if (prevStatus === 'done' || prevStatus === 'error') return;
   const detail = JSON.stringify({ session: update.sessionId, task: shortSubagentTask(update.task), status: update.status });
   recordDisplayMarker(store, sessionId, publish, 'subagent', detail);
+}
+
+/** Drop a display-only marker into the timeline when a WORKFLOW reaches a terminal status — the whole-DAG
+ *  twin of recordSubagentFinishMarker, and the timeline's only word on a finished DAG: the live `workflow`
+ *  snapshots attach to the WorkflowStart tool row, which is not a flat announcement. Fires only on the
+ *  running→terminal TRANSITION of the workflow's OWN status (a terminal snapshot can re-emit once a node's
+ *  late event settles), so one workflow leaves exactly one marker. `prevStatus` is the workflow's status
+ *  read from the store BEFORE the upsert that carries this snapshot. The marker's detail is small JSON
+ *  carrying the workflow id (for a later WorkflowResume), the model-authored title, the outcome and how
+ *  many of the nodes reached a terminal state. */
+export function recordWorkflowFinishMarker(
+  store: BrainStore,
+  sessionId: string,
+  publish: (event: SessionEventFrame) => void,
+  prevStatus: 'running' | 'done' | 'error' | 'cancelled' | undefined,
+  update: WorkflowUpdate,
+): void {
+  if (update.status !== 'done' && update.status !== 'error' && update.status !== 'cancelled') return;
+  if (prevStatus === 'done' || prevStatus === 'error' || prevStatus === 'cancelled') return;
+  const total = update.nodes.length;
+  let ran = 0;
+  for (const node of update.nodes) if (node.status === 'done' || node.status === 'error') ran += 1;
+  const title = update.title?.trim();
+  const detail = JSON.stringify({
+    id: update.id,
+    ...(title ? { title: title.length > WORKFLOW_MARKER_TITLE_MAX ? `${title.slice(0, WORKFLOW_MARKER_TITLE_MAX - 1)}…` : title } : {}),
+    status: update.status,
+    ran, total,
+  });
+  recordDisplayMarker(store, sessionId, publish, 'workflow', detail);
 }
 
 /** How long the reasoning level must sit unchanged before its marker lands. Cycling with ctrl+r fires

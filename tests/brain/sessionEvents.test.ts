@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  recordSessionEvent, drainSessionNotices, recordSubagentFinishMarker,
+  recordSessionEvent, drainSessionNotices, recordSubagentFinishMarker, recordWorkflowFinishMarker,
   scheduleReasoningMarker, flushReasoningMarker, REASONING_MARKER_DEBOUNCE_MS,
 } from '../../src/brain/service/sessionEvents.js';
 import type { BrainStore, BrainSessionEvent, SessionEventKind } from '../../src/store/brainStore.js';
 import type { LiveBrain } from '../../src/brain/session/liveBrain.js';
-import type { BrainEvent, SubagentUpdate } from '../../src/brain/events.js';
+import type { BrainEvent, SubagentUpdate, WorkflowUpdate } from '../../src/brain/events.js';
 
 function fakeLive(published: BrainEvent[]): LiveBrain {
   return {
@@ -145,6 +145,105 @@ describe('recordSubagentFinishMarker', () => {
     recordSubagentFinishMarker(store, 's1', () => {}, 'running', subUpdate({ task: '\n\n  Fix the bug  \nmore', status: 'done' }));
     const [entry] = store.appended;
     expect((JSON.parse(entry?.detail ?? '{}') as { task: string }).task).toBe('Fix the bug');
+  });
+});
+
+// A workflow's terminal state drops the SAME display-only marker a sub-agent does (kind 'workflow'), once
+// per running→terminal transition of the DAG's OWN status. It must carry the outcome (done/error/cancelled)
+// and how many of the nodes actually reached a terminal state, so a partial failure reads differently from
+// a clean success and a stopped run is distinguishable from both.
+describe('recordWorkflowFinishMarker', () => {
+  const wfUpdate = (over: Partial<WorkflowUpdate> = {}): WorkflowUpdate => ({
+    id: 'wf-1', toolCallId: 'call-1', title: 'Ship it', status: 'running',
+    nodes: [
+      { id: 'a', task: 'a', status: 'done', deps: [] },
+      { id: 'b', task: 'b', status: 'done', deps: [] },
+      { id: 'c', task: 'c', status: 'done', deps: [] },
+      { id: 'd', task: 'd', status: 'done', deps: [] },
+    ],
+    ...over,
+  });
+
+  it('records one display marker on running→done, carrying id, title, outcome and node tally, with NO model notice', () => {
+    const published: BrainEvent[] = [];
+    const live = fakeLive(published);
+    const store = fakeStore();
+    recordWorkflowFinishMarker(store, 's1', (event) => live.replay.publish(event), 'running', wfUpdate({ status: 'done' }));
+
+    const detail = JSON.stringify({ id: 'wf-1', title: 'Ship it', status: 'done', ran: 4, total: 4 });
+    expect(store.appended).toEqual([{ kind: 'workflow', detail }]);
+    expect(published).toEqual([{ type: 'session-event', id: 'evt-1', kind: 'workflow', detail, at: '2026-07-16T09:01:00.000Z' }]);
+    // Display-only, like the sub-agent marker: never a "the user …" model-facing notice.
+    expect(live.pendingSessionNotices).toBeUndefined();
+  });
+
+  // A DAG with a failed node and its blocked dependents is NOT a clean success: status 'error' and a ran
+  // tally that excludes the nodes that never ran must both show, so the user can tell partial failure apart.
+  it('marks a partial failure distinctly: status error and only the terminal nodes counted', () => {
+    const store = fakeStore();
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'running', wfUpdate({
+      status: 'error',
+      nodes: [
+        { id: 'a', task: 'a', status: 'done', deps: [] },
+        { id: 'b', task: 'b', status: 'error', deps: [], error: 'boom' },
+        { id: 'c', task: 'c', status: 'pending', deps: ['b'] },
+      ],
+    }));
+    const [entry] = store.appended;
+    expect(JSON.parse(entry?.detail ?? '{}')).toEqual({ id: 'wf-1', title: 'Ship it', status: 'error', ran: 2, total: 3 });
+  });
+
+  it('marks a stopped (cancelled) run with status cancelled', () => {
+    const store = fakeStore();
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'running', wfUpdate({
+      status: 'cancelled',
+      nodes: [
+        { id: 'a', task: 'a', status: 'done', deps: [] },
+        { id: 'b', task: 'b', status: 'running', deps: ['a'], sessionId: 's-b' },
+      ],
+    }));
+    const [entry] = store.appended;
+    // The running node was interrupted, not completed — only terminal nodes count as having run.
+    expect(JSON.parse(entry?.detail ?? '{}')).toEqual({ id: 'wf-1', title: 'Ship it', status: 'cancelled', ran: 1, total: 2 });
+  });
+
+  it('never marks a running snapshot', () => {
+    const store = fakeStore();
+    recordWorkflowFinishMarker(store, 's1', () => {}, undefined, wfUpdate());
+    expect(store.appended).toEqual([]);
+  });
+
+  // A terminal snapshot can re-emit once a late node event settles (the engine's snapshot() re-fans the
+  // whole DAG with the already-terminal status), so a second terminal update must add nothing — exactly
+  // one marker per workflow, never a stack.
+  it('is idempotent when the previous status was already terminal', () => {
+    const store = fakeStore();
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'done', wfUpdate({ status: 'done' }));
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'error', wfUpdate({ status: 'error' }));
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'cancelled', wfUpdate({ status: 'cancelled' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  it('records nothing in a conversation that has no turns yet', () => {
+    const store = fakeStore(false);
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'running', wfUpdate({ status: 'done' }));
+    expect(store.appended).toEqual([]);
+  });
+
+  it('clips a long title, bounded', () => {
+    const store = fakeStore();
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'running', wfUpdate({ title: 'A'.repeat(200), status: 'done' }));
+    const [entry] = store.appended;
+    const title = (JSON.parse(entry?.detail ?? '{}') as { title: string }).title;
+    expect(title.length).toBeLessThanOrEqual(80);
+    expect(title.endsWith('…')).toBe(true);
+  });
+
+  it('omits the title field when the workflow has none', () => {
+    const store = fakeStore();
+    recordWorkflowFinishMarker(store, 's1', () => {}, 'running', wfUpdate({ title: undefined, status: 'done' }));
+    const [entry] = store.appended;
+    expect(JSON.parse(entry?.detail ?? '{}')).toEqual({ id: 'wf-1', status: 'done', ran: 4, total: 4 });
   });
 });
 

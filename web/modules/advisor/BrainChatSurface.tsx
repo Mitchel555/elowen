@@ -303,6 +303,17 @@ function parseSubagentMarker(detail: string): { task: string; status: string } |
   } catch { return null; }
 }
 
+/** A workflow finish marker's detail is small JSON (mirror of the daemon `parseWorkflowMarker`). */
+function parseWorkflowMarker(detail: string): { title: string; status: string; ran: number; total: number } | null {
+  try {
+    const raw: unknown = JSON.parse(detail);
+    if (!raw || typeof raw !== 'object') return null;
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.status !== 'string' || typeof obj.ran !== 'number' || typeof obj.total !== 'number') return null;
+    return { title: typeof obj.title === 'string' ? obj.title : '', status: obj.status, ran: obj.ran, total: obj.total };
+  } catch { return null; }
+}
+
 /** Phrase a session-change marker — mirror of the daemon `sessionEventLabel` (src/cli/chat/turnRenderer.ts).
  *  A `cwd` path is shortened to its last two segments (the web has no absolute-path context). */
 function eventLabel(kind: string, detail: string, t: LocaleDict): string {
@@ -317,6 +328,14 @@ function eventLabel(kind: string, detail: string, t: LocaleDict): string {
       if (!marker) return detail;
       const verb = marker.status === 'error' ? t.brainChat.eventSubagentFailed : t.brainChat.eventSubagentDone;
       return marker.task ? `${verb} · ${marker.task}` : verb;
+    }
+    case 'workflow': {
+      const marker = parseWorkflowMarker(detail);
+      if (!marker) return detail;
+      const verb = marker.status === 'error' ? t.brainChat.eventWorkflowFailed
+        : marker.status === 'cancelled' ? t.brainChat.eventWorkflowStopped : t.brainChat.eventWorkflowDone;
+      const tally = `${marker.ran}/${marker.total} ${t.brainChat.eventNodes}`;
+      return marker.title ? `${verb} · ${marker.title} · ${tally}` : `${verb} · ${tally}`;
     }
     default: return detail;
   }

@@ -2,7 +2,7 @@ import { PluginHookBus } from '../../plugins/hookBus.js';
 import type { PluginRegistry } from '../../plugins/registry.js';
 import { runWithPolicy } from '../../plugins/policyContext.js';
 import type { ToolPolicy } from '../../plugins/policyContext.js';
-import { drainSessionNotices, recordSubagentFinishMarker } from './sessionEvents.js';
+import { drainSessionNotices, recordSubagentFinishMarker, recordWorkflowFinishMarker } from './sessionEvents.js';
 import type { HookAuditBuffer } from '../../shared/hookAudit.js';
 import type { BrainStore } from '../../store/brainStore.js';
 import type { BrainDeps } from '../brainDeps.js';
@@ -248,10 +248,16 @@ export class TurnContextBuilder {
     // Persist-first, exactly like emitSubagent above: the durable row is what the transcript marker and
     // its modal are rebuilt from on every hydration, so the live event must not advertise a DAG the store
     // refused. No setChildRunning — node children are registered by beginDelegatedCall on the shared run
-    // path, independently of any emitter.
+    // path, independently of any emitter. The finish marker fires once on the running→terminal transition
+    // of the workflow's own status (mirroring the sub-agent marker), so only a terminal snapshot pays for
+    // the prior-status read — the frequent running ticks never touch the store for it.
     const emitWorkflow = (update: WorkflowUpdate): void => {
+      const prevStatus = update.status === 'done' || update.status === 'error' || update.status === 'cancelled'
+        ? this.d.store.workflowStatus(live.sessionId, update.id)
+        : undefined;
       if (!this.d.store.upsertWorkflowRun(live.sessionId, update)) return;
       live.replay.publish({ type: 'workflow', ...update });
+      recordWorkflowFinishMarker(this.d.store, live.sessionId, (event) => live.replay.publish(event), prevStatus, update);
     };
     const emitWorkflowCompletion = (completion: WorkflowCompletion): void => {
       this.d.completeWorkflow?.(live.sessionId, userId, completion);

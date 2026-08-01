@@ -8,7 +8,7 @@ import {
   type DelegatedExecutionScope,
 } from './delegatedScope.js';
 import type { AskQuestion, BrainEvent, BrainUsage, CompactResult, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from './events.js';
-import { recordSubagentFinishMarker } from './service/sessionEvents.js';
+import { recordSubagentFinishMarker, recordWorkflowFinishMarker } from './service/sessionEvents.js';
 import { runCompaction, withDescendantUsage, sessionUsageSnapshot } from './events.js';
 import type { ElicitationRegistry } from './elicitation.js';
 import { normalizeCard } from './cards.js';
@@ -389,10 +389,16 @@ export class ChannelSessionService {
           : undefined;
         // Persist-first, mirroring emitSubagent: the in-plugin engine owns the DAG only in memory, so the
         // durable row is the sole thing the transcript marker and its modal can be rebuilt from after a
-        // reconnect or restart. A snapshot the store refuses must not reach a client.
+        // reconnect or restart. A snapshot the store refuses must not reach a client. The finish marker
+        // rides the running→terminal transition of the workflow's OWN status, read from the store before
+        // the upsert, exactly as emitSubagent's does for a child.
         const emitWorkflow = (u: WorkflowUpdate) => {
+          const prevStatus = u.status === 'done' || u.status === 'error' || u.status === 'cancelled'
+            ? this.d.store.workflowStatus(ch.sessionId, u.id)
+            : undefined;
           if (!this.d.store.upsertWorkflowRun(ch.sessionId, u)) return;
           ch.replay.publish({ type: 'workflow', ...u });
+          recordWorkflowFinishMarker(this.d.store, ch.sessionId, (event) => ch.replay.publish(event), prevStatus, u);
         };
         const emitWorkflowCompletion = parentSessionId && this.d.completeWorkflow
           ? (completion: WorkflowCompletion) => { this.d.completeWorkflow!(ch.sessionId, opts.ownerUserId, completion); }

@@ -443,6 +443,23 @@ export class BrainDelegationStore {
     return out;
   }
 
+  /** The persisted status of one workflow (the last snapshot's `status`), or undefined when the store has
+   *  no row for it. ONE cheap json_extract read — the workflow finish-marker guard needs only the prior
+   *  status to fire once on the running→terminal transition, and getWorkflowRuns would cost a whole-DAG
+   *  parse per live tick. */
+  workflowStatus(parentSessionId: string, workflowId: string): 'running' | 'done' | 'error' | 'cancelled' | undefined {
+    if (!parentSessionId || !workflowId) return undefined;
+    const row = this.db.prepare(
+      `SELECT state FROM brain_workflows WHERE parent_session_id = ? AND workflow_id = ?`
+    ).get(parentSessionId, workflowId) as { state: string } | undefined;
+    if (!row) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(row.state);
+      const status = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).status : undefined;
+      return status === 'running' || status === 'done' || status === 'error' || status === 'cancelled' ? status : undefined;
+    } catch { return undefined; }
+  }
+
   /** Every parent session holding a sub-agent run or workflow row still marked `running`. Read ONCE at
    *  daemon boot, where such a row is by definition a restart orphan — the in-memory registrations that
    *  drove it died with the process. Deliberately not scoped to a user: the boot reconcile must reach the

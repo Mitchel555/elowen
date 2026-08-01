@@ -78,6 +78,18 @@ function parseSubagentMarker(detail: string): { task: string; status: string } |
   } catch { return null; }
 }
 
+/** A workflow finish marker's detail is small JSON (see recordWorkflowFinishMarker). Parse defensively,
+ *  like parseSubagentMarker: a malformed row falls back to the raw string on a render path. */
+function parseWorkflowMarker(detail: string): { title: string; status: string; ran: number; total: number } | null {
+  try {
+    const raw: unknown = JSON.parse(detail);
+    if (!raw || typeof raw !== 'object') return null;
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.status !== 'string' || typeof obj.ran !== 'number' || typeof obj.total !== 'number') return null;
+    return { title: typeof obj.title === 'string' ? obj.title : '', status: obj.status, ran: obj.ran, total: obj.total };
+  } catch { return null; }
+}
+
 /** One-line description of a session-change marker (model/mode/rename/reasoning/cwd/subagent), rendered as
  *  a faint centered-ish row in the transcript. The verb varies by kind; the detail is the new value. */
 function sessionEventLabel(kind: string, detail: string): string {
@@ -96,6 +108,15 @@ function sessionEventLabel(kind: string, detail: string): string {
       const verb = marker.status === 'error' ? 'sub-agent failed' : 'sub-agent done';
       const task = terminalInlineText(marker.task);
       return task ? `${verb} · ${task}` : verb;
+    }
+    case 'workflow': {
+      const marker = parseWorkflowMarker(detail);
+      if (!marker) return value;
+      const verb = marker.status === 'error' ? 'workflow failed'
+        : marker.status === 'cancelled' ? 'workflow stopped' : 'workflow done';
+      const title = terminalInlineText(marker.title);
+      const tally = `${marker.ran}/${marker.total} nodes`;
+      return title ? `${verb} · ${title} · ${tally}` : `${verb} · ${tally}`;
     }
     default: return value;
   }

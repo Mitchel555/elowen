@@ -149,6 +149,7 @@ export function openDb(path: string): Db {
   makeUserIdsMonotonic(db);
   repairUserSequenceBelowReferences(db);
   widenSessionEventKindsForSubagent(db);
+  widenSessionEventKindsForWorkflow(db);
   return db;
 }
 
@@ -319,6 +320,35 @@ function widenSessionEventKindsForSubagent(db: Db): void {
         session_id TEXT NOT NULL,
         event_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent')),
+        detail TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (session_id, event_id)
+      );
+      INSERT INTO brain_session_events_new (session_id, event_id, kind, detail, created_at)
+        SELECT session_id, event_id, kind, detail, created_at FROM brain_session_events;
+      DROP TABLE brain_session_events;
+      ALTER TABLE brain_session_events_new RENAME TO brain_session_events;
+      CREATE INDEX IF NOT EXISTS idx_brain_session_events_session ON brain_session_events(session_id);
+    `);
+  });
+}
+
+/** v10 — let `brain_session_events.kind` also carry 'workflow' (a display-only "workflow finished"
+ *  marker, see sessionEvents.ts / recordWorkflowFinishMarker).
+ *
+ *  Same rebuild rationale as v5/v9 (widenSessionEventKinds): SQLite cannot alter a CHECK constraint and
+ *  `CREATE TABLE IF NOT EXISTS` in schema.sql leaves an existing DB on the old one, so an inserted
+ *  'workflow' marker would raise on every database that predates this while passing on a fresh one.
+ *
+ *  NUMBERED 10: versions 1-9 are all spent (see the runners above) — a migration numbered ≤9 would be
+ *  skipped in silence on exactly the databases that need it. */
+function widenSessionEventKindsForWorkflow(db: Db): void {
+  runOnce(db, 10, () => {
+    db.exec(`
+      CREATE TABLE brain_session_events_new (
+        session_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('model', 'mode', 'rename', 'reasoning', 'cwd', 'subagent', 'workflow')),
         detail TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (session_id, event_id)
