@@ -72,7 +72,7 @@
     },
     "askTimeoutMs": {
       "label": "Timeout otázky (ms)",
-      "hint": "Ako dlho zostáva čakajúca AskUserQuestion otvorená pre číselnú odpoveď alebo voľný text, než ju bot zahodí ako zastaranú."
+      "hint": "Ako dlho zostáva čakajúca AskUserQuestion otvorená pre číselnú odpoveď alebo voľný text, než ju bot zahodí ako zastaranú. Rovnaké okno platí aj pre interaktívne menu."
     },
     "sec_senders": {
       "label": "Pravidlá odosielateľov",

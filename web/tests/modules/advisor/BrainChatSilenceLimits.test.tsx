@@ -7,6 +7,7 @@ import { createWrapper } from '../../test-utils';
 import { ToastProvider } from '../../../components/ui/Toast';
 import { BrainChat } from '../../../modules/advisor/BrainChat';
 import { BrainChatProvider } from '../../../modules/advisor/BrainChatProvider';
+import { first } from '../../first.js';
 
 // Both silence limits are operator-tunable (`runtime.limits`), and the web cannot import the daemon — the
 // values reach the browser over GET /config. These tests pin that they ARRIVE: that the watchdog polls
@@ -95,7 +96,7 @@ describe('the stream watchdog reads its limit from the daemon config', () => {
 
     tickAfterSilence(41_000);
 
-    expect(FakeES.instances[0]!.closed).toBe(true);
+    expect(first(FakeES.instances, 'EventSource').closed).toBe(true);
     await waitFor(() => expect(startBodies.length).toBe(2));
   });
 
@@ -104,7 +105,7 @@ describe('the stream watchdog reads its limit from the daemon config', () => {
 
     tickAfterSilence(41_000); // well inside the built-in 75 s
 
-    expect(FakeES.instances[0]!.closed).toBe(false);
+    expect(first(FakeES.instances, 'EventSource').closed).toBe(false);
     await new Promise((r) => setTimeout(r, 20));
     expect(startBodies.length).toBe(1);
   });

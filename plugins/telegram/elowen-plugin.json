@@ -207,7 +207,7 @@
       "step": 30000,
       "placeholder": "360000",
       "default": 360000,
-      "hint": "How long a pending AskUserQuestion stays open for a button tap or free-text reply before it's dropped as stale."
+      "hint": "How long a pending AskUserQuestion stays open for a button tap or free-text reply before it's dropped as stale. The same window applies to the interactive menus and pickers."
     },
     {
       "key": "sec_voice",

@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({ refetch: vi.fn() }));
 vi.mock('../../../lib/queries', () => ({ useMyTerminalSettings: () => (state.error ? { data: undefined, isLoading: false, isError: true, refetch: mocks.refetch } : { data: SEED, isLoading: false, isError: false }) }));
 
 import { TerminalSection } from '../../../modules/account/TerminalSection';
+import { first } from '../../first.js';
 
 const renderSection = () => render(<ToastProvider><TerminalSection /></ToastProvider>, { wrapper: createWrapper().wrapper });
 const colorInputs = (c: HTMLElement) => c.querySelectorAll('input[type="color"]');
@@ -66,9 +67,9 @@ describe('TerminalSection', () => {
 
   it('autosaves the patched fields after a change', async () => {
     renderSection();
-    fireEvent.change(screen.getAllByRole('slider')[0]!, { target: { value: '18' } }); // fontSize slider
+    fireEvent.change(first(screen.getAllByRole('slider'), 'slider'), { target: { value: '18' } }); // fontSize slider
     await waitFor(() => expect(mutate).toHaveBeenCalled(), { timeout: 1500 });
-    expect((mutate.mock.calls[0]![0] as TerminalSettings).fontSize).toBe(18);
+    expect((first(mutate.mock.calls, 'save call')[0] as TerminalSettings).fontSize).toBe(18);
   });
 
   // The two CLI chat knobs must SEED from the stored settings: were the form to keep its built-in
@@ -84,7 +85,7 @@ describe('TerminalSection', () => {
 
     fireEvent.change(depth, { target: { value: '400' } });
     await waitFor(() => expect(mutate).toHaveBeenCalled(), { timeout: 1500 });
-    const saved = mutate.mock.calls[0]![0] as TerminalSettings;
+    const saved = first(mutate.mock.calls, 'save call')[0] as TerminalSettings;
     expect(saved.promptHistoryDepth).toBe(400);
     expect(saved.interruptConfirmMs).toBe(2500); // the untouched sibling travels at its stored value
   });

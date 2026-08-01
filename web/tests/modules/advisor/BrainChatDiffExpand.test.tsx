@@ -7,6 +7,7 @@ import { createWrapper } from '../../test-utils';
 import { ToastProvider } from '../../../components/ui/Toast';
 import { BrainChatSurface } from '../../../modules/advisor/BrainChatSurface';
 import { BrainChatProvider } from '../../../modules/advisor/BrainChatProvider';
+import { first } from '../../first.js';
 
 /** A long edit's diff is previewed and the rest folds behind the shared expander, rather than being cut
  *  off with no way back: the transcript is the only place the change is shown, so the reader checking what
@@ -55,7 +56,7 @@ async function renderWithDiff(diff: string): Promise<void> {
     <Wrapper><ToastProvider><BrainChatProvider><BrainChatSurface variant="compact" /></BrainChatProvider></ToastProvider></Wrapper>,
   );
   await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(0));
-  const es = FakeES.instances[0]!;
+  const es = first(FakeES.instances, 'EventSource');
   act(() => {
     es.emit({ type: 'tool', name: 'Edit', id: 'e1', detail: 'a.ts' });
     es.emit({ type: 'diff', id: 'e1', diff });

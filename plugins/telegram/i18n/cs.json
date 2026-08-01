@@ -96,7 +96,7 @@
     },
     "askTimeoutMs": {
       "label": "Timeout otázky (ms)",
-      "hint": "Jak dlouho zůstává čekající AskUserQuestion otevřená pro klik na tlačítko nebo textovou odpověď, než ji bot zahodí jako zastaralou."
+      "hint": "Jak dlouho zůstává čekající AskUserQuestion otevřená pro klik na tlačítko nebo textovou odpověď, než ji bot zahodí jako zastaralou. Stejné okno platí i pro interaktivní menu a výběry."
     },
     "voiceProvider": {
       "label": "Poskytovatel hlasu",
