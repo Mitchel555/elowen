@@ -8,24 +8,22 @@ import { MemoryCurator } from './memoryCurator.js';
 import { ConversationTitler } from './conversationTitler.js';
 import { logger } from '../shared/logger.js';
 import { BrainSessionFactory, resolveAutoCompactPct } from './session/factory.js';
-import { abortSessionWork } from './session/abortSessionWork.js';
 import { IdentityResolver } from './identity.js';
 import { LiveSessionRegistry } from './session/liveRegistry.js';
 import type { LiveBrain, QueuedMsg } from './session/liveBrain.js';
 import { DEFAULT_AUTO_COMPACT_PCT } from './session/liveBrain.js';
-import { clearDeliveredUserEchoes, enqueueMirrored, queuedWithPending } from './session/queueMirror.js';
+import { enqueueMirrored } from './session/queueMirror.js';
 import { ChannelSessionService } from './channels.js';
 import type { ChannelSendOpts } from './channels.js';
 import { PlatformOrchestrator } from './platforms.js';
 import type { BrainMessageView } from './messageView.js';
 import { runCompaction, withDescendantUsage } from './events.js';
 import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
-import { isNonUserSession, isOwnedUserSession, isChannelSession, channelIdOf, defaultUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
+import { isNonUserSession, isOwnedUserSession, defaultUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
 import { lastAssistantText } from './goal.js';
 import { ClientAttachments } from './service/attachments.js';
 import { DelegatedSessionService } from './service/delegatedSession.js';
 import { IdleSessionClock } from './service/liveSessionReaper.js';
-import { SESSION_IDLE_ROLLOVER_MS } from './session/idleRollover.js';
 import { PermissionApprovalService } from './service/permissionApproval.js';
 import { GoalLoopService } from './service/goalLoop.js';
 import { LiveSessionSpawner } from './service/spawner.js';
@@ -36,10 +34,13 @@ import { BrainTurnRunner } from './service/turnRunner.js';
 import type { BoundClientRequest, TurnRequest } from './service/turnRequest.js';
 import { BrainStatusService } from './service/statusService.js';
 import type { SessionListItem, SessionPage, SessionPageOpts, MessagePage, MessagePageOpts, BrainStatusView, ManagedSessionView } from './service/statusService.js';
+import { SessionTeardownService } from './service/sessionTeardown.js';
+import { SessionProcessService } from './service/sessionProcesses.js';
+import { SessionQueueService } from './service/sessionQueue.js';
 import { exportBrainSession } from './session/exportSession.js';
 import type { ExportFormat, SessionExport } from './session/exportSession.js';
 import type { BrainDeps } from './brainDeps.js';
-import { processRegistry, type ProcessHandle, type ProcessInfo } from './processRegistry.js';
+import { processRegistry, type ProcessInfo } from './processRegistry.js';
 import type { BrainStreamSnapshot } from './session/liveEventReplay.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 import type { Model, Api } from '@earendil-works/pi-ai';
@@ -111,6 +112,13 @@ export class BrainService {
   /** Sub-agent delegation: boot reconcile, drill-in reads/continuations, and the single delegated-turn
    *  dispatch. Owns every path that touches a `brain-ch-subagent-*` child. */
   private delegated: DelegatedSessionService;
+  /** The destructive session lifecycle: turn interruption (Esc/Stop), the client-close stop, the idle
+   *  reaper and conversation delete/purge — see SessionTeardownService. */
+  private teardown: SessionTeardownService;
+  /** Background-process ownership + the owner-scoped process panel — see SessionProcessService. */
+  private processSvc: SessionProcessService;
+  /** The mid-turn message backlog (list/remove/recall) — see SessionQueueService. */
+  private queue: SessionQueueService;
   /** A plugin (e.g. the skills plugin's CreateSkill) asked for a plugin reload from INSIDE a running
    *  turn. Reloading there would dispose the very session executing the tool, so the request is coalesced
    *  onto this flag and drained once the turn settles (see drainDeferredPluginReload). */
@@ -237,7 +245,7 @@ export class BrainService {
         this.turnRunner.acceptSubagentCompletion(parentSessionId, userId, completion),
       completeWorkflow: (parentSessionId, userId, completion) =>
         this.turnRunner.acceptWorkflowCompletion(parentSessionId, userId, completion),
-      cancelWorkflows: (sessionId) => this.cancelWorkflowsFor(sessionId),
+      cancelWorkflows: (sessionId) => this.teardown.cancelWorkflowsFor(sessionId),
     });
     this.delegated = new DelegatedSessionService({
       store: d.store, sessions: this.sessions, channelService: this.channelService, identity: this.identity,
@@ -281,6 +289,17 @@ export class BrainService {
         return this.bindChannelContext(linked.id, channelKey, sessionId);
       },
     });
+    // Destructive-lifecycle unit. Every collaborator is a live instance built above; `terminalTeardown` is
+    // read through a getter because it is attached to the facade only AFTER construction (attachTerminalTeardown).
+    this.teardown = new SessionTeardownService({
+      store: d.store, sessions: this.sessions, attachments: this.attachments,
+      elicitation: this.elicitation, goals: this.goals, cards: this.cards,
+      channelService: this.channelService, lifecycle: this.lifecycle, idleClock: this.idleClock,
+      resolvePlugins: () => this.resolvePlugins(),
+      terminalTeardown: () => this.terminalTeardown,
+    });
+    this.processSvc = new SessionProcessService({ store: d.store, attachments: this.attachments, identity: this.identity });
+    this.queue = new SessionQueueService({ sessions: this.sessions, lifecycle: this.lifecycle });
   }
 
   /** Admin daemon-restart handler for a platform `/restart` slash. Late-bound: it's built after the brain
@@ -362,33 +381,7 @@ export class BrainService {
    *  caller's explicit `session` (a bound CLI). The agent settles into agent_end → the idle event, so
    *  subscribed clients wind down on their own. */
   async abort(userId: number, session?: string): Promise<void> {
-    const b = session ? this.sessions.get(this.lifecycle.ownedUserSession(userId, session)) : this.lifecycle.activeLive(userId);
-    if (!b) throw new Error('brain not started');
-    // Esc/Stop before the turn produced any output discards the just-sent user turn: delete its durable
-    // row and tell clients to pull the bubble + restore its text to the composer. Decided synchronously,
-    // before the first await — JS is single-threaded, so turnProducedOutput cannot change under us between
-    // this read and arming the guard; a token still in flight is then dropped by the reducer's guard.
-    // Only abort() (the explicit Esc/Stop) does this — stopSession (client disconnect) and interruptQueued
-    // keep the turn, so this deliberately lives here and not in abortFenced/abortLive.
-    const discard = !b.turnProducedOutput ? b.lastAdmitted : undefined;
-    if (discard) b.discardingUserTurn = discard.durableId;
-    try {
-      await this.abortFenced(b);
-      if (discard) {
-        // Delete the user row AND any partial assistant output the aborted turn's agent_end persisted:
-        // projectEvent runs synchronously while abortFenced tears the run down, so a token that raced the
-        // cancel can leave a fragment in the store. Removing only the user row would surface that fragment
-        // as an answer with no question after a reconnect. deleteMessagesFrom clears the row and everything
-        // after it in this turn.
-        this.d.store.deleteMessagesFrom(b.sessionId, discard.durableId);
-        b.replay.publish({ type: 'discard_user', durableId: discard.durableId, text: discard.text });
-      }
-    } finally {
-      // Always release the guard, even if abortFenced threw — otherwise the reducer would keep dropping
-      // every future content event (discardingUserTurn stays armed) and the session would go mute until a
-      // respawn, and a stale lastAdmitted could let a later abort delete a turn that already has output.
-      if (discard) { b.discardingUserTurn = undefined; b.lastAdmitted = undefined; }
-    }
+    return this.teardown.abort(userId, session);
   }
 
   /** Interrupt the current PI run and immediately promote the oldest native queued message into a fresh
@@ -411,7 +404,7 @@ export class BrainService {
       // the client degrades to its normal two-press arming. `interrupted:true` ⇔ the turn was really aborted.
       const snapshot = this.queuedSnapshot(b);
       if (snapshot.length === 0) return { interrupted: false, injected: false };
-      await this.abortLive(b);
+      await this.teardown.abortLive(b);
 
       const requestFor = (message: QueuedMsg): TurnRequest => ({
         userId,
@@ -475,85 +468,6 @@ export class BrainService {
     ];
   }
 
-  /** The direct children of `parentSessionId` that a parent abort (Esc / interruptQueued / stopSession)
-   *  must SPARE: still-running detached/background delegates. Their results are durable in the inbox and
-   *  are delivered independently of the parent's live turn (ensureLive respawns the parent if needed;
-   *  restart reconcile sweeps any that die), so tearing them down on a parent stop would silently kill work
-   *  the contract promised keeps running. Foreground blocking delegates are NOT spared — they belong to the
-   *  interrupted turn. Same predicate the start() reconcile uses to decide auto-delivery. */
-  private sparedChildSessionIds(parentSessionId: string): Set<string> {
-    const spared = new Set(
-      this.d.store.getSubagentRuns(parentSessionId)
-        .filter((run) => run.status === 'running' && (run.background === true || run.autoDeliver === true))
-        .map((run) => run.sessionId),
-    );
-    // A background workflow makes the same promise a detached delegate does, so its still-running NODE
-    // sessions are spared on the same terms. Without this the engine correctly declined to cancel the
-    // workflow while the abort cascade tore down the very children it was running in.
-    for (const run of this.d.store.getWorkflowRuns(parentSessionId)) {
-      if (run.status !== 'running' || run.background !== true) continue;
-      for (const node of run.nodes) {
-        if (node.status === 'running' && node.sessionId) spared.add(node.sessionId);
-      }
-    }
-    return spared;
-  }
-
-  /** Stop the workflow engine for an aborted origin BEFORE its children are torn down: the engine would
-   *  otherwise launch every ready node the moment an aborted one settles — fresh child sessions born
-   *  after the abort, which nothing tears down (the user-visible symptom: Esc-Esc, workflow keeps going). */
-  private async cancelWorkflowsFor(sessionId: string): Promise<void> {
-    const registry = await this.d.plugins?.get();
-    registry?.control('workflow')?.cancelForSession({ sessionId });
-  }
-
-  /** Shared destructive half of stop and queue-interrupt. Caller owns the parent-abort fence. */
-  private async abortLive(b: LiveBrain): Promise<void> {
-    this.goals.cancelGoalContinuation(b.sessionId);
-    b.session.clearQueue();
-    clearDeliveredUserEchoes(b);
-    if (b.sessionId) this.elicitation.cancelForSession(b.sessionId, 'aborted');
-    await this.cancelWorkflowsFor(b.sessionId);
-    // Spare detached/background children; abort only the foreground delegates bound to this turn.
-    const spared = this.sparedChildSessionIds(b.sessionId);
-    const doomed = this.sessions.childrenOf(b.sessionId).filter((child) => !spared.has(child));
-    await Promise.all(doomed
-      .filter((child) => isChannelSession(child))
-      .map((child) => this.channelService.abort(channelIdOf(child))));
-    // Deregister ONLY the doomed children — a spared child MUST stay registered so it keeps counting toward
-    // emitSubagent/status/reconcile/hasActiveChildren (channel eviction, /status, running-subagents block).
-    for (const child of doomed) this.sessions.setChildRunning(b.sessionId, child, false);
-    await abortSessionWork(b.session);
-    b.session.clearQueue();
-    clearDeliveredUserEchoes(b);
-  }
-
-  /** `abortLive` behind the parent-abort fence — the one entry point every caller that already HOLDS the
-   *  live record uses. Fence before the child snapshot is taken inside: otherwise an idle drill-in
-   *  continuation can register a fresh child between childrenOf() and the deregistration of the doomed
-   *  ones, escaping this stop tree. */
-  private async abortFenced(b: LiveBrain): Promise<void> {
-    this.sessions.beginParentAbort(b.sessionId);
-    try {
-      await this.abortLive(b);
-    } finally {
-      this.sessions.endParentAbort(b.sessionId);
-    }
-  }
-
-  /** Whether a client-initiated stop may interrupt this session's turn (Invariant 2). A detaching client
-   *  must not abort a turn ANOTHER interactive client is watching. A stable client id identifies a terminal
-   *  ending its own run, so only another stable client — or one mid-boot, which is on its way to watch —
-   *  holds it off; an anonymous web-dock subscription merely watches and does not own the turn, so letting
-   *  it veto meant an open browser tab silently disabled ctrl+c. A caller with no id cannot be told apart
-   *  from a passive stream, so it keeps the conservative any-attachment rule. */
-  private mayAbortOnStop(sessionId: string, clientId?: string): boolean {
-    if (this.attachments.hasPendingStartClaim(sessionId)) return false;
-    return clientId
-      ? !this.attachments.hasLiveStableClient(sessionId)
-      : this.attachments.attachedCount(sessionId) === 0;
-  }
-
   /** Whether `sessionId` is safe for `bindChannelContext` to re-key onto a new id right now — the
    *  review's smallest safe fix for the `/context` move (Tier 2 #13): refuse the bind rather than migrate
    *  every sidecar map that is keyed on the OLD id (attachments, live children, processRegistry, the goal
@@ -566,192 +480,22 @@ export class BrainService {
     // An attached client stream (web dock, CLI tap/subscribe) or a mid-boot start claim both read/write
     // through the OLD id; neither follows a bare `reassignSession`, so either would go dark or misfire.
     if (this.attachments.attachedCount(sessionId) !== 0 || this.attachments.hasPendingStartClaim(sessionId)) return false;
-    if (this.sessions.hasActiveChildren(sessionId) || this.sparedChildSessionIds(sessionId).size > 0) return false;
+    if (this.sessions.hasActiveChildren(sessionId) || this.teardown.sparedChildSessionIds(sessionId).size > 0) return false;
     if (processRegistry.runningJobCountForSession(sessionId) > 0) return false;
     if (this.d.store.getGoal(sessionId)?.status === 'active') return false;
     return true;
   }
 
-  /** Whether this conversation has WORK in flight — a running turn, anything queued behind it, a parked
-   *  question, a still-running child/workflow/background job, or an armed goal continuation. Deliberately
-   *  FAIL-CLOSED: every uncertain signal counts as busy, because the two callers (a detach-only stop and
-   *  the idle reaper) both destroy a live runtime when it answers false, and the cost of a false "idle" is
-   *  killed work while the cost of a false "busy" is a runtime that lives one sweep longer. */
-  private sessionIsIdle(sessionId: string): boolean {
-    const live = this.sessions.get(sessionId);
-    if (!live) return true; // nothing live to protect
-    if (live.session.isStreaming) return false;
-    if (this.sessions.isParentAborting(sessionId) || this.sessions.hasPendingAbort(sessionId)) return false;
-    if (live.session.getSteeringMessages().length > 0 || live.session.getFollowUpMessages().length > 0) return false;
-    if (live.queuedSteer?.length || live.queuedFollowUp?.length) return false;
-    if (live.pendingCompactionEchoes?.length || live.deliveringUserEchoes?.length) return false;
-    if (this.elicitation.pendingForSession(sessionId) !== null) return false;
-    // Foreground children plus the detached/background delegates and workflow nodes that deliver their
-    // results back INTO this conversation — tearing the parent down would strand every one of them.
-    if (this.sessions.hasActiveChildren(sessionId) || this.sparedChildSessionIds(sessionId).size > 0) return false;
-    if (processRegistry.runningJobCountForSession(sessionId) > 0) return false;
-    // An active goal re-prompts this very session from a timer, so it is work in flight even between turns.
-    if (this.d.store.getGoal(sessionId)?.status === 'active') return false;
-    return true;
-  }
-
-  /** Final teardown of one live conversation, shared by the last-watcher stop and the idle reaper. The
-   *  caller owns the `markDisposing` guard and the session lock. */
-  private disposeLiveSession(sessionId: string, reason: string): void {
-    this.goals.cancelGoalContinuation(sessionId);
-    this.elicitation.cancelForSession(sessionId, reason);
-    this.cards.clearSession(sessionId);
-    this.sessions.dispose(sessionId);
-  }
-
-  /** A CLI is closing: stop its bound run and release the live PI session unless another INTERACTIVE
-   *  client (one identifying itself with a stable client id) is still on this conversation. A passive
-   *  web-dock subscription does not hold the turn open — it only watches. History stays in SQLite and can
-   *  be resumed. Idempotent for an already-stopped conversation.
-   *
-   *  `detachOnly` (the web beacon) keeps the binding release but refuses the destructive half unless the
-   *  conversation is idle: closing the last browser tab over a RUNNING agent must never kill it — that is
-   *  what the Stop button is for. The abandoned runtime is collected later by reapIdleLiveSessions. The
-   *  CLI omits the flag and keeps its original semantics (closing the terminal aborts its own run). */
+  /** A CLI is closing: stop its bound run and release the live PI session unless another interactive
+   *  client is still on this conversation — see SessionTeardownService.stopSession. */
   async stopSession(userId: number, session?: string, clientId?: string, clientGeneration?: number, opts?: { detachOnly?: boolean }): Promise<{ stopped: boolean; disposed: boolean }> {
-    // Consume the authenticated client's attachment FIRST. Its binding follows idle rollover inside the
-    // daemon, so it is more authoritative than the (possibly pre-rollover) id the CLI last observed.
-    // Releasing invokes only this client's stream disposer; every other attachment remains counted.
-    const released = clientId
-      ? this.attachments.release(userId, clientId, clientGeneration)
-      : { accepted: true as const, sessionId: undefined };
-    // A delayed stop from generation N must not abort a newer N+1 selection owned by the same CLI id.
-    if (!released.accepted) return { stopped: false, disposed: false };
-    const bound = released.sessionId;
-    // A bootstrap/start failure can issue a generation stop before the daemon ever created a binding.
-    // `release()` has still tombstoned that generation (so a delayed start cannot resurrect it), but with
-    // no stable target and no explicit session body it must not guess the user's unrelated active session.
-    if (clientId && !bound && !session) return { stopped: false, disposed: false };
-    const cleanUp = async (sessionId: string): Promise<{ stopped: boolean; disposed: boolean }> => {
-      const live = this.sessions.get(sessionId);
-      if (!live) return { stopped: false, disposed: false };
-      // The caller's own attachment was released above, so a zero count now unambiguously means no other
-      // observer. A detaching client MUST NOT abort a turn another client is still watching (Invariant 2):
-      // only the last watcher leaving may abort + dispose. Legacy callers without a stable id retain the
-      // conservative behavior — only an already-detached stream can make the count zero.
-      // A claimed-but-not-yet-streaming start counts as an observer. It is a client mid-boot — a `--resume`
-      // that has been handed the session and is still opening its SSE — and counting only live streams
-      // disposes the conversation out from under it, leaving its stream dark until some later send
-      // respawns. availableForDefaultStart already treats a claim as occupancy for the same reason.
-      // Same predicate the pre-lock abort used, re-evaluated because a client can attach while this waited
-      // on the session lock. Deciding it twice with two copies of the rule is how they drift apart.
-      if (!this.mayAbortOnStop(sessionId, clientId)) return { stopped: true, disposed: false };
-      // A detaching web tab may release its binding but never tear down work in flight.
-      if (opts?.detachOnly && !this.sessionIsIdle(sessionId)) return { stopped: false, disposed: false };
-      // From here the record stays registered while we await, but it is doomed. Mark it so a concurrent
-      // ensureLive() queues on the session lock and respawns behind the dispose, instead of fast-pathing
-      // onto a handle this teardown is about to throw away.
-      this.sessions.markDisposing(sessionId);
-      // Everything from the mark to the dispose runs under this guard: dispose() clears the marker itself,
-      // and the abandoned-teardown path clears it explicitly, but a throw in between (a goal, elicitation
-      // or card teardown) would strand it — pinning a perfectly healthy session on the slow path forever.
-      try {
-        // Abort through the record this teardown already holds, NOT the public abort(): that one throws a
-        // bare 'brain not started' for an already-settled conversation, so catching it here also swallowed
-        // a REAL failure — a workflow that refused to cancel, a foreground delegate that stayed up, a PI
-        // turn that never unwound — and disposed the parent anyway, leaving that work running with nothing
-        // above it. Nothing live to abort is the only benign case, and it cannot happen under this lock.
-        await this.abortFenced(live);
-        // Re-check after the abort settles: a client can attach during that await, and it must not be
-        // disposed out from under. If one arrived, leave the (now idle) session live for the new observer.
-        // Deliberately NOT counting a pending claim here, unlike the gate above: a start that arrives once
-        // the teardown is already committed is expected to queue on the session lock and respawn behind the
-        // dispose — that ordering is the whole point of the disposing marker, and honouring the claim here
-        // would hand it the very record the teardown is about to drop.
-        if (this.attachments.attachedCount(sessionId) !== 0) {
-          this.sessions.clearDisposing(sessionId); // teardown abandoned — the record is healthy again
-          return { stopped: true, disposed: false };
-        }
-        this.disposeLiveSession(sessionId, 'client closed');
-      } catch (e) {
-        this.sessions.clearDisposing(sessionId);
-        throw e;
-      }
-      // A conversation nobody ever typed into leaves with the session it was the identity of, rather than
-      // lingering as an untitled shell until some later `/new` sweeps it up.
-      this.lifecycle.dropIfUnspoken(sessionId);
-      return { stopped: true, disposed: true };
-    };
-    // Reserve the bare session lock BEFORE any wait/ownership lookup. `settled(bound)` outside this lock
-    // can race a replacement start (and can deadlock when that lifecycle holder waits on this cleanup).
-    // Once queued here, a start either finishes first and this stops that exact live instance, or waits
-    // behind us and creates a fresh one only after the old instance was disposed.
-    const target = bound
-      ? this.lifecycle.ownedUserSession(userId, bound)
-      : session ? this.lifecycle.ownedUserSession(userId, session) : this.lifecycle.activeSessionId(userId);
-    // Interrupt the in-flight work BEFORE queueing on the session lock. A running turn HOLDS that lock, so
-    // a teardown that serializes first waits for the very turn it exists to interrupt: ctrl+c did nothing
-    // until the work ended on its own. (`/stop` never had the bug — it calls abort() straight out.)
-    // Only the PI-level interrupt, never the full abort(): abort() throws on an already-stopped session
-    // and stopSession must stay idempotent. The serialized teardown below still does the real cascade.
-    const runningLive = this.sessions.get(target);
-    // A detach-only stop never interrupts: it may only reach the teardown below for an IDLE session, and
-    // an idle session has no turn to interrupt. Skipping it here is what keeps the beacon non-destructive
-    // — this pre-lock signal lands before `cleanUp` can veto anything.
-    if (!opts?.detachOnly && runningLive && this.mayAbortOnStop(target, clientId)) {
-      // Signal only — deliberately NOT awaited, so cleanUp reserves the lock in THIS tick. Awaiting would
-      // let a start arriving during the interrupt take the lock first, breaking "a start racing a teardown
-      // respawns behind the dispose". This DOES leave a window where the turn is dying but the session is
-      // not yet marked disposing (the marker is set under the lock): what closes it is cleanUp re-checking
-      // claims and attachments, not the marker. Note the cost — a veto there can no longer save the turn,
-      // because the interrupt has already landed.
-      // A turn parked on AskUserQuestion or a permission prompt is NOT PI-level work: the agent loop is
-      // awaiting the tool's own promise and only re-checks the abort signal once that settles, so the
-      // interrupt below cannot unwind it and the lock would stay held until the question is answered or
-      // times out (5 min by default). Release the parked turn first — synchronous, so the lock is still
-      // reserved in this tick. abortLive does the same in the same order for the same reason.
-      this.elicitation.cancelForSession(target, 'client closed');
-      void abortSessionWork(runningLive.session).catch((err: unknown) => {
-        // The serialized abort below normally reports the outcome — but if this interrupt is what failed,
-        // the turn may never release the lock and the teardown silently waits it out again. Leave a trace.
-        logger('brain').warn(`stop ${target}: interrupt failed — ${err instanceof Error ? err.message : String(err)}`);
-      });
-    }
-    return this.serial(target, async () => cleanUp(target));
+    return this.teardown.stopSession(userId, session, clientId, clientGeneration, opts);
   }
 
-  /** Whether this live conversation is a candidate for the idle reaper right now: no client watching it
-   *  in any form, and no work in flight. Channel/task sessions are excluded — they have their own LRU. */
-  private reapableNow(sessionId: string): boolean {
-    if (isNonUserSession(sessionId)) return false;
-    if (!this.sessions.has(sessionId) || this.sessions.isDisposing(sessionId)) return false;
-    if (this.sessions.isActiveChild(sessionId)) return false;
-    if (this.attachments.attachedCount(sessionId) !== 0) return false;
-    if (this.attachments.hasLiveStableClient(sessionId) || this.attachments.hasPendingStartClaim(sessionId)) return false;
-    return this.sessionIsIdle(sessionId);
-  }
-
-  /** Periodic sweep (daemon bootstrap, 60s): dispose live PI sessions that nobody has watched and nothing
-   *  has run in for a full SESSION_IDLE_ROLLOVER_MS. This is the counterpart of the non-destructive web
-   *  stop — a client's binding expires on its own TTL, but before this nothing ever released the RUNTIME,
-   *  so a tab closed over a running agent leaked its session until the daemon restarted. Returns the ids
-   *  reaped. History stays in SQLite; the next message respawns the conversation. */
+  /** Periodic sweep: dispose live PI sessions unwatched and idle for a full SESSION_IDLE_ROLLOVER_MS —
+   *  see SessionTeardownService.reapIdleLiveSessions. */
   async reapIdleLiveSessions(now: number = Date.now()): Promise<string[]> {
-    const due = this.idleClock.due(
-      this.sessions.liveEntries().map(([sessionId]) => ({ sessionId, reapable: this.reapableNow(sessionId) })),
-      now,
-      SESSION_IDLE_ROLLOVER_MS,
-    );
-    const reaped: string[] = [];
-    for (const sessionId of due) {
-      const idleFor = now - (this.idleClock.reapableSince(sessionId) ?? now);
-      await this.serial(sessionId, async () => {
-        // Re-check under the lock: a client can attach, or a turn start, while earlier reaps awaited.
-        if (!this.reapableNow(sessionId)) return;
-        this.sessions.markDisposing(sessionId);
-        try { this.disposeLiveSession(sessionId, 'idle session reaped'); }
-        catch (e) { this.sessions.clearDisposing(sessionId); throw e; }
-        this.idleClock.forget(sessionId);
-        reaped.push(sessionId);
-        logger('brain').info(`reaped idle live session ${sessionId} (unwatched and idle for ${Math.round(idleFor / 60_000)}m)`);
-      });
-    }
-    return reaped;
+    return this.teardown.reapIdleLiveSessions(now);
   }
 
   /** Settle a parked `AskUserQuestion` with the user's picks (from POST /brain/answer or a Discord
@@ -842,71 +586,19 @@ export class BrainService {
     return this.statusView.status(userId, session);
   }
 
-  /** The caller's pending mid-turn message backlog (PI's transient steered + follow-up snapshot) — of the
-   *  active conversation, or of the caller's explicit `session` (a bound CLI). Empty when nothing is
-   *  pending or no conversation is live. */
+  /** The caller's pending mid-turn message backlog — see SessionQueueService.queueList. */
   queueList(userId: number, session?: string): { id: string; text: string }[] {
-    const sessionId = session ? this.lifecycle.ownedUserSession(userId, session) : this.sessions.activeIdFor(userId);
-    const live = sessionId ? this.sessions.get(sessionId) : undefined;
-    return live ? queuedWithPending(live) : [];
+    return this.queue.queueList(userId, session);
   }
 
-  /** Remove ONE pending mid-turn message (the CLI ctrl+x / the web × button). PI's steering queue holds
-   *  bare strings with no ids and offers only a clear-all, so we target by POSITION (the same positional
-   *  id `queueItems` hands clients): drain the queue, then re-queue everything except the targeted index.
-   *  Re-queues from our image-carrying mirror (queuedSteer/queuedFollowUp), NOT PI's text-only accessors —
-   *  PI's clearQueue drops image attachments, so re-steering from text alone would strip the surviving
-   *  messages' images. An out-of-range id is a no-op. Returns whether a message was actually removed. */
+  /** Remove ONE pending mid-turn message by position — see SessionQueueService.queueRemove. */
   queueRemove(userId: number, id: string, session?: string): boolean {
-    const sessionId = session ? this.lifecycle.ownedUserSession(userId, session) : this.sessions.activeIdFor(userId);
-    const live = sessionId ? this.sessions.get(sessionId) : undefined;
-    if (!live) return false;
-    const steering = live.queuedSteer ?? [];
-    const followUp = live.queuedFollowUp ?? [];
-    const idx = Number(id);
-    if (!Number.isInteger(idx) || idx < 0 || idx >= steering.length + followUp.length) return false;
-    // Snapshot WITH images before clearQueue empties both PI's queue and (via queue_update) our mirror.
-    const combined = [
-      ...steering.map((m) => ({ kind: 'steer' as const, ...m })),
-      ...followUp.map((m) => ({ kind: 'followUp' as const, ...m })),
-    ];
-    live.session.clearQueue();
-    clearDeliveredUserEchoes(live);
-    // Re-queue in the same order, dropping the positional target, preserving each survivor's images.
-    // `steer`/`followUp` only enqueue while the turn is streaming (a queue only exists mid-turn), so
-    // nothing runs a fresh turn; enqueueMirrored keeps the mirror in step.
-    combined.forEach((m, i) => {
-      if (i !== idx) void enqueueMirrored(live, m.kind, m.text, m.images, m.echo);
-    });
-    return true;
+    return this.queue.queueRemove(userId, id, session);
   }
 
-  /** Pop the LAST pending mid-turn message and hand back its text — the CLI ↑-recall (restores it to the
-   *  composer) and ctrl+x remove-last (drops it). Unlike queueRemove's positional targeting, this pops by
-   *  VALUE from the daemon's authoritative queue mirror. A client's cached positional id goes stale the
-   *  moment PI delivers a queued message between steps, so a positional remove issued mid-stream can
-   *  mis-target or no-op and leave the message both queued and re-sendable — the duplicate the ↑-recall
-   *  produced. Popping the real current tail server-side removes that race. Returns { text: null } when
-   *  nothing is pending (e.g. the message was delivered before the key landed). */
+  /** Pop the LAST pending mid-turn message and hand back its text — see SessionQueueService.queueRecall. */
   queueRecall(userId: number, session?: string): { text: string | null } {
-    const sessionId = session ? this.lifecycle.ownedUserSession(userId, session) : this.sessions.activeIdFor(userId);
-    const live = sessionId ? this.sessions.get(sessionId) : undefined;
-    if (!live) return { text: null };
-    const steering = live.queuedSteer ?? [];
-    const followUp = live.queuedFollowUp ?? [];
-    if (steering.length + followUp.length === 0) return { text: null };
-    // Snapshot WITH images before clearQueue empties both PI's queue and (via queue_update) our mirror —
-    // then re-queue every survivor except the tail, preserving order and each message's attachments.
-    const combined = [
-      ...steering.map((m) => ({ kind: 'steer' as const, ...m })),
-      ...followUp.map((m) => ({ kind: 'followUp' as const, ...m })),
-    ];
-    const target = combined[combined.length - 1]!;
-    const text = target.echo?.displayText ?? target.text;
-    live.session.clearQueue();
-    clearDeliveredUserEchoes(live);
-    combined.slice(0, -1).forEach((m) => void enqueueMirrored(live, m.kind, m.text, m.images, m.echo));
-    return { text };
+    return this.queue.queueRecall(userId, session);
   }
 
   /** Flip the SESSION-scoped YOLO override (the CLI `/yolo` command) — see PermissionApprovalService.
@@ -917,94 +609,10 @@ export class BrainService {
     return this.permissionSvc.setYolo(userId, b, on);
   }
 
-  /** Delete one of the user's stored conversations (never a channel session, never someone else's).
-   *  A live session is disposed first; deleting the active conversation just clears the pointer —
-   *  the next start() falls back to the most recent remaining one.
-   *
-   *  Serialized on the session lock, like every neighbouring path that mutates one conversation
-   *  (compact, stopSession, the idle reaper, bindChannelContext). Unserialized, the teardown interleaved
-   *  with a prompt() already running inside that lock: the delete disposed the live record and dropped
-   *  the row while the turn ran on, and that turn's own agent_end then persisted its output into a
-   *  conversation that no longer existed. The in-flight work is fenced and interrupted BEFORE queueing on
-   *  the lock — a running turn HOLDS it, so serializing first would make the delete wait out the very
-   *  turn it exists to destroy (the ordering stopSession uses, for the same reason). */
+  /** Delete one of the user's stored conversations (never a channel session, never someone else's) —
+   *  see SessionTeardownService.deleteSession. */
   async deleteSession(userId: number, sessionId: string): Promise<void> {
-    const row = this.d.store.getSession(sessionId);
-    if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
-    this.fenceDeletedSession(sessionId);
-    await this.serial(sessionId, async () => {
-      // Re-read under the lock: a concurrent delete of the same conversation may already have completed,
-      // and running the teardown a second time would tear down whatever took this id in the meantime.
-      if (!isOwnedUserSession(this.d.store.getSession(sessionId), userId, sessionId)) {
-        this.sessions.clearDisposing(sessionId); // teardown abandoned — don't pin a live record on the slow path
-        return;
-      }
-      this.teardownDeletedSession(userId, sessionId);
-      this.d.store.deleteSession(sessionId);
-    });
-  }
-
-  /** Fence a conversation whose delete is COMMITTED, in the same tick the caller reserves its session
-   *  lock. `markDisposing` is what keeps a concurrent ensureLive() from fast-pathing onto the record this
-   *  delete is about to throw away — it queues on the lock instead, where the row is already gone and
-   *  every bound entry point rejects the id. Releasing the parked question and interrupting PI's run is
-   *  what lets a turn holding that lock reach the end of it rather than run to completion first; a turn
-   *  parked on AskUserQuestion is not PI-level work, so no interrupt can unwind it (see stopSession).
-   *  Both are signals only, deliberately not awaited, so the lock is still reserved in this tick. */
-  private fenceDeletedSession(sessionId: string): void {
-    const live = this.sessions.get(sessionId);
-    if (!live) return;
-    this.sessions.markDisposing(sessionId);
-    this.elicitation.cancelForSession(sessionId, 'conversation deleted');
-    void abortSessionWork(live.session).catch((err: unknown) => {
-      // Nothing else reports this one: it runs before the lock and nothing awaits it, so a failed
-      // interrupt would silently turn the delete back into "wait out the turn".
-      logger('brain').warn(`delete ${sessionId}: interrupt failed — ${err instanceof Error ? err.message : String(err)}`);
-    });
-  }
-
-  /** Everything a conversation owns, released before its row is dropped — shared by the user-facing
-   *  delete and the admin one so the two cannot drift apart (they already had: only one of them cleared
-   *  the active pointer and the card cache, so an admin delete of the active conversation left
-   *  `activeSessionId` naming a row that no longer existed).
-   *
-   *  A delete spares nothing, unlike a stop: a detached delegate or a background workflow keeps burning
-   *  tokens for an inbox that has ceased to exist. */
-  private teardownDeletedSession(userId: number, id: string): void {
-    // Tear down any chat terminal bound to this conversation FIRST (docs order: terminal, then session).
-    // Fire-and-forget — no delete path awaits it, and the binding row outlives store.deleteSession
-    // (separate table), so the async teardown still resolves the row; the janitor is the backstop if
-    // it's unwired. No-op when the conversation has no bound terminal (channel/task sessions never do).
-    void this.terminalTeardown?.(userId, id).catch((e) => logger('brain').error(`terminal teardown failed for ${id}`, e));
-    this.cleanupProcessesForTree(id);
-    this.cancelDelegatedWorkFor(id);
-    this.elicitation.cancelForSession(id, 'conversation deleted'); // release a parked turn before dropping its session
-    this.goals.cancelGoalContinuation(id);
-    this.cards.clearSession(id);
-    if (isChannelSession(id)) this.sessions.channelDispose(channelIdOf(id));
-    else this.sessions.dispose(id);
-    // The in-memory pointer must not survive the row it names, or status/send would keep answering for a
-    // conversation that no longer exists (lifecycle.activeSessionId trusts the pointer verbatim).
-    if (this.sessions.activeIdFor(userId) === id) this.sessions.clearActive(userId);
-  }
-
-  /** Stop the DELEGATED work a deleted conversation is still driving: the workflow DAG that keeps
-   *  launching fresh nodes into it, and every running delegated child whose result now has nowhere to be
-   *  delivered. cleanupProcessesForTree reaches only the shell processes those children spawned, never
-   *  the agent turns themselves.
-   *
-   *  Fired and logged rather than awaited: the workflow control lives behind the plugin registry (async)
-   *  while neither delete entry point awaits it — the same contract the terminal teardown above uses.
-   *  Cancel the engine BEFORE the children, or it relaunches a node the moment an aborted one settles. */
-  private cancelDelegatedWorkFor(id: string): void {
-    const children = this.sessions.childrenOf(id);
-    void (async () => {
-      await this.cancelWorkflowsFor(id);
-      for (const child of children) {
-        if (isChannelSession(child)) await this.channelService.abort(channelIdOf(child));
-        this.sessions.setChildRunning(id, child, false);
-      }
-    })().catch((e) => logger('brain').error(`delegated teardown failed for ${id}`, e));
+    return this.teardown.deleteSession(userId, sessionId);
   }
 
   renameSession(userId: number, sessionId: string, title: string): { id: string; title: string } {
@@ -1115,71 +723,22 @@ export class BrainService {
     return this.statusView.listManagedSessions(userId);
   }
 
-  /** Delete ANY of the owner's brain sessions by id (admin panel) — disposing a live conversation or
-   *  channel session first. Deliberately bypasses the isNonUserSession guard: this IS the management
-   *  surface. Returns how many were deleted (0 or 1). */
+  /** Delete ANY of the owner's brain sessions by id (admin panel) — see
+   *  SessionTeardownService.deleteManagedSession. */
   deleteManagedSession(userId: number, id: string): number {
-    const row = this.d.store.getSession(id);
-    if (!row || row.user_id !== userId) return 0;
-    this.teardownDeletedSession(userId, id);
-    this.d.store.deleteSession(id);
-    return 1;
+    return this.teardown.deleteManagedSession(userId, id);
   }
 
-  private cleanupProcessesForTree(id: string): void {
-    const stack = [id];
-    for (let index = 0; index < stack.length; index += 1) {
-      const sessionId = stack[index]!;
-      processRegistry.killSession(sessionId);
-      for (const child of this.d.store.getSubagentRuns(sessionId)) stack.push(child.sessionId);
-    }
-  }
-
-  /** Every delegated descendant session id under `id` (breadth-first via the sub-agent run tree), the
-   *  root excluded. The janitor uses this to purge a stale conversation's sub-agent transcripts WITH it —
-   *  deleteSession only detaches children to top-level, where their `brain-ch-` prefix then excludes them
-   *  from staleConversationIds forever, leaking the transcripts. */
-  private descendantSessionIds(id: string): string[] {
-    const out: string[] = [];
-    const stack = [id];
-    for (let index = 0; index < stack.length; index += 1) {
-      for (const child of this.d.store.getSubagentRuns(stack[index]!)) { out.push(child.sessionId); stack.push(child.sessionId); }
-    }
-    return out;
-  }
-
-  /** Delete ALL of the owner's brain sessions (the panel's "delete everything" — the client confirms).
-   *  Returns the count removed. */
+  /** Delete ALL of the owner's brain sessions (the panel's "delete everything" — the client confirms) —
+   *  see SessionTeardownService.deleteAllManagedSessions. */
   deleteAllManagedSessions(userId: number): number {
-    let n = 0;
-    for (const s of this.d.store.listSessions(userId)) n += this.deleteManagedSession(userId, s.id);
-    return n;
+    return this.teardown.deleteAllManagedSessions(userId);
   }
 
-  /** Retention janitor: delete this user's own idle top-level conversations older than `days`. The store
-   *  query already excludes non-user shells, delegated children and unspoken rows; here we add the live
-   *  exclusions it cannot see — a running session, the user's active conversation, any session whose
-   *  sub-agent is still running (deleting it would kill that child), and any conversation a PENDING cron
-   *  wake-up was scheduled FROM (purging it would strand the wake-up's context and demote its reply to
-   *  the notification channel). Returns the count removed. */
+  /** Retention janitor: delete this user's own idle top-level conversations older than `days` — see
+   *  SessionTeardownService.purgeStaleSessionsForUser. */
   async purgeStaleSessionsForUser(userId: number, days: number): Promise<number> {
-    // The cronjob plugin owns the wake-up jobs, so ask through its typed control; with the plugin
-    // disabled/absent no control is registered → nothing to protect. A failed plugin LOAD rejects
-    // instead — fail closed (the sweep skips, the caller logs) rather than delete a conversation a
-    // wake-up may still need.
-    const cron = (await this.resolvePlugins())?.control('cron');
-    const pendingOrigins = new Set(cron?.pendingWakeupOriginSessionIds(userId) ?? []);
-    const activeId = this.lifecycle.activeSessionId(userId);
-    let n = 0;
-    for (const id of this.d.store.staleConversationIds(userId, days)) {
-      if (id === activeId || pendingOrigins.has(id)) continue;
-      if (this.sessions.has(id) || this.sessions.hasActiveChildren(id)) continue;
-      // Purge the whole delegated tree, not just the root: collect the sub-agent descendants FIRST (before
-      // deleteSession detaches them), then delete each. Otherwise their transcripts leak forever.
-      for (const descId of this.descendantSessionIds(id)) n += this.deleteManagedSession(userId, descId);
-      n += this.deleteManagedSession(userId, id);
-    }
-    return n;
+    return this.teardown.purgeStaleSessionsForUser(userId, days);
   }
 
   /** Start (or resume) a conversation — see ConversationLifecycle.start. */
@@ -1261,59 +820,24 @@ export class BrainService {
     return this.identity.isOwner(userId);
   }
 
-  /** Push a background-process snapshot to the OWNER's live client streams (the CLI/web process panel),
-   *  so it refreshes out of turn on every spawn/exit/kill. Wired to the process registry's change
-   *  listener in the daemon. Owner-only: a command line can carry a secret, so the event is delivered
-   *  ONLY to streams attached to the owner's own sessions, never a second admin's. */
+  /** Push a background-process snapshot to the OWNER's live client streams — see
+   *  SessionProcessService.broadcastProcesses. */
   broadcastProcesses(sessionId: string, processes: ProcessInfo[]): void {
-    const event: BrainEvent = { type: 'process', processes };
-    for (const [listener, attachedSessionId] of this.attachments.clientStreams) {
-      if (attachedSessionId === sessionId && this.isOwner(this.d.store.getSession(attachedSessionId)?.user_id)) listener(event);
-    }
+    this.processSvc.broadcastProcesses(sessionId, processes);
   }
 
-  /** Ownership of ONE process, independent of any session scope. The originating session row decides: a
-   *  process spawned inside a DELEGATED child (sub-agent) carries `handle.userId === null` — that turn's
-   *  identity has no Elowen user — so the child session's `user_id` is the only reliable owner. The handle's
-   *  own userId is the fallback for a process whose session row is already gone. */
-  private ownsProcess(userId: number, handle: ProcessHandle): boolean {
-    const sessionOwner = handle.sessionId ? this.d.store.getSession(handle.sessionId)?.user_id : undefined;
-    return (sessionOwner ?? handle.userId ?? null) === userId;
-  }
-
-  /** Resolve an EXPLICIT `?session=` process scope. Throws (→ 404) on an unknown or foreign session — the
-   *  CLI's bound-session contract. The sessionless surfaces below never call it: they span the user's whole
-   *  process tree instead. */
-  private ownedProcessSession(userId: number, sessionId: string): string {
-    const row = this.d.store.getSession(sessionId);
-    if (!row || row.user_id !== userId) throw new Error('unknown session');
-    return sessionId;
-  }
-
-  /** The user's background processes. Without a session: EVERY process they own, across conversations,
-   *  channels and sub-agent children — the web panel's view, and the only surface that can reach a service
-   *  process an orphaned delegate left behind. With a session: that conversation only (CLI). */
+  /** The user's background processes — sessionless spans their whole tree, session-scoped is one
+   *  conversation. See SessionProcessService.processes. */
   processes(userId: number, sessionId?: string): ProcessInfo[] {
-    if (sessionId) return processRegistry.listForSession(this.ownedProcessSession(userId, sessionId));
-    // The cross-conversation (web panel) view excludes in-flight `foreground` Bash commands: they are
-    // transient tool calls owned by their live turn (Ctrl+B backgrounds them), not managed background
-    // processes to list and kill. The session-scoped path above keeps them — the CLI's Ctrl+B gate reads it.
-    return processRegistry.listWhere((handle) => this.ownsProcess(userId, handle) && handle.completionMode !== 'foreground');
+    return this.processSvc.processes(userId, sessionId);
   }
 
   processOutput(userId: number, processId: string, sessionId?: string): string | null {
-    if (sessionId) return processRegistry.outputForSession(this.ownedProcessSession(userId, sessionId), processId);
-    const handle = processRegistry.get(processId);
-    return handle && this.ownsProcess(userId, handle) ? handle.readAll() : null;
+    return this.processSvc.processOutput(userId, processId, sessionId);
   }
 
   killProcess(userId: number, processId: string, sessionId?: string): boolean {
-    // A foreground command is owned by its live turn; the process API never kills it (that would SIGKILL a
-    // command the CLI is still awaiting). Ctrl+B backgrounds it; session deletion still reaps it via killSession.
-    if (processRegistry.get(processId)?.completionMode === 'foreground') return false;
-    if (sessionId) return processRegistry.killForSession(this.ownedProcessSession(userId, sessionId), processId);
-    const handle = processRegistry.get(processId);
-    return handle !== undefined && this.ownsProcess(userId, handle) && processRegistry.kill(processId);
+    return this.processSvc.killProcess(userId, processId, sessionId);
   }
 
   async send(request: TurnRequest): Promise<void> {
