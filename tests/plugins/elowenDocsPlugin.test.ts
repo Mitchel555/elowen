@@ -157,7 +157,8 @@ describe('elowen-docs — pure helpers', () => {
 
   it('gives up cleanly when there is no manual next to it, rather than guessing a directory', async () => {
     const { resolveDocsRoot } = await load();
-    expect(resolveDocsRoot(mkdtempSync(join(tmpdir(), 'elowen-nodocs-')))).toBeNull();
+    const empty = mkdtempSync(join(tmpdir(), 'elowen-nodocs-'));
+    try { expect(resolveDocsRoot(empty)).toBeNull(); } finally { rmSync(empty, { recursive: true, force: true }); }
   });
 });
 

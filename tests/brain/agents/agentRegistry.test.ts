@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, it, expect } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,9 @@ import {
   READ_ONLY_AGENT_TOOLS,
   type AgentDef,
 } from '../../../src/brain/agents/agentRegistry.js';
+
+let dirs: string[] = [];
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 const md = (frontmatter: string, body: string): string => `---\n${frontmatter}\n---\n${body}`;
 
@@ -63,7 +66,8 @@ describe('resolveAgentTools', () => {
 
 describe('loadAgentRegistry', () => {
   it('merges built-in then user, a user file overrides a built-in of the same name, and skips broken files', () => {
-    const root = mkdtempSync(join(tmpdir(), 'agents-'));
+    const root = mkdtempSync(join(tmpdir(), 'elowen-agents-'));
+    dirs.push(root);
     const builtin = join(root, 'builtin');
     const user = join(root, 'user');
     mkdirSync(builtin);

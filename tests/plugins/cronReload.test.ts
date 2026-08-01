@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import type { SessionSource } from '../../src/plugins/api.js';
@@ -20,7 +20,9 @@ interface CronAdapterUnderTest {
   disconnect(): void;
 }
 
-function freshDataRoot(): string { return mkdtempSync(join(tmpdir(), 'elowen-pdata-')); }
+let dirs: string[] = [];
+function freshDataRoot(): string { const p = mkdtempSync(join(tmpdir(), 'elowen-pdata-')); dirs.push(p); return p; }
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 async function loadCron(dataRoot: string, notify: (text: string, channelId?: string) => Promise<void>) {
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };

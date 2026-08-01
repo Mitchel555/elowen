@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,12 +28,21 @@ const runTool = (reg: PluginRegistry, name: string, params: Record<string, unkno
 // each test. kill() is idempotent and safe on both fake and real handles.
 afterEach(() => { for (const p of processRegistry.list()) processRegistry.kill(p.id); });
 
+// Every describe's beforeAll creates ONE shared dir for all its tests, so the dirs must survive until the
+// whole file is done — and they must outlive the afterEach that kills the registry's background processes:
+// those commands run with the dir as their cwd, so deleting it under a still-running process would break
+// the run nondeterministically. Removing them here, after every test (and its kill hook) has settled, is
+// the only safe point.
+let dirs: string[] = [];
+const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+afterAll(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
 describe('terminal plugin', () => {
   let reg: PluginRegistry;
   let dir: string;
   beforeAll(async () => {
     reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log });
-    dir = mkdtempSync(join(tmpdir(), 'elowen-term-'));
+    dir = tmpDir('term');
   });
 
   it('registers Bash + background process tools', () => {
@@ -101,7 +110,7 @@ describe('terminal plugin — live foreground output (onUpdate streaming)', () =
   let dir: string;
   beforeAll(async () => {
     reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log });
-    dir = mkdtempSync(join(tmpdir(), 'elowen-term-live-'));
+    dir = tmpDir('term-live');
   });
 
   const runStreaming = (command: string, onUpdate: (p: { content: { text: string }[] }) => void) => {
@@ -136,7 +145,7 @@ describe('terminal plugin — live foreground output (onUpdate streaming)', () =
 
 describe('terminal plugin — configurable outputCap', () => {
   let dir: string;
-  beforeAll(() => { dir = mkdtempSync(join(tmpdir(), 'elowen-term-cap-')); });
+  beforeAll(() => { dir = tmpDir('term-cap'); });
   const bigOutput = (n: number) => `node -e "process.stdout.write('a'.repeat(${n}))"`;
   // The shown output is the tail kept after the "…[truncated: …]\n" hint line, up to the trailing
   // "[exit N]" marker. Its length == the applied cap (bash truncation keeps the END).
@@ -193,7 +202,7 @@ describe('terminal plugin — the process registry is the single source of truth
   let dir: string;
   beforeAll(async () => {
     reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log });
-    dir = mkdtempSync(join(tmpdir(), 'elowen-term-registry-'));
+    dir = tmpDir('term-registry');
   });
 
   const inSession = (sessionId: string, name: string, params: Record<string, unknown>) =>
@@ -250,7 +259,7 @@ describe('terminal plugin — the process registry is the single source of truth
 
 describe('terminal plugin — UTF-8 streaming', () => {
   let dir: string;
-  beforeAll(() => { dir = mkdtempSync(join(tmpdir(), 'elowen-term-utf8-')); });
+  beforeAll(() => { dir = tmpDir('term-utf8'); });
 
   it('does not corrupt multibyte output split across stream chunks', async () => {
     // 70000 × the 3-byte euro sign = 210000 bytes, well past the OS pipe chunk size, so the character
@@ -277,7 +286,7 @@ describe('terminal plugin — UTF-8 streaming', () => {
 // case needing a full real 120s to prove the constant wasn't shrunk.
 describe('terminal plugin — configurable commandTimeoutMs', () => {
   let dir: string;
-  beforeAll(() => { dir = mkdtempSync(join(tmpdir(), 'elowen-term-timeout-')); });
+  beforeAll(() => { dir = tmpDir('term-timeout'); });
 
   it('a configured commandTimeoutMs (min-clamped 30000) kills a command sooner than the default', async () => {
     const reg = await loadPlugins({
@@ -310,7 +319,7 @@ describe('terminal plugin — per-call Bash timeout', () => {
       dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log,
       config: { terminal: { commandTimeoutMs: 30_000 } },
     });
-    dir = mkdtempSync(join(tmpdir(), 'elowen-term-calltimeout-'));
+    dir = tmpDir('term-calltimeout');
   });
 
   it('an explicit timeout overrides the configured default and kills the command at ITS deadline', async () => {
@@ -355,7 +364,7 @@ describe('terminal plugin — foreground detach (Ctrl+B backgrounds a running co
   const uidOwner: TurnIdentity = { platform: 'elowen', userId: '1', admin: true, owner: true, elowenUserId: 1 };
   beforeAll(async () => {
     reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log });
-    dir = mkdtempSync(join(tmpdir(), 'elowen-term-detach-'));
+    dir = tmpDir('term-detach');
   });
   // The exit listener is a singleton on the shared registry; reset it so a test's counter never leaks.
   afterEach(() => { processRegistry.setExitListener(() => {}); });
@@ -451,7 +460,7 @@ describe('terminal plugin — foreground kill (stop escalation)', () => {
   const uidOwner: TurnIdentity = { platform: 'elowen', userId: '1', admin: true, owner: true, elowenUserId: 1 };
   beforeAll(async () => {
     reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log });
-    dir = mkdtempSync(join(tmpdir(), 'elowen-term-kill-'));
+    dir = tmpDir('term-kill');
   });
   afterEach(() => { processRegistry.setExitListener(() => {}); });
 
@@ -525,7 +534,7 @@ describe('terminal plugin — ProcessOutput(block)', () => {
   let dir: string;
   beforeAll(async () => {
     reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['terminal'], logger: log });
-    dir = mkdtempSync(join(tmpdir(), 'elowen-term-block-'));
+    dir = tmpDir('term-block');
   });
 
   const inSession = (sessionId: string, name: string, params: Record<string, unknown>) =>

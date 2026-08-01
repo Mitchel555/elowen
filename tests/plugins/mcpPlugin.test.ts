@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 // The plugin is a plain ESM module (no build step) — import it directly.
 // @ts-expect-error - .mjs plugin has no type declarations
@@ -95,8 +95,14 @@ describe('mcp plugin — helpers', () => {
 });
 
 describe('mcp plugin — end-to-end connection + process-group cleanup', () => {
+  // Each test kills its MCP server processes (reload.before hook) before it ends, so the pid-file dirs
+  // are safe to remove after the test instead of leaving them in /tmp.
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
   it('connects a stdio MCP server, bridges its tool, and reaps the process group on reload', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-mcp-'));
+    const dir = tmpDir('mcp');
     const pidFile = join(dir, 'grandchild.pid');
     const ctx = fakeCtx({
       servers: [{
@@ -173,7 +179,7 @@ describe('mcp plugin — end-to-end connection + process-group cleanup', () => {
   // tools kept failing against the dead client, and reconnectMcpServer no-opped because the state still
   // said "connected".
   it('detects an unexpected disconnect and lets a manual reconnect actually reconnect', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-mcp-'));
+    const dir = tmpDir('mcp');
     const pidFile = join(dir, 'server.pid');
     const ctx = fakeCtx({
       servers: [{

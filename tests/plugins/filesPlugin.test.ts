@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, utimesSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, utimesSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -27,6 +27,11 @@ describe('files plugin', () => {
     dir = mkdtempSync(join(tmpdir(), 'elowen-files-'));
     writeFileSync(join(dir, 'hello.txt'), 'hello world');
   });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
   it('registers read/write/edit/list tools', () => {
     expect(reg.tools.map((t) => t.name).sort()).toEqual(['Edit', 'FileInfo', 'GitStatus', 'Glob', 'Grep', 'ListDir', 'Read', 'Search', 'Write']);
@@ -241,7 +246,7 @@ describe('files plugin', () => {
   });
 
   it('GitStatus reports branch and dirty files for an allowed repo', async () => {
-    const repo = mkdtempSync(join(tmpdir(), 'elowen-files-git-'));
+    const repo = tmpDir('files-git');
     execFileSync('git', ['init', '-b', 'main'], { cwd: repo, stdio: 'ignore' });
     writeFileSync(join(repo, 'tracked.txt'), 'one\n');
     execFileSync('git', ['add', 'tracked.txt'], { cwd: repo, stdio: 'ignore' });
@@ -257,6 +262,7 @@ describe('files plugin', () => {
 describe('files plugin — configurable readCap', () => {
   let dir: string;
   beforeAll(() => { dir = mkdtempSync(join(tmpdir(), 'elowen-files-cap-')); });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 
   // shown content is everything before the appended "\n\n[…]" continuation/limit hint.
   const shownLength = (text: string): number => {
@@ -322,6 +328,7 @@ describe('files plugin — configurable searchMaxMatches', () => {
     const lines = Array.from({ length: 250 }, (_, i) => `needle line ${i}`).join('\n');
     writeFileSync(join(dir, 'haystack.txt'), lines);
   });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 
   it('a configured searchMaxMatches (min-clamped 50) truncates results sooner than the default 200', async () => {
     const reg = await loadPlugins({
@@ -357,6 +364,11 @@ describe('files plugin — Glob', () => {
     writeFileSync(join(dir, 'root.ts'), 'export const root = 1;');
     writeFileSync(join(dir, 'src', 'nested.ts'), 'export const nested = 1;');
   });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
   it('matches **/*.ts at zero directory depth (top-level file) and deeper', async () => {
     const res = await runWithPolicy(userPolicy([dir]), () => runTool(reg2, 'Glob', { path: dir, pattern: '**/*.ts' }));
@@ -371,7 +383,7 @@ describe('files plugin — Glob', () => {
   });
 
   it('collects ALL matches then sorts by mtime (newest first), not a traversal-order subset', async () => {
-    const d2 = mkdtempSync(join(tmpdir(), 'elowen-glob-mtime-'));
+    const d2 = tmpDir('glob-mtime');
     // 25 matching files created in order; strictly increasing mtimes so f24 is newest, f00 oldest.
     // globMax clamps to a floor of 10, so 25 files > globMax*2 (20): the old code stopped the walk at
     // 20 matches IN TRAVERSAL ORDER and sorted only those, dropping the newest files (f20..f24, created
@@ -400,6 +412,11 @@ describe('files plugin — Grep', () => {
     writeFileSync(join(dir, 'a.ts'), 'const needle = 1;\nconst other = 2;\n');
     writeFileSync(join(dir, 'sub', 'b.ts'), 'function needleFn() {}\nreturn needle;\n');
   });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
   it('content mode returns relative path:line:content', async () => {
     const res = await runWithPolicy(userPolicy([dir]), () => runTool(reg2, 'Grep', { path: dir, pattern: 'needle' }));
@@ -440,7 +457,7 @@ describe('files plugin — Grep', () => {
   });
 
   it('head_limit truncates and appends a pagination note; head_limit 0 means unlimited', async () => {
-    const many = mkdtempSync(join(tmpdir(), 'elowen-grep-head-'));
+    const many = tmpDir('grep-head');
     writeFileSync(join(many, 'many.txt'), Array.from({ length: 20 }, (_, i) => `needle ${i}`).join('\n'));
     const limited = await runWithPolicy(userPolicy([many]), () => runTool(reg2, 'Grep', { path: many, pattern: 'needle', head_limit: 5 }));
     expect(detailsOf(limited).matches).toBe(5);
@@ -452,7 +469,7 @@ describe('files plugin — Grep', () => {
   });
 
   it('multiline: true makes . cross newlines (multiline-dotall)', async () => {
-    const ml = mkdtempSync(join(tmpdir(), 'elowen-grep-ml-'));
+    const ml = tmpDir('grep-ml');
     writeFileSync(join(ml, 'm.txt'), 'foo\nbar\nbaz\n');
     const withMl = await runWithPolicy(userPolicy([ml]), () => runTool(reg2, 'Grep', { path: ml, pattern: 'foo.*bar', multiline: true }));
     expect(detailsOf(withMl).matches).toBeGreaterThan(0);
@@ -461,7 +478,7 @@ describe('files plugin — Grep', () => {
   });
 
   it('JS fallback (rg unavailable) still searches content, case-sensitively like rg', async () => {
-    const fb = mkdtempSync(join(tmpdir(), 'elowen-grep-fb-'));
+    const fb = tmpDir('grep-fb');
     writeFileSync(join(fb, 'c.txt'), 'Needle here\nneedle there\n');
     const prevPath = process.env.PATH;
     process.env.PATH = ''; // hide rg → the tool falls back to the bounded JS walk

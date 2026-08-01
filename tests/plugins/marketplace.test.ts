@@ -1,9 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MarketplaceService, parseRegistry, MarketplaceError } from '../../src/plugins/marketplace.js';
 import { discoverPlugins } from '../../src/plugins/loader.js';
+
+// setup() runs once per test and roots everything under one temp dir, so sweeping them after each
+// test is enough; without this the suite left a directory behind on every single case.
+let dirs: string[] = [];
+const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 /** One plugin folder (manifest + entry) inside a `plugins/<name>` root. */
 function writePlugin(pluginsRoot: string, name: string, version: string): string {
@@ -68,7 +74,7 @@ function setup(opts: {
   seedCacheGit?: boolean;
   calls?: string[];
 }): Harness {
-  const base = mkdtempSync(join(tmpdir(), 'elowen-mkt-'));
+  const base = tmpDir('mkt');
   const fixture = join(base, 'fixture-registry');
   const bundledDir = join(base, 'bundled');
   const userDir = join(base, 'user');
@@ -188,7 +194,7 @@ describe('MarketplaceService.install', () => {
   });
 
   it('symlinks host node_modules into the installed plugin so its SDK imports resolve', async () => {
-    const base = mkdtempSync(join(tmpdir(), 'elowen-mkt-hostmods-'));
+    const base = tmpDir('mkt-hostmods');
     const host = join(base, 'host-node-modules');
     mkdirSync(host, { recursive: true });
     const { svc, userDir } = setup({ registryEntries: [{ name: 'weather', version: '1.0.0' }] });

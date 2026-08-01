@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,6 +22,9 @@ import { toolResultSpillDir } from '../../../src/shared/paths.js';
 import { openDb } from '../../../src/store/db.js';
 import { BrainStore } from '../../../src/store/brainStore.js';
 import type { PiAgentMessage } from '../../../src/brain/session/historyImageStripping.js';
+
+let dirs: string[] = [];
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 const T0 = 1_000_000;
 const IDLE = 60_000;
@@ -427,6 +430,7 @@ describe('installToolResultClearing', () => {
 
   it('spills into the real per-session dir, and the existing session cleanup removes it', async () => {
     const home = mkdtempSync(join(tmpdir(), 'elowen-size-spill-'));
+    dirs.push(home);
     vi.stubEnv('HOME', home);
     try {
       // Real fs writer and real spill dir — no injection, so this exercises the path the daemon uses.

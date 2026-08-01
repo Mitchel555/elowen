@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../../src/store/db.js';
@@ -20,6 +20,10 @@ import type { BrainCredentialAccess } from '../../src/brain/providerUsage.js';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import { PluginRegistryProvider } from '../../src/plugins/pluginsProvider.js';
 
+let dirs: string[] = [];
+const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
 const noCreds: BrainCredentialAccess = { get: () => undefined, getApiKey: async () => undefined };
 let sharedRuntime: ModelRuntime;
 beforeAll(async () => { sharedRuntime = await inMemoryModelRuntime(); });
@@ -35,8 +39,8 @@ function makePlugin(root: string, name: string, extra: Record<string, unknown> =
 }
 
 function setup() {
-  const root = mkdtempSync(join(tmpdir(), 'elowen-plugroutes-'));
-  const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-plugdata-'));
+  const root = tmpDir('plugroutes');
+  const dataRoot = tmpDir('plugdata');
   makePlugin(root, 'skills');
   makePlugin(root, 'files');
   makePlugin(root, 'discord', {
@@ -158,7 +162,7 @@ describe('plugin routes', () => {
   });
 
   it('GET /plugins/:name surfaces declared capabilities ({} when the manifest omits them)', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'elowen-plugcaps-'));
+    const root = tmpDir('plugcaps');
     makePlugin(root, 'enricher', { capabilities: { hooks: ['brain.turn.contextBuilt'], mutates: ['turnContext'], network: true } });
     makePlugin(root, 'plain');
     const db = openDb(':memory:');
@@ -185,7 +189,7 @@ describe('plugin routes', () => {
   });
 
   it('exposes MCP server state and reconnect actions from the live MCP plugin module', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'elowen-mcproutes-'));
+    const root = tmpDir('mcproutes');
     const dir = join(root, 'mcp');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'elowen-plugin.json'), JSON.stringify({
@@ -291,7 +295,7 @@ describe('sub-agent (typed .md) routes', () => {
   // The routes derive the user-agents dir as dirname(pluginDataRoot)/agents, so nest pluginDataRoot one
   // level down to keep each test's agents dir isolated (setup() puts it directly under tmpdir → shared).
   function agentSetup() {
-    const cfgDir = mkdtempSync(join(tmpdir(), 'elowen-agentcfg-'));
+    const cfgDir = tmpDir('agentcfg');
     const pluginDataRoot = join(cfgDir, 'plugins-data');
     mkdirSync(pluginDataRoot, { recursive: true });
     const db = openDb(':memory:');

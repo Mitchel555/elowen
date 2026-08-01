@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { resolve, dirname } from 'node:path';
+import { rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { openDb, type Db } from '../../src/store/db.js';
 import { BrainStore, SESSION_EVENT_KINDS, syntheticRestartResultId } from '../../src/store/brainStore.js';
@@ -15,6 +16,8 @@ const { clipTail } = await import(
 describe('BrainStore', () => {
   let store: BrainStore;
   let db: Db;
+  let dirs: string[] = [];
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
   beforeEach(() => { db = openDb(':memory:'); store = new BrainStore(db); });
 
   it('creates and reads back a session', () => {
@@ -1273,6 +1276,7 @@ describe('BrainStore', () => {
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
       const home = mkdtempSync(join(tmpdir(), 'elowen-plan-purge-'));
+      dirs.push(home);
       vi.stubEnv('HOME', home);
       try {
         store.createSession({ id: 's1', userId: 7, model: 'm' });
@@ -1294,6 +1298,7 @@ describe('BrainStore', () => {
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
       const home = mkdtempSync(join(tmpdir(), 'elowen-plan-move-'));
+      dirs.push(home);
       vi.stubEnv('HOME', home);
       try {
         store.createSession({ id: 'chan-x', userId: 7, model: 'm' });
@@ -1316,6 +1321,7 @@ describe('BrainStore', () => {
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
       const home = mkdtempSync(join(tmpdir(), 'elowen-plan-user-'));
+      dirs.push(home);
       vi.stubEnv('HOME', home);
       try {
         store.createSession({ id: 'mine-a', userId: 7, model: 'm' });
@@ -1561,6 +1567,7 @@ describe('BrainStore', () => {
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
       const home = mkdtempSync(join(tmpdir(), 'elowen-spill-purge-'));
+      dirs.push(home);
       vi.stubEnv('HOME', home);
       try {
         store.createSession({ id: 's1', userId: 7, model: 'm' });
@@ -1587,6 +1594,7 @@ describe('BrainStore', () => {
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
       const home = mkdtempSync(join(tmpdir(), 'elowen-spill-move-'));
+      dirs.push(home);
       vi.stubEnv('HOME', home);
       try {
         store.createSession({ id: 'chan-x', userId: 7, model: 'm' });

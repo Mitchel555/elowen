@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { vi } from 'vitest';
@@ -84,10 +84,12 @@ describe('GET /system/readiness', () => {
   });
 
   describe('tasks: an external agent-CLI exec depends on the resolved binary being on PATH', () => {
-    afterEach(() => { vi.unstubAllEnvs(); });
+    let dirs: string[] = [];
+    const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+    afterEach(() => { vi.unstubAllEnvs(); for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
     it('ok when the resolved program binary is present on PATH', async () => {
-      const binDir = mkdtempSync(join(tmpdir(), 'elowen-readiness-bin-'));
+      const binDir = tmpDir('readiness-bin');
       writeFileSync(join(binDir, 'pi'), '#!/bin/sh\n');
       chmodSync(join(binDir, 'pi'), 0o755);
       vi.stubEnv('PATH', binDir);
@@ -97,7 +99,7 @@ describe('GET /system/readiness', () => {
     });
 
     it('not ok when the resolved program binary is missing from PATH', async () => {
-      const emptyDir = mkdtempSync(join(tmpdir(), 'elowen-readiness-empty-'));
+      const emptyDir = tmpDir('readiness-empty');
       vi.stubEnv('PATH', emptyDir);
       const { app } = makeApp({ model: 'm', patch: { defaults: { exec: 'pi:some-model', autonomy: 'L3', maxSessions: 1 } } });
       const { body } = await getChecks(app);

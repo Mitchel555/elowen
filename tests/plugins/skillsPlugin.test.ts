@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
@@ -15,6 +15,10 @@ const runTool = (reg: { tools: { name: string; execute: (id: string, p: unknown)
   reg.tools.find((t) => t.name === name)!.execute('t', p);
 
 describe('bundled skills plugin', () => {
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
   it('registers at least one skill from its bundled dir', async () => {
     const reg = await loadPlugins({ dirs: [resolve(repoRoot, 'plugins')], enabled: ['skills'], logger: log });
     expect(reg.skills.length).toBeGreaterThan(0);
@@ -30,7 +34,7 @@ describe('bundled skills plugin', () => {
     // Regression: before the fix, CreateSkill wrote the file but never triggered a reload, so a freshly
     // created skill only reached the model after a daemon restart / plugins toggle. It must now request a
     // live reload (drained by the brain once the turn settles) so the skill is available next message.
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-skills-'));
+    const dataRoot = tmpDir('skills');
     let reloads = 0;
     const reg = await loadPlugins({ dirs: [resolve(repoRoot, 'plugins')], enabled: ['skills'], logger: log, dataRoot, requestReload: () => { reloads += 1; } });
     const res = await runWithPolicy(adminPolicy, () => runTool(reg as never, 'CreateSkill', { name: 'ship-it', description: 'how to ship a release', content: 'do the thing' }), { identity: admin });
@@ -42,7 +46,7 @@ describe('bundled skills plugin', () => {
   });
 
   it('DeleteSkill also asks the host to apply the removal live', async () => {
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-skills-'));
+    const dataRoot = tmpDir('skills');
     mkdirSync(join(dataRoot, 'skills'), { recursive: true });
     writeFileSync(join(dataRoot, 'skills', 'temp-skill.md'), '---\nname: temp-skill\ndescription: throwaway\n---\n\nbody\n');
     let reloads = 0;
@@ -55,7 +59,7 @@ describe('bundled skills plugin', () => {
   it('lists AND deletes a directory-form <name>/SKILL.md user skill, not just flat .md', async () => {
     // ctx.dataDir() resolves to <dataRoot>/skills — seed a directory-form skill there (PI treats a dir
     // with a SKILL.md as a skill root). The old flat-*.md readdir catalog would miss it entirely.
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-skills-'));
+    const dataRoot = tmpDir('skills');
     const skillDir = join(dataRoot, 'skills', 'deploy-flow');
     mkdirSync(skillDir, { recursive: true });
     writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: deploy-flow\ndescription: how to deploy the app\n---\n\nsteps here\n');

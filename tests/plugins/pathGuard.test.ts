@@ -1,10 +1,14 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { rmSync } from 'node:fs';
 import { assertPathAllowed, allowedRoots, defaultCwd, isAllAccess } from '../../src/plugins/pathGuard.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import type { Policy } from '../../src/plugins/policy.js';
 
 const userPolicy = (roots: string[]): Policy => ({ allowedProjectIds: new Set([1]), allowedPaths: () => roots });
 const adminPolicy: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
+
+let dirs: string[] = [];
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 describe('assertPathAllowed', () => {
   it('allows a path inside an allowed root', () => {
@@ -79,6 +83,7 @@ describe('symlink escape', () => {
     const { join } = await import('node:path');
     const { tmpdir } = await import('node:os');
     const base = mkdtempSync(join(tmpdir(), 'elowen-guard-'));
+    dirs.push(base);
     const repo = join(base, 'repo'); const outside = join(base, 'outside');
     mkdirSync(repo); mkdirSync(outside);
     writeFileSync(join(outside, 'secret.txt'), 'x');
@@ -99,6 +104,7 @@ describe('symlink escape', () => {
     const { join } = await import('node:path');
     const { tmpdir } = await import('node:os');
     const base = mkdtempSync(join(tmpdir(), 'elowen-guard-deep-'));
+    dirs.push(base);
     const repo = join(base, 'repo'); const outside = join(base, 'outside');
     mkdirSync(repo); mkdirSync(outside);
     // Neither the target nor its immediate parent exists — only the symlinked ancestor does, so the
@@ -119,6 +125,7 @@ describe('own tool-result spill dir', () => {
     const { join } = await import('node:path');
     const { tmpdir } = await import('node:os');
     const home = mkdtempSync(join(tmpdir(), 'elowen-spill-guard-'));
+    dirs.push(home);
     vi.stubEnv('HOME', home);
     try {
       const spill = join(home, '.config/elowen/tool-results/sess-a/out.txt');
@@ -135,6 +142,7 @@ describe('own tool-result spill dir', () => {
     const { join } = await import('node:path');
     const { tmpdir } = await import('node:os');
     const home = mkdtempSync(join(tmpdir(), 'elowen-spill-guard-'));
+    dirs.push(home);
     vi.stubEnv('HOME', home);
     try {
       const foreign = join(home, '.config/elowen/tool-results/sess-b/out.txt');

@@ -1,11 +1,13 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync, rmSync } from 'node:fs';
 // @ts-expect-error — plain .mjs plugin module, no types
 import { StateStore } from '../../plugins/_shared/stateStore.mjs';
 
-function freshDir(): string { return mkdtempSync(join(tmpdir(), 'elowen-statestore-')); }
+let dirs: string[] = [];
+function freshDir(): string { const p = mkdtempSync(join(tmpdir(), 'elowen-statestore-')); dirs.push(p); return p; }
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 function fakeLogger() { return { info: vi.fn(), warn: vi.fn(), error: vi.fn() }; }
 
 describe('StateStore', () => {

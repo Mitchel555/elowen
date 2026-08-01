@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { statSync } from 'node:fs';
+import { statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveToken, login, clearToken, NeedsLogin, tokenFile, defaultIo, type TokenIo } from '../../../src/cli/chat/token.js';
@@ -58,9 +58,13 @@ describe('chat token', () => {
   it('defaultIo writes the cache file 0600', () => {
     const dir = join(tmpdir(), `elowen-tok-${process.pid}`);
     const realEnv = { HOME: dir } as NodeJS.ProcessEnv;
-    defaultIo.write(tokenFile(realEnv), JSON.stringify({ token: 't' }));
-    const mode = statSync(tokenFile(realEnv)).mode & 0o777;
-    expect(mode).toBe(0o600);
-    defaultIo.remove(tokenFile(realEnv));
+    try {
+      defaultIo.write(tokenFile(realEnv), JSON.stringify({ token: 't' }));
+      const mode = statSync(tokenFile(realEnv)).mode & 0o777;
+      expect(mode).toBe(0o600);
+    } finally {
+      // `write` mints the whole HOME tree, so removing just the token file leaves the directory behind.
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

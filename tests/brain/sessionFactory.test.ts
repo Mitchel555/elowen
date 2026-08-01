@@ -1,11 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BrainSessionFactory, compactionReserveTokens, resolveAutoCompactPct } from '../../src/brain/session/factory.js';
 import { openDb } from '../../src/store/db.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { CLEAR_MIN_BYTES } from '../../src/brain/session/toolResultClearing.js';
+
+let dirs: string[] = [];
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 describe('per-model auto-compact threshold', () => {
   it('uses the per-model override when set, else the global default', () => {
@@ -47,6 +50,7 @@ describe('BrainSessionFactory context-saving installers', () => {
     // Spills resolve through dataDir(HOME) — point HOME at a tmp dir so the test never touches the
     // real ~/.config/elowen.
     const home = mkdtempSync(join(tmpdir(), 'elowen-home-'));
+    dirs.push(home);
     vi.stubEnv('HOME', home);
     const listeners: ((e: unknown) => void)[] = [];
     const session = {
@@ -241,6 +245,7 @@ describe('BrainSessionFactory turn-boundary compaction toggle', () => {
 describe('BrainSessionFactory deferred-tool wiring', () => {
   async function createWithDeferral(deferred: Set<string>) {
     const home = mkdtempSync(join(tmpdir(), 'elowen-home-'));
+    dirs.push(home);
     vi.stubEnv('HOME', home);
     const session = {
       sessionId: 'sess-deferral',

@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from 'node:fs';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPlugins } from '../../src/plugins/loader.js';
@@ -18,9 +18,13 @@ function writePlugin(root: string, name: string, version: string, marker: string
 }
 
 describe('loadPlugins import cache-busting', () => {
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
   it('re-imports a plugin whose bytes+version changed under the same path', async () => {
     const marker = `__mkbust_${Date.now()}`;
-    const root = mkdtempSync(join(tmpdir(), 'elowen-bust-'));
+    const root = tmpDir('bust');
     writePlugin(root, 'demo', '1.0.0', marker);
     await loadPlugins({ dirs: [root], enabled: ['demo'], logger: silentLogger });
     expect((globalThis as Record<string, unknown>)[marker]).toBe(1);
@@ -35,7 +39,7 @@ describe('loadPlugins import cache-busting', () => {
   });
 
   it('rejects a manifest entry that escapes the plugin dir', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'elowen-escape-'));
+    const root = tmpDir('escape');
     const dir = join(root, 'evil');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'elowen-plugin.json'), JSON.stringify({

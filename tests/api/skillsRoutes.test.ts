@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../../src/store/db.js';
@@ -14,13 +14,17 @@ import { UserStore } from '../../src/store/userStore.js';
 import { ProjectStore } from '../../src/store/projectStore.js';
 import { UserProjectStore } from '../../src/store/userProjectStore.js';
 
+let dirs: string[] = [];
+const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
 const skillMd = (name: string, description: string) => `---\nname: ${name}\ndescription: ${description}\n---\n\nBody of ${name}.\n`;
 
 function setup() {
-  const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-skills-data-'));
+  const dataRoot = tmpDir('skills-data');
   // A plugin scan root shaped like the real one: <root>/skills is the plugin folder, its bundled
   // .md skills live one level deeper in <root>/skills/skills.
-  const pluginsRoot = mkdtempSync(join(tmpdir(), 'elowen-skills-plugins-'));
+  const pluginsRoot = tmpDir('skills-plugins');
   const bundledDir = join(pluginsRoot, 'skills', 'skills');
   mkdirSync(bundledDir, { recursive: true });
   writeFileSync(join(bundledDir, 'greeting.md'), skillMd('greeting', 'How to greet.'));

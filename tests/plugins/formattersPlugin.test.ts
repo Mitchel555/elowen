@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,12 +28,16 @@ const fakeBin = (path: string, body = '#!/bin/sh\nexit 0\n') => {
 
 /** A temp project with a fake local prettier that marks each formatted file with `<file>.formatted`. */
 const projectWithPrettier = () => {
-  const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-'));
+  const dir = tmpDir('fmt');
   fakeBin(join(dir, 'node_modules/.bin/prettier'), '#!/bin/sh\necho formatted > "$2.formatted"\n');
   return dir;
 };
 
 const writeResult = (path: string) => ({ tool: 'Write', params: { path }, result: { content: [], details: { ok: true, path } } });
+
+let dirs: string[] = [];
+const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 describe('formatters plugin — catalog resolution (extension → formatter, enabledWhen gates)', () => {
   let mod: FormattersModule;
@@ -49,13 +53,13 @@ describe('formatters plugin — catalog resolution (extension → formatter, ena
   });
 
   it('an empty project enables nothing, even for known extensions', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-empty-'));
+    const dir = tmpDir('fmt-empty');
     expect(mod.resolveFormatter(join(dir, 'a.ts'), dir)).toBeNull();
     expect(mod.resolveFormatter(join(dir, 'a.go'), dir)).toBeNull();
   });
 
   it('pint is gated on vendor/bin/pint being present', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-php-'));
+    const dir = tmpDir('fmt-php');
     expect(mod.resolveFormatter(join(dir, 'x.php'), dir)).toBeNull();
     fakeBin(join(dir, 'vendor/bin/pint'));
     expect(mod.resolveFormatter(join(dir, 'x.php'), dir)?.name).toBe('pint');
@@ -77,7 +81,7 @@ describe('formatters plugin — catalog resolution (extension → formatter, ena
     const dir = projectWithPrettier();
     const prettier = mod.FORMATTERS.find((f) => f.name === 'prettier')!;
     expect(mod.buildCommand(prettier, dir, join(dir, 'a.ts'))).toEqual(['node_modules/.bin/prettier', '--write', join(dir, 'a.ts')]);
-    const bare = mkdtempSync(join(tmpdir(), 'elowen-fmt-bare-'));
+    const bare = tmpDir('fmt-bare');
     expect(mod.buildCommand(prettier, bare, join(bare, 'a.ts'))[0]).toBe('prettier');
   });
 });
@@ -93,17 +97,17 @@ describe('formatters plugin — enabledWhen against PATH binaries (temp PATH)', 
     fakeBin(join(binDir, 'gofmt'));
     process.env.PATH = binDir;
   });
-  afterAll(() => { process.env.PATH = oldPath; });
+  afterAll(() => { process.env.PATH = oldPath; rmSync(binDir, { recursive: true, force: true }); });
 
   it('ruff needs BOTH the binary on PATH and a project ruff config', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-py-'));
+    const dir = tmpDir('fmt-py');
     expect(mod.resolveFormatter(join(dir, 'a.py'), dir)).toBeNull(); // binary alone is not enough
     writeFileSync(join(dir, 'ruff.toml'), '');
     expect(mod.resolveFormatter(join(dir, 'a.py'), dir)?.name).toBe('ruff');
   });
 
   it('ruff also accepts a pyproject.toml that mentions ruff', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-py2-'));
+    const dir = tmpDir('fmt-py2');
     writeFileSync(join(dir, 'pyproject.toml'), '[tool.poetry]\n');
     expect(mod.resolveFormatter(join(dir, 'a.py'), dir)).toBeNull();
     writeFileSync(join(dir, 'pyproject.toml'), '[tool.ruff]\nline-length = 100\n');
@@ -111,16 +115,16 @@ describe('formatters plugin — enabledWhen against PATH binaries (temp PATH)', 
   });
 
   it('gofmt needs go.mod, not just the binary', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-go-'));
+    const dir = tmpDir('fmt-go');
     expect(mod.resolveFormatter(join(dir, 'main.go'), dir)).toBeNull();
     writeFileSync(join(dir, 'go.mod'), 'module example.com/x\n');
     expect(mod.resolveFormatter(join(dir, 'main.go'), dir)?.name).toBe('gofmt');
   });
 
   it('gofmt stays off when the binary is missing from PATH, even with go.mod', () => {
-    process.env.PATH = mkdtempSync(join(tmpdir(), 'elowen-fmt-nobin-'));
+    process.env.PATH = tmpDir('fmt-nobin');
     try {
-      const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-go2-'));
+      const dir = tmpDir('fmt-go2');
       writeFileSync(join(dir, 'go.mod'), 'module example.com/x\n');
       expect(mod.resolveFormatter(join(dir, 'main.go'), dir)).toBeNull();
     } finally { process.env.PATH = binDir; }
@@ -176,7 +180,7 @@ describe('formatters plugin — tools.call.after hook flow', () => {
 
   it('keeps details.diff when the formatter fails — the file on disk is unchanged, so the diff still matches', async () => {
     const { hook } = await loadHook();
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-difffail-'));
+    const dir = tmpDir('fmt-difffail');
     fakeBin(join(dir, 'node_modules/.bin/prettier'), '#!/bin/sh\nexit 3\n');
     const file = join(dir, 'a.ts');
     writeFileSync(file, 'const x=1');
@@ -201,7 +205,7 @@ describe('formatters plugin — tools.call.after hook flow', () => {
   it('rejects a path outside the current work dir (resolve + prefix check)', async () => {
     const { hook } = await loadHook();
     const dir = projectWithPrettier();
-    const outside = mkdtempSync(join(tmpdir(), 'elowen-fmt-out-'));
+    const outside = tmpDir('fmt-out');
     const file = join(outside, 'a.ts');
     writeFileSync(file, 'const x=1');
     await fire(hook, dir, writeResult(file));
@@ -253,7 +257,7 @@ describe('formatters plugin — tools.call.after hook flow', () => {
 
   it('logs a warning (fail-soft) when the formatter binary exits non-zero — and appends NO note', async () => {
     const { hook, lines } = await loadHook();
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-fail-'));
+    const dir = tmpDir('fmt-fail');
     fakeBin(join(dir, 'node_modules/.bin/prettier'), '#!/bin/sh\nexit 3\n');
     const file = join(dir, 'a.ts');
     writeFileSync(file, 'const x=1');
@@ -283,7 +287,7 @@ describe('formatters plugin — tools.call.after hook flow', () => {
 
   it('applies a configured timeoutMs override (kills a subprocess the 10s default would let finish)', async () => {
     const { hook, lines } = await loadHook({ timeoutMs: 5000 }); // schema min
-    const dir = mkdtempSync(join(tmpdir(), 'elowen-fmt-timeout-'));
+    const dir = tmpDir('fmt-timeout');
     fakeBin(join(dir, 'node_modules/.bin/prettier'), '#!/bin/sh\nsleep 6\n');
     const file = join(dir, 'a.ts');
     writeFileSync(file, 'const x=1');

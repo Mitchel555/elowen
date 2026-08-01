@@ -1,11 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, chmodSync, statSync, rmSync } from 'node:fs';
 // @ts-expect-error — plain .mjs plugin module, no types
 import { readJsonSafe, writeJsonAtomic } from '../../plugins/_shared/atomicJson.mjs';
 
-function freshDir(): string { return mkdtempSync(join(tmpdir(), 'elowen-atomicjson-')); }
+let dirs: string[] = [];
+function freshDir(): string { const p = mkdtempSync(join(tmpdir(), 'elowen-atomicjson-')); dirs.push(p); return p; }
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 describe('atomicJson', () => {
   it('readJsonSafe returns the fallback when the file does not exist yet', () => {

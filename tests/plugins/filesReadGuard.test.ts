@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,6 +32,7 @@ describe('files plugin — read-before-modify guard', () => {
     reg = await loadPlugins({ dirs: [join(repoRoot, 'plugins')], enabled: ['files'], logger: log });
     dir = mkdtempSync(join(tmpdir(), 'elowen-files-guard-'));
   });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
   // A fresh session id per test: the guard's state is per conversation, so tests must not vouch for one
   // another's reads.
   let session: string;

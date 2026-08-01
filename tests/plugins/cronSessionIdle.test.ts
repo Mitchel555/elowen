@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import type { SessionSource } from '../../src/plugins/api.js';
@@ -18,7 +18,9 @@ interface CronAdapterUnderTest {
   sessionIdleMs: number | undefined;
 }
 
-function freshDataRoot(): string { return mkdtempSync(join(tmpdir(), 'elowen-pdata-')); }
+let dirs: string[] = [];
+function freshDataRoot(): string { const p = mkdtempSync(join(tmpdir(), 'elowen-pdata-')); dirs.push(p); return p; }
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 async function loadCron(dataRoot: string, config?: Record<string, unknown>) {
   const reg = await loadPlugins({ dirs: [pluginsDir], enabled: ['cronjob'], dataRoot, logger: log, config: config ? { cronjob: config } : undefined });

@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
@@ -12,7 +12,9 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const pluginsDir = join(repoRoot, 'plugins');
 const ADMIN: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
 const asText = (r: { content: { text?: string }[] }) => (r.content[0] as { text: string }).text;
-const freshDataRoot = () => mkdtempSync(join(tmpdir(), 'elowen-qw-'));
+let dirs: string[] = [];
+const freshDataRoot = () => { const p = mkdtempSync(join(tmpdir(), 'elowen-qw-')); dirs.push(p); return p; };
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 describe('runtime-context plugin', () => {
   it('registers a turn-context provider that emits the current date/time', async () => {

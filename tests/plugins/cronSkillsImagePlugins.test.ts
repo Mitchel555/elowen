@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
@@ -17,12 +17,18 @@ const LIMITED: Policy = { allowedProjectIds: new Set([1]), allowedPaths: () => [
 const OWNER: TurnIdentity = { platform: 'elowen', userId: '1', elowenUserId: 1, admin: true, owner: true };
 const asText = (r: { content: { text?: string }[] }) => (r.content[0] as { text: string }).text;
 
-function freshDataRoot(): string { return mkdtempSync(join(tmpdir(), 'elowen-pdata-')); }
+let dirs: string[] = [];
+function freshDataRoot(): string { const p = mkdtempSync(join(tmpdir(), 'elowen-pdata-')); dirs.push(p); return p; }
 
 // The process registry is a module-level singleton shared across every test in this run. Any handle a
 // test registers (even fake ones) survives into later tests and other files, so clear it after each test.
-// kill() is idempotent and safe on both fake and real handles.
-afterEach(() => { for (const p of processRegistry.list()) processRegistry.kill(p.id); });
+// kill() is idempotent and safe on both fake and real handles. The per-test data roots are removed only
+// after the kill so no still-running background process is left with its working directory deleted.
+afterEach(() => {
+  for (const p of processRegistry.list()) processRegistry.kill(p.id);
+  for (const p of dirs) rmSync(p, { recursive: true, force: true });
+  dirs = [];
+});
 
 describe('cronjob plugin', () => {
   it('parses schedules and computes due-ness', async () => {

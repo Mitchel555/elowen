@@ -1,5 +1,5 @@
-import { beforeAll, describe, it, expect, vi } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { afterEach, beforeAll, describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
@@ -8,6 +8,9 @@ import { BrainStore } from '../../src/store/brainStore.js';
 import { openDb } from '../../src/store/db.js';
 import type { Db } from '../../src/store/db.js';
 import { inMemoryModelRuntime } from '../../src/brain/providers.js';
+
+let dirs: string[] = [];
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 let sharedRuntime: ModelRuntime;
 beforeAll(async () => { sharedRuntime = await inMemoryModelRuntime(); });
@@ -39,6 +42,8 @@ function makeService(opts: { providers?: Provider[]; reply?: string | Error } = 
   const createSession = vi.fn(async () => ({ session }));
   const db: Db = openDb(':memory:');
   const store = new BrainStore(db);
+  const cwd = mkdtempSync(join(tmpdir(), 'elowen-smoketest-'));
+  dirs.push(cwd);
   const deps: BrainDeps = {
     store,
     runtime: sharedRuntime,
@@ -48,7 +53,7 @@ function makeService(opts: { providers?: Provider[]; reply?: string | Error } = 
     url: 'http://x',
     // A real (throwaway) temp dir — smokeTest builds its OWN DefaultResourceLoader directly (unlike the
     // normal session path) so there's no injection seam for it; give it an empty, harmless cwd.
-    cwd: mkdtempSync(join(tmpdir(), 'elowen-smoketest-')),
+    cwd,
     createSession: createSession as unknown as BrainDeps['createSession'],
   };
   const svc = new BrainService(deps);

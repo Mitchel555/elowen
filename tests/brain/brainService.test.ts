@@ -128,6 +128,10 @@ function fakeDeps() {
 }
 
 describe('BrainService', () => {
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
   it('accepts the complete owner turn as one named request object', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
@@ -1506,8 +1510,8 @@ describe('BrainService', () => {
     // spawn and otherwise only carried across respawns — so it has to be assigned here or the comparison
     // means "differs from the launch directory" forever: re-announcing every repeat /cd elsewhere, and
     // staying silent on the move home.
-    const launch = realpathSync(mkdtempSync(join(tmpdir(), 'elowen-cwd-a-')));
-    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'elowen-cwd-b-')));
+    const launch = realpathSync(tmpDir('cwd-a'));
+    const elsewhere = realpathSync(tmpDir('cwd-b'));
     const d = fakeDeps();
     (d as unknown as { policy: () => unknown }).policy = () => ({ allowedProjectIds: 'all', allowedPaths: () => [] });
     const svc = new BrainService(d as never);
@@ -1526,8 +1530,8 @@ describe('BrainService', () => {
   });
 
   it('noteWorkDir refuses a directory the caller\'s policy does not reach', async () => {
-    const allowed = realpathSync(mkdtempSync(join(tmpdir(), 'elowen-cwd-scoped-')));
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'elowen-cwd-outside-')));
+    const allowed = realpathSync(tmpDir('cwd-scoped'));
+    const outside = realpathSync(tmpDir('cwd-outside'));
     const d = fakeDeps();
     (d as unknown as { policy: () => unknown }).policy = () => ({ allowedProjectIds: new Set([1]), allowedPaths: () => [allowed] });
     const svc = new BrainService(d as never);

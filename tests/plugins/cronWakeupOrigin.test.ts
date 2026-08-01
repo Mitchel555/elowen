@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadPlugins } from '../../src/plugins/loader.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
@@ -16,7 +16,9 @@ const ADMIN: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
 const OWNER: TurnIdentity = { platform: 'elowen', userId: '1', elowenUserId: 1, admin: true, owner: true };
 const asText = (r: { content: { text?: string }[] }) => (r.content[0] as { text: string }).text;
 
-function freshDataRoot(): string { return mkdtempSync(join(tmpdir(), 'elowen-pdata-')); }
+let dirs: string[] = [];
+function freshDataRoot(): string { const p = mkdtempSync(join(tmpdir(), 'elowen-pdata-')); dirs.push(p); return p; }
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 /** A turn event the host forwards into the cron handler: the `session` route, plus the `idle` event the
  *  delivered footer is built from. */

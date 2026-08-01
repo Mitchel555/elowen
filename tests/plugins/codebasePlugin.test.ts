@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -35,6 +35,12 @@ const fakeEmbedder = {
   embed: async (_cfg: EmbeddingConfig, text: string) => fakeVec(text),
   embedBatch: async (_cfg: EmbeddingConfig, texts: string[]) => texts.map(fakeVec),
 };
+
+// Every repo/data root a test mints goes through here so it is removed afterwards: this file alone
+// used to leave ~40 directories in the system temp dir on each run.
+let dirs: string[] = [];
+const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
 // ── pure exports ─────────────────────────────────────────────────────────────────────────────────────
 describe('codebase plugin — pure helpers', () => {
@@ -123,6 +129,10 @@ describe('codebase plugin — index + search', () => {
     embeddingConfig: () => liveCfg,
   });
 
+  // These three are indexed once and then queried by every test below, so they outlive a single test
+  // and are swept only after the describe finishes — not by the module-level afterEach.
+  afterAll(() => { for (const p of [dataRoot, repo1, repo2]) rmSync(p, { recursive: true, force: true }); });
+
   beforeAll(async () => {
     dataRoot = mkdtempSync(join(tmpdir(), 'elowen-cb-data-'));
     repo1 = mkdtempSync(join(tmpdir(), 'elowen-cb-r1-'));
@@ -202,7 +212,7 @@ describe('codebase plugin — index + search', () => {
   });
 
   it('an incremental reindex re-embeds only edited files and prunes deleted ones', async () => {
-    const edited = mkdtempSync(join(tmpdir(), 'elowen-cb-inc-'));
+    const edited = tmpDir('cb-inc');
     writeFileSync(join(edited, 'keep.ts'), 'export function keep() { return 1; } // cosine vector\n');
     writeFileSync(join(edited, 'gone.ts'), 'export function gone() { return 2; } // dot product\n');
     await runWithPolicy(adminPolicy(), () => runTool(reg, 'CodebaseReindex', { repo: edited }), { workDir: edited });
@@ -222,7 +232,7 @@ describe('codebase plugin — index + search', () => {
   });
 
   it('switching the embedding model marks the repo stale and rebuilds it under the new model', async () => {
-    const stale = mkdtempSync(join(tmpdir(), 'elowen-cb-stale-'));
+    const stale = tmpDir('cb-stale');
     writeFileSync(join(stale, 'a.ts'), 'export function alpha() { return 1; } // cosine vector\n');
     await runWithPolicy(adminPolicy(), () => runTool(reg, 'CodebaseReindex', { repo: stale }), { workDir: stale });
 
@@ -245,7 +255,7 @@ describe('codebase plugin — index + search', () => {
   });
 
   it('search returns a clear failure (not a throw) when no embedding model is configured', async () => {
-    const off = mkdtempSync(join(tmpdir(), 'elowen-cb-off-'));
+    const off = tmpDir('cb-off');
     const regOff = await loadPlugins({
       dirs: [join(repoRoot, 'plugins')], enabled: ['codebase'], logger: log,
       dataRoot: off,
@@ -277,8 +287,8 @@ describe('codebase plugin — batch3 fixes', () => {
   // #4 — a budget-capped model switch must CONVERGE: each pass converts a fresh batch, so `pending`
   // strictly shrinks and the leading files are never re-embedded forever.
   it('#4 model switch converges under a per-pass budget (pending shrinks 2→1→0)', async () => {
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-cb4-data-'));
-    const repo = mkdtempSync(join(tmpdir(), 'elowen-cb4-repo-'));
+    const dataRoot = tmpDir('cb4-data');
+    const repo = tmpDir('cb4-repo');
     for (const [name, word] of [['a', 'cosine'], ['b', 'vector'], ['c', 'dot']] as const)
       writeFileSync(join(repo, `${name}.ts`), `export function ${name}() { return 1; } // ${word} similarity\n`);
     let cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
@@ -308,8 +318,8 @@ describe('codebase plugin — batch3 fixes', () => {
   // #5 — auto-reindex on search is admin-only; a non-admin search must never write the index or spend the
   // embedding provider (the same effects CodebaseReindex refuses to non-admins).
   it('#5 a non-admin search never triggers auto-reindex; an admin search does', async () => {
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-cb5-data-'));
-    const repo = mkdtempSync(join(tmpdir(), 'elowen-cb5-repo-'));
+    const dataRoot = tmpDir('cb5-data');
+    const repo = tmpDir('cb5-repo');
     writeFileSync(join(repo, 'x.ts'), 'export function x() { return 1; } // cosine similarity vector\n');
     const cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
     let embedBatchCalls = 0;
@@ -337,8 +347,8 @@ describe('codebase plugin — batch3 fixes', () => {
   // #6 — the debounce must apply even to a repo that indexes to zero chunks (failing provider / all
   // excluded), so a persistently-empty repo can't re-walk + re-embed on every search.
   it('#6 the debounce holds for a repo that keeps indexing to zero chunks', async () => {
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-cb6-data-'));
-    const repo = mkdtempSync(join(tmpdir(), 'elowen-cb6-repo-'));
+    const dataRoot = tmpDir('cb6-data');
+    const repo = tmpDir('cb6-repo');
     writeFileSync(join(repo, 'x.ts'), 'export function x() { return 1; } // cosine vector\n');
     const cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
     let embedBatchCalls = 0;
@@ -363,8 +373,8 @@ describe('codebase plugin — batch3 fixes', () => {
 
   // #8 — the search answer must not wait on a full reindex embedding pass (fire-and-forget).
   it('#8 an admin search does not block on the reindex embed pass', async () => {
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-cb8-data-'));
-    const repo = mkdtempSync(join(tmpdir(), 'elowen-cb8-repo-'));
+    const dataRoot = tmpDir('cb8-data');
+    const repo = tmpDir('cb8-repo');
     writeFileSync(join(repo, 'seed.ts'), 'export function seed() { return 1; } // cosine similarity vector dot product\n');
     const cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
     const SLOW_MS = 500;
@@ -402,8 +412,8 @@ describe('codebase plugin — batch3 fixes', () => {
   // #9 / #4 — search filters by stored MODEL (not vector width) in SQL: a same-width chunk from a foreign
   // model is never cosine-compared, even when its vector is a perfect match for the query.
   it('#9/#4 search never ranks a same-width foreign-model vector', async () => {
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-cb9-data-'));
-    const repo = mkdtempSync(join(tmpdir(), 'elowen-cb9-repo-'));
+    const dataRoot = tmpDir('cb9-data');
+    const repo = tmpDir('cb9-repo');
     writeFileSync(join(repo, 'real.ts'), 'export function real() { return 1; } // background job queue\n');
     const cfg: EmbeddingConfig = { providerId: 'p', model: 'fake-1', dimensions: VOCAB.length };
     const reg = await loadPlugins({
@@ -429,8 +439,8 @@ describe('codebase plugin — batch3 fixes', () => {
   // #7 — the result snippet is line-aware and UTF-8-safe (PI truncateHead/truncateLine), never splitting a
   // multibyte char and never emptying on a lone over-long first line.
   it('#7 snippet truncates an over-long single line without splitting a multibyte char', async () => {
-    const dataRoot = mkdtempSync(join(tmpdir(), 'elowen-cb7-data-'));
-    const repo = mkdtempSync(join(tmpdir(), 'elowen-cb7-repo-'));
+    const dataRoot = tmpDir('cb7-data');
+    const repo = tmpDir('cb7-repo');
     // A single line far longer than SNIPPET_MAX_CHARS (400), padded with 3-byte '€' so a naive byte slice
     // could land mid-character. Vocab words make it rank for the query.
     const longLine = `// cosine similarity vector ${'€'.repeat(600)} dot product`;
@@ -476,8 +486,8 @@ describe('codebase plugin — auto-reindex single-flight', () => {
   };
 
   const seedRepo = (tag: string) => {
-    const dataRoot = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-data-`));
-    const repo = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-repo-`));
+    const dataRoot = tmpDir(`cb-${tag}-data`);
+    const repo = tmpDir(`cb-${tag}-repo`);
     writeFileSync(join(repo, 'x.ts'), 'export function x() { return 1; } // cosine similarity vector\n');
     return { dataRoot, repo };
   };
@@ -615,8 +625,8 @@ describe('codebase plugin — scheduled reindex', () => {
     return found as unknown as Indexer;
   };
   const seed = (tag: string, files: Record<string, string>) => {
-    const dataRoot = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-data-`));
-    const repo = mkdtempSync(join(tmpdir(), `elowen-cb-${tag}-repo-`));
+    const dataRoot = tmpDir(`cb-${tag}-data`);
+    const repo = tmpDir(`cb-${tag}-repo`);
     for (const [name, body] of Object.entries(files)) writeFileSync(join(repo, name), body);
     return { dataRoot, repo };
   };

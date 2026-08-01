@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPlugins, discoverPlugins } from '../../src/plugins/loader.js';
@@ -39,6 +39,7 @@ describe('loadPlugins', () => {
     // Same grab, but the manifest declares a 'providers' read capability → allowed.
     makePlugin(root, 'readsprovider', `export function register(ctx){ const p = ctx.resolveProvider('oai'); ctx.registerSystemPromptFragment(p ? p.apiKey : 'denied'); }`, '1', { capabilities: { reads: ['providers'] } });
   });
+  afterAll(() => { rmSync(root, { recursive: true, force: true }); });
 
   it('wires a plugin manifest showOutput into the registry tool-output policy set', async () => {
     const reg = await loadPlugins({ dirs: [root], enabled: ['quiet'], logger: log });
@@ -117,8 +118,12 @@ describe('loadPlugins', () => {
 });
 
 describe('discoverPlugins', () => {
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
   it('lists valid manifests without importing code, skipping bad apiVersions', () => {
-    const root = mkdtempSync(join(tmpdir(), 'elowen-discover-'));
+    const root = tmpDir('discover');
     makePlugin(root, 'alpha', `export function register(){ throw new Error('never imported'); }`);
     makePlugin(root, 'badver', `export function register(){}`, '999');
     const found = discoverPlugins([root]);
@@ -127,8 +132,8 @@ describe('discoverPlugins', () => {
   });
 
   it('dedupes by name across dirs (first dir wins) and labels sources', () => {
-    const a = mkdtempSync(join(tmpdir(), 'elowen-disc-a-'));
-    const b = mkdtempSync(join(tmpdir(), 'elowen-disc-b-'));
+    const a = tmpDir('disc-a');
+    const b = tmpDir('disc-b');
     makePlugin(a, 'dup', `export function register(){}`);
     makePlugin(b, 'dup', `export function register(){}`);
     makePlugin(b, 'solo', `export function register(){}`);

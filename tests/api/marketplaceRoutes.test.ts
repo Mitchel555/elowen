@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../../src/store/db.js';
@@ -30,9 +30,13 @@ function writePlugin(dir: string, name: string): void {
   writeFileSync(join(pdir, 'elowen-plugin.json'), JSON.stringify({ name, version: '1.0.0', apiVersion: '1', description: 'x', entry: 'index.mjs' }));
 }
 
+let dirs: string[] = [];
+const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
 /** Lay out a bundled scan root (memory) + a user scan root (weather) so DELETE can branch on `source`. */
 function pluginDirsFixture(): string[] {
-  const base = mkdtempSync(join(tmpdir(), 'elowen-mp-'));
+  const base = tmpDir('mp');
   const bundled = join(base, 'bundled');
   const user = join(base, 'user');
   writePlugin(bundled, 'memory');

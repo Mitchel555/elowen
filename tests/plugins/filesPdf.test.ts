@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,6 +93,7 @@ describe('Read — PDF', () => {
     writeFileSync(pdf, buildPdf(['Hello page one', 'Second page here', 'Third page text']));
     writeFileSync(scanned, buildPdf(['Cover page text', null])); // page 2 has no text layer
   });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 
   const read = (params: Record<string, unknown>) =>
     runWithPolicy(userPolicy([dir]), () => runTool(reg, 'Read', params), { sessionId: 'brain-pdf' });
