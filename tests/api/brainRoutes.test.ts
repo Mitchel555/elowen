@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { BrainCredentialAccess } from '../../src/brain/providerUsage.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -260,9 +260,15 @@ function fakeBrain() {
   };
 }
 
+// The MCP fixture below is written to disk because the loader only reads real plugin folders, so it has
+// to be swept afterwards or every run leaves one behind.
+let pluginRoots: string[] = [];
+afterEach(() => { for (const p of pluginRoots) rmSync(p, { recursive: true, force: true }); pluginRoots = []; });
+
 /** A minimal on-disk MCP plugin registering the `listServers` control the telemetry rail reads. */
 function mcpPluginProvider(servers: { name: string; status: string }[]): PluginRegistryProvider {
   const root = mkdtempSync(join(tmpdir(), 'brain-mcp-plugin-'));
+  pluginRoots.push(root);
   const dir = join(root, 'mcp');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'elowen-plugin.json'), JSON.stringify({

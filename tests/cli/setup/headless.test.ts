@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+
+// runHeadlessSetup writes setup.json under $HOME. Pointing HOME straight at the system temp dir made
+// every run write the SAME path — so the suites shared one file and could read state another test wrote.
+// Each case gets its own home instead, and it is removed afterwards.
+let homes: string[] = [];
+const tmpHome = (): string => { const p = mkdtempSync(join(tmpdir(), 'elowen-headless-home-')); homes.push(p); return p; };
+afterEach(() => { for (const p of homes) rmSync(p, { recursive: true, force: true }); homes = []; });
 import { parseHeadlessFlags, resolveModel, runHeadlessSetup } from '../../../src/cli/setup/headless.js';
 import { PREFERRED_DEFAULT } from '../../../src/brain/providers.js';
 import { RECOMMENDED_EMBEDDING_MODEL, OPENROUTER_BASE, OPENAI_BASE } from '../../../src/cli/setup/constants.js';
@@ -129,7 +138,7 @@ describe('cli/setup/headless.resolveModel', () => {
 describe('cli/setup/headless.runHeadlessSetup — provider reuse (regression guards)', () => {
   it('keyless re-run keeps the existing model list instead of wiping it', async () => {
     const d = fakeDaemon([{ id: 'openai', label: 'OpenAI', type: 'openai', baseUrl: OPENAI_BASE, models: ['gpt-5.5'], apiKeySet: true }]);
-    await runHeadlessSetup('http://x', { HOME: tmpdir() } as NodeJS.ProcessEnv, ['--admin-password', 'pw', '--provider', 'openai', '--skip-test']);
+    await runHeadlessSetup('http://x', { HOME: tmpHome() } as NodeJS.ProcessEnv, ['--admin-password', 'pw', '--provider', 'openai', '--skip-test']);
     const put = d.calls.find((c) => c.method === 'PUT' && c.path === '/config' && (c.body?.brain as { providers?: unknown })?.providers);
     const saved = ((put?.body?.brain as { providers: Record<string, unknown>[] }).providers).find((p) => p.id === 'openai');
     expect(saved?.models).toEqual(['gpt-5.5']); // NOT []
@@ -137,7 +146,7 @@ describe('cli/setup/headless.runHeadlessSetup — provider reuse (regression gua
 
   it('memory openrouter reuses the keyless entry the AI step wrote — no openrouter-2 duplicate', async () => {
     const d = fakeDaemon([]);
-    await runHeadlessSetup('http://x', { HOME: tmpdir() } as NodeJS.ProcessEnv, [
+    await runHeadlessSetup('http://x', { HOME: tmpHome() } as NodeJS.ProcessEnv, [
       '--admin-password', 'pw', '--provider', 'openrouter', '--memory', 'openrouter', '--memory-key', 'K', '--skip-test',
     ]);
     const ors = d.providers().filter((p) => p.baseUrl === OPENROUTER_BASE);

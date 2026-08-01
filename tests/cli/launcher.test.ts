@@ -82,7 +82,12 @@ describe('cli/launcher.isTrackedService', () => {
   });
 
   it('recognizes a legacy web (no ELOWEN_SERVICE — e.g. a unit installed before the marker existed) via ELOWEN_DAEMON_URL alone', async () => {
-    const pid = await spawnFixture('next-server (v16.2.11)', { ...process.env, ELOWEN_DAEMON_URL: 'http://127.0.0.1:4400' });
+    // The whole point is a process WITHOUT the marker, so it has to be stripped from the inherited
+    // environment: once the new unit is installed the daemon carries ELOWEN_SERVICE=daemon, and a test
+    // run spawned from it would inherit the very marker this case is defined by not having.
+    const env = { ...process.env, ELOWEN_DAEMON_URL: 'http://127.0.0.1:4400' };
+    delete env.ELOWEN_SERVICE;
+    const pid = await spawnFixture('next-server (v16.2.11)', env);
     try {
       expect(isTrackedService(pid, 'web')).toBe(true);
     } finally {
