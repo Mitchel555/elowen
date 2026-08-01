@@ -2,6 +2,11 @@ import { readFileSync, writeFileSync, statSync, readdirSync, mkdirSync, realpath
 import { resolve, join, relative, sep, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { CommitFileChange, CommitLogEntry } from '../shared/wireContract.js';
+
+// The commit-row shapes are the daemon↔web wire contract (git log / task change-list endpoints) —
+// defined once in src/shared and re-exported here, so the two can never drift.
+export type { CommitFileChange, CommitLogEntry };
 
 const run = promisify(execFile);
 
@@ -275,9 +280,6 @@ export async function projectCommitFiles(root: string, hash: string): Promise<st
     return [];
   }
 }
-
-export interface CommitFileChange { path: string; added: number; deleted: number }
-export interface CommitLogEntry { hash: string; subject: string; author: string; timestamp: number; files: CommitFileChange[] }
 
 /** Parse one `git --numstat` row (`<added>\t<deleted>\t<path>`) into a file change, or null when the
  *  line carries no path. Binary files report '-' for the counts, which map to 0. The path may itself

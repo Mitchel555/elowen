@@ -1,4 +1,9 @@
 import type { Db } from './db.js';
+import type { MemoryCategoryRow } from '../shared/wireContract.js';
+
+// The category row shape is the daemon↔web wire contract (served over /memory/categories) — defined
+// once in src/shared and re-exported here, so a field added on the daemon can never be missing on the web.
+export type { MemoryCategoryRow };
 
 /** The server source of truth for category icons — 24 lucide names shared with the web client. Any icon
  *  written to a category is clamped to one of these; the default/fallback is 'Folder'. */
@@ -16,19 +21,10 @@ function clampIcon(icon: string | null | undefined): string {
   return icon && (ICON_ALLOWLIST as readonly string[]).includes(icon) ? icon : DEFAULT_ICON;
 }
 
-/** A user-scoped memory category. name is the label; description is the LLM-facing guide the categorizer
- *  classifies against; color is an optional UI hint; icon is a lucide name from ICON_ALLOWLIST;
- *  is_builtin marks seeded ones. */
-export interface MemoryCategoryRow {
-  id: number;
-  user_id: number;
-  name: string;
-  description: string;
-  color: string;
-  icon: string;
-  is_builtin: number;
-  created_at: string;
-}
+// A user-scoped memory category. name is the label; description is the LLM-facing guide the
+// categorizer classifies against; color is an optional UI hint; icon is a lucide name from
+// ICON_ALLOWLIST; is_builtin marks seeded ones. The row shape is the shared wire contract
+// (re-exported above).
 
 export interface CategoryInput { name: string; description?: string; color?: string; icon?: string; isBuiltin?: boolean }
 export interface CategoryPatch { name?: string; description?: string; color?: string; icon?: string }

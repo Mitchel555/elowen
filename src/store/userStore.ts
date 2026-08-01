@@ -1,5 +1,6 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import type { Db } from './db.js';
+import type { User } from '../shared/wireContract.js';
 
 /** Fallback token TTL (days) when no configured value is passed in — keeps the store usable on its
  *  own (e.g. tests). The live value comes from config.security.tokenTtlDays. */
@@ -7,7 +8,9 @@ const DEFAULT_TOKEN_TTL_DAYS = 30;
 const ttlDays = (days?: number): number =>
   typeof days === 'number' && Number.isFinite(days) && days >= 1 ? Math.floor(days) : DEFAULT_TOKEN_TTL_DAYS;
 
-export interface User { id: number; username: string; created_at: string; is_admin: boolean; allowed_execs: string[]; disabled_tools: string[]; name: string; email: string; avatar: string; default_exec: string; advisor_exec: string; advisor_autostart: boolean }
+// The user shape is the daemon↔web wire contract (served by /auth/me etc.) — defined once in
+// src/shared and re-exported here, so a field added on the daemon can never be missing on the web.
+export type { User };
 /** What a token may do. 'full' = an interactive user session (the user's own rights). 'agent' = a
  *  spawned worker/overseer/pilot, restricted to its task-close / plan-submit / overseer verbs.
  *  'advisor' is stored in the DB for the per-user advisor session; it grants full access (mapped to

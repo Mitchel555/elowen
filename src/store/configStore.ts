@@ -2,6 +2,11 @@ import type { Db } from './db.js';
 import { defaultPromptTemplate } from '../overseer/planner.js';
 import { DEFAULT_BINS, EXEC_NOTES, KNOWN_EXECS, isAllowedExec } from '../shared/execs.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
+import type { BrainLimits } from '../shared/wireContract.js';
+
+// The brain-limits shape is the daemon↔web wire contract (Settings → Elowen AI → Limits) — defined
+// once in src/shared and re-exported here, so the two can never drift.
+export type { BrainLimits };
 
 /** How the memory subsystem generates embeddings. `providerId` references a brain provider whose API
  *  key is reused (no second secret is stored). `baseUrl` optionally overrides the provider's endpoint;
@@ -184,19 +189,7 @@ const clampMaxSteps = (next: number | undefined, fallback: number): number =>
  *  never wipes a sibling). Consumed at: messageView (tool-output preview), ElicitationRegistry
  *  (AskUserQuestion wait), MemoryService.retrieve (recall size), the goal loop (turn budget + YOLO
  *  safety ceiling), Channels (live-session LRU cap), and the subagent plugin (context handed to a
- *  delegated child / workflow node). */
-export interface BrainLimits {
-  toolOutputMaxLines: number;
-  toolOutputMaxChars: number;
-  toolResultInlineBytes: number;
-  elicitationTimeoutMs: number;
-  memoryRecallCount: number;
-  memoryRecallChars: number;
-  goalTurnBudget: number;
-  goalMaxTurns: number;
-  channelSessionCap: number;
-  delegateContextChars: number;
-}
+ *  delegated child / workflow node). The shape is the shared wire contract (re-exported above). */
 export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   toolOutputMaxLines: 80,
   // Matches Claude Code's BASH_MAX_OUTPUT_DEFAULT (30 000 chars).

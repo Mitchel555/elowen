@@ -2,27 +2,13 @@ import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-
 import { isContextOverflow } from '@earendil-works/pi-ai';
 import { submittedPlan, toolCommand, toolDetail, toolDisplay, toolOutputView } from './messageView.js';
 import type { ToolOutputView } from './messageView.js';
-import type { AskQuestion } from '../shared/wireContract.js';
+import type { AskQuestion, BrainUsage, BrainGoalState } from '../shared/wireContract.js';
 import type { ProcessInfo } from './processRegistry.js';
 import { extractReason } from './toolReason.js';
 
-/** Durable state of one autonomous goal. This is the shared HTTP/SSE contract; the store row and every
- * client view use the same shape so lifecycle transitions cannot drift between polling and live streams. */
-export interface BrainGoalState {
-  session_id: string;
-  user_id: number;
-  status: 'active' | 'draft' | 'paused' | 'done';
-  goal: string;
-  draft: string;
-  subgoals: string;
-  turns_used: number;
-  turn_budget: number;
-  last_verdict: string;
-  last_evidence: string;
-  paused_reason: string;
-  created_at: string;
-  updated_at: string;
-}
+// The usage and goal shapes are the daemon↔web wire contract (idle/status events + the snapshot
+// frame's `goal`) — defined once in src/shared and re-exported here, so the two can never drift.
+export type { BrainUsage, BrainGoalState };
 
 /** What a channel (web/terminal/Discord) receives from the brain. Stable regardless of the underlying
  *  PI event shape — the mapping lives in one place (`toBrainEvent`). This is the wire contract every
@@ -282,27 +268,6 @@ export interface BrainCard {
   items?: BrainCardItem[];
   body?: string;
   pinned?: boolean;
-}
-
-/** Statusline data for one live conversation: current context fill + session totals. The breakdown
- *  fields (`input`…`reasoning`, `outputTps`) are the session's own cumulative sums, so the /stats views
- *  can show more than the grand total; optional because tests and custom producers build partial
- *  literals — treat absence as 0/unknown. */
-export interface BrainUsage {
-  tokens: number | null;
-  contextWindow: number;
-  percent: number | null;
-  totalTokens: number;
-  cost: number;
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  /** Reasoning tokens (a SUBSET of `output`, display only). */
-  reasoning?: number;
-  /** Average output tokens/sec across the session's measured generations (root session only — a
-   *  sub-agent's speed shows in its own lane). Null until a generation with timing finishes. */
-  outputTps?: number | null;
 }
 
 /** PI's overflow detector expects a fully shaped assistant usage object, while tests/custom stream

@@ -1,13 +1,39 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, expectTypeOf } from 'vitest';
 import ts from 'typescript';
+import type {
+  User as WireUser,
+  MemoryRow as WireMemoryRow,
+  MemoryCategoryRow as WireMemoryCategoryRow,
+  MemoryEventRow as WireMemoryEventRow,
+  BrainLimits as WireBrainLimits,
+  BrainUsage as WireBrainUsage,
+  BrainGoalState as WireBrainGoalState,
+  CommitFileChange as WireCommitFileChange,
+  CommitLogEntry as WireCommitLogEntry,
+} from '../../../src/shared/wireContract.js';
+import type {
+  User as WebUser,
+  Memory as WebMemory,
+  MemoryCategory as WebMemoryCategory,
+  MemoryEvent as WebMemoryEvent,
+  BrainLimits as WebBrainLimits,
+  BrainUsage as WebBrainUsage,
+  BrainGoal as WebBrainGoal,
+  CommitFileChange as WebCommitFileChange,
+  CommitLogEntry as WebCommitLogEntry,
+} from '../../lib/types';
 
 /** The web cannot import daemon types (src/ is off-limits to the web toolchain by design), so the
  *  hand-mirrored DTOs in web/lib/types.ts are guarded by comparing them against the daemon's OWN
  *  interface declarations, read as plain source data (not imported). This is what turned the real
  *  /auth/me incident — the daemon grew `advisor_exec`/`advisor_autostart` and the web mirror lagged —
- *  into a test failure instead of a silent `undefined` at runtime. */
+ *  into a test failure instead of a silent `undefined` at runtime.
+ *
+ *  The pairs whose web copies were exact have since moved ONCE into src/shared/wireContract.ts and are
+ *  re-exported by both toolchains, so this file guards only the shapes whose web variants deliberately
+ *  diverge; the shared ones are pinned by the type-identity checks in the second describe below. */
 interface Member {
   type: string;
   optional: boolean;
@@ -40,29 +66,14 @@ const WEB_TYPES_FILE = join(repoRoot(), 'web/lib/types.ts');
 const DAEMON_ROOT = join(repoRoot(), 'src/');
 
 const PAIRS: MirrorPair[] = [
-  // The one that really drifted: GET /auth/me serves userStore.User (src/api/routes/auth.ts), and the
-  // web renders it through this mirror. Both are exact copies today.
-  { web: 'User', daemonFile: `${DAEMON_ROOT}store/userStore.ts`, daemon: 'User' },
   // The web lists and opens tasks; the git bookkeeping and the authoring principal never reach the UI.
+  // This pair is deliberately NOT shared: the web's copy is a relaxed subset — daemon-required fields
+  // are optional, `outcome` is narrowed to the two values the daemon actually records, and the three
+  // omitted fields stay omitted. Collapsing it into one shared shape would either force the web to
+  // declare fields it deliberately does not render or weaken the daemon's type.
   { web: 'Task', daemonFile: `${DAEMON_ROOT}store/types.ts`, daemon: 'Task', allowMissing: ['base_sha', 'head_sha', 'created_by'] },
-  { web: 'Memory', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryRow' },
-  { web: 'MemoryCategory', daemonFile: `${DAEMON_ROOT}store/memoryCategoryStore.ts`, daemon: 'MemoryCategoryRow' },
-  { web: 'MemoryEvent', daemonFile: `${DAEMON_ROOT}store/memoryStore.ts`, daemon: 'MemoryEventRow' },
-  { web: 'BrainLimits', daemonFile: `${DAEMON_ROOT}store/configStore.ts`, daemon: 'BrainLimits' },
-  { web: 'BrainUsage', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainUsage' },
-  // The goal card renders the goal itself and its progress. Ownership (the session and user it belongs
-  // to) is implicit in the stream the card is fed from, and the loop's working state — the unsubmitted
-  // draft, the last verdict and its evidence, the pause reason — is daemon-internal.
-  {
-    web: 'BrainGoal', daemonFile: `${DAEMON_ROOT}brain/events.ts`, daemon: 'BrainGoalState',
-    allowMissing: [
-      'session_id', 'user_id', 'draft', 'last_verdict', 'last_evidence', 'paused_reason',
-      'created_at', 'updated_at',
-    ],
-  },
-  { web: 'CommitFileChange', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitFileChange' },
-  { web: 'CommitLogEntry', daemonFile: `${DAEMON_ROOT}integrations/projectFiles.ts`, daemon: 'CommitLogEntry' },
-  // showThoughtsCli is optional on the web but always sent by the daemon — a tolerated relaxation.
+  // showThoughtsCli is optional on the web but always sent by the daemon — a tolerated relaxation the
+  // mirror keeps honest (the web's test literals construct the settings without it).
   { web: 'TerminalSettings', daemonFile: `${DAEMON_ROOT}store/terminalSettings.ts`, daemon: 'TerminalSettings' },
 ];
 
@@ -168,5 +179,26 @@ describe('web DTO mirrors of daemon shapes', () => {
   it.each(PAIRS.map((p) => [p.web, p] as const))('%s mirrors the daemon shape', (_webName, pair) => {
     const errors = comparePair(pair);
     expect(errors, errors.join('\n')).toEqual([]);
+  });
+});
+
+/** The moved pairs are SHARED, not mirrored: the web re-exports the daemon's type instead of declaring
+ *  its own copy, so drift is impossible by construction. The only way it can return is someone replacing
+ *  a re-export with a local redeclaration — so pin the identity at TYPECHECK time (web/tsconfig.json
+ *  includes this file): `toEqualTypeOf` fails to compile the moment the web's exported name resolves to
+ *  a local copy that diverged from the wire shape. The runtime assertion itself passes trivially —
+ *  type identity cannot be observed from a value — which is exactly why the gate that matters here is
+ *  `cd web && npx tsc --noEmit`, not the vitest run. */
+describe('web types ARE the shared wire contract', () => {
+  it('re-exports the shared shapes, not local copies', () => {
+    expectTypeOf<WebUser>().toEqualTypeOf<WireUser>();
+    expectTypeOf<WebMemory>().toEqualTypeOf<WireMemoryRow>();
+    expectTypeOf<WebMemoryCategory>().toEqualTypeOf<WireMemoryCategoryRow>();
+    expectTypeOf<WebMemoryEvent>().toEqualTypeOf<WireMemoryEventRow>();
+    expectTypeOf<WebBrainLimits>().toEqualTypeOf<WireBrainLimits>();
+    expectTypeOf<WebBrainUsage>().toEqualTypeOf<WireBrainUsage>();
+    expectTypeOf<WebBrainGoal>().toEqualTypeOf<WireBrainGoalState>();
+    expectTypeOf<WebCommitFileChange>().toEqualTypeOf<WireCommitFileChange>();
+    expectTypeOf<WebCommitLogEntry>().toEqualTypeOf<WireCommitLogEntry>();
   });
 });

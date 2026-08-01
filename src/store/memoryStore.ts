@@ -1,22 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { Db } from './db.js';
+import type { MemoryRow, MemoryEventRow } from '../shared/wireContract.js';
 
-/** A durable RAW memory row (v1: user-scoped). Deletes are SOFT (status='deleted'). */
-export interface MemoryRow {
-  id: number;
-  user_id: number;
-  body: string;
-  kind: string;
-  importance: number;
-  confidence: number;
-  source: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-  last_used_at: string | null;
-  use_count: number;
-  category_id: number | null;
-}
+// The memory row shapes are the daemon↔web wire contract (served over /memory) — defined once in
+// src/shared and re-exported here, so a field added on the daemon can never be missing on the web.
+export type { MemoryRow, MemoryEventRow };
 
 /** One packed-Float32 embedding per memory. content_hash pins which body text was embedded. */
 export interface MemoryEmbeddingRow {
@@ -26,20 +14,6 @@ export interface MemoryEmbeddingRow {
   dimensions: number;
   vector: Buffer;
   content_hash: string;
-  created_at: string;
-}
-
-/** Append-only audit of a memory mutation. before/after are JSON snapshots. */
-export interface MemoryEventRow {
-  id: number;
-  memory_id: number | null;
-  user_id: number;
-  action: string;
-  before_json: string | null;
-  after_json: string | null;
-  actor: string;
-  reason: string;
-  model: string | null;
   created_at: string;
 }
 

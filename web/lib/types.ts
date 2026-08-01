@@ -45,20 +45,8 @@ export interface ElowenConfig {
   brain?: { providers: BrainProvider[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: BrainLimits; hiddenOauth?: string[] };
 }
 
-/** Operator-tunable brain limits (Settings → Elowen AI → Limits) — mirrors `BrainLimits` in
- *  `src/store/configStore.ts`. Every field is a whole number the daemon clamps to a sane range. */
-export interface BrainLimits {
-  toolOutputMaxLines: number;
-  toolOutputMaxChars: number;
-  toolResultInlineBytes: number;
-  elicitationTimeoutMs: number;
-  memoryRecallCount: number;
-  memoryRecallChars: number;
-  goalTurnBudget: number;
-  goalMaxTurns: number;
-  channelSessionCap: number;
-  delegateContextChars: number;
-}
+// Operator-tunable brain limits — shared with the daemon via the wire contract (re-exported from it
+// further down this file); every field is a whole number the daemon clamps to a sane range.
 
 /** How a brain provider talks upstream: a custom endpoint (API key) or a connected OAuth account. */
 export type BrainProviderType = 'openai' | 'anthropic' | 'oauth-anthropic' | 'oauth-github-copilot' | 'oauth-openai-codex' | 'oauth-kimi';
@@ -93,17 +81,26 @@ export interface ManagedSession { id: string; title: string; model: string; upda
  *  the template's arguments ($ARGUMENTS/$1..$9) on the daemon; `prompt` is kept for menu/identification. */
 /** One fulltext-search match across the caller's brain conversations. */
 export interface BrainSearchHit { sessionId: string; sessionTitle: string; role: string; snippet: string; ts: string }
-/** The display-transcript shapes are the daemon↔web wire contract, defined once in src/shared and
- *  imported (type-only, so nothing bundles) rather than re-declared — the web mirror can no longer drift
- *  from what the daemon serves over GET /brain/messages. `BrainMessage` is the web's name for the
- *  daemon's `BrainMessageView`. */
+/** The display-transcript shapes AND the REST DTOs the dock lists are the daemon↔web wire contract,
+ *  defined once in src/shared and imported (type-only, so nothing bundles) rather than re-declared —
+ *  the web mirror can no longer drift from what the daemon serves (the /auth/me User actually drifted
+ *  once). `BrainMessage` is the web's name for the daemon's `BrainMessageView`; the memory/category/
+ *  event/goal DTOs likewise keep their web-side names (`Memory`, `MemoryCategory`, `MemoryEvent`,
+ *  `BrainGoal`) as aliases of the shared rows. */
 import type {
   ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef, AskQuestion, BrainStreamControl,
   BrainWorkMode, BrainPendingPlan,
+  User, BrainLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
+  CommitFileChange, CommitLogEntry,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
-export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan };
+export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, BrainUsage, CommitFileChange, CommitLogEntry };
 export type BrainMessage = BrainMessageView;
+// The memory DTOs keep their established web-side names while sharing the daemon's row shapes.
+export type Memory = MemoryRow;
+export type MemoryCategory = MemoryCategoryRow;
+export type MemoryEvent = MemoryEventRow;
+export type BrainGoal = BrainGoalState;
 
 /** One backwards page of chat history (lazy-load). `nextBefore` is the cursor for the next older page —
  *  null once the oldest turn has been loaded, which is also when `hasMore` is false. */
@@ -153,25 +150,10 @@ export interface BrainCard { id: string; title?: string; items?: BrainCardItem[]
  *  live panels leave those out. */
 export interface ProcessInfo { id: string; command: string; cwd: string; startedAt: string; sessionId: string | null; running: boolean; exitCode: number | null; completionMode?: 'job' | 'service' | 'foreground' }
 
-/** Durable state of one autonomous goal (mirror of the daemon's `BrainGoalState`, src/brain/events.ts),
- *  narrowed to what the web renders. `subgoals` is the stored JSON array. */
-export interface BrainGoal {
-  status: 'active' | 'draft' | 'paused' | 'done';
-  goal: string;
-  subgoals: string;
-  turns_used: number;
-  turn_budget: number;
-}
-/** Live statusline numbers for the active conversation. */
-export interface BrainUsage {
-  tokens: number | null; contextWindow: number; percent: number | null; totalTokens: number; cost: number;
-  /** Cumulative per-session breakdown (absent on older daemons — treat as 0/unknown). */
-  input?: number; output?: number; cacheRead?: number; cacheWrite?: number;
-  /** Reasoning tokens (a subset of `output`, display only). */
-  reasoning?: number;
-  /** Average output tokens/sec over the session's measured generations; null when none measured yet. */
-  outputTps?: number | null;
-}
+// Durable state of one autonomous goal (the daemon's `BrainGoalState`, shared via the wire contract
+// at the top of this file). The web renders only a few of its fields — the extra ones are simply not
+// read. `subgoals` is the stored JSON array.
+
 /** The statusline plugin's display toggles (null = plugin disabled). */
 export interface StatuslineConfig { showModel?: boolean; showContext?: boolean; showTokens?: boolean; showCost?: boolean }
 /** Where the conversation works: the live (or last stamped) directory and its git branch. Both null for
@@ -210,7 +192,6 @@ export interface ConfigPatch {
   brain?: { providers?: (Omit<BrainProvider, 'apiKeySet'> & { apiKey?: string })[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
 }
 interface MissionPrInfo { branch: string; prNumber: number | null; prUrl: string | null; prState: string | null; fixRounds: number; lastFeedback: string | null }
-export interface User { id: number; username: string; created_at: string; is_admin: boolean; allowed_execs: string[]; disabled_tools: string[]; name: string; email: string; avatar: string; default_exec: string; advisor_exec: string; advisor_autostart: boolean }
 export interface UserPatch { is_admin?: boolean; allowed_execs?: string[]; disabled_tools?: string[] }
 export interface ProfilePatch { name?: string; email?: string; default_exec?: string }
 
@@ -491,8 +472,6 @@ interface GitStatus { branch: string; ahead: number; behind: number; dirty: numb
 interface GitBranch { name: string; current: boolean }
 interface GitCommit { hash: string; subject: string; author: string; relative: string }
 export interface ProjectGit { isRepo: boolean; status: GitStatus | null; branches: GitBranch[]; commits: GitCommit[] }
-interface CommitFileChange { path: string; added: number; deleted: number }
-export interface CommitLogEntry { hash: string; subject: string; author: string; timestamp: number; files: CommitFileChange[] }
 /** A handoff note one agent left for later agents on the same mission. */
 export interface Note { id: number; scope: string; target: string; author: string; body: string; created_at: string }
 
@@ -570,37 +549,12 @@ export interface SkillInstallResult {
   results: Array<{ provider: string; installed: boolean; skipped: boolean; error?: string }>;
 }
 
-/** One stored memory (mirrors the daemon's MemoryRow). Per-user and private — every route derives
- *  identity from the session, never a body/param id. */
-export interface Memory {
-  id: number;
-  user_id: number;
-  body: string;
-  kind: string;
-  importance: number;
-  confidence: number;
-  source: string;
-  status: 'active' | 'archived' | 'deleted';
-  created_at: string;
-  updated_at: string;
-  last_used_at: string | null;
-  use_count: number;
-  category_id: number | null;
-}
+// One stored memory — the daemon's `MemoryRow`, shared via the wire contract (re-exported at the top
+// of this file). Per-user and private — every route derives identity from the session, never a
+// body/param id. `status` is closed to what the daemon's API schema enums.
 
-/** One user-defined (or built-in) memory category (mirrors the daemon's MemoryCategoryRow). Per-user.
- *  `is_builtin` is 0/1 and `color` is a hex/token string used by the UI badge. */
-export interface MemoryCategory {
-  id: number;
-  user_id: number;
-  name: string;
-  description: string;
-  color: string;
-  /** One of the shared lucide icon allowlist (see web/lib/categoryIcons.tsx). Empty string → Folder. */
-  icon: string;
-  is_builtin: number;
-  created_at: string;
-}
+// One user-defined (or built-in) memory category (the daemon's `MemoryCategoryRow`, shared via the
+// wire contract). Per-user. `is_builtin` is 0/1 and `color` is a hex/token string used by the UI badge.
 
 /** Body for POST /memory/categories — only `name` is required (409 on duplicate name). */
 export interface MemoryCategoryCreate { name: string; description?: string; color?: string; icon?: string }
@@ -622,21 +576,9 @@ export interface CategorizationSettingsPatch {
   baseUrl?: string;
 }
 
-/** One entry of a memory's audit trail (mirrors the daemon's MemoryEventRow). `memory_id` is null for
- *  events whose memory was hard-removed; `before_json`/`after_json` are raw JSON snapshots. */
-export interface MemoryEvent {
-  id: number;
-  memory_id: number | null;
-  user_id: number;
-  action: string;
-  before_json: string | null;
-  after_json: string | null;
-  actor: string;
-  reason: string;
-  /** Inference model that performed the action (curator/categorizer), or null for user/system events. */
-  model: string | null;
-  created_at: string;
-}
+// One entry of a memory's audit trail (the daemon's `MemoryEventRow`, shared via the wire contract).
+// `memory_id` is null for events whose memory was hard-removed; `before_json`/`after_json` are raw JSON
+// snapshots.
 
 /** Body for POST /memory — only `body` is required. */
 export interface MemoryCreate { body: string; kind?: string; importance?: number; confidence?: number }
