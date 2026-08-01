@@ -25,6 +25,10 @@
       "label": "Limit výstupu kontroly (znaky)",
       "hint": "Koľko výstupu z guard príkazu „check“ sa odovzdá do ťahu mozgu. Zvýšte pre collectory, ktoré vytvárajú veľké agregované dáta."
     },
+    "cronLookbackMs": {
+      "label": "Okno dohľadania zmeškaných cron spustení (ms)",
+      "hint": "Ako ďaleko dozadu hľadá päťpoľová cron úloha spustenie, ktoré zmeškala počas výpadku démona. Dohľadá sa vždy len posledné zmeškané spustenie, nikdy nahromadený rad. Rozsah 1 hodina až 7 dní, predvolené 24 hodín."
+    },
     "sessionIdleMs": {
       "label": "Prah nečinnosti pre novú session (ms)",
       "hint": "Voliteľné. Úloha nečinná dlhšie než táto hodnota medzi behmi začne pri ďalšom tiknutí novú konverzáciu — po vypršaní cache promptu je opätovné použitie starého kontextu čistá cena bez úspory. Nechajte prázdne pre predvolenú hodnotu hostiteľa (ako Discord). Nižšia hodnota pre časté úlohy, vyššia pre dlhšie zachovanie nadväznosti, alebo 0 pre trvalé zachovanie kontextu (nikdy nezačínať znova)."

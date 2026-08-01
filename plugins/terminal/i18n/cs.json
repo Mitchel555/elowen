@@ -12,6 +12,10 @@
     "commandTimeoutMs": {
       "label": "Časový limit příkazu (ms)",
       "hint": "Jak dlouho může příkaz na popředí běžet, než je ukončen."
+    },
+    "maxBackgroundProcesses": {
+      "label": "Procesy na pozadí na relaci",
+      "hint": "Kolik procesů na pozadí smí jedna relace souběžně udržovat; spuštění dalšího je odmítnuto, dokud některý neukončíte. Rozsah 1–64, výchozí 16."
     }
   }
 }

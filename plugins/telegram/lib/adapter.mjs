@@ -16,11 +16,13 @@ import { isSteered } from '../../_shared/turnResult.mjs';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // default: larger images are noted, not downloaded (cfg: maxImageBytes)
 const MAX_IMAGES = 4;                    // default vision cap per message (cfg: maxImages)
-const ASK_TTL_MS = 6 * 60_000;           // default: drop a pending AskUserQuestion after this (cfg: askTimeoutMs; > the core 5-min timeout)
+// Default lifetime of a parked prompt — a pending AskUserQuestion AND a pending inline picker, which are
+// the same thing from the user's side: an interactive question this chat still owes an answer to. One
+// `askTimeoutMs` governs both, so raising it for a slow chat cannot leave the picker expiring six minutes in.
+const ASK_TTL_MS = 6 * 60_000;           // default: drop a parked prompt after this (cfg: askTimeoutMs; > the core 5-min timeout)
 const MAX_UPLOAD_IMAGES = 4;             // default generated-image uploads per outgoing message (cfg: maxUploadImages)
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Whisper's per-file limit — larger clips are just noted
 const TTS_MAX_CHARS = 4000;              // cap the spoken text (OpenAI TTS input limit is 4096)
-const MENU_TTL_MS = 6 * 60_000;          // a pending model picker's inline keyboard is valid this long
 const PICKER_PAGE = 8;                   // inline-keyboard rows per page for the /model + /context pickers
 const CONTEXT_MAX = 200;                 // upper bound of own conversations the /context picker pages over
 
@@ -211,6 +213,9 @@ export class TelegramAdapter {
     return false;
   }
 
+  /** How long a parked prompt (ask or inline picker) stays answerable. */
+  askTtlMs() { return cfgNum(this.cfg, 'askTimeoutMs', ASK_TTL_MS, 30000, 1800000); }
+
   /** Remove the bot's own @mention token from the text (case-insensitive). */
   stripMention(text) {
     let out = String(text ?? '');
@@ -229,7 +234,7 @@ export class TelegramAdapter {
     // Free-text answer to a parked AskUserQuestion ("✏️ Other"): if this chat has a pending ask awaiting
     // text from THIS sender, consume the message as that answer — not as a new brain turn.
     for (const [token, pend] of this.pendingAsks) {
-      if (Date.now() - pend.createdAt > cfgNum(this.cfg, 'askTimeoutMs', ASK_TTL_MS, 30000, 1800000)) { this.pendingAsks.delete(token); continue; }
+      if (Date.now() - pend.createdAt > this.askTtlMs()) { this.pendingAsks.delete(token); continue; }
       if (!pend.awaitingText || pend.chatId !== chatId || pend.askerId !== from.id) continue;
       const other = String(m.text ?? '').trim();
       if (!other) continue;
@@ -551,7 +556,7 @@ export class TelegramAdapter {
     if (data.startsWith('m:')) {
       if (!this.isAdmin(ids)) { await ctx.answerCallbackQuery({ text: this.msg.modelForbidden, show_alert: true }).catch(() => {}); return; }
       const picker = this.pendingPickers.get(String(chatId));
-      const stale = !picker || picker.kind !== 'model' || Date.now() - picker.createdAt > MENU_TTL_MS;
+      const stale = !picker || picker.kind !== 'model' || Date.now() - picker.createdAt > this.askTtlMs();
       const mo = stale ? null : picker.models[Number(data.slice(2))];
       if (mo) {
         const models = await this.listModels().catch(() => []);
@@ -602,7 +607,7 @@ export class TelegramAdapter {
       if (rest === 'noop') return;
       const page = Number(rest);
       const picker = this.pendingPickers.get(String(chatId));
-      if (!Number.isInteger(page) || !picker || picker.kind !== kind || Date.now() - picker.createdAt > MENU_TTL_MS) return;
+      if (!Number.isInteger(page) || !picker || picker.kind !== kind || Date.now() - picker.createdAt > this.askTtlMs()) return;
       picker.page = page;
       const rows = kind === 'model' ? this.modelRows(picker.models, chatId) : this.contextRows(picker.sessions);
       await this.bot.api.editMessageReplyMarkup(chatId, messageId, { reply_markup: { inline_keyboard: this.buildPagedKeyboard(rows, page, navPrefix) } }).catch(() => {});
@@ -611,7 +616,7 @@ export class TelegramAdapter {
     if (data.startsWith('c:')) {
       if (!this.isAdmin(ids)) { await ctx.answerCallbackQuery({ text: this.msg.controlForbidden, show_alert: true }).catch(() => {}); return; }
       const picker = this.pendingPickers.get(String(chatId));
-      const stale = !picker || picker.kind !== 'context' || Date.now() - picker.createdAt > MENU_TTL_MS;
+      const stale = !picker || picker.kind !== 'context' || Date.now() - picker.createdAt > this.askTtlMs();
       const session = stale ? null : picker.sessions[Number(data.slice(2))];
       await ctx.answerCallbackQuery().catch(() => {});
       this.pendingPickers.delete(String(chatId));

@@ -46,5 +46,24 @@
     "DelegateList",
     "DelegateRead",
     "WorkflowStatus"
+  ],
+  "configSchema": [
+    {
+      "key": "sec_retention",
+      "label": "Retention",
+      "type": "section",
+      "hint": "How long a finished delegation stays collectable."
+    },
+    {
+      "key": "resultRetentionMs",
+      "label": "Result retention (ms)",
+      "type": "number",
+      "min": 600000,
+      "max": 86400000,
+      "step": 600000,
+      "placeholder": "3600000",
+      "default": 3600000,
+      "hint": "How long after finishing a background delegation or a workflow can still be read with DelegateStatus, DelegateResult or WorkflowStatus. Past it the entry is forgotten and the id no longer resolves. Range 10 minutes to 24 hours, default 1 hour."
+    }
   ]
 }

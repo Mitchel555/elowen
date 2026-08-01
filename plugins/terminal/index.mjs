@@ -21,7 +21,7 @@ const MIN_TIMEOUT_S = 1;
 // running after a timeout, so the caller can simply block again.
 const DEFAULT_BLOCK_S = 30;
 const MAX_BLOCK_S = 120;
-const MAX_BG = 16;               // concurrent background processes
+const DEFAULT_MAX_BG = 16;       // default concurrent background processes per session (cfg: maxBackgroundProcesses)
 const PROGRESS_THROTTLE_MS = 100;        // min gap between live-output pushes of a foreground run
 const PROGRESS_TAIL = 2_000;             // rolling TAIL of live output sent per push (never the whole buffer)
 const ok = (text) => ({ content: [{ type: 'text', text }], details: {} });
@@ -234,6 +234,10 @@ export function register(ctx) {
   // Also caps the rolling buffer kept for background processes (BgProcess.output trim above).
   const outputCap = Math.min(Math.max(Number(ctx.config.outputCap) || DEFAULT_MAX, 10_000), 500_000);
   const commandTimeoutMs = Math.min(Math.max(Number(ctx.config.commandTimeoutMs) || DEFAULT_TIMEOUT_MS, 30_000), 600_000);
+  // The bounds here MUST mirror the manifest's, because the server stores plugin config unvalidated —
+  // a wider clamp would honour a value the settings UI rejects, a narrower one would silently ignore an
+  // accepted setting.
+  const maxBackgroundProcesses = Math.min(Math.max(Number(ctx.config.maxBackgroundProcesses) || DEFAULT_MAX_BG, 1), 64);
 
   // Default cwd is host-resolved (ctx.defaultCwd): the session's bound project path when there is one,
   // re-established every run — an explicit `cwd` from one call never carries into the next.
@@ -340,7 +344,7 @@ export function register(ctx) {
         if (!sessionId) return ok('Error: background processes require an authenticated conversation.');
         for (const proc of ctx.processes.listForSession(sessionId)) { if (!proc.running) ctx.processes.remove(proc.id); }
         // Exclude an in-flight foreground command from the cap: it is not a background slot holder.
-        if (ctx.processes.listForSession(sessionId).filter((proc) => proc.completionMode !== 'foreground').length >= MAX_BG) return ok(`Error: too many background processes (${MAX_BG}); kill one first.`);
+        if (ctx.processes.listForSession(sessionId).filter((proc) => proc.completionMode !== 'foreground').length >= maxBackgroundProcesses) return ok(`Error: too many background processes (${maxBackgroundProcesses}); kill one first.`);
         const id = newProcessId();
         // The operator who started it (+ the session they started it in) → wake THAT conversation when it
         // exits (markExited on close). Field is `elowenUserId` (was mis-typed as the pre-rebrand `orcaUserId`,

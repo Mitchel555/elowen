@@ -54,6 +54,17 @@
       "placeholder": "120000",
       "default": 120000,
       "hint": "How long a foreground command may run before it is killed."
+    },
+    {
+      "key": "maxBackgroundProcesses",
+      "label": "Background processes per session",
+      "type": "number",
+      "min": 1,
+      "max": 64,
+      "step": 1,
+      "placeholder": "16",
+      "default": 16,
+      "hint": "How many background processes one session may keep running at once; starting another is refused until one is killed. Range 1-64, default 16."
     }
   ]
 }

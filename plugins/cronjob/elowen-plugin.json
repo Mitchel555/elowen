@@ -69,6 +69,17 @@
       "hint": "How much of a guard `check`'s output is fed into the brain turn. Raise it for collectors that emit large aggregated data."
     },
     {
+      "key": "cronLookbackMs",
+      "label": "Cron catch-up window (ms)",
+      "type": "number",
+      "min": 3600000,
+      "max": 604800000,
+      "step": 3600000,
+      "placeholder": "86400000",
+      "default": 86400000,
+      "hint": "How far back a 5-field cron job looks for a run it missed while the daemon was down. Only the most recent missed occurrence is replayed, never a backlog. Range 1 hour to 7 days, default 24 hours."
+    },
+    {
       "key": "sessionIdleMs",
       "label": "Fresh-session idle threshold (ms)",
       "type": "number",

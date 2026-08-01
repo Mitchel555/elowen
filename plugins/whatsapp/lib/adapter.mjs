@@ -18,8 +18,10 @@ import { resolveImageFiles } from '../../_shared/images.mjs';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // default: larger inbound images are noted, not downloaded (cfg: maxImageBytes)
 const MAX_IMAGES = 4;                    // default vision cap per message (cfg: maxImages)
-const ASK_TTL_MS = 6 * 60_000;           // default: drop a pending ask after this (cfg: askTimeoutMs; > the core 5-min timeout)
-const MENU_TTL_MS = 6 * 60_000;          // a numbered-menu number-reply is valid this long
+// Default lifetime of a parked prompt — a pending ask AND a pending numbered menu, which are the same
+// thing from the user's side: an interactive question this chat still owes an answer to. One `askTimeoutMs`
+// governs both, so raising it for a slow chat cannot leave the menu expiring six minutes in.
+const ASK_TTL_MS = 6 * 60_000;           // default: drop a parked prompt after this (cfg: askTimeoutMs; > the core 5-min timeout)
 const MENU_PAGE = 18;                     // numbered-menu options per page (leaves room for nav rows)
 const CONTEXT_MAX = 200;                  // upper bound of own conversations the /context picker pages over
 const MAX_UPLOAD_IMAGES = 4;             // default generated-image uploads per reply (cfg: maxUploadImages)
@@ -504,6 +506,9 @@ export class WhatsAppAdapter {
     return false;
   }
 
+  /** How long a parked prompt (ask or numbered menu) stays answerable. */
+  askTtlMs() { return cfgNum(this.cfg, 'askTimeoutMs', ASK_TTL_MS, 30000, 1800000); }
+
   /** Resolve a text reply against a pending prompt: a numeric pick on a model/thinking menu, or an
    *  answer to a parked ask (a number picks that option on a single-question ask; `submit` delivers;
    *  anything else is a free-form answer). Returns true when the message was consumed. */
@@ -511,7 +516,7 @@ export class WhatsAppAdapter {
     const t = String(text ?? '').trim();
     // Parked AskUserQuestion from this sender.
     for (const [id, pend] of this.pendingAsks) {
-      if (Date.now() - pend.createdAt > cfgNum(this.cfg, 'askTimeoutMs', ASK_TTL_MS, 30000, 1800000)) { this.pendingAsks.delete(id); continue; }
+      if (Date.now() - pend.createdAt > this.askTtlMs()) { this.pendingAsks.delete(id); continue; }
       if (pend.jid !== chatJid || !sameId(pend.askerJid, senderJid)) continue;
       if (/^submit$/i.test(t)) { await this.submitAsk(id, m); return true; }
       // A single-question ask answers from one reply: a number (or a comma list on multiSelect) picks
@@ -547,7 +552,7 @@ export class WhatsAppAdapter {
     // (a "nav" entry re-renders another page; a "pick" entry selects).
     const menu = this.pendingMenus.get(chatJid);
     if (menu) {
-      if (Date.now() - menu.createdAt > MENU_TTL_MS) { this.pendingMenus.delete(chatJid); return false; }
+      if (Date.now() - menu.createdAt > this.askTtlMs()) { this.pendingMenus.delete(chatJid); return false; }
       const entries = menu.entries ?? [];
       const n = Number(t);
       if (Number.isInteger(n) && n >= 1 && n <= entries.length) {

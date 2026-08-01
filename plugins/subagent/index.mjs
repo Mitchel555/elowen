@@ -7,6 +7,7 @@ import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
 import { clipTail } from './lib/results.mjs';
+import { resolveResultRetentionMs } from './lib/retention.mjs';
 import {
   CONTEXT_HEADER,
   MAX_CONTEXT_CHUNK_CHARS,
@@ -16,7 +17,6 @@ import {
 } from './lib/limits.mjs';
 
 const MAX_BACKGROUND_JOBS = 64;
-const JOB_RETENTION_MS = 60 * 60_000;
 const MAX_STORED_RESULT_CHARS = 100_000;
 const MAX_STORED_TASK_CHARS = 2_000;
 // Match workflow result bodies: 8k is useful for reports while leaving headroom under the default 12k
@@ -151,6 +151,8 @@ const buildCollectReminder = (finished, stillRunning) => {
 
 export function register(ctx) {
   let run = null; // the host's channel handler, captured on connect
+  // One operator knob covers a background job and a workflow alike — see lib/retention.mjs.
+  const resultRetentionMs = resolveResultRetentionMs(ctx.config);
   // A plugin reload replaces THIS closure wholesale — emitters, the `run` handler and the adapter behind
   // them all die with the old registry — so the map deliberately does NOT outlive it. What matters is that
   // no job is left silently running across that boundary, and the reload hook below handles exactly that:
@@ -164,7 +166,7 @@ export function register(ctx) {
   // age and count. Running entries are never evicted; when all slots are live, a new spawn is refused.
   const pruneJobs = (now = Date.now(), reserveSlot = false) => {
     for (const [jobId, job] of jobs) {
-      if (job.finishedAt !== undefined && now - job.finishedAt >= JOB_RETENTION_MS) jobs.delete(jobId);
+      if (job.finishedAt !== undefined && now - job.finishedAt >= resultRetentionMs) jobs.delete(jobId);
     }
     const limit = MAX_BACKGROUND_JOBS - (reserveSlot ? 1 : 0);
     if (jobs.size <= limit) return;

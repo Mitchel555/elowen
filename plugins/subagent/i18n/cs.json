@@ -1,3 +1,13 @@
 {
-  "description": "Delegování: spustí nového izolovaného subagenta, který zpracuje samostatný úkol a vrátí výsledek. Subagent dědí přístup volajícího, nikdy víc."
+  "description": "Delegování: spustí nového izolovaného subagenta, který zpracuje samostatný úkol a vrátí výsledek. Subagent dědí přístup volajícího, nikdy víc.",
+  "fields": {
+    "sec_retention": {
+      "label": "Uchování výsledků",
+      "hint": "Jak dlouho zůstane dokončená delegace k vyzvednutí."
+    },
+    "resultRetentionMs": {
+      "label": "Uchování výsledku (ms)",
+      "hint": "Jak dlouho po dokončení lze delegaci na pozadí nebo workflow ještě přečíst nástroji DelegateStatus, DelegateResult či WorkflowStatus. Po uplynutí se záznam zapomene a jeho identifikátor už nelze dohledat. Rozsah 10 minut až 24 hodin, výchozí 1 hodina."
+    }
+  }
 }

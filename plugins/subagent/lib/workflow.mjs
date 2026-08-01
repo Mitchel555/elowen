@@ -19,9 +19,9 @@ import {
   resolveContextTotalChars,
 } from './limits.mjs';
 import { clipTail } from './results.mjs';
+import { resolveResultRetentionMs } from './retention.mjs';
 
 const MAX_WORKFLOWS = 16;
-const WORKFLOW_RETENTION_MS = 60 * 60_000;
 const MAX_RESULT_CHARS = 8_000;
 // The workflow snapshot re-emits every node on each state change; the UI only previews a node's task, so
 // the snapshot carries at most this many chars of it (the full task still drives the child's turn).
@@ -127,6 +127,9 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
    *  restart, and its node child sessions persist on their own. */
   const workflows = new Map();
 
+  // Shared with delegate's background jobs, from one operator knob — see lib/retention.mjs.
+  const resultRetentionMs = resolveResultRetentionMs(ctx.config);
+
   /** Where a workflow definition belongs by default: under elowen's own data dir, not in the user's
    *  repository. A definition is scaffolding for one run — writing it into the project would leave
    *  untracked files behind after every workflow, or worse, get committed.
@@ -169,7 +172,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
 
   const pruneWorkflows = (now = Date.now()) => {
     for (const [id, wf] of workflows) {
-      if (wf.finishedAt !== undefined && now - wf.finishedAt >= WORKFLOW_RETENTION_MS) workflows.delete(id);
+      if (wf.finishedAt !== undefined && now - wf.finishedAt >= resultRetentionMs) workflows.delete(id);
     }
     // Bounded memory without blocking new starts: once retained history grows past MAX_WORKFLOWS, evict
     // the OLDEST finished entries first (a finished workflow no longer counts against the start limit

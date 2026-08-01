@@ -25,6 +25,10 @@
       "label": "Limit výstupu kontroly (znaky)",
       "hint": "Kolik výstupu z guard příkazu „check“ se předá do tahu mozku. Zvyšte pro collectory, které vytvářejí velká agregovaná data."
     },
+    "cronLookbackMs": {
+      "label": "Okno dohledání zmeškaných cron spuštění (ms)",
+      "hint": "Jak daleko zpět hledá pětipolová cron úloha spuštění, které zmeškala během výpadku démona. Dohledá se vždy jen poslední zmeškané spuštění, nikdy nahromaděná fronta. Rozsah 1 hodina až 7 dní, výchozí 24 hodin."
+    },
     "sessionIdleMs": {
       "label": "Práh nečinnosti pro novou session (ms)",
       "hint": "Volitelné. Úloha nečinná déle než tato hodnota mezi běhy začne při dalším tiknutí novou konverzaci — po vypršení cache promptu je opětovné použití starého kontextu čistá cena bez úspory. Nechte prázdné pro výchozí hodnotu hosta (jako Discord). Nižší hodnota pro časté úlohy, vyšší pro delší zachování návaznosti, nebo 0 pro trvalé zachování kontextu (nikdy nezačínat znovu)."

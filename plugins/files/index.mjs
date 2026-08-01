@@ -282,7 +282,7 @@ const INLINE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'ima
 // so plainly instead of silently returning nothing. A page with a text layer comes back as text; a scanned
 // page (no text layer) is rendered to a PNG and returned as an image, which is the only way its content
 // reaches a model at all.
-const PDF_MAX_PAGES = 20;          // per call — the spec's cap, and enough to keep one call's output sane
+const DEFAULT_PDF_MAX_PAGES = 20;  // per call — enough to keep one call's output sane (cfg: pdfMaxPages)
 const PDF_MAX_IMAGE_PAGES = 5;     // rendered pages per call; each is ~0.5-1 MB of base64, so cap them hard
 // Rendered pages are sized by their LONG EDGE, not by dpi. A PDF may declare a MediaBox up to 200x200
 // INCHES; at any fixed dpi that is a gigapixel render — hundreds of MB of PNG on disk and gigabytes of RGBA
@@ -296,10 +296,14 @@ const PDF_MAX_BUFFER = 8_000_000;
 const isPdf = (buf) => startsWithAscii(buf, 0, '%PDF-');
 
 /** Expand a `pages` spec — "3", "1-5", "1,3,5" (and combinations) — into a sorted, deduplicated page list.
- *  Returns `{ error }` for a malformed spec or one that asks for more than PDF_MAX_PAGES, so the model gets
+ *  Returns `{ error }` for a malformed spec or one that asks for more than `maxPages`, so the model gets
  *  a reason it can act on rather than a silently truncated read. Ranges are rejected BEFORE expansion, so
- *  "1-999999" cannot balloon the set. */
-export function parsePageSpec(spec) {
+ *  "1-999999" cannot balloon the set.
+ *
+ *  `maxPages` is passed in rather than read from the module: the tool DESCRIPTION states the same cap, and
+ *  the two must come from one resolved value — a model told "at most 20" while validation enforces 5 would
+ *  be sent into a failure it had no way to avoid. */
+export function parsePageSpec(spec, maxPages = DEFAULT_PDF_MAX_PAGES) {
   const text = String(spec ?? '').trim();
   if (!text) return { error: 'pages is empty' };
   const pages = new Set();
@@ -314,10 +318,10 @@ export function parsePageSpec(spec) {
     else if (single) { from = Number(single[1]); to = from; }
     else return { error: `"${part}" is not a page or a range — use "3", "1-5" or "1,3,5"` };
     if (from < 1 || to < from) return { error: `"${part}" is not a valid page range (pages start at 1)` };
-    if (to - from + 1 > PDF_MAX_PAGES) return { error: `"${part}" spans more than ${PDF_MAX_PAGES} pages` };
+    if (to - from + 1 > maxPages) return { error: `"${part}" spans more than ${maxPages} pages` };
     for (let page = from; page <= to; page += 1) {
       pages.add(page);
-      if (pages.size > PDF_MAX_PAGES) return { error: `at most ${PDF_MAX_PAGES} pages can be read in one call` };
+      if (pages.size > maxPages) return { error: `at most ${maxPages} pages can be read in one call` };
     }
   }
   if (pages.size === 0) return { error: 'pages is empty' };
@@ -372,8 +376,8 @@ async function pdfImageBlock(png) {
 
 /** Read the requested pages of a PDF: text where there is a text layer, a rendered image where there is
  *  not. Returns the PI tool-result shape directly. */
-async function readPdf(abs, pageSpec, supportsImages, readCap) {
-  const parsed = parsePageSpec(pageSpec);
+async function readPdf(abs, pageSpec, supportsImages, readCap, maxPages) {
+  const parsed = parsePageSpec(pageSpec, maxPages);
   if (parsed.error) return fail('Read', new Error(`Invalid pages: ${parsed.error}.`), { path: abs, pdf: true });
 
   let total = null;
@@ -750,6 +754,10 @@ async function rgGrep(target, root, pattern, opts = {}) {
 export function register(ctx) {
   const readCap = Math.min(Math.max(Number(ctx.config.readCap) || DEFAULT_MAX, 20_000), 500_000);
   const searchMaxMatches = Math.min(Math.max(Number(ctx.config.searchMaxMatches) || DEFAULT_SEARCH_MAX_MATCHES, 50), 1000);
+  // Resolved BEFORE the tool is defined, because the Read description below quotes this cap to the model.
+  // The bounds MUST mirror the manifest's: the server stores plugin config unvalidated, so this clamp is
+  // the only one there is.
+  const pdfMaxPages = Math.min(Math.max(Number(ctx.config.pdfMaxPages) || DEFAULT_PDF_MAX_PAGES, 5), 50);
 
   // A conversation coming back after a daemon restart brings its history with it — and with it every
   // file this session has already seen. Replay that into the read state so the guard picks up where the
@@ -767,14 +775,14 @@ export function register(ctx) {
       'The path must be absolute. It is okay to read a file that does not exist — you get an error, not a crash. Directories cannot be read: use ListDir for those. For a large file use offset (1-indexed line to start from) and limit (max lines) and read only the part you need — details.truncated and the continuation hint tell you where to resume.',
       'Results are returned with line numbers (cat -n format: line number + tab + content), starting at 1.',
       'Images (jpg/png/gif/webp/bmp) come back as an attachment you can see.',
-      `PDFs require \`pages\` ("3", "1-5" or "1,3,5"; at most ${PDF_MAX_PAGES} pages per call). Pages with a text layer are returned as text; a scanned page with no text layer is rendered and returned as an image.`,
+      `PDFs require \`pages\` ("3", "1-5" or "1,3,5"; at most ${pdfMaxPages} pages per call). Pages with a text layer are returned as text; a scanned page with no text layer is rendered and returned as an image.`,
       'Do not re-read a file you just edited to check the change landed — Edit and Write would have errored if the write failed, so a verification read costs a round and tells you nothing.',
     ].join(' '),
     parameters: Type.Object({
       path: Type.String({ description: 'Absolute path to the file' }),
       offset: Type.Optional(Type.Number({ description: 'Line number to start reading from (1-indexed)' })),
       limit: Type.Optional(Type.Number({ description: 'Maximum number of lines to read' })),
-      pages: Type.Optional(Type.String({ description: `PDF pages to read: "3", "1-5" or "1,3,5" (max ${PDF_MAX_PAGES} per call). Required for a PDF; ignored for any other file.` })),
+      pages: Type.Optional(Type.String({ description: `PDF pages to read: "3", "1-5" or "1,3,5" (max ${pdfMaxPages} per call). Required for a PDF; ignored for any other file.` })),
     }),
     execute: async (_id, p, _signal, _onUpdate, ectx) => {
       try {
@@ -786,9 +794,9 @@ export function register(ctx) {
           // A PDF has no meaningful line-based read, so `pages` is not optional here — decoding it as UTF-8
           // would hand the model a screenful of binary and look like a successful read.
           if (p.pages === undefined) {
-            return fail('Read', new Error(`This is a PDF. Pass \`pages\` to read it — e.g. pages="1-5" (max ${PDF_MAX_PAGES} per call).`), { path: abs, pdf: true });
+            return fail('Read', new Error(`This is a PDF. Pass \`pages\` to read it — e.g. pages="1-5" (max ${pdfMaxPages} per call).`), { path: abs, pdf: true });
           }
-          const result = await readPdf(abs, p.pages, supportsImages, readCap);
+          const result = await readPdf(abs, p.pages, supportsImages, readCap, pdfMaxPages);
           // Only a read that actually SHOWED the agent something counts. A bad `pages` spec, an encrypted
           // PDF or a missing poppler must not leave the file marked as read — that would license a later
           // blind Write over a document nobody ever saw.

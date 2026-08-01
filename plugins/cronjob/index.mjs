@@ -190,9 +190,10 @@ const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 // How far back a cron schedule may catch up after downtime. The human-readable "daily 07:30" form already
 // fires late (isDue only checks that today's slot has passed), and a cron job must not be the one form that
-// silently skips its run because the daemon happened to be restarting at 09:00. Bounded at a day so a
-// long outage replays at most one occurrence, never a backlog.
-const CRON_LOOKBACK_MS = 24 * 3_600_000;
+// silently skips its run because the daemon happened to be restarting at 09:00. A day means a long outage
+// replays at most one daily occurrence, never a backlog; an operator who wants a week-long outage caught up
+// raises it (cfg: cronLookbackMs).
+const DEFAULT_CRON_LOOKBACK_MS = 24 * 3_600_000;
 
 /** Parse ONE cron field into the set of values it matches: a wildcard, a single value, a range, any of
  *  those with a step suffix (e.g. a wildcard every 15), and comma-separated lists of them. `names`
@@ -284,8 +285,8 @@ export function cronMatches(sched, ms, timezone = systemZone()) {
  *  simply moves which instants carry which clock time — no arithmetic to get wrong. It stops at `after` or
  *  the lookback bound, so it costs at most one day of minutes and gives a cron job the same
  *  catch-up-after-downtime behavior the daily form has. */
-export function lastCronOccurrence(sched, now, after, timezone = systemZone()) {
-  const floor = Math.max(after, now - CRON_LOOKBACK_MS);
+export function lastCronOccurrence(sched, now, after, timezone = systemZone(), lookbackMs = DEFAULT_CRON_LOOKBACK_MS) {
+  const floor = Math.max(after, now - lookbackMs);
   let cursor = now - (now % 60_000); // truncate to the minute
   while (cursor > floor) {
     if (cronMatches(sched, cursor, timezone)) return cursor;
@@ -339,7 +340,7 @@ export function inHours(hours, now, timezone = systemZone()) {
  *  INSTANTS carrying the same clock time, so comparing instants alone would fire "daily 02:30" twice that
  *  night. Comparing the slot fires it once, which is what the user asked for. (In spring that clock time
  *  does not exist at all and the job is skipped for the day — standard cron behaviour.) */
-export function dueSlot(job, now, timezone = systemZone()) {
+export function dueSlot(job, now, timezone = systemZone(), lookbackMs = DEFAULT_CRON_LOOKBACK_MS) {
   if (job.enabled === false) return null;
   // One-shots are consumed by deletion, not by a slot — they fire exactly once, at an absolute instant.
   if (job.runAt) return (!job.lastRun && now >= Date.parse(job.runAt)) ? slotKey(now, timezone) : null;
@@ -358,7 +359,7 @@ export function dueSlot(job, now, timezone = systemZone()) {
   };
 
   if (sched.kind === 'cron') {
-    const at = lastCronOccurrence(sched, now, last, timezone);
+    const at = lastCronOccurrence(sched, now, last, timezone, lookbackMs);
     return at === null ? null : fire(at);
   }
 
@@ -402,6 +403,7 @@ class CronAdapter {
     this.retryBackoffMs = clampConfig(config.retryBackoffMs, DEFAULT_CRON_RETRY_BACKOFF_MS, 1_000, 30_000);
     this.checkTimeoutMs = clampConfig(config.checkTimeoutMs, DEFAULT_CHECK_TIMEOUT_MS, 10_000, 300_000);
     this.checkOutputMaxChars = clampConfig(config.checkOutputChars, DEFAULT_CHECK_OUTPUT_CHARS, 2_000, 200_000);
+    this.cronLookbackMs = clampConfig(config.cronLookbackMs, DEFAULT_CRON_LOOKBACK_MS, 3_600_000, 604_800_000);
     // Idle cutoff forwarded per turn to the host (access.sessionIdleMs). Unset → undefined (host default,
     // like Discord); explicit 0 → Infinity (rollover off); explicit > 0 → clamped up to a 1-min floor,
     // no upper clamp. See resolveSessionIdleMs.
@@ -438,7 +440,7 @@ class CronAdapter {
       // the adapter that replaced us instead of running them from a generation the host has dropped.
       if (this.stopped) break;
       // Cheap pre-filter on the snapshot — claiming re-reads the file, so only pay that for a due job.
-      if (dueSlot(snapshot, now, tz) === null) continue;
+      if (dueSlot(snapshot, now, tz, this.cronLookbackMs) === null) continue;
       const job = this.claimDueJob(snapshot.id, now, tz);
       if (!job) continue;
       // Cheap guard gate: if the job has a `check` command, run it FIRST (no LLM). Only spend a brain
@@ -568,7 +570,7 @@ class CronAdapter {
     const jobs = this.store.all();
     const job = jobs.find((j) => j.id === id);
     if (!job) return null;
-    const slot = dueSlot(job, now, tz);
+    const slot = dueSlot(job, now, tz, this.cronLookbackMs);
     if (slot === null) return null;
     if (job.runAt) this.store.save(jobs.filter((j) => j.id !== job.id));
     else this.store.patch(job.id, { lastRun: new Date(now).toISOString(), lastSlot: slot });

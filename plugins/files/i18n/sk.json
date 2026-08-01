@@ -16,6 +16,10 @@
     "globMax": {
       "label": "Glob max výsledkov",
       "hint": "Maximálny počet súborov, ktoré Glob vráti, než výpis skráti."
+    },
+    "pdfMaxPages": {
+      "label": "Strany PDF na jedno čítanie",
+      "hint": "Maximálny počet strán PDF, ktoré možno vyžiadať jedným volaním nástroja Read. Nástroj Read tento limit uvádza modelu, takže jeho zvýšenie zároveň modelu dovolí vyžadovať širšie rozsahy. Rozsah 5–50, predvolené 20."
     }
   }
 }
