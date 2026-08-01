@@ -99,6 +99,8 @@ export function compositionHarness(options: {
   columns?: number;
   rows?: number;
   turns?: number;
+  /** The caller's Account → Terminal settings as the boot fetch returned them; null is an offline boot. */
+  termSettings?: ChatApplicationResources['termSettings'];
 } = {}): CompositionHarness {
   const term = new HarnessTerminal(options.columns ?? 80, options.rows ?? 24);
   const tuiImpl = new HarnessTui(term);
@@ -147,7 +149,7 @@ export function compositionHarness(options: {
     shellContext: new LocalShellBuffer(),
     mentionIndex: { files: () => [], refreshIfStale: () => {} },
     commandDefs: [{ name: 'help', description: 'Show help' }],
-    termSettings: null,
+    termSettings: options.termSettings ?? null,
     cwdLabel: '~/elowen',
     branchLabel: 'test',
     lifetime: new ChatApplicationLifetime<'metadata'>(),

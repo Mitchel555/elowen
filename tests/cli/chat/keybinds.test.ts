@@ -3,7 +3,7 @@ import {
   chordFromInput, createKeymap, createLeaderState, keybindDefault, keybindRows, parseKeybind, KEYBIND_ACTIONS,
 } from '../../../src/cli/chat/keys.js';
 import {
-  escalationPress, INTERRUPT_CONFIRM_MS, interruptPress, noticeAction,
+  escalationPress, INTERRUPT_CONFIRM_MS, interruptPress, noticeAction, resolveInterruptConfirmMs,
 } from '../../../src/cli/chat/chatComposition.js';
 import {
   bottomHintItems, modelMetaLine, quitHint, startScreenHintItems,
@@ -70,6 +70,19 @@ describe('stream interrupt + shell row budget', () => {
       armedUntil: first.armedUntil + INTERRUPT_CONFIRM_MS,
       abort: false,
     });
+  });
+
+  // The window is a per-user setting the CLI reads at boot, so the value arrives from a daemon whose
+  // version this build does not control and is held inside the CLI's own bounds before it is used.
+  it('holds the configured confirmation window inside the CLI-side bounds', () => {
+    expect(resolveInterruptConfirmMs(2_500)).toBe(2_500);
+    expect(resolveInterruptConfirmMs(500)).toBe(500);
+    expect(resolveInterruptConfirmMs(5_000)).toBe(5_000);
+    expect(resolveInterruptConfirmMs(0)).toBe(500);          // a zero window would disarm before a hand can follow
+    expect(resolveInterruptConfirmMs(60_000)).toBe(5_000);   // an arm outliving its turn would abort the next one
+    expect(resolveInterruptConfirmMs(1_234.6)).toBe(1_235);  // whole milliseconds, like the daemon's clamp
+    expect(resolveInterruptConfirmMs(undefined)).toBe(INTERRUPT_CONFIRM_MS); // offline / older daemon
+    expect(resolveInterruptConfirmMs(Number.NaN)).toBe(INTERRUPT_CONFIRM_MS);
   });
 
   // Submitting the next message used to be the only general clear, so a confirmation sat above the

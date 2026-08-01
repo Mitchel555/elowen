@@ -40,6 +40,7 @@ const brainLimitsPatchSchema = z.object({
   goalMaxTurns: z.number().optional(),
   channelSessionCap: z.number().optional(),
   delegateContextChars: z.number().optional(),
+  askHistoryTurns: z.number().optional(),
 });
 
 /** The operator-tunable runtime limits, all optional for the same reason as the brain limits above —
@@ -51,6 +52,7 @@ const runtimeLimitsPatchSchema = z.object({
   eventRetentionDays: z.number().optional(),
   streamSilenceLimitMs: z.number().optional(),
   streamReviveSilenceLimitMs: z.number().optional(),
+  toastDurationMs: z.number().optional(),
 });
 
 /** A patch to the daemon config (PUT /config, admin-only). Mirrors `ConfigPatch` field-for-field so a

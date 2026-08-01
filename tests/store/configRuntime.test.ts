@@ -16,6 +16,7 @@ describe('ConfigStore runtime limits', () => {
         eventRetentionDays: 30,           // purgeOlderThan(days = 30)
         streamSilenceLimitMs: 75_000,     // SILENCE_LIMIT_MS
         streamReviveSilenceLimitMs: 45_000, // REVIVE_SILENCE_LIMIT_MS
+        toastDurationMs: 4_500,           // TOAST_MS
       },
       toolDeferralEnabled: true,
     });
@@ -23,29 +24,29 @@ describe('ConfigStore runtime limits', () => {
 
   it('accepts every knob at both edges of its range', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    cs.update({ runtime: { limits: { localShellTimeoutMs: 10_000, memorySemanticFloorPerMille: 100, toolDeferThreshold: 1, eventRetentionDays: 1, streamSilenceLimitMs: 35_000, streamReviveSilenceLimitMs: 35_000 } } });
+    cs.update({ runtime: { limits: { localShellTimeoutMs: 10_000, memorySemanticFloorPerMille: 100, toolDeferThreshold: 1, eventRetentionDays: 1, streamSilenceLimitMs: 35_000, streamReviveSilenceLimitMs: 35_000, toastDurationMs: 2_000 } } });
     expect(cs.get().runtime.limits).toEqual({
       localShellTimeoutMs: 10_000, memorySemanticFloorPerMille: 100, toolDeferThreshold: 1, eventRetentionDays: 1,
-      streamSilenceLimitMs: 35_000, streamReviveSilenceLimitMs: 35_000,
+      streamSilenceLimitMs: 35_000, streamReviveSilenceLimitMs: 35_000, toastDurationMs: 2_000,
     });
-    cs.update({ runtime: { limits: { localShellTimeoutMs: 300_000, memorySemanticFloorPerMille: 800, toolDeferThreshold: 100, eventRetentionDays: 365, streamSilenceLimitMs: 300_000, streamReviveSilenceLimitMs: 300_000 } } });
+    cs.update({ runtime: { limits: { localShellTimeoutMs: 300_000, memorySemanticFloorPerMille: 800, toolDeferThreshold: 100, eventRetentionDays: 365, streamSilenceLimitMs: 300_000, streamReviveSilenceLimitMs: 300_000, toastDurationMs: 15_000 } } });
     expect(cs.get().runtime.limits).toEqual({
       localShellTimeoutMs: 300_000, memorySemanticFloorPerMille: 800, toolDeferThreshold: 100, eventRetentionDays: 365,
-      streamSilenceLimitMs: 300_000, streamReviveSilenceLimitMs: 300_000,
+      streamSilenceLimitMs: 300_000, streamReviveSilenceLimitMs: 300_000, toastDurationMs: 15_000,
     });
   });
 
   it('clamps a value past either end back into range', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    cs.update({ runtime: { limits: { localShellTimeoutMs: 1, memorySemanticFloorPerMille: 0, toolDeferThreshold: 0, eventRetentionDays: 0, streamSilenceLimitMs: 1_000, streamReviveSilenceLimitMs: 1_000 } } });
+    cs.update({ runtime: { limits: { localShellTimeoutMs: 1, memorySemanticFloorPerMille: 0, toolDeferThreshold: 0, eventRetentionDays: 0, streamSilenceLimitMs: 1_000, streamReviveSilenceLimitMs: 1_000, toastDurationMs: 100 } } });
     expect(cs.get().runtime.limits).toEqual({
       localShellTimeoutMs: 10_000, memorySemanticFloorPerMille: 100, toolDeferThreshold: 1, eventRetentionDays: 1,
-      streamSilenceLimitMs: 35_000, streamReviveSilenceLimitMs: 35_000,
+      streamSilenceLimitMs: 35_000, streamReviveSilenceLimitMs: 35_000, toastDurationMs: 2_000,
     });
-    cs.update({ runtime: { limits: { localShellTimeoutMs: 9_000_000, memorySemanticFloorPerMille: 1_000, toolDeferThreshold: 5_000, eventRetentionDays: 10_000, streamSilenceLimitMs: 9_000_000, streamReviveSilenceLimitMs: 9_000_000 } } });
+    cs.update({ runtime: { limits: { localShellTimeoutMs: 9_000_000, memorySemanticFloorPerMille: 1_000, toolDeferThreshold: 5_000, eventRetentionDays: 10_000, streamSilenceLimitMs: 9_000_000, streamReviveSilenceLimitMs: 9_000_000, toastDurationMs: 9_000_000 } } });
     expect(cs.get().runtime.limits).toEqual({
       localShellTimeoutMs: 300_000, memorySemanticFloorPerMille: 800, toolDeferThreshold: 100, eventRetentionDays: 365,
-      streamSilenceLimitMs: 300_000, streamReviveSilenceLimitMs: 300_000,
+      streamSilenceLimitMs: 300_000, streamReviveSilenceLimitMs: 300_000, toastDurationMs: 15_000,
     });
   });
 

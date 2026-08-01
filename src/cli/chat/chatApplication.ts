@@ -24,7 +24,7 @@ import { FileIndex, loadMentionFrecency } from './mentions.js';
 import { ChatEditor } from './picker.js';
 import { createPickers } from './pickers.js';
 import { loadPrefs, resolveLocale } from './prefs.js';
-import { loadPromptHistory, PromptStash } from './promptHistory.js';
+import { loadPromptHistory, PromptStash, resolvePromptHistoryDepth } from './promptHistory.js';
 import { SnapshotHydrator } from './snapshotHydrator.js';
 import { StreamCoordinator } from './streamCoordinator.js';
 import type { StreamCoordinatorPort } from './streamCoordinator.js';
@@ -198,7 +198,10 @@ export class ChatApplication {
     const tui = new TUI(term);
     tui.setClearOnShrink(true);
     const editor = new ChatEditor(tui, { borderColor: color.faint, selectList: getSelectListTheme() }, {});
-    for (const entry of loadPromptHistory(process.cwd())) editor.addToHistory(entry);
+    // The ↑-recall depth is the user's own (Account → Terminal) and travels with the account, while the
+    // history file it caps is per-machine; an offline boot leaves the built-in default in force.
+    const promptHistoryDepth = resolvePromptHistoryDepth(termSettings?.promptHistoryDepth);
+    for (const entry of loadPromptHistory(process.cwd(), process.env, promptHistoryDepth)) editor.addToHistory(entry);
     const attachmentChips = new AttachmentChips();
     const queuedMessages = new QueuedMessages();
     const editorSlot = new Container();
@@ -239,7 +242,7 @@ export class ChatApplication {
       promptStash: new PromptStash(),
       shellContext: new LocalShellBuffer(),
       mentionIndex: new FileIndex(process.cwd()),
-      commandDefs, termSettings,
+      commandDefs, termSettings, promptHistoryDepth,
       localShellTimeoutMs: shellTimeoutMs ?? LOCAL_SHELL_TIMEOUT_MS,
       cwdLabel: prettyCwd(),
       branchLabel: gitBranch(),

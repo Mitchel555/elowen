@@ -1,5 +1,5 @@
 'use client';
-import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, type LucideIcon } from 'lucide-react';
+import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, MessageSquare, type LucideIcon } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { HelpTip } from '../../components/ui/HelpTip';
@@ -12,7 +12,7 @@ import type { RuntimeConfig, RuntimeLimits } from '../../lib/types';
 /** Fallback for seeding the Runtime form before the daemon's config arrives (it always sends real values). */
 export const RUNTIME_LIMIT_DEFAULTS: RuntimeLimits = {
   localShellTimeoutMs: 30000, memorySemanticFloorPerMille: 300, toolDeferThreshold: 10, eventRetentionDays: 30,
-  streamSilenceLimitMs: 75000, streamReviveSilenceLimitMs: 45000,
+  streamSilenceLimitMs: 75000, streamReviveSilenceLimitMs: 45000, toastDurationMs: 4500,
 };
 
 const MILLISECONDS_PER_SECOND = 1_000;
@@ -45,6 +45,7 @@ const RUNTIME_LIMIT_FIELDS: RuntimeLimitField[] = [
   // limit inside the beat interval would call a healthy but idle stream dead.
   { key: 'streamSilenceLimitMs', kind: 'seconds', min: 35000, max: 300000, step: 5000, icon: Activity },
   { key: 'streamReviveSilenceLimitMs', kind: 'seconds', min: 35000, max: 300000, step: 5000, icon: AlarmClock },
+  { key: 'toastDurationMs', kind: 'seconds', min: 2000, max: 15000, step: 500, icon: MessageSquare },
 ];
 
 const DISPLAY_DIVISORS: Record<RuntimeLimitKind, number> = {

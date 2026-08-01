@@ -230,6 +230,11 @@ export interface TerminalSettings {
   cursorBlink: boolean;
   /** Render the model's Thought rows in the CLI chat (cross-device per-user toggle). */
   showThoughtsCli?: boolean;
+  /** How many sent prompts the CLI chat keeps for ↑-recall, per project. */
+  promptHistoryDepth: number;
+  /** How long the first Esc stays armed in the CLI chat before a second press stops counting as the
+   *  confirmation. Only the confirmation window — key decoding is unaffected. */
+  interruptConfirmMs: number;
   scrollback: number;
   theme: TerminalThemeMode;
   palette: TerminalPalette;

@@ -4,7 +4,8 @@ import { usePathname } from 'next/navigation';
 import { BRAIN_COMPOSE_EVENT, BRAIN_OPEN_EVENT } from '../../lib/brainDock';
 import { Providers } from '../../app/providers';
 import { LanguageProvider } from '../../lib/i18n';
-import { ToastProvider } from '../ui/Toast';
+import { ToastProvider, resolveToastDuration } from '../ui/Toast';
+import { useConfig } from '../../lib/queries';
 import { LoginGate } from '../auth/LoginGate';
 import { Sidebar, type SidebarMode } from './Sidebar';
 import { OrbitalNav } from './OrbitalNav';
@@ -170,6 +171,14 @@ function ShellBody({ children }: { children: ReactNode }) {
   return <ShellLayout>{children}</ShellLayout>;
 }
 
+/** The toast provider bound to the operator's configured duration (Settings → Elowen AI → Runtime). It
+ *  sits above the auth gate, where the config query 401s for a visitor who has not logged in yet — the
+ *  same race every other child query runs — so an unresolved config simply leaves the default in force. */
+function ConfiguredToastProvider({ children }: { children: ReactNode }) {
+  const { data: config } = useConfig();
+  return <ToastProvider durationMs={resolveToastDuration(config?.runtime?.limits)}>{children}</ToastProvider>;
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <EffectsProvider>
@@ -177,13 +186,13 @@ export function Shell({ children }: { children: ReactNode }) {
         <ThemeProvider>
         <UiScaleProvider>
         <LanguageProvider>
-        <ToastProvider>
+        <ConfiguredToastProvider>
           <PageHeaderProvider>
             <LoginGate>
               <ShellBody>{children}</ShellBody>
             </LoginGate>
           </PageHeaderProvider>
-        </ToastProvider>
+        </ConfiguredToastProvider>
         </LanguageProvider>
         </UiScaleProvider>
         </ThemeProvider>

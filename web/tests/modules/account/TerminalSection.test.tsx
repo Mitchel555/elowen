@@ -15,7 +15,7 @@ vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 const mutate = vi.fn();
 vi.mock('../../../lib/mutations', () => ({ useSaveMyTerminalSettings: () => ({ mutate, mutateAsync: mutate }) }));
 
-const SEED: TerminalSettings = { fontSize: 16, fontFamily: 'menlo', cursorStyle: 'bar', cursorBlink: false, scrollback: 2000, theme: 'auto', palette: DARK_PALETTE };
+const SEED: TerminalSettings = { fontSize: 16, fontFamily: 'menlo', cursorStyle: 'bar', cursorBlink: false, scrollback: 2000, theme: 'auto', palette: DARK_PALETTE, promptHistoryDepth: 250, interruptConfirmMs: 2500 };
 const state = vi.hoisted(() => ({ error: false }));
 const mocks = vi.hoisted(() => ({ refetch: vi.fn() }));
 vi.mock('../../../lib/queries', () => ({ useMyTerminalSettings: () => (state.error ? { data: undefined, isLoading: false, isError: true, refetch: mocks.refetch } : { data: SEED, isLoading: false, isError: false }) }));
@@ -69,5 +69,23 @@ describe('TerminalSection', () => {
     fireEvent.change(screen.getAllByRole('slider')[0]!, { target: { value: '18' } }); // fontSize slider
     await waitFor(() => expect(mutate).toHaveBeenCalled(), { timeout: 1500 });
     expect((mutate.mock.calls[0]![0] as TerminalSettings).fontSize).toBe(18);
+  });
+
+  // The two CLI chat knobs must SEED from the stored settings: were the form to keep its built-in
+  // defaults, the next unrelated autosave would write them back over whatever the user had chosen.
+  it('seeds the CLI chat knobs from the stored settings and carries them through a save', async () => {
+    renderSection();
+    const depth = screen.getByRole('slider', { name: 'Prompt history' });
+    const window = screen.getByRole('slider', { name: 'Double Esc window' });
+    expect(depth).toHaveValue('250');
+    expect(window).toHaveValue('2.5'); // stored in milliseconds, edited in seconds
+    expect(screen.getByText('250 lines')).toBeTruthy();
+    expect(screen.getByText('2.5 s')).toBeTruthy();
+
+    fireEvent.change(depth, { target: { value: '400' } });
+    await waitFor(() => expect(mutate).toHaveBeenCalled(), { timeout: 1500 });
+    const saved = mutate.mock.calls[0]![0] as TerminalSettings;
+    expect(saved.promptHistoryDepth).toBe(400);
+    expect(saved.interruptConfirmMs).toBe(2500); // the untouched sibling travels at its stored value
   });
 });

@@ -41,6 +41,11 @@ export interface ChatApplicationResources {
    *  Elowen AI → Runtime) and falling back to LOCAL_SHELL_TIMEOUT_MS when the daemon serves none. Fixed
    *  for the session: a `!` command must not change its deadline mid-run because a setting was saved. */
   readonly localShellTimeoutMs: number;
+  /** ↑-recall depth for the persisted prompt history, resolved once at boot from the user's Account →
+   *  Terminal settings. On `resources` rather than read from `termSettings` at each use because BOTH the
+   *  boot seeding and the submit path cap with it — the Esc window next door has a single reader and stays
+   *  inside its own module. */
+  readonly promptHistoryDepth: number;
   readonly termSettings: Awaited<ReturnType<BrainClient['terminalSettings']>> | null;
   /** Project chips for the status row. Mutable, not readonly: `/cd` moves the process mid-session and
    *  these must follow it, or the CLI would keep reporting a directory it has left. Re-derived on `/cd`

@@ -91,6 +91,42 @@ describe('double-Esc stop flow through the editor', () => {
     composition.dispose();
   });
 
+  // The window is the user's own (Account → Terminal). Shortening it must move the boundary a second
+  // press is judged against — and nothing else: the same run still decodes an arrow key normally, since
+  // reassembling `\x1b[A` is the stdin buffer's byte-driven job and never consults this value.
+  it('judges the second press against the CONFIGURED window, leaving arrow keys alone', () => {
+    const h = compositionHarness({ columns: 100, rows: 24, turns: 6, termSettings: { theme: 'auto', interruptConfirmMs: 600 } });
+    thinking(h);
+    const { abort } = stopClient(h);
+    const composition = makeComposition(h);
+    composition.resume();
+
+    h.tui.emit('\x1b');
+    vi.setSystemTime(1_000 + 900); // past 600 ms, but well inside the 1800 ms default
+    h.tui.emit('\x1b');
+    expect(abort).not.toHaveBeenCalled(); // the arm had already expired — this press only re-arms
+
+    h.tui.emit('\x1b[A'); // an arrow between the presses is not an Esc and must not disarm anything
+    vi.setSystemTime(1_000 + 900 + 400); // inside the configured 600 ms of the re-arm
+    h.tui.emit('\x1b');
+    expect(abort).toHaveBeenCalledOnce();
+    composition.dispose();
+  });
+
+  it('holds a configured window that is out of range at the CLI-side bound', () => {
+    const h = compositionHarness({ columns: 100, rows: 24, turns: 6, termSettings: { theme: 'auto', interruptConfirmMs: 0 } });
+    thinking(h);
+    const { abort } = stopClient(h);
+    const composition = makeComposition(h);
+    composition.resume();
+
+    h.tui.emit('\x1b');
+    vi.setSystemTime(1_000 + 400); // a zero window would have expired instantly; the 500 ms floor has not
+    h.tui.emit('\x1b');
+    expect(abort).toHaveBeenCalledOnce();
+    composition.dispose();
+  });
+
   it('a third press after the abort escalates to the foreground kill', () => {
     const h = compositionHarness({ columns: 100, rows: 24, turns: 6 });
     thinking(h);

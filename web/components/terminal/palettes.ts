@@ -67,4 +67,6 @@ export const TERMINAL_DEFAULTS: TerminalSettings = {
   theme: 'auto',
   palette: DARK_PALETTE,
   showThoughtsCli: true,
+  promptHistoryDepth: 100,
+  interruptConfirmMs: 1800,
 };

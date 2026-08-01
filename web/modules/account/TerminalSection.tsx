@@ -8,6 +8,7 @@ import { Segmented } from '../../components/ui/Segmented';
 import { ChoiceField } from '../../components/ui/ChoiceField';
 import { Slider } from '../../components/ui/Slider';
 import { Toggle } from '../../components/ui/Toggle';
+import { HelpTip } from '../../components/ui/HelpTip';
 import { LoadingState, ErrorState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
@@ -18,6 +19,16 @@ import { useSaveMyTerminalSettings } from '../../lib/mutations';
 import { TerminalPreview } from '../../components/terminal/TerminalPreview';
 import { PALETTE_PRESETS, PALETTE_KEYS, TERMINAL_DEFAULTS } from '../../components/terminal/palettes';
 import type { TerminalSettings, TerminalPalette, TerminalFontFamily, TerminalCursorStyle, TerminalThemeMode } from '../../lib/types';
+
+const MILLISECONDS_PER_SECOND = 1_000;
+
+/** Slider bounds for the two CLI chat knobs. Both MIRROR the daemon's clamp in
+ *  `src/store/terminalSettings.ts` (the web may not import it — see the `web-not-to-backend` rule) so a
+ *  slider can never offer a value the daemon would silently lower, and the CLI re-applies the same pair on
+ *  what it receives. `web/tests/modules/account/terminalCliParity.test.ts` compares all three and fails on
+ *  drift. */
+const PROMPT_HISTORY_DEPTH_BOUNDS: [min: number, max: number] = [20, 1000];
+const INTERRUPT_CONFIRM_BOUNDS: [min: number, max: number] = [500, 5000];
 
 /** Account → Terminal: per-user appearance for every web xterm (advisor dock, session cards, pop-out).
  *  Font, cursor, scrollback and a full 21-colour custom palette, with a live preview and debounced
@@ -37,6 +48,8 @@ export function TerminalSection({ onSaveState }: { onSaveState?: (section: strin
   const [theme, setTheme] = useState<TerminalThemeMode>(TERMINAL_DEFAULTS.theme);
   const [palette, setPalette] = useState<TerminalPalette>(TERMINAL_DEFAULTS.palette);
   const [showThoughtsCli, setShowThoughtsCli] = useState(TERMINAL_DEFAULTS.showThoughtsCli ?? true);
+  const [promptHistoryDepth, setPromptHistoryDepth] = useState(TERMINAL_DEFAULTS.promptHistoryDepth);
+  const [interruptConfirmMs, setInterruptConfirmMs] = useState(TERMINAL_DEFAULTS.interruptConfirmMs);
 
   const [seeded, setSeeded] = useState(false);
   // The palette + live preview open in a side drawer via the pod's orb.
@@ -45,12 +58,13 @@ export function TerminalSection({ onSaveState }: { onSaveState?: (section: strin
     if (data && !seeded) {
       setFontSize(data.fontSize); setFontFamily(data.fontFamily); setCursorStyle(data.cursorStyle);
       setCursorBlink(data.cursorBlink); setScrollback(data.scrollback); setTheme(data.theme);
-      setPalette(data.palette); setShowThoughtsCli(data.showThoughtsCli ?? true); setSeeded(true);
+      setPalette(data.palette); setShowThoughtsCli(data.showThoughtsCli ?? true);
+      setPromptHistoryDepth(data.promptHistoryDepth); setInterruptConfirmMs(data.interruptConfirmMs); setSeeded(true);
     }
   }, [data, seeded]);
 
-  const settings: TerminalSettings = { fontSize, fontFamily, cursorStyle, cursorBlink, scrollback, theme, palette, showThoughtsCli };
-  const autosave = useAutoSaveStatus([fontSize, fontFamily, cursorStyle, cursorBlink, scrollback, theme, palette, showThoughtsCli], async () => {
+  const settings: TerminalSettings = { fontSize, fontFamily, cursorStyle, cursorBlink, scrollback, theme, palette, showThoughtsCli, promptHistoryDepth, interruptConfirmMs };
+  const autosave = useAutoSaveStatus([fontSize, fontFamily, cursorStyle, cursorBlink, scrollback, theme, palette, showThoughtsCli, promptHistoryDepth, interruptConfirmMs], async () => {
     try { await save.mutateAsync(settings); }
     catch (error) { toast(t.terminal.saveError, 'error'); throw error; }
   }, { ready: seeded });
@@ -148,10 +162,49 @@ export function TerminalSection({ onSaveState }: { onSaveState?: (section: strin
 
   const rowCli = (
       <SpatialRow title={t.terminal.cliTitle} icon={ScrollText} description={t.terminal.showThoughtsHelp}>
-        <label className="flex items-center gap-3 text-sm text-text">
-          <Toggle checked={showThoughtsCli} onChange={setShowThoughtsCli} label={t.terminal.showThoughts} />
-          <span>{t.terminal.showThoughts}</span>
-        </label>
+        <div className="flex flex-col gap-4">
+          <label className="flex items-center gap-3 text-sm text-text">
+            <Toggle checked={showThoughtsCli} onChange={setShowThoughtsCli} label={t.terminal.showThoughts} />
+            <span>{t.terminal.showThoughts}</span>
+          </label>
+          <div className="flex flex-col gap-1.5">
+            <span className={`flex items-center gap-1.5 ${label}`}>
+              {t.terminal.promptHistoryDepth}
+              <HelpTip>{t.terminal.promptHistoryDepthHelp}</HelpTip>
+            </span>
+            <div className="flex items-center gap-4">
+              <Slider
+                value={promptHistoryDepth}
+                min={PROMPT_HISTORY_DEPTH_BOUNDS[0]}
+                max={PROMPT_HISTORY_DEPTH_BOUNDS[1]}
+                step={10}
+                onChange={setPromptHistoryDepth}
+                aria-label={t.terminal.promptHistoryDepth}
+              />
+              <span className="w-20 shrink-0 text-right font-mono text-sm tabular-nums text-text">{`${promptHistoryDepth.toLocaleString()} ${t.terminal.lineUnit}`}</span>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className={`flex items-center gap-1.5 ${label}`}>
+              {t.terminal.interruptConfirmMs}
+              <HelpTip>{t.terminal.interruptConfirmMsHelp}</HelpTip>
+            </span>
+            <div className="flex items-center gap-4">
+              {/* Edited in seconds, stored in milliseconds — the daemon clamps whole milliseconds. */}
+              <Slider
+                value={interruptConfirmMs / MILLISECONDS_PER_SECOND}
+                min={INTERRUPT_CONFIRM_BOUNDS[0] / MILLISECONDS_PER_SECOND}
+                max={INTERRUPT_CONFIRM_BOUNDS[1] / MILLISECONDS_PER_SECOND}
+                step={100 / MILLISECONDS_PER_SECOND}
+                onChange={(next) => setInterruptConfirmMs(Math.round(next * MILLISECONDS_PER_SECOND))}
+                aria-label={t.terminal.interruptConfirmMs}
+              />
+              <span className="w-20 shrink-0 text-right font-mono text-sm tabular-nums text-text">
+                {`${Number((interruptConfirmMs / MILLISECONDS_PER_SECOND).toFixed(1))} ${t.terminal.secondUnit}`}
+              </span>
+            </div>
+          </div>
+        </div>
       </SpatialRow>
   );
 

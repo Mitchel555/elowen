@@ -66,7 +66,24 @@ export interface ChatComposition {
   dispose(): void;
 }
 
+/** Window used when no per-user setting reached the CLI (older daemon, offline boot). Matches
+ *  `TERMINAL_DEFAULTS.interruptConfirmMs`, the source of the configured value. */
 export const INTERRUPT_CONFIRM_MS = 1_800;
+
+/** Bounds mirroring the daemon's own clamp (`INTERRUPT_CONFIRM_BOUNDS` in store/terminalSettings.ts),
+ *  re-applied here because the value arrives over the wire from a daemon whose version the CLI does not
+ *  control. Nothing about this window touches key DECODING: `\x1b[A` is reassembled into an arrow key by
+ *  pi-tui's stdin buffer on its own byte-driven 10 ms timeout, long before any consumer sees an Esc, so
+ *  shortening the confirmation window cannot split an escape sequence. */
+const INTERRUPT_CONFIRM_BOUNDS: [min: number, max: number] = [500, 5000];
+
+/** The effective double-Esc window for this session: the user's Account → Terminal value, held inside the
+ *  bounds above, or the built-in default when the daemon served none. */
+export function resolveInterruptConfirmMs(configured: number | undefined): number {
+  if (typeof configured !== 'number' || !Number.isFinite(configured)) return INTERRUPT_CONFIRM_MS;
+  const [min, max] = INTERRUPT_CONFIRM_BOUNDS;
+  return Math.min(max, Math.max(min, Math.round(configured)));
+}
 
 /** How long a transient notice stays above the composer. Long enough to read a line of confirmation
  *  after looking back at the screen, short enough that it is gone before it reads as state. */
@@ -127,6 +144,8 @@ export function createChatComposition(
     // them mid-session and a copy taken once here would pin the status row to the launch directory.
     promptStash, shellContext, mentionIndex, commandDefs, lifetime,
   } = resources;
+  // Resolved once: the window a press is judged against must not change under a turn already armed.
+  const interruptConfirmMs = resolveInterruptConfirmMs(resources.termSettings?.interruptConfirmMs);
   let renderOwner!: RenderShell;
   let scheduledMessagePresence = rt.transcript.turnCount > 0;
   const render = (reason = 'state'): void => {
@@ -474,7 +493,7 @@ export function createChatComposition(
   // the two-press parent-turn path and the empty-queue fallback, so a follow-up Esc aborts consistently.
   const armInterrupt = (armedUntil: number): void => {
     interruptArmedUntil = armedUntil;
-    animations.scheduleVisual('interrupt-arm', INTERRUPT_CONFIRM_MS, () => {
+    animations.scheduleVisual('interrupt-arm', interruptConfirmMs, () => {
       if (interruptArmedUntil === armedUntil) { clearInterruptArm(); render('input:interrupt-expired'); }
     });
   };
@@ -864,7 +883,7 @@ export function createChatComposition(
               // The server saw an empty queue (the SSE mirror already drained it) and deliberately did NOT
               // abort. Fall into the two-press disarm window so a follow-up Esc still stops the parent turn,
               // and remember that the mirror lied so that press is not routed back here.
-              armInterrupt(Date.now() + INTERRUPT_CONFIRM_MS);
+              armInterrupt(Date.now() + interruptConfirmMs);
               queueMirrorStale = true;
               rt.notice = color.dim('queue already delivered · esc again to interrupt');
             }
@@ -877,7 +896,7 @@ export function createChatComposition(
         );
         return true;
       }
-      const next = escalationPress(stopRequested, interruptArmedUntil, Date.now());
+      const next = escalationPress(stopRequested, interruptArmedUntil, Date.now(), interruptConfirmMs);
       if (next.action === 'kill') {
         // The abort already fired and the turn is still pinned — hard-kill the foreground command so the
         // parked agent loop can unwind. Idempotent server-side: a settled run kills 0.

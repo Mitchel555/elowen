@@ -26,6 +26,14 @@ export interface TerminalSettings {
   /** Render the model's Thought rows in the CLI chat transcript. Cross-device (per user), toggled from
    *  Account → Terminal or `/reasoning show` in the CLI. */
   showThoughtsCli: boolean;
+  /** How many sent prompts the CLI chat keeps for ↑-recall, per project. The history file itself is
+   *  per-machine, but how far back a person wants to reach is a property of the person, so the depth
+   *  travels with the account and the CLI reads it at boot. */
+  promptHistoryDepth: number;
+  /** How long the first Esc stays armed in the CLI chat, i.e. how quickly the confirming SECOND press has
+   *  to follow to interrupt the turn. Purely the CONFIRMATION window — decoding `\x1b[A` into an arrow key
+   *  is the stdin buffer's own affair (pi-tui, 10 ms, and byte-driven), so this value cannot affect it. */
+  interruptConfirmMs: number;
 }
 
 // The font-family id → CSS stack mapping lives only where it's applied (the web, in
@@ -54,6 +62,8 @@ export const TERMINAL_DEFAULTS: TerminalSettings = {
   theme: 'auto',
   palette: DARK_PALETTE,
   showThoughtsCli: true,
+  promptHistoryDepth: 100,
+  interruptConfirmMs: 1800,
 };
 
 const isHex6 = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
@@ -73,6 +83,21 @@ function clampScrollback(n: unknown): number {
   const v = Number(n);
   if (!Number.isFinite(v)) return TERMINAL_DEFAULTS.scrollback;
   return Math.min(50_000, Math.max(500, Math.round(v)));
+}
+
+/** Bound the ↑-recall depth. The whole history file is rewritten on every sent prompt, so the ceiling is
+ *  what keeps that write cheap; below the floor the recall stops reaching past the current sitting. */
+const PROMPT_HISTORY_DEPTH_BOUNDS: [min: number, max: number] = [20, 1000];
+/** Bound the double-Esc confirmation window. The floor is what a second deliberate keypress needs — under
+ *  it the feature reads as broken, since the first Esc disarms before a hand can follow it. The ceiling is
+ *  a correctness bound: an armed window that outlives the turn it was armed in would let a press meant for
+ *  that turn abort the NEXT one, which is the stale-arm failure `interruptPress` exists to prevent. */
+const INTERRUPT_CONFIRM_BOUNDS: [min: number, max: number] = [500, 5000];
+
+function clampToBounds(n: unknown, [min, max]: [number, number], fallback: number): number {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(v)));
 }
 
 /** Build a full valid palette from an untrusted partial, dropping any non-`#rrggbb` value to `base`. */
@@ -96,6 +121,8 @@ export function sanitizeTerminalSettings(input: unknown, base: TerminalSettings 
     theme: isThemeMode(src.theme) ? src.theme : base.theme,
     palette: sanitizePalette(src.palette, base.palette),
     showThoughtsCli: typeof src.showThoughtsCli === 'boolean' ? src.showThoughtsCli : base.showThoughtsCli,
+    promptHistoryDepth: src.promptHistoryDepth !== undefined ? clampToBounds(src.promptHistoryDepth, PROMPT_HISTORY_DEPTH_BOUNDS, base.promptHistoryDepth) : base.promptHistoryDepth,
+    interruptConfirmMs: src.interruptConfirmMs !== undefined ? clampToBounds(src.interruptConfirmMs, INTERRUPT_CONFIRM_BOUNDS, base.interruptConfirmMs) : base.interruptConfirmMs,
   };
 }
 

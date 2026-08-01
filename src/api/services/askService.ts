@@ -5,8 +5,6 @@ import type { ServerDeps } from '../deps.js';
 /** One poll's max hold before returning a heartbeat so the worker's CLI re-polls (mirrors the overseer
  *  long-poll heartbeat). Kept under common proxy idle timeouts. */
 const POLL_HEARTBEAT_MS = 25_000;
-/** How many of the most recent conversation turns the overseer is handed as context. */
-const HISTORY_TURNS = 30;
 /** Grace period after an exchange SETTLES before its in-memory entry is evicted, so a late re-poll (or
  *  the route's access gate) still resolves it before it's GC'd. (An exchange parked on a human that is
  *  never answered is held until it settles — by design: it stays on the Escalations page until a person
@@ -107,12 +105,14 @@ export function createAskService({ d, decisionQueue }: AskServiceDeps): AskServi
 
   /** The task's conversation so far (every `message` turn, oldest-first) so the overseer answers with
    *  full context instead of a single isolated question. Kept to the MOST RECENT turns so the just-asked
-   *  question is always included — `list` with a target is ordered oldest-first, so slice from the tail. */
+   *  question is always included — `list` with a target is ordered oldest-first, so slice from the tail.
+   *  The window is read per call rather than captured at construction: the service outlives a settings
+   *  save, so a captured value would keep the old window until the daemon restarted. */
   function history(taskId: string): { role: AskRole; text: string }[] {
     const turns = (d.events?.list({ target: taskId, type: 'message' }) ?? [])
       .map((e) => { try { const p = JSON.parse(e.detail) as { role: AskRole; text: string }; return p.role && typeof p.text === 'string' ? p : null; } catch { return null; } })
       .filter((p): p is { role: AskRole; text: string } => p !== null);
-    return turns.slice(-HISTORY_TURNS); // newest turns, still oldest-first within the window
+    return turns.slice(-d.config.get().brain.limits.askHistoryTurns); // newest turns, still oldest-first
   }
 
   async function resolveExchange(askId: string, taskId: string, question: string): Promise<void> {

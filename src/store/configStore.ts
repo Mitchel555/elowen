@@ -213,6 +213,9 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   goalMaxTurns: 64,
   channelSessionCap: 32,
   delegateContextChars: 20_000,
+  // An ask thread is a short clarification exchange, not a conversation — 30 turns already reaches back
+  // past anything the overseer needs to answer the question that was just asked.
+  askHistoryTurns: 30,
 };
 
 /** Adjustable range of a tuning knob: its default ±50%, derived from the default so raising a default
@@ -252,6 +255,9 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   goalTurnBudget: [4, 500],
   goalMaxTurns: [8, 500],
   channelSessionCap: [4, 256],
+  // Plain ±50% rule: the window only has to cover the exchange in progress, so the tuning margin around
+  // the default is the whole useful range — a far larger one would just re-send settled turns every ask.
+  askHistoryTurns: band('askHistoryTurns'),
 };
 /** Merge a (possibly partial, possibly malformed) limits patch onto `fallback`, clamping each field to
  *  its bound and rounding to a whole number; a missing/invalid field keeps the fallback value. */
@@ -283,6 +289,7 @@ export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   streamSilenceLimitMs: 75_000,
   // …and a tighter one at a wake-up, where no watchdog tick could have run while the page slept.
   streamReviveSilenceLimitMs: 45_000,
+  toastDurationMs: 4_500,
 };
 
 /** Hard floor under BOTH stream silence limits — a correctness bound, not a taste one. The daemon sends an
@@ -312,6 +319,9 @@ const RUNTIME_LIMIT_BOUNDS: Record<keyof RuntimeLimits, [min: number, max: numbe
   // is five minutes, past which a dead stream is no longer worth calling detected.
   streamSilenceLimitMs: [MIN_STREAM_SILENCE_MS, 300_000],
   streamReviveSilenceLimitMs: [MIN_STREAM_SILENCE_MS, 300_000],
+  // A toast is a glance, not a panel: under two seconds the sentence is gone before it is read, and past
+  // fifteen it stops reading as a notice and starts reading as state the page is holding open.
+  toastDurationMs: [2_000, 15_000],
 };
 
 /** Merge a (possibly partial, possibly malformed) runtime-limits patch onto `fallback` — same per-field

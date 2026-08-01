@@ -5,6 +5,7 @@ import type { TerminalSettings } from '../../../lib/types';
 
 const base: TerminalSettings = {
   fontSize: 12, fontFamily: 'system', cursorStyle: 'block', cursorBlink: true, scrollback: 1000, theme: 'auto', palette: DARK_PALETTE,
+  promptHistoryDepth: 100, interruptConfirmMs: 1800,
 };
 
 describe('xtermTheme', () => {

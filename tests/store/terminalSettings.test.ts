@@ -16,6 +16,19 @@ describe('terminalSettings — sanitize (untrusted → valid)', () => {
     expect(sanitizeTerminalSettings({ scrollback: 9_999_999 }).scrollback).toBe(50_000);
   });
 
+  // Both CLI chat knobs are clamped on the way in, exactly like fontSize/scrollback: the route forwards
+  // the request body untouched, so this sanitiser is the only thing between a typed number and the CLI.
+  it('clamps the CLI chat knobs into their bands', () => {
+    expect(sanitizeTerminalSettings({ promptHistoryDepth: 1 }).promptHistoryDepth).toBe(20);
+    expect(sanitizeTerminalSettings({ promptHistoryDepth: 50_000 }).promptHistoryDepth).toBe(1000);
+    expect(sanitizeTerminalSettings({ promptHistoryDepth: 250.4 }).promptHistoryDepth).toBe(250); // whole numbers only
+    expect(sanitizeTerminalSettings({ promptHistoryDepth: 'lots' }).promptHistoryDepth).toBe(100); // non-number → default
+    expect(sanitizeTerminalSettings({ interruptConfirmMs: 0 }).interruptConfirmMs).toBe(500);
+    expect(sanitizeTerminalSettings({ interruptConfirmMs: 60_000 }).interruptConfirmMs).toBe(5_000);
+    expect(sanitizeTerminalSettings({ interruptConfirmMs: 2_500 }).interruptConfirmMs).toBe(2_500);
+    expect(sanitizeTerminalSettings({ interruptConfirmMs: Number.NaN }).interruptConfirmMs).toBe(1800);
+  });
+
   it('falls back on unknown enum values', () => {
     const s = sanitizeTerminalSettings({ fontFamily: 'comic-sans', cursorStyle: 'wiggle', theme: 'neon' });
     expect(s.fontFamily).toBe('system');

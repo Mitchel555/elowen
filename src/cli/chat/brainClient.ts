@@ -536,13 +536,15 @@ export class BrainClient {
     return (await res.json()) as LspStatus;
   }
 
-  /** The caller's web Account → Terminal appearance settings — the CLI derives its chat theme from a
-   *  CUSTOM palette so colors configured on the web carry across devices. */
-  async terminalSettings(): Promise<{ theme: string; palette?: Record<string, string>; showThoughtsCli?: boolean }> {
+  /** The caller's web Account → Terminal settings — the CLI derives its chat theme from a CUSTOM palette
+   *  so colors configured on the web carry across devices, and reads the two chat-behaviour knobs
+   *  (↑-recall depth, double-Esc window) from the same place. Every field stays optional: a daemon too old
+   *  to serve one leaves the CLI on its own built-in default rather than on NaN. */
+  async terminalSettings(): Promise<{ theme: string; palette?: Record<string, string>; showThoughtsCli?: boolean; promptHistoryDepth?: number; interruptConfirmMs?: number }> {
     const res = await this.f(`${this.o.base}/auth/me/terminal-settings`, { headers: this.headers() });
     if (res.status === 401) throw new Unauthorized();
     if (!res.ok) throw new Error(`elowen ${res.status} on /auth/me/terminal-settings`);
-    return (await res.json()) as { theme: string; palette?: Record<string, string>; showThoughtsCli?: boolean };
+    return (await res.json()) as { theme: string; palette?: Record<string, string>; showThoughtsCli?: boolean; promptHistoryDepth?: number; interruptConfirmMs?: number };
   }
 
   /** Patch the caller's per-user terminal settings (`/reasoning show` persists the Thought toggle

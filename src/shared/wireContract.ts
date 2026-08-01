@@ -222,6 +222,8 @@ export interface BrainLimits {
   goalMaxTurns: number;
   channelSessionCap: number;
   delegateContextChars: number;
+  /** How many of a task's most recent `elowen ask` turns travel to the overseer as its context. */
+  askHistoryTurns: number;
 }
 
 /** Operator-tunable runtime limits (Settings → Elowen AI → Runtime): each a whole number the daemon
@@ -250,6 +252,9 @@ export interface RuntimeLimits {
    *  so the watchdog tick that should have caught this never happened and the wall clock is read instead.
    *  Tighter than its twin by default: nobody was watching, so a lost stream is likelier here. */
   streamReviveSilenceLimitMs: number;
+  /** How long a web toast holds the screen before dismissing itself. Read by the WEB client, same trip
+   *  through this contract as the stream pair above — it has no daemon-side reader at all. */
+  toastDurationMs: number;
 }
 
 /** The runtime block as served/patched: the numeric limits plus the deferral kill switch (its own field

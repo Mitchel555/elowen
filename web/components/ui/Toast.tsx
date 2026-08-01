@@ -9,9 +9,28 @@ interface ToastCtx { toast: (message: string, tone?: Tone) => void }
 
 const Ctx = createContext<ToastCtx | null>(null);
 let nextId = 0;
-const TOAST_MS = 4500;
 
-function ToastCard({ item, meta, dismissLabel, onDismiss }: { item: ToastItem; meta: { Icon: LucideIcon; color: string; title: string }; dismissLabel: string; onDismiss: () => void }) {
+/** Used until the daemon's config lands, and against a daemon too old to carry the field. Keeps the
+ *  value that was hardcoded before the setting existed. */
+export const DEFAULT_TOAST_MS = 4500;
+/** Floor and ceiling mirroring the daemon's `toastDurationMs` clamp (`src/store/configStore.ts`). The
+ *  floor is a correctness bound, not taste: the countdown below divides the elapsed time BY this value,
+ *  so a zero would render the progress bar as NaN and dismiss the toast before it could be read — and the
+ *  browser cannot assume the daemon that answered GET /config clamps the way this build does. */
+export const MIN_TOAST_MS = 2_000;
+export const MAX_TOAST_MS = 15_000;
+
+/** Read the configured duration out of the daemon's runtime limits, held inside the bounds above.
+ *  Structurally typed rather than importing `RuntimeLimits`, so a caller may pass the limits block of a
+ *  config that has not arrived yet (or came from a daemon that never serves the field). */
+export function resolveToastDuration(limits?: { toastDurationMs?: number }): number {
+  const value = limits?.toastDurationMs;
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(MAX_TOAST_MS, Math.max(MIN_TOAST_MS, value))
+    : DEFAULT_TOAST_MS;
+}
+
+function ToastCard({ item, meta, durationMs, dismissLabel, onDismiss }: { item: ToastItem; meta: { Icon: LucideIcon; color: string; title: string }; durationMs: number; dismissLabel: string; onDismiss: () => void }) {
   const { Icon, color, title } = meta;
   const [remaining, setRemaining] = useState(100);
   const paused = useRef(false);
@@ -30,12 +49,12 @@ function ToastCard({ item, meta, dismissLabel, onDismiss }: { item: ToastItem; m
     let raf = requestAnimationFrame(function tick(now) {
       if (!paused.current) elapsed += now - last;
       last = now;
-      setRemaining(Math.max(0, 100 - (elapsed / TOAST_MS) * 100));
-      if (elapsed >= TOAST_MS) { onDismiss(); return; }
+      setRemaining(Math.max(0, 100 - (elapsed / durationMs) * 100));
+      if (elapsed >= durationMs) { onDismiss(); return; }
       raf = requestAnimationFrame(tick);
     });
     return () => cancelAnimationFrame(raf);
-  }, [onDismiss]);
+  }, [durationMs, onDismiss]);
 
   return (
     <div
@@ -68,7 +87,11 @@ function ToastCard({ item, meta, dismissLabel, onDismiss }: { item: ToastItem; m
   );
 }
 
-export function ToastProvider({ children }: { children: ReactNode }) {
+/** `durationMs` is a prop rather than a `useConfig()` call inside this provider on purpose: the provider
+ *  mounts above the auth gate and is rendered bare by most component tests, so fetching here would put a
+ *  query client in the way of every one of them. `ConfiguredToastProvider` (components/shell) is the one
+ *  place that resolves it from the daemon config. */
+export function ToastProvider({ children, durationMs = DEFAULT_TOAST_MS }: { children: ReactNode; durationMs?: number }) {
   const { t } = useTranslation();
   const TONE: Record<Tone, { Icon: LucideIcon; color: string; title: string }> = {
     ok: { Icon: CheckCircle2, color: '#32CD32', title: t.common.success },
@@ -91,7 +114,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           and step the size back up from `sm` onward. */}
       <div className="pointer-events-none fixed top-3 right-3 z-50 flex w-[calc(100vw-1.5rem)] flex-col gap-2 sm:top-5 sm:right-5 sm:w-[26rem] sm:gap-2.5">
         {items.map((item) => (
-          <ToastCard key={item.id} item={item} meta={TONE[item.tone]} dismissLabel={t.common.dismiss} onDismiss={() => dismiss(item.id)} />
+          <ToastCard key={item.id} item={item} meta={TONE[item.tone]} durationMs={durationMs} dismissLabel={t.common.dismiss} onDismiss={() => dismiss(item.id)} />
         ))}
       </div>
     </Ctx.Provider>

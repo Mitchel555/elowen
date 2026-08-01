@@ -50,6 +50,40 @@ describe('prompt history persistence (per project)', () => {
     expect(entries[entries.length - 1]).toBe(`prompt ${MAX_PROMPT_HISTORY + 19}`);
   });
 
+  // The depth is a per-user setting (Account → Terminal) the CLI reads at boot, so BOTH ends have to
+  // honour it: the writer, which decides what survives in the file, and the reader, which decides what a
+  // session recalls out of a file another session may have written at a different depth.
+  it('caps the writer at the CONFIGURED depth', () => {
+    const env = makeEnv();
+    for (let i = 0; i < 40; i++) appendPromptHistory('/p', `prompt ${i}`, env, 25);
+    // Read back at a LARGER depth than it was written with, or the reader's own cap would hide whether
+    // the writer truncated anything: what is asserted here is the state of the file.
+    const entries = loadPromptHistory('/p', env, 1000);
+    expect(entries).toHaveLength(25);
+    expect(entries[0]).toBe('prompt 15');
+    expect(entries[entries.length - 1]).toBe('prompt 39');
+  });
+
+  it('caps the reader at the CONFIGURED depth, without touching the stored file', () => {
+    const env = makeEnv();
+    for (let i = 0; i < 40; i++) appendPromptHistory('/p', `prompt ${i}`, env);
+    expect(loadPromptHistory('/p', env, 30)).toHaveLength(30);
+    expect(loadPromptHistory('/p', env, 30)[0]).toBe('prompt 10');
+    expect(loadPromptHistory('/p', env)).toHaveLength(40); // the file itself still holds all 40
+  });
+
+  // The depth arrives over the wire from a daemon whose version the CLI does not control, so the bounds
+  // are re-applied here. A depth of 0 would make the next sent prompt truncate the file to nothing.
+  it('holds an out-of-range or absent depth inside the CLI-side bounds', () => {
+    const env = makeEnv();
+    for (let i = 0; i < 40; i++) appendPromptHistory('/p', `prompt ${i}`, env);
+    expect(loadPromptHistory('/p', env, 0)).toHaveLength(20);          // floor
+    expect(loadPromptHistory('/p', env, 9_999_999)).toHaveLength(40);  // ceiling raised, file is shorter
+    expect(loadPromptHistory('/p', env, Number.NaN)).toHaveLength(40); // unusable → built-in default
+    appendPromptHistory('/p', 'after a zero depth', env, 0);
+    expect(loadPromptHistory('/p', env, 1000)).toHaveLength(20); // floored, never emptied
+  });
+
   it('ignores blank prompts and survives a corrupt or missing file', () => {
     const env = makeEnv();
     appendPromptHistory('/p', '   ', env); // blank → no write at all

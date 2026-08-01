@@ -231,7 +231,7 @@ export function compactNotice(result: { compacted: boolean; message?: string }):
 
 export function wireSubmit(
   rt: ChatState,
-  resources: Pick<ChatApplicationResources, 'client' | 'tui' | 'editor' | 'attachmentChips' | 'shellContext' | 'commandDefs' | 'lifetime' | 'localShellTimeoutMs'>,
+  resources: Pick<ChatApplicationResources, 'client' | 'tui' | 'editor' | 'attachmentChips' | 'shellContext' | 'commandDefs' | 'lifetime' | 'localShellTimeoutMs' | 'promptHistoryDepth'>,
   actions: ChatApplicationActions,
   deps: {
     stream: StreamCoordinatorPort;
@@ -258,7 +258,7 @@ export function wireSubmit(
     const trimmed = text.trim();
     if (!trimmed) return;
     editor.addToHistory(trimmed); // Up-arrow recall of sent inputs (seeded from disk at startup)
-    appendPromptHistory(process.cwd(), trimmed); // per-project persistence for the next session
+    appendPromptHistory(process.cwd(), trimmed, process.env, resources.promptHistoryDepth); // per-project persistence for the next session
     editor.setText('');
     rt.notice = '';
     // `!cmd` runs LOCALLY (node child_process in the CLI's cwd) — never sent to the brain. The output
