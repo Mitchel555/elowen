@@ -48,6 +48,14 @@ export interface DelegatedChildSummary {
  *  tool call into an unbounded transcript dump. */
 const MAX_DELEGATED_CHILDREN = 50;
 
+/** `provider/model` when both are known, the bare model when only that is. A bare id is ambiguous once
+ *  several providers serve similarly named models, and the listing is what an agent reads to report which
+ *  model actually ran — so it should not have to guess. */
+function qualifiedModel(provider: string | null, model: string | null): string | undefined {
+  if (!model) return undefined;
+  return provider ? `${provider}/${model}` : model;
+}
+
 export interface BrainSubagentResult {
   /** Which producer enqueued this row (see brain_subagent_results.kind). A 'workflow' result carries an
    *  empty `sessionId` and a `workflowId` instead of a child session. */
@@ -339,10 +347,38 @@ export class BrainDelegationStore {
    *  a workflow node is a real continuable child even though the engine records the DAG instead of a
    *  per-child run row. Non-sub-agent nested sessions (a bound channel) are filtered out — they are not
    *  delegated children and have no immutable scope to resume under. */
+  /** Every workflow node of one conversation, keyed by the child session it ran in. The engine records a
+   *  whole-DAG snapshot instead of a per-child run row, so this is where a node's task and status live —
+   *  and the only way `listDelegatedChildren` can describe one rather than calling it unknown. */
+  private workflowNodesBySession(parentSessionId: string): Map<string, { task: string; status: 'running' | 'done' | 'error' }> {
+    const out = new Map<string, { task: string; status: 'running' | 'done' | 'error' }>();
+    const rows = this.db.prepare(
+      'SELECT state FROM brain_workflows WHERE parent_session_id = ?'
+    ).all(parentSessionId) as { state: string }[];
+    for (const row of rows) {
+      let parsed: unknown;
+      // A malformed snapshot costs the enrichment, never the listing: the child is still continuable.
+      try { parsed = JSON.parse(row.state); } catch { continue; }
+      if (typeof parsed !== 'object' || parsed === null) continue;
+      const nodes = (parsed as { nodes?: unknown }).nodes;
+      if (!Array.isArray(nodes)) continue;
+      for (const raw of nodes) {
+        if (typeof raw !== 'object' || raw === null) continue;
+        const n = raw as { sessionId?: unknown; task?: unknown; status?: unknown };
+        if (typeof n.sessionId !== 'string' || !n.sessionId) continue;
+        const status = n.status === 'running' || n.status === 'done' || n.status === 'error' ? n.status : undefined;
+        if (!status) continue;
+        out.set(n.sessionId, { task: typeof n.task === 'string' ? n.task : '', status });
+      }
+    }
+    return out;
+  }
+
   listDelegatedChildren(parentSessionId: string, limit = MAX_DELEGATED_CHILDREN): DelegatedChildSummary[] {
     if (!parentSessionId) return [];
     const rows = this.db.prepare(
-      `SELECT c.id, c.title, c.created_at, c.updated_at, r.state, r.updated_at AS run_updated_at,
+      `SELECT c.id, c.title, c.created_at, c.updated_at, c.model, c.provider,
+              r.state, r.updated_at AS run_updated_at,
               (SELECT COUNT(*) FROM brain_messages m WHERE m.session_id = c.id) AS messages
          FROM brain_sessions c
          JOIN brain_sessions p ON p.id = c.parent_session_id
@@ -353,9 +389,17 @@ export class BrainDelegationStore {
         ORDER BY c.created_at DESC, c.rowid DESC`
     ).all(parentSessionId) as {
       id: string; title: string; created_at: string; updated_at: string;
+      model: string | null; provider: string | null;
       state: string | null; run_updated_at: string | null; messages: number;
     }[];
     const capped = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, MAX_DELEGATED_CHILDREN) : MAX_DELEGATED_CHILDREN;
+    // Parsed at most once per listing, and only when a row actually needs it: a conversation that never
+    // ran a workflow must not pay to parse DAG snapshots, and one that did must not re-parse per row.
+    let nodesBySession: Map<string, { task: string; status: 'running' | 'done' | 'error' }> | undefined;
+    const workflowNodes = (): Map<string, { task: string; status: 'running' | 'done' | 'error' }> => {
+      if (!nodesBySession) nodesBySession = this.workflowNodesBySession(parentSessionId);
+      return nodesBySession;
+    };
     const out: DelegatedChildSummary[] = [];
     for (const row of rows) {
       if (out.length >= capped) break;
@@ -366,11 +410,19 @@ export class BrainDelegationStore {
       if (row.state) {
         try { state = normalizeSubagentState(JSON.parse(row.state)); } catch { state = undefined; }
       }
+      // A workflow node has no run row, so its task/status live in the DAG snapshot instead — without
+      // this it listed as "unknown" forever, including long after it finished.
+      const node = state ? undefined : workflowNodes().get(row.id);
+      // The session row is the one place that always knows which model actually ran, and it keeps the
+      // provider too. The run state carries a bare model id at best and is absent for workflow nodes,
+      // so it is only the fallback now: "kimi-coding/k3" beats "k3" beats nothing.
+      const model = qualifiedModel(row.provider, row.model) ?? state?.model;
       out.push({
         sessionId: row.id,
         title: row.title,
         ...(state ? { task: state.task, status: state.status } : {}),
-        ...(state?.model ? { model: state.model } : {}),
+        ...(node ? { task: node.task, status: node.status } : {}),
+        ...(model ? { model } : {}),
         messages: Number(row.messages) || 0,
         startedAt: row.created_at,
         updatedAt: row.run_updated_at ?? row.updated_at,

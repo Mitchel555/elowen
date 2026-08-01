@@ -16,9 +16,15 @@ describe('BrainStore.listDelegatedChildren', () => {
     store.createSession({ id, userId, model: 'm', parentSessionId: parent, delegatedAccess: SCOPE });
   };
 
+  /** The run row's own `model` is a bare id recorded by the plugin and is absent entirely for workflow
+   *  nodes, so the session row wins when the two disagree — it is the one that always knows what ran. */
+  const childOn = (id: string, parent: string, model: string, provider: string): void => {
+    store.createSession({ id, userId: 1, model, provider, parentSessionId: parent, delegatedAccess: SCOPE });
+  };
+
   it('lists this conversation\'s own sub-agent children with their task, status and message count', () => {
     store.createSession({ id: 'root', userId: 1, model: 'm' });
-    child('brain-ch-subagent-sub-a', 'root');
+    childOn('brain-ch-subagent-sub-a', 'root', 'claude', 'anthropic');
     store.setTitle('brain-ch-subagent-sub-a', 'Audit the auth module');
     store.appendMessage({ id: 'm1', sessionId: 'brain-ch-subagent-sub-a', parentId: null, role: 'user', content: 'go' });
     store.appendMessage({ id: 'm2', sessionId: 'brain-ch-subagent-sub-a', parentId: null, role: 'assistant', content: 'done' });
@@ -32,7 +38,7 @@ describe('BrainStore.listDelegatedChildren', () => {
     expect(rows[0]!.sessionId).toBe('brain-ch-subagent-sub-a');
     expect(rows[0]!.task).toBe('Audit the auth module for missing checks');
     expect(rows[0]!.status).toBe('done');
-    expect(rows[0]!.model).toBe('claude');
+    expect(rows[0]!.model).toBe('anthropic/claude');
     expect(rows[0]!.messages).toBe(2);
     expect(rows[0]!.title).toBe('Audit the auth module');
     // The listing renders this as the child's age, so it has to be the child session's own creation
@@ -51,8 +57,40 @@ describe('BrainStore.listDelegatedChildren', () => {
     store.setTitle('brain-ch-subagent-wf-w1-node', 'Node task');
     const rows = store.listDelegatedChildren('root');
     expect(rows.map((r) => r.sessionId)).toEqual(['brain-ch-subagent-wf-w1-node']);
-    expect(rows[0]!.task).toBeUndefined();
-    expect(rows[0]!.status).toBeUndefined();
+    // Nothing recorded the DAG here, so there is genuinely nothing to say about the node's progress.
+    expect(rows[0]?.task).toBeUndefined();
+    expect(rows[0]?.status).toBeUndefined();
+  });
+
+  // The node's task and status live in the DAG snapshot instead of a run row. Without reading it, a
+  // finished workflow node listed as "unknown" forever — which is what the parent reads when it asks
+  // what it already ran.
+  it('describes a workflow node from the DAG snapshot when there is no run row', () => {
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    child('brain-ch-subagent-wf-w1-review', 'root');
+    expect(store.upsertWorkflowRun('root', {
+      id: 'wf-1', toolCallId: 'call-9', title: 'Batch', status: 'done', background: true,
+      nodes: [
+        { id: 'review', task: 'Review the batch', status: 'done', deps: [], sessionId: 'brain-ch-subagent-wf-w1-review' },
+        { id: 'other', task: 'Not this conversation', status: 'error', deps: [], sessionId: 'brain-ch-subagent-wf-elsewhere' },
+      ],
+    })).toBe(true);
+
+    const rows = store.listDelegatedChildren('root');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe('done');
+    expect(rows[0]?.task).toBe('Review the batch');
+  });
+
+  // The session row is the only place that always knows which model actually ran, and it keeps the
+  // provider — a bare model id is ambiguous once two providers serve similar names.
+  it('reports the model as provider/model from the session row', () => {
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    store.createSession({
+      id: 'brain-ch-subagent-sub-k', userId: 1, model: 'k3', provider: 'kimi-coding',
+      parentSessionId: 'root', delegatedAccess: SCOPE,
+    });
+    expect(store.listDelegatedChildren('root')[0]?.model).toBe('kimi-coding/k3');
   });
 
   it('never leaks another conversation\'s or another account\'s sub-agents', () => {
