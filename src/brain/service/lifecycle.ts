@@ -243,7 +243,10 @@ export class ConversationLifecycle {
    *  of start(), bound sends, goal continuations and respawns. `clientCwd` is a client-REPORTED launch
    *  directory (validated, then stamped as the session's work_dir); `spawnCwd` is an internal carry-over
    *  (respawn keeping its previous workDir) that must NOT be stamped — a cwd-less web session stays
-   *  cwd-less. Serialized per conversation: two concurrent spawns would leak one PI session. */
+   *  cwd-less. When neither is given (a cold respawn: daemon restart, plugin reload, last client
+   *  detach) the session row's stored work_dir is restored instead — the conversation's durable home —
+   *  and equally never stamped. Serialized per conversation: two concurrent spawns would leak one PI
+   *  session. */
   async ensureLive(userId: number, sessionId: string, o: { provider?: string; model?: string; clientCwd?: string; spawnCwd?: string; explicitResume?: boolean; fast?: boolean; thinkingLevel?: string | null; reapplyModelPreference?: boolean } = {}): Promise<void> {
     // A HEALTHY live conversation needs no spawn, so it must not queue on the session lock to find that
     // out: a running turn holds that lock for its full duration (turnRunner), which would leave a
@@ -272,7 +275,6 @@ export class ConversationLifecycle {
       // falls through rather than blocking the brain.
       const userCfg = this.d.userSettings?.(userId);
       const policy = this.d.policy?.(userId) ?? { allowedProjectIds: 'all' as const, allowedPaths: () => [] };
-      const projectRoot = gitProjectRoot(policy, o.clientCwd ?? o.spawnCwd);
       // A respawn is ROUTINE — the last client detaching, a settings save, a plugin reload, the idle
       // reaper, a daemon restart all cause one — and each used to re-resolve the model from the global
       // or project preference, silently overwriting an explicit `/model` pick with no session event to
@@ -284,10 +286,29 @@ export class ConversationLifecycle {
       // restart the row still names a temporary hop and honouring it would make the hop permanent.
       // `reapplyModelPreference` is set by a restart that exists BECAUSE the model setting changed —
       // honouring the pin there would leave the user staring at a settings page reporting one model
-      // while the chat kept running another.
-      const storedRow = o.reapplyModelPreference ? undefined : this.d.store.getSession(sessionId);
-      const storedModel = storedRow?.model;
-      const storedProvider = storedRow?.provider;
+      // while the chat kept running another. Only the MODEL is dropped by it — the row is still read,
+      // because its work_dir feeds the cwd fallback below and the conversation's home directory is not
+      // the model pin.
+      const storedRow = this.d.store.getSession(sessionId);
+      const storedModel = o.reapplyModelPreference ? undefined : storedRow?.model;
+      const storedProvider = o.reapplyModelPreference ? undefined : storedRow?.provider;
+      // A web turn carries no client cwd, and spawnCwd (the internal respawn carry-over) is equally
+      // absent on a COLD respawn — without a fallback the spawn resolves the policy root / primary
+      // project instead of the conversation's own home, which is exactly the wrong-repo bug this
+      // restores. The stored work_dir is that home: it is only ever written from a VALIDATED client
+      // report (stampWorkDir), so restoring it restores the conversation's own identity, never invents
+      // one. Empty stays empty — a cwd-less row means "matches nowhere", not a path. The restored
+      // directory must NOT be stamped back (the stamp below stays gated on o.clientCwd): it is not a
+      // directory the CURRENT caller reported, and restamping would dress a cwd-less respawn up as
+      // client-confirmed.
+      const restoredWorkDir = storedRow?.work_dir || undefined;
+      const resolvedCwd = o.clientCwd ?? o.spawnCwd ?? restoredWorkDir;
+      // The restored directory feeds the project-model pick too: the spawn cwd and the project
+      // preference must agree on which repo this conversation belongs to, and the preference is only
+      // consulted when the conversation carries no model pin of its own, so a pinned conversation is
+      // unaffected. A dir that vanished or fell outside the policy simply yields no project root — the
+      // same graceful miss as a CLI client launching in a gone directory.
+      const projectRoot = gitProjectRoot(policy, resolvedCwd);
       const stored = storedModel && storedProvider
         && storedModel !== userCfg?.visionModel
         && this.d.store.lastMessageAt(sessionId) !== undefined
@@ -315,7 +336,7 @@ export class ConversationLifecycle {
         fast: o.fast,
         autoCompact: !!userCfg?.autoCompact,
         autoCompactAtPct: userCfg?.autoCompactAt ?? DEFAULT_AUTO_COMPACT_PCT,
-        clientCwd: o.clientCwd ?? o.spawnCwd,
+        clientCwd: resolvedCwd,
       });
       if (o.explicitResume) live.interactedAt = Date.now();
       this.d.sessions.set(sessionId, live);
