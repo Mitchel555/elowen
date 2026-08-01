@@ -257,11 +257,11 @@ describe('install/serviceUser', () => {
     expect(await userHome(absent, 'elowen')).toBeNull();
   });
 
-  it('mode=existing returns the resolved HOME and never calls useradd', async () => {
+  it('mode=existing returns the resolved HOME, created=false, and never calls useradd', async () => {
     const calls: string[] = [];
     const r = runner({ exec: async (cmd) => { calls.push(cmd); return passwd('/home/deploy'); } });
     const res = await ensureServiceUser(r, { mode: 'existing', username: 'deploy' });
-    expect(res).toEqual({ username: 'deploy', home: '/home/deploy' });
+    expect(res).toEqual({ username: 'deploy', home: '/home/deploy', created: false });
     expect(calls).not.toContain('useradd');
   });
 
@@ -270,7 +270,7 @@ describe('install/serviceUser', () => {
     await expect(ensureServiceUser(r, { mode: 'existing', username: 'ghost' })).rejects.toThrow(/does not exist/);
   });
 
-  it('mode=create runs useradd --system with its own HOME when absent', async () => {
+  it('mode=create runs useradd --system with its own HOME when absent, and reports created=true', async () => {
     let useraddArgs: string[] = [];
     const r = runner({
       exec: async (cmd, args) => {
@@ -280,8 +280,18 @@ describe('install/serviceUser', () => {
       },
     });
     const res = await ensureServiceUser(r, { mode: 'create', username: 'elowen' });
-    expect(res).toEqual({ username: 'elowen', home: '/var/lib/elowen' });
+    expect(res).toEqual({ username: 'elowen', home: '/var/lib/elowen', created: true });
     expect(useraddArgs).toContain('--system');
     expect(useraddArgs).toContain('elowen');
+  });
+
+  // mode=create on an already-present user must NOT report created=true: no useradd ran, so the
+  // uninstall must never treat the account as something this install made.
+  it('mode=create on an existing user never runs useradd and reports created=false', async () => {
+    const calls: string[] = [];
+    const r = runner({ exec: async (cmd) => { calls.push(cmd); return passwd('/var/lib/elowen'); } });
+    const res = await ensureServiceUser(r, { mode: 'create', username: 'elowen' });
+    expect(res).toEqual({ username: 'elowen', home: '/var/lib/elowen', created: false });
+    expect(calls).not.toContain('useradd');
   });
 });

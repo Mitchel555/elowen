@@ -40,6 +40,8 @@ SETUP                             (setup = this machine, local · install = a sh
   doctor                          readiness check: what works, and how to fix what doesn't
   install                         provision Elowen as a shared server: systemd units, a reverse proxy
                                   and the first admin (run as root). See \`elowen install --help\`.
+  uninstall                       remove what install created: services, sudoers, vhost, service
+                                  user and the install record — keeps data unless --purge
 
 SERVICE
   menu                            interactive launcher: start/stop/status/update in one place
@@ -367,6 +369,10 @@ export async function main() {
   // `elowen install` is the root provisioning wizard — it sets up systemd, the proxy and the admin
   // itself, so it must run BEFORE ensureDaemon (no auto-spawn) and before the lifecycle commands.
   if (argv[0] === 'install') { const { install } = await import('./install/index.js'); await install(argv.slice(1)); return; }
+  // `elowen uninstall` tears down what install created — it stops the services itself, so like install it
+  // must run BEFORE ensureDaemon (a stopped-then-reuninstalled daemon must not be auto-spawned) and before
+  // the lifecycle commands.
+  if (argv[0] === 'uninstall') { const { runUninstall } = await import('./uninstall.js'); process.exit(await runUninstall(argv.slice(1))); }
   // `elowen setup` runs the onboarding wizard on demand. Like install it manages the daemon itself, so it
   // runs BEFORE ensureDaemon/runLifecycle and is NOT an API command. In a non-TTY it prints a next step
   // and exits 0 (never blocks CI). Dynamic import keeps the cold-path wizard out of the hot dispatch.

@@ -41,6 +41,16 @@ export function daemonUnit(p: UnitParams): string {
   return `[Unit]
 Description=ELOWEN daemon (REST API)
 After=network.target
+# If the install vanished (broken uninstall left the units behind), the daemon entry is gone and
+# every start would fail. ConditionPathExists turns that into a single skipped-start log line:
+# the process never runs, so Restart= below has nothing to restart — no crash loop.
+ConditionPathExists=${p.daemonEntry}
+# Start limit aligned with RestartSec=3 below: five starts at 3 s spacing span 15 s, so the default
+# 10 s window can never fit a sixth start and the burst of 5 is unreachable — any boot-time crash
+# loop would run forever. 30 s keeps that default burst of 5 but actually trips: the 6th start at
+# ~15 s is refused. Re-derive both if RestartSec ever changes.
+StartLimitIntervalSec=30
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -125,6 +135,11 @@ export function webUnit(p: UnitParams): string {
 Description=ELOWEN web UI
 After=network.target elowen-daemon.service
 Wants=elowen-daemon.service
+# Same two guards as the daemon unit: skip when the web entry is missing (no crash loop), and trip
+# the start limit when the entry exists but crashes at boot. Window/burst pair matches RestartSec=3.
+ConditionPathExists=${p.webServer}
+StartLimitIntervalSec=30
+StartLimitBurst=5
 
 [Service]
 Type=simple

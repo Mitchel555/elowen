@@ -4,7 +4,14 @@
  *
  *  macOS model: everything runs as the CURRENT user in the `gui/<uid>` domain (LaunchAgents start at
  *  login) — no root, no dedicated service user, no reverse proxy. The daemon and web bind localhost
- *  only; KeepAlive.SuccessfulExit=false mirrors systemd's Restart=on-failure. */
+ *  only; KeepAlive.SuccessfulExit=false mirrors systemd's Restart=on-failure.
+ *
+ *  launchd has NO equivalent of systemd's ConditionPathExists. KeepAlive's PathState key is ORed
+ *  with the other keep-alive conditions (man launchd.plist), so it can only ADD a keep-alive reason
+ *  — it cannot gate restarts on the entry file existing. Replacing SuccessfulExit with PathState
+ *  would stop the missing-file loop but would also relaunch after every clean exit, breaking the
+ *  "clean stop stays stopped" contract. macOS therefore stays unprotected against a missing-install
+ *  restart loop; do not "fix" it with PathState without solving that. */
 
 export const LAUNCHD_DAEMON_LABEL = 'io.elowen.daemon';
 export const LAUNCHD_WEB_LABEL = 'io.elowen.web';

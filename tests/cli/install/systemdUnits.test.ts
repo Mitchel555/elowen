@@ -25,6 +25,18 @@ describe('install/systemdUnits.daemonUnit', () => {
     expect(u).toMatch(/^Restart=on-failure$/m);
     expect(u).toMatch(/^WantedBy=multi-user\.target$/m);
   });
+  it('skips the unit instead of crash-looping when the daemon entry is missing', () => {
+    // ConditionPathExists guards the exact ExecStart entry: gone file → skipped start, no process
+    // to restart, so a missing install is one log line instead of a 1200/h restart loop.
+    expect(u).toMatch(/^ConditionPathExists=\/g\/lib\/node_modules\/elowen\/dist\/daemon\/index\.js$/m);
+  });
+  it('aligns the start limit with RestartSec=3 so a boot crash loop actually trips it', () => {
+    // 5 starts at 3 s spacing span 15 s; the default 10 s window can never hold a 6th start, so a
+    // burst of 5 is unreachable there. 30 s keeps burst 5 and refuses the 6th start at ~15 s.
+    expect(u).toMatch(/^StartLimitIntervalSec=30$/m);
+    expect(u).toMatch(/^StartLimitBurst=5$/m);
+    expect(u).toMatch(/^RestartSec=3$/m);
+  });
   it('pins a UTF-8 locale so accented output never depends on the box default environment', () => {
     expect(u).toMatch(/^Environment=LANG=C\.UTF-8$/m);
   });
@@ -44,6 +56,14 @@ describe('install/systemdUnits.webUnit', () => {
   it('runs the standalone server as the service user', () => {
     expect(u).toContain('ExecStart=/usr/bin/node /g/lib/node_modules/elowen/web-dist/server.js');
     expect(u).toMatch(/^User=elowen$/m);
+  });
+  it('skips the unit instead of crash-looping when the web entry is missing', () => {
+    expect(u).toMatch(/^ConditionPathExists=\/g\/lib\/node_modules\/elowen\/web-dist\/server\.js$/m);
+  });
+  it('aligns the start limit with RestartSec=3 (same pair as the daemon unit)', () => {
+    expect(u).toMatch(/^StartLimitIntervalSec=30$/m);
+    expect(u).toMatch(/^StartLimitBurst=5$/m);
+    expect(u).toMatch(/^RestartSec=3$/m);
   });
   it('pins the same UTF-8 locale as the daemon unit', () => expect(u).toMatch(/^Environment=LANG=C\.UTF-8$/m));
   it('binds the configured web host (127.0.0.1 behind a proxy)', () => expect(u).toMatch(/^Environment=HOSTNAME=127\.0\.0\.1$/m));

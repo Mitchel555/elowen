@@ -22,21 +22,23 @@ export async function currentUser(r: Runner, env: NodeJS.ProcessEnv = process.en
 }
 
 /** Create the service user (idempotent) or validate the chosen existing one, returning its resolved
- *  username + HOME. A created user is a `--system` account with its own HOME and a real shell (so
- *  `sudo -u … -H bash -lc` gives the agent CLIs a normal environment). */
-export async function ensureServiceUser(r: Runner, choice: ServiceUserChoice): Promise<{ username: string; home: string }> {
+ *  username + HOME. `created` is true only when THIS call ran useradd — the single fact an uninstall
+ *  needs to decide whether the account may ever be removed. A created user is a `--system` account with
+ *  its own HOME and a real shell (so `sudo -u … -H bash -lc` gives the agent CLIs a normal environment). */
+export async function ensureServiceUser(r: Runner, choice: ServiceUserChoice): Promise<{ username: string; home: string; created: boolean }> {
   const existingHome = await userHome(r, choice.username);
 
   if (choice.mode === 'existing') {
     if (!existingHome) throw new Error(`user '${choice.username}' does not exist`);
-    return { username: choice.username, home: existingHome };
+    return { username: choice.username, home: existingHome, created: false };
   }
 
   if (!existingHome) {
     const home = `/var/lib/${choice.username}`;
     const res = await r.exec('useradd', ['--system', '--create-home', '--home-dir', home, '--shell', '/bin/bash', choice.username]);
     if (res.code !== 0) throw new Error(`useradd failed: ${res.stderr.trim() || res.code}`);
-    return { username: choice.username, home };
+    return { username: choice.username, home, created: true };
   }
-  return { username: choice.username, home: existingHome };
+  // mode=create on a user that already exists never runs useradd — nothing was created, same as existing.
+  return { username: choice.username, home: existingHome, created: false };
 }

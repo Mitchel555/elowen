@@ -7,11 +7,13 @@ import { currentUser, ensureServiceUser, userHome, type ServiceUserChoice } from
 import { AGENT_CLIS, detectAgentClis, installCommand } from './agentClis.js';
 import { daemonUnit, webUnit, updateService, updateTimer, elowenSudoers, type UnitParams } from './systemdUnits.js';
 import { LAUNCHD_DAEMON_LABEL, LAUNCHD_UPDATE_LABEL, LAUNCHD_WEB_LABEL, agentPlistPath, daemonAgent, updateAgent, webAgent, type LaunchdParams } from './launchdUnits.js';
+import { detectProxy } from './proxy.js';
 import { SERVICES } from '../systemd.js';
 import { applySetup, buildSetupPlan, defaultExecForCli, isFirstRun, type SetupAnswers } from '../setup.js';
 import { selfPrefix, reinstallNpmArgs } from '../update.js';
 import { runOnboarding } from '../setup/wizard.js';
-import { INSTALL_INFO_PATH, serializeInstallInfo, type InstallInfo } from '../installInfo.js';
+import { ELOWEN_CLI_VERSION } from '../version.js';
+import { INSTALL_INFO_PATH, buildInstallInfo, serializeInstallInfo, type InstallArtifacts, type InstallUnit } from '../installInfo.js';
 import { must, aptInstall, step } from '../provision/exec.js';
 import { type Deployment, isIpAddress, publicUrl, localhostDeploy, ipDeploy, chooseDeployment, provisionProxy } from '../provision/deployment.js';
 import { beginInstaller } from '../ui/installer.js';
@@ -95,8 +97,9 @@ export async function ensureTerminalStreaming(r: Runner, platform = process.plat
 
 /** Write + bootstrap the three launchd LaunchAgents (daemon, web, hourly update) in the invoking
  *  user's gui domain — the macOS counterpart of provisionSystemd. Idempotent: a stale bootstrap from a
- *  previous run is booted out first, so a re-install replaces rather than fails. */
-async function provisionLaunchd(r: Runner, home: string): Promise<void> {
+ *  previous run is booted out first, so a re-install replaces rather than fails. Returns the plists it
+ *  wrote (all three bootstrapped), which become part of the install record. */
+async function provisionLaunchd(r: Runner, home: string): Promise<InstallUnit[]> {
   const { daemonEntry, webServer } = packagePaths();
   const params: LaunchdParams = {
     home, nodePath: process.execPath, daemonEntry, webServer,
@@ -110,16 +113,21 @@ async function provisionLaunchd(r: Runner, home: string): Promise<void> {
     [LAUNCHD_WEB_LABEL, webAgent(params)],
     [LAUNCHD_UPDATE_LABEL, updateAgent(params)],
   ];
+  const written: InstallUnit[] = [];
   for (const [label, body] of agents) {
     const path = agentPlistPath(home, label);
     await r.writeFile(path, body);
     await r.exec('launchctl', ['bootout', `gui/${uid}/${label}`]); // expected to fail on a first install
     await must(r, 'launchctl', ['bootstrap', `gui/${uid}`, path]);
+    written.push({ path, enabled: true });
   }
+  return written;
 }
 
-/** Write + enable the two systemd units and verify they came active. */
-async function provisionSystemd(r: Runner, user: string, home: string, deploy: Deployment): Promise<void> {
+/** Write + enable the two systemd units and verify they came active. Returns the unit files it wrote
+ *  with their enabled state — the same literals the writes and `enable --now` calls use, so the record
+ *  can never drift from what was actually enabled. */
+async function provisionSystemd(r: Runner, user: string, home: string, deploy: Deployment): Promise<InstallUnit[]> {
   const { daemonEntry, webServer } = packagePaths();
   // Proxy-less IP mode is the only one that exposes the daemon: it binds 0.0.0.0 and advertises its
   // port to the browser, so the terminal WebSocket connects straight to it (no nginx `/ws/` hop). Behind
@@ -130,16 +138,22 @@ async function provisionSystemd(r: Runner, user: string, home: string, deploy: D
     npmGlobalBin: await npmGlobalBin(r), daemonPort: DAEMON_PORT, webPort: WEB_PORT, webHost: deploy.webHost,
     daemonHost: direct ? '0.0.0.0' : '127.0.0.1', wsDirectPort: direct ? DAEMON_PORT : undefined,
   };
+  const paths = {
+    daemon: '/etc/systemd/system/elowen-daemon.service',
+    web: '/etc/systemd/system/elowen-web.service',
+    update: '/etc/systemd/system/elowen-update.service',
+    timer: '/etc/systemd/system/elowen-update.timer',
+  };
   // Ensure the data tree exists and is owned by the service user before first boot.
   await must(r, 'mkdir', ['-p', join(home, '.config', 'elowen', 'logs')]);
   await must(r, 'chown', ['-R', `${user}:`, join(home, '.config', 'elowen')]);
 
-  await r.writeFile('/etc/systemd/system/elowen-daemon.service', daemonUnit(params));
-  await r.writeFile('/etc/systemd/system/elowen-web.service', webUnit(params));
+  await r.writeFile(paths.daemon, daemonUnit(params));
+  await r.writeFile(paths.web, webUnit(params));
   // The auto-update timer + its oneshot service ship disabled-by-default behaviour: the timer fires
   // hourly but the service no-ops unless the operator turns auto-update on in Settings.
-  await r.writeFile('/etc/systemd/system/elowen-update.service', updateService(params));
-  await r.writeFile('/etc/systemd/system/elowen-update.timer', updateTimer());
+  await r.writeFile(paths.update, updateService(params));
+  await r.writeFile(paths.timer, updateTimer());
   await must(r, 'systemctl', ['daemon-reload']);
   for (const svc of SERVICES) await must(r, 'systemctl', ['enable', '--now', `${svc}.service`]);
   await must(r, 'systemctl', ['enable', '--now', 'elowen-update.timer']);
@@ -148,6 +162,13 @@ async function provisionSystemd(r: Runner, user: string, home: string, deploy: D
     const res = await r.exec('systemctl', ['is-active', svc]);
     if (res.stdout.trim() !== 'active') throw new Error(`${svc} did not start (journalctl -u ${svc})`);
   }
+  // The update service is never enabled directly — only its timer is; the daemon/web pair both are.
+  return [
+    { path: paths.daemon, enabled: true },
+    { path: paths.web, enabled: true },
+    { path: paths.update, enabled: false },
+    { path: paths.timer, enabled: true },
+  ];
 }
 
 /** Grant the service user passwordless systemctl for its own units, so the auto-update timer (and a
@@ -180,9 +201,19 @@ async function provisionAdmin(answers: SetupAnswers): Promise<void> {
 async function execute(r: Runner, plan: InstallPlan): Promise<{ tls: boolean }> {
   if (plan.installTmux) await step('Installing tmux', () => (MAC ? must(r, 'brew', ['install', 'tmux']) : aptInstall(r, 'tmux')));
 
-  const { username, home } = MAC
-    ? await step('Resolving the current user', () => currentUser(r))
-    : await step(`Service user "${plan.user.username}"`, () => ensureServiceUser(r, plan.user));
+  // serviceUserCreated is tri-state — created by useradd / pre-existing / macOS (invoking user, N/A) —
+  // and must come from the executor's own result: the plan's create-vs-existing intent is not what ran
+  // (mode=create on an already-present user never runs useradd, so nothing was created).
+  let username: string;
+  let home: string;
+  let serviceUserCreated: boolean | null;
+  if (MAC) {
+    const me = await step('Resolving the current user', () => currentUser(r));
+    username = me.username; home = me.home; serviceUserCreated = null;
+  } else {
+    const su = await step(`Service user "${plan.user.username}"`, () => ensureServiceUser(r, plan.user));
+    username = su.username; home = su.home; serviceUserCreated = su.created;
+  }
 
   for (const id of plan.agents) {
     const { cmd, args } = installCommand(agentCli(id));
@@ -194,15 +225,18 @@ async function execute(r: Runner, plan: InstallPlan): Promise<{ tls: boolean }> 
   await step('Enabling terminal streaming', () => ensureTerminalStreaming(r))
     .catch((e) => p.log.warn(`Terminal streaming unavailable (snapshot fallback stays active): ${(e as Error).message}`));
 
+  let units: InstallUnit[] = [];
+  let sudoersCreated = false;
   if (MAC) {
-    await step('Configuring launchd agents', () => provisionLaunchd(r, home));
+    units = await step('Configuring launchd agents', () => provisionLaunchd(r, home));
   } else {
-    await step('Configuring systemd services', () => provisionSystemd(r, plan.user.username, home, plan.deploy));
+    units = await step('Configuring systemd services', () => provisionSystemd(r, plan.user.username, home, plan.deploy));
 
     // Non-fatal: without the sudoers drop-in the services still run — only in-place self-updates
     // (auto-update timer + manual `elowen update`) lose the ability to restart the units unattended.
     // macOS needs none of this: the agents run as the invoking user, who can already restart them.
     await step('Granting self-update permissions', () => provisionSudoers(r, plan.user.username))
+      .then(() => { sudoersCreated = true; })
       .catch((e) => p.log.warn(`Self-update permissions not granted (auto-update can't restart units until fixed): ${(e as Error).message}`));
   }
 
@@ -214,9 +248,28 @@ async function execute(r: Runner, plan: InstallPlan): Promise<{ tls: boolean }> 
 
   if (plan.admin) await step('Creating admin + verifying login', () => provisionAdmin(plan.admin!));
 
+  // provisionProxy resolves the proxy kind inside (detected-over-preference) and never reports it, so
+  // re-detect at record time: the server it ends up configuring is exactly what `which` finds now, and
+  // any failure in that phase aborts before this line — the detected kind is the one whose vhost exists.
+  const proxyKind = d.mode === 'domain' ? await detectProxy(r) : null;
+  const artifacts: InstallArtifacts = {
+    version: ELOWEN_CLI_VERSION,
+    installedAt: new Date().toISOString(),
+    units,
+    sudoers: sudoersCreated,
+    // Only a domain deployment writes a vhost; the path mirrors configureVhost's writes verbatim.
+    proxy: proxyKind
+      ? { kind: proxyKind, vhostPath: proxyKind === 'nginx' ? '/etc/nginx/sites-available/elowen.conf' : '/etc/apache2/sites-available/elowen.conf', tls: tlsOk }
+      : undefined,
+    serviceUserCreated,
+    // Every CLI in the plan went through must() above — a failure would have aborted the run, so what
+    // remains in the plan is exactly what was installed.
+    agentClis: plan.agents,
+  };
+
   // Record the deployment so the launcher menu shows the right URL and drives the provisioned services
   // (systemd units / launchd agents), never a second, port-conflicting daemon.
-  const info: InstallInfo = { publicUrl: publicUrl(d, tlsOk, WEB_PORT), mode: d.mode, serviceUser: username, daemonPort: DAEMON_PORT, webPort: WEB_PORT };
+  const info = buildInstallInfo({ publicUrl: publicUrl(d, tlsOk, WEB_PORT), mode: d.mode, serviceUser: username, daemonPort: DAEMON_PORT, webPort: WEB_PORT }, artifacts);
   await must(r, 'mkdir', ['-p', dirname(INSTALL_INFO_PATH)]);
   await r.writeFile(INSTALL_INFO_PATH, serializeInstallInfo(info));
   return { tls: tlsOk };
