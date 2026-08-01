@@ -227,8 +227,9 @@ export interface BrainLimits {
 /** Operator-tunable runtime limits (Settings → Elowen AI → Runtime): each a whole number the daemon
  *  clamps to a sane range. A SIBLING of `BrainLimits` rather than more fields on it: these govern the
  *  daemon's surrounding runtime — the CLI's `!` escape, the memory relevance floor, the deferred-tool
- *  policy and activity-log retention — not the per-turn brain budget, and `BrainLimits` already mixes
- *  more domains than one editor should. Served inside `ElowenConfig.runtime` and PATCHed as a partial.
+ *  policy, activity-log retention and the web client's stream watchdog — not the per-turn brain budget,
+ *  and `BrainLimits` already mixes more domains than one editor should. Served inside
+ *  `ElowenConfig.runtime` and PATCHed as a partial.
  *
  *  `memorySemanticFloorPerMille` is a cosine threshold carried in PER MILLE (300 = 0.30) because every
  *  value in these groups is rounded to a whole number on save — a float would round to 0 and floor
@@ -238,6 +239,17 @@ export interface RuntimeLimits {
   memorySemanticFloorPerMille: number;
   toolDeferThreshold: number;
   eventRetentionDays: number;
+  /** The two below are a PAIR — both answer "how long may a chat stream go without a sign of life before
+   *  the browser gives up on it", differing only in which moment asks. They are read by the WEB client
+   *  (which cannot import daemon code, hence the trip through this contract), and neither may reach down
+   *  to the 30 s heartbeat interval: see the shared floor in `RUNTIME_LIMIT_BOUNDS`.
+   *
+   *  Silence on a page the user is watching, polled by the stream watchdog. */
+  streamSilenceLimitMs: number;
+  /** Silence discovered at a WAKE-UP (unlock, tab return, bfcache restore) — a frozen page runs no timers,
+   *  so the watchdog tick that should have caught this never happened and the wall clock is read instead.
+   *  Tighter than its twin by default: nobody was watching, so a lost stream is likelier here. */
+  streamReviveSilenceLimitMs: number;
 }
 
 /** The runtime block as served/patched: the numeric limits plus the deferral kill switch (its own field

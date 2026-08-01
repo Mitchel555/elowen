@@ -11,6 +11,8 @@ const AMBIENT = ['/config', '/sessions', '/tasks', '/missions', '/projects', '/a
 
 export function onUnhandledRequest(request: Request, print: { warning: () => void; error: () => void }): void {
   const { pathname } = new URL(request.url);
-  if (request.method === 'GET' && AMBIENT.some((p) => pathname === p || pathname.startsWith(p + '/'))) return;
+  // The client prefixes every call with the API base, which is not part of the endpoint names above.
+  const route = pathname.replace(/^\/api(?=\/)/, '');
+  if (request.method === 'GET' && AMBIENT.some((p) => route === p || route.startsWith(p + '/'))) return;
   print.warning();
 }

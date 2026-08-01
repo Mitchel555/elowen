@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, MoreHorizontal, ListChecks } from 'lucide-react';
@@ -36,6 +36,7 @@ function TextSegment({ text, className = '' }: { text: string; className?: strin
   return <div className={`chat-markdown text-sm leading-relaxed text-text ${className}`} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
+/** How many rows of a diff are shown before the rest folds away behind the expander. */
 const DIFF_MAX_ROWS = 60;
 /** How many trailing lines of a running command's live output tail to show (mirror of the CLI). */
 const PROGRESS_TAIL_ROWS = 8;
@@ -45,21 +46,51 @@ const DIFF_SIGN = /^([+-])\s*\d+ |^\s*\d+ ([-+ ]) |^([-+])/;
 
 /** An edit's display diff, Claude-Code style: a coloured left gutter per row (added green, removed red,
  *  context muted), no frame and no horizontal scroll — long lines wrap under the gutter so nothing is
- *  clipped or hidden behind a scrollbar. */
+ *  clipped or hidden behind a scrollbar.
+ *
+ *  A diff longer than the preview folds behind the shared expander instead of being cut off for good: the
+ *  rest of an edit is exactly what a reader checking the change needs, and the transcript is the only
+ *  place it is shown. Expanded, the block scrolls within its own bounded height rather than growing
+ *  without limit, so a thousand-line edit still cannot take over the viewport on a phone. */
 function DiffBlock({ diff }: { diff: string }) {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const bodyId = useId();
   const lines = diff.replace(/\n+$/, '').split('\n');
+  const hiddenRows = Math.max(0, lines.length - DIFF_MAX_ROWS);
   return (
     <div className="my-1 overflow-hidden rounded-md bg-elevated/40 py-1">
-      {lines.slice(0, DIFF_MAX_ROWS).map((l, i) => {
-        const m = DIFF_SIGN.exec(l);
-        const sign = m?.[1] ?? m?.[2] ?? m?.[3];
-        const cls = sign === '+' ? 'border-success/50 bg-success/10 text-success'
-          : sign === '-' ? 'border-danger/50 bg-danger/10 text-danger'
-          : 'border-transparent text-text-muted';
-        return <div key={i} className={`whitespace-pre-wrap break-words border-l-2 px-2 ${cls}`}>{l || ' '}</div>;
-      })}
-      {lines.length > DIFF_MAX_ROWS ? <div className="border-l-2 border-transparent px-2 text-text-muted">… +{lines.length - DIFF_MAX_ROWS} {t.brainChat.moreLines}</div> : null}
+      <div
+        id={bodyId}
+        data-testid="chat-diff"
+        className={expanded ? 'max-h-[60vh] overflow-y-auto' : ''}
+        // A scrollable region has to be reachable by keyboard alone, and it only scrolls when expanded.
+        tabIndex={expanded ? 0 : undefined}
+        role={expanded ? 'group' : undefined}
+        aria-label={expanded ? t.brainChat.diffLabel : undefined}
+      >
+        {(expanded ? lines : lines.slice(0, DIFF_MAX_ROWS)).map((l, i) => {
+          const m = DIFF_SIGN.exec(l);
+          const sign = m?.[1] ?? m?.[2] ?? m?.[3];
+          const cls = sign === '+' ? 'border-success/50 bg-success/10 text-success'
+            : sign === '-' ? 'border-danger/50 bg-danger/10 text-danger'
+            : 'border-transparent text-text-muted';
+          return <div key={i} className={`whitespace-pre-wrap break-words border-l-2 px-2 ${cls}`}>{l || ' '}</div>;
+        })}
+      </div>
+      {hiddenRows > 0 ? (
+        <div className="px-2 pt-1">
+          <MorePill
+            expanded={expanded}
+            hidden={hiddenRows}
+            onToggle={() => setExpanded((v) => !v)}
+            controls={bodyId}
+            // The pill's own "+N more" repeats across every diff in the transcript; spell out what this
+            // one unfolds for a reader who only hears the button.
+            label={expanded ? t.brainChat.diffCollapse : t.brainChat.diffExpand.replace('{n}', String(hiddenRows))}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

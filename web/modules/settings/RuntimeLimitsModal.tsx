@@ -1,5 +1,5 @@
 'use client';
-import { Gauge, TerminalSquare, Radar, Layers, History, type LucideIcon } from 'lucide-react';
+import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, type LucideIcon } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { HelpTip } from '../../components/ui/HelpTip';
@@ -12,6 +12,7 @@ import type { RuntimeConfig, RuntimeLimits } from '../../lib/types';
 /** Fallback for seeding the Runtime form before the daemon's config arrives (it always sends real values). */
 export const RUNTIME_LIMIT_DEFAULTS: RuntimeLimits = {
   localShellTimeoutMs: 30000, memorySemanticFloorPerMille: 300, toolDeferThreshold: 10, eventRetentionDays: 30,
+  streamSilenceLimitMs: 75000, streamReviveSilenceLimitMs: 45000,
 };
 
 const MILLISECONDS_PER_SECOND = 1_000;
@@ -39,6 +40,11 @@ const RUNTIME_LIMIT_FIELDS: RuntimeLimitField[] = [
   { key: 'memorySemanticFloorPerMille', kind: 'cosine', min: 100, max: 800, step: 10, icon: Radar },
   { key: 'toolDeferThreshold', kind: 'count', min: 1, max: 100, step: 1, icon: Layers },
   { key: 'eventRetentionDays', kind: 'days', min: 1, max: 365, step: 1, icon: History },
+  // Adjacent on purpose: the two are one setting asked at two moments (a watched page, and a wake-up where
+  // no timer could have run), and they share a floor — 35 s, above the daemon's 30 s heartbeat, because a
+  // limit inside the beat interval would call a healthy but idle stream dead.
+  { key: 'streamSilenceLimitMs', kind: 'seconds', min: 35000, max: 300000, step: 5000, icon: Activity },
+  { key: 'streamReviveSilenceLimitMs', kind: 'seconds', min: 35000, max: 300000, step: 5000, icon: AlarmClock },
 ];
 
 const DISPLAY_DIVISORS: Record<RuntimeLimitKind, number> = {

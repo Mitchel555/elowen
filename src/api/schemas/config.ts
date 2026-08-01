@@ -49,6 +49,8 @@ const runtimeLimitsPatchSchema = z.object({
   memorySemanticFloorPerMille: z.number().optional(),
   toolDeferThreshold: z.number().optional(),
   eventRetentionDays: z.number().optional(),
+  streamSilenceLimitMs: z.number().optional(),
+  streamReviveSilenceLimitMs: z.number().optional(),
 });
 
 /** A patch to the daemon config (PUT /config, admin-only). Mirrors `ConfigPatch` field-for-field so a

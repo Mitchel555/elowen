@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
-import { useBrainSessions, useBrainCommands } from '../../lib/queries';
+import { useBrainSessions, useBrainCommands, useConfig } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
 import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainModelOption, BrainPendingPlan, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
 import { collectSubagents, collectWorkflows, emptyView, fromHistory, fromSnapshot, prependHistory, reduce, submittedPlan, upsertCard, type ChatTurn, type ChatView, type SubagentState, type TranscriptEvent, type WorkflowState } from '../../lib/transcript';
@@ -14,7 +14,7 @@ import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
 import { subscribeRevive, STALE_HIDE_MS } from '../../lib/useRevive';
 import { createReconnectController, type ReconnectController } from '../../lib/reconnect';
-import { startStreamWatchdog, REVIVE_SILENCE_LIMIT_MS } from '../../lib/streamWatchdog';
+import { startStreamWatchdog, resolveStreamSilence } from '../../lib/streamWatchdog';
 import {
   BRAIN_COMPOSE_EVENT,
   BRAIN_OPEN_EVENT,
@@ -254,6 +254,7 @@ function useBrainChatController(): BrainChatValue {
   const qc = useQueryClient();
   const sessions = useBrainSessions();
   const { data: commands = [] } = useBrainCommands();
+  const { data: config } = useConfig();
 
   // The transcript view-model + fold live in the shared `web/lib/transcript.ts` mirror (kept in lockstep
   // with the daemon's `src/brain/transcript.ts`): SSE events fold through `reduce`, history through
@@ -372,6 +373,12 @@ function useBrainChatController(): BrainChatValue {
   /** When the stream last delivered anything — an event or the daemon's heartbeat. The silence watchdog and
    *  the wake-up path both read it off the wall clock, because a frozen page runs no timers. */
   const lastFrameAtRef = useRef(0);
+  /** How long the stream may stay silent before it counts as dead, in either phase — operator-tunable
+   *  (`runtime.limits`), floored at the heartbeat interval, and falling back to the built-in defaults until
+   *  the config arrives, so a daemon that never answers behaves exactly as before. */
+  const silence = useMemo(() => resolveStreamSilence(config?.runtime?.limits), [config?.runtime?.limits]);
+  const silenceRef = useRef(silence);
+  silenceRef.current = silence;
   /** Fires when a stream opened but its guaranteed first frame never arrived. */
   const snapshotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The ONE way back onto a dropped stream. A phone unlock triggers the wake-up, the watchdog and often a
@@ -1097,22 +1104,27 @@ function useBrainChatController(): BrainChatValue {
     // decided here from the wall clock. A momentary hide over a stream that is still being fed needs
     // nothing; anything longer, or any silence past the wake limit, may have lost frames.
     const silentMs = Date.now() - lastFrameAtRef.current;
-    if (hiddenMs <= STALE_HIDE_MS && silentMs <= REVIVE_SILENCE_LIMIT_MS && esRef.current?.readyState === EventSource.OPEN) return;
+    // Through a ref, because this subscription is made once: a limit edited mid-session must reach the next
+    // wake-up without re-subscribing (which would drop the wake-ups that arrive while React re-runs it).
+    if (hiddenMs <= STALE_HIDE_MS && silentMs <= silenceRef.current.reviveLimitMs && esRef.current?.readyState === EventSource.OPEN) return;
     reconnect().now();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), []);
 
   // A dropped SSE connection can sit in readyState OPEN forever with nothing arriving on it — no error, no
   // close. The daemon's named heartbeat makes that state observable: silence past the limit means dead.
+  // Unlike the wake-up path this one is re-armed when the operator changes the limit, since the interval
+  // reads it once at start; the watchdog holds no state worth preserving across that restart.
   useEffect(() => startStreamWatchdog({
     lastFrameAt: () => lastFrameAtRef.current,
+    limitMs: silence.limitMs,
     onSilent: () => {
       if (!attachedRef.current || !esRef.current) return;
       esRef.current.close();
       reconnect().now();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), []);
+  }), [silence.limitMs]);
 
   // Tear the stream down when the whole provider unmounts (app teardown), matching today's cleanup.
   useEffect(() => () => {

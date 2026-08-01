@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
+import { MIN_SILENCE_LIMIT_MS } from '../../../lib/streamWatchdog';
 
 /** The runtime-knob twin of `brainLimitsParity.test.ts`: the canonical table is `src/store/configStore.ts`
  *  (its defaults seed the form, its clamp bounds decide which values survive a save), `RuntimeLimitsModal`
@@ -32,14 +33,24 @@ const daemonDefaults = numericFields(objectBlock(daemon, 'export const DEFAULT_R
 const webDefaults = numericFields(objectBlock(web, 'export const RUNTIME_LIMIT_DEFAULTS: RuntimeLimits = {', 'RUNTIME_LIMIT_DEFAULTS'));
 const boundsBlock = objectBlock(daemon, 'const RUNTIME_LIMIT_BOUNDS: Record<keyof RuntimeLimits, [min: number, max: number]> = {', 'RUNTIME_LIMIT_BOUNDS');
 
-/** Every runtime bound is written out explicitly (no `band()` derivation, unlike the brain limits), so an
- *  entry the regex cannot read is a real drift signal rather than an unsupported expression. */
+/** A daemon-side `const NAME = 12_345;`, resolved by name — a bound may be written as a shared constant
+ *  where two knobs genuinely share one edge (the stream silence pair and their heartbeat floor). */
+function daemonConst(name: string): number {
+  const found = new RegExp(`const ${name} = ([\\d_]+);`).exec(daemon);
+  expect(found, `daemon constant ${name} not found`).toBeTruthy();
+  return found ? num(found[1]) : Number.NaN;
+}
+
+/** Every runtime bound is written out explicitly (no `band()` derivation, unlike the brain limits) or as a
+ *  named constant of this same file, so an entry neither regex can read is a real drift signal rather than
+ *  an unsupported expression. */
 function daemonBounds(): Record<string, [min: number, max: number]> {
   const out: Record<string, [number, number]> = {};
+  const edge = (token: string): number => (/^[\d_]+$/.test(token) ? num(token) : daemonConst(token));
   for (const [, key, expression] of boundsBlock.matchAll(/^ {2}(\w+): (.+),$/gm)) {
-    const explicit = /^\[([\d_]+), ([\d_]+)\]$/.exec(expression);
+    const explicit = /^\[([\w]+), ([\w]+)\]$/.exec(expression);
     expect(explicit, `unrecognised bound expression for ${key}: ${expression}`).toBeTruthy();
-    if (explicit) out[key] = [num(explicit[1]), num(explicit[2])];
+    if (explicit) out[key] = [edge(explicit[1]), edge(explicit[2])];
   }
   return out;
 }
@@ -66,11 +77,22 @@ describe('runtime limits — web editor against the daemon clamp', () => {
     expect(webDefaults).toEqual(daemonDefaults);
   });
 
+  // The stream watchdog runs in the BROWSER off a value the daemon serves, so its floor lives in three
+  // places at once. A limit under the daemon's 30 s heartbeat would tear down a live but idle stream, so
+  // all three have to agree — including the client-side re-clamp, which is the only one that still applies
+  // when the config comes from a daemon of another version.
+  it('floors both halves of the stream pair at the client-side heartbeat guard', () => {
+    const bounds = daemonBounds();
+    expect(bounds.streamSilenceLimitMs[0]).toBe(MIN_SILENCE_LIMIT_MS);
+    expect(bounds.streamReviveSilenceLimitMs[0]).toBe(MIN_SILENCE_LIMIT_MS);
+    expect(MIN_SILENCE_LIMIT_MS).toBeGreaterThan(30_000);
+  });
+
   // Guards the parsing itself: were a regex to stop matching, every table above would silently be empty
   // and all three assertions would pass on nothing.
   it('actually read both tables', () => {
-    expect(Object.keys(daemonBounds())).toHaveLength(4);
-    expect(Object.keys(webBounds())).toHaveLength(4);
+    expect(Object.keys(daemonBounds())).toHaveLength(6);
+    expect(Object.keys(webBounds())).toHaveLength(6);
     expect(daemonBounds().localShellTimeoutMs).toEqual([10000, 300000]);
     expect(daemonBounds().memorySemanticFloorPerMille).toEqual([100, 800]);
     expect(webBounds().eventRetentionDays).toEqual([1, 365]);

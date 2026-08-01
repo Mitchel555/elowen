@@ -270,22 +270,36 @@ function clampBrainLimits(next: Partial<BrainLimits> | undefined, fallback: Brai
 /** Operator-tunable runtime limits — the sibling group of DEFAULT_BRAIN_LIMITS, for the knobs that
  *  govern the runtime AROUND a turn rather than the turn's own budget. Consumed at: the chat CLI's `!`
  *  escape (local shell timeout), MemoryService (semantic relevance floor), the deferred-tool policy
- *  (LiveSessionSpawner) and the hourly activity-log purge (bootstrap). Same contract as the brain
- *  limits: whole numbers, clamped per field, an unset/invalid field keeping the current value. */
+ *  (LiveSessionSpawner), the hourly activity-log purge (bootstrap) and the web client's stream watchdog
+ *  (`web/lib/streamWatchdog.ts`, which reads them off GET /config). Same contract as the brain limits:
+ *  whole numbers, clamped per field, an unset/invalid field keeping the current value. */
 export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   localShellTimeoutMs: 30_000,
   // 0.30 cosine, carried in per mille because the clamp rounds to a whole number — see RuntimeLimits.
   memorySemanticFloorPerMille: 300,
   toolDeferThreshold: 10,
   eventRetentionDays: 30,
+  // Two and a half missed heartbeats on a watched page…
+  streamSilenceLimitMs: 75_000,
+  // …and a tighter one at a wake-up, where no watchdog tick could have run while the page slept.
+  streamReviveSilenceLimitMs: 45_000,
 };
+
+/** Hard floor under BOTH stream silence limits — a correctness bound, not a taste one. The daemon sends an
+ *  SSE heartbeat every 30 s whether or not a turn is running, and that beat is the only reason silence is
+ *  measurable at all; a limit at or below the beat interval fires in the ordinary gap BETWEEN two beats and
+ *  tears down a perfectly healthy stream, on a loop. The 5 s on top absorbs scheduler and network jitter on
+ *  a beat that did leave on time. The web client repeats this same floor on whatever value it receives
+ *  (`MIN_SILENCE_LIMIT_MS` in `web/lib/streamWatchdog.ts`), because a browser cannot assume the daemon it
+ *  is talking to is this version. */
+const MIN_STREAM_SILENCE_MS = 35_000;
 
 /** Whether deferred tools are computed at all. On by default — the threshold above already keeps small
  *  MCP surfaces untouched; this is the prod-safety switch that turns the mechanism off wholesale. */
 const DEFAULT_TOOL_DEFERRAL_ENABLED = true;
 
 /** Every bound here is written out rather than derived from the default (the ±50% `band()` rule the brain
- *  limits use): each of these four has a domain range that the default sits inside rather than centres —
+ *  limits use): each of these has a domain range that the default sits inside rather than centres —
  *  a 10s floor is what makes a `!` timeout survivable, and cosine similarity has no meaning past ~0.8. */
 const RUNTIME_LIMIT_BOUNDS: Record<keyof RuntimeLimits, [min: number, max: number]> = {
   localShellTimeoutMs: [10_000, 300_000],
@@ -294,6 +308,10 @@ const RUNTIME_LIMIT_BOUNDS: Record<keyof RuntimeLimits, [min: number, max: numbe
   // break for nothing; past 100 no realistic MCP surface would ever engage it.
   toolDeferThreshold: [1, 100],
   eventRetentionDays: [1, 365],
+  // The pair shares one floor because they measure the same thing against the same heartbeat; the ceiling
+  // is five minutes, past which a dead stream is no longer worth calling detected.
+  streamSilenceLimitMs: [MIN_STREAM_SILENCE_MS, 300_000],
+  streamReviveSilenceLimitMs: [MIN_STREAM_SILENCE_MS, 300_000],
 };
 
 /** Merge a (possibly partial, possibly malformed) runtime-limits patch onto `fallback` — same per-field

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { startStreamWatchdog, SILENCE_LIMIT_MS } from '../../lib/streamWatchdog';
+import { startStreamWatchdog, resolveStreamSilence, DEFAULT_STREAM_SILENCE, MIN_SILENCE_LIMIT_MS } from '../../lib/streamWatchdog';
 
 // A dropped SSE connection can stay in readyState OPEN with nothing ever arriving on it, so silence is the
 // only observable symptom. The daemon heartbeats every 30 s, which is what makes silence measurable.
@@ -8,13 +8,14 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe('startStreamWatchdog', () => {
-  const run = (opts: { silentMs: number; hidden?: boolean }) => {
+  const run = (opts: { silentMs: number; hidden?: boolean; limitMs?: number }) => {
     const onSilent = vi.fn();
     const lastFrameAt = Date.now();
     const stop = startStreamWatchdog({
       lastFrameAt: () => lastFrameAt,
       onSilent,
       hidden: () => opts.hidden ?? false,
+      limitMs: opts.limitMs,
       intervalMs: 1_000, // fine granularity so the assertion is about the limit, not the poll rate
     });
     vi.advanceTimersByTime(opts.silentMs);
@@ -45,7 +46,7 @@ describe('startStreamWatchdog', () => {
       now: () => clock,
       intervalMs: 15_000,
     });
-    clock += SILENCE_LIMIT_MS + 1_000;
+    clock += DEFAULT_STREAM_SILENCE.limitMs + 1_000;
     vi.advanceTimersByTime(15_000); // a single tick
     stop();
     expect(onSilent).toHaveBeenCalledTimes(1);
@@ -57,5 +58,37 @@ describe('startStreamWatchdog', () => {
     stop();
     vi.advanceTimersByTime(300_000);
     expect(onSilent).not.toHaveBeenCalled();
+  });
+
+  it('watches for the operator-configured limit rather than the built-in default', () => {
+    expect(run({ silentMs: 41_000, limitMs: 40_000 })).toHaveBeenCalled();
+    expect(run({ silentMs: 41_000 })).not.toHaveBeenCalled(); // the 75 s default would still be waiting
+  });
+
+  // The floor is a correctness bound: the daemon beats every 30 s, so a shorter limit would fire in the
+  // ordinary gap between two beats and tear down a live stream.
+  it('never watches on a limit below the heartbeat floor, however it was configured', () => {
+    expect(run({ silentMs: MIN_SILENCE_LIMIT_MS - 1_000, limitMs: 5_000 })).not.toHaveBeenCalled();
+    expect(run({ silentMs: MIN_SILENCE_LIMIT_MS + 1_000, limitMs: 5_000 })).toHaveBeenCalled();
+  });
+});
+
+describe('resolveStreamSilence', () => {
+  it('takes both halves of the pair from the daemon config', () => {
+    expect(resolveStreamSilence({ streamSilenceLimitMs: 120_000, streamReviveSilenceLimitMs: 60_000 }))
+      .toEqual({ limitMs: 120_000, reviveLimitMs: 60_000 });
+  });
+
+  it('holds each half at the heartbeat floor, whatever the wire carried', () => {
+    expect(resolveStreamSilence({ streamSilenceLimitMs: 5_000, streamReviveSilenceLimitMs: 0 }))
+      .toEqual({ limitMs: MIN_SILENCE_LIMIT_MS, reviveLimitMs: MIN_SILENCE_LIMIT_MS });
+  });
+
+  // An older daemon, or one that has not answered yet, must leave behaviour exactly as it was.
+  it('falls back per field to the previously hardcoded defaults', () => {
+    expect(resolveStreamSilence(undefined)).toEqual(DEFAULT_STREAM_SILENCE);
+    expect(resolveStreamSilence({ streamReviveSilenceLimitMs: 90_000 }))
+      .toEqual({ limitMs: DEFAULT_STREAM_SILENCE.limitMs, reviveLimitMs: 90_000 });
+    expect(resolveStreamSilence({ streamSilenceLimitMs: Number.NaN }).limitMs).toBe(DEFAULT_STREAM_SILENCE.limitMs);
   });
 });
