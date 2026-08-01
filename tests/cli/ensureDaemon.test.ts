@@ -3,9 +3,14 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { ensureDaemon, systemdKnown, type EnsureDaemonDeps } from '../../src/cli/index.js';
 import { runCmd } from '../../src/cli/systemd.js';
 
-/** A spawn fake that records invocations and answers like a successful detached spawn. */
-function fakeSpawn(recorded: { count: number }): typeof nodeSpawn {
-  return ((() => { recorded.count++; return { unref: () => {}, pid: 4242 }; }) as unknown as typeof nodeSpawn);
+/** A spawn fake that records invocations and answers like a successful detached spawn. `env` is captured
+ *  because the spawned daemon's identity depends on it, not just on the fact that a spawn happened. */
+function fakeSpawn(recorded: { count: number; env?: NodeJS.ProcessEnv }): typeof nodeSpawn {
+  return (((_cmd: string, _args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
+    recorded.count++;
+    recorded.env = opts?.env;
+    return { unref: () => {}, pid: 4242 };
+  }) as unknown as typeof nodeSpawn);
 }
 
 /** Canary: reaching the real spawn in a test would boot a real daemon — any test that does not mean to
@@ -69,6 +74,24 @@ describe('cli/index.ensureDaemon', () => {
     const d = deps({ waitHealthy: async () => [false], spawn: fakeSpawn(spawned) });
     await expect(ensureDaemon(d)).rejects.toThrow('elowen daemon did not become healthy');
     expect(spawned.count).toBe(1);
+  });
+
+  it('pins ELOWEN_SERVICE=daemon so the spawned daemon can never read as the web', async () => {
+    // isTrackedService falls back to the environment and trusts the legacy ELOWEN_DAEMON_URL marker
+    // only when ELOWEN_SERVICE is absent. This spawn inherits the caller's environment, so without the
+    // pin a daemon started from a shell that exported ELOWEN_DAEMON_URL would answer the WEB check —
+    // and `elowen down` would signal it.
+    const spawned: { count: number; env?: NodeJS.ProcessEnv } = { count: 0 };
+    let call = 0;
+    process.env.ELOWEN_DAEMON_URL = 'http://127.0.0.1:4400'; // the operator's shell export
+    try {
+      const d = deps({ waitHealthy: async () => [++call === 1 ? false : true], spawn: fakeSpawn(spawned) });
+      await expect(ensureDaemon(d)).resolves.toBeUndefined();
+      expect(spawned.env?.ELOWEN_SERVICE).toBe('daemon');
+      expect(spawned.env?.ELOWEN_DAEMON_URL).toBe('http://127.0.0.1:4400'); // inheritance still works
+    } finally {
+      delete process.env.ELOWEN_DAEMON_URL;
+    }
   });
 });
 

@@ -171,7 +171,16 @@ export async function ensureDaemon(deps: Partial<EnsureDaemonDeps> = {}) {
     throw new Error(`elowen daemon is not running and the services are systemd-managed — start it with: ${sudo ? 'sudo ' : ''}systemctl start ${SERVICES.join(' ')}`);
   }
   const entry = join(dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'index.js');
-  spawnFn(process.execPath, [entry], { detached: true, stdio: 'ignore' }).unref();
+  // ELOWEN_SERVICE is pinned here for the same reason the launcher and the unit template pin it: the
+  // identity check trusts the legacy ELOWEN_DAEMON_URL marker only when ELOWEN_SERVICE is absent, so a
+  // daemon spawned from a shell that exported the former would otherwise read as the WEB — and `down`
+  // would signal it. Inheriting the environment is what makes that reachable, so it is pinned even
+  // though this spawn is the one path that never had a marker.
+  spawnFn(process.execPath, [entry], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, ELOWEN_SERVICE: 'daemon' },
+  }).unref();
   // 5s TOTAL, not 50 probes that may each stall for their own timeout.
   const [healthy] = await waitHealthyFn([`${BASE}/health`], { budgetMs: 5000 });
   if (!healthy) throw new Error('elowen daemon did not become healthy');

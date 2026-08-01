@@ -72,10 +72,13 @@ export function isTrackedService(pid: number, mark: ServiceMark, platform: NodeJ
   if (envMark === undefined) return false; // the daemon's argv is stable — no env fallback
   const environ = processEnviron(pid, platform);
   if (environ === null) return false;
-  // A process we spawned always carries ELOWEN_SERVICE, pinned by the launcher (and the systemd unit),
-  // so its value is authoritative over anything the operator's shell exported. The legacy marker is
-  // trusted only in its absence — otherwise an exported ELOWEN_DAEMON_URL spread into every spawn
-  // would make the daemon read as the web and `down` would SIGTERM it.
+  // Every path that starts a service pins ELOWEN_SERVICE — this launcher, the systemd unit, and
+  // ensureDaemon's auto-spawn in index.ts — so its value is authoritative over anything the operator's
+  // shell exported. The legacy marker is trusted only in its absence, because an exported
+  // ELOWEN_DAEMON_URL spreads into every spawn and would otherwise make a daemon read as the web,
+  // handing it a SIGTERM from `down`. Any new spawn path has to pin it too, or it reopens that hole.
+  // (The pin cannot help a process that is not ours: environments are inherited, so a child of the web
+  // still carries both markers. It has to be in run.json to matter, which bounds it to one signal.)
   if (environ.some((e) => e === `ELOWEN_SERVICE=${mark}`)) return true;
   return !environ.some((e) => e.startsWith('ELOWEN_SERVICE=')) && environ.some((e) => e.startsWith(`${envMark}=`));
 }
