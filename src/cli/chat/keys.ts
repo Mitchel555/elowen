@@ -22,7 +22,13 @@ export function isCtrlP(data: string): boolean { return matchesKey(data, 'ctrl+p
 export function isCtrlR(data: string): boolean { return matchesKey(data, 'ctrl+r'); }
 export function isCtrlU(data: string): boolean { return matchesKey(data, 'ctrl+u'); }
 
-export function isEscapeKey(data: string): boolean { return matchesKey(data, 'escape'); }
+export function isEscapeKey(data: string): boolean {
+  // A fast double-Esc (the two-press stop contract) can land as ONE `\x1b\x1b` chunk: pi-tui's buffer only
+  // re-splits that pair when a sequence-introducing byte follows, so a bare pair decodes as the ctrl+alt+[
+  // chord and every ESC consumer would swallow both presses. Recognize the pair as an escape so overlays
+  // and modals still close; ChatEditor additionally splits it into two presses for the stop flow.
+  return data === '\x1b\x1b' || matchesKey(data, 'escape');
+}
 export function isEnterKey(data: string): boolean { return data === '\r' || matchesKey(data, 'enter'); }
 export function isBackspaceKey(data: string): boolean { return matchesKey(data, 'backspace') || data === '\x7f'; }
 export function isUpKey(data: string): boolean { return data === '\x1b[A' || matchesKey(data, 'up'); }

@@ -897,14 +897,33 @@ export function createChatComposition(
         clearInterruptArm();
         stopRequested = true; // set AFTER the clear: the escalation window opens the moment the abort fires
         // Only a running foreground command can pin the aborted turn — advertise the escalation only then.
-        if (rt.processes.some((proc) => proc.running && proc.completionMode === 'foreground')) {
+        // Otherwise confirm the stop IMMEDIATELY: the visible turn end rides the daemon's SSE idle, a
+        // round trip away, and an unacknowledged Esc leaves the user staring at a still-streaming turn.
+        const foregroundPinned = rt.processes.some((proc) => proc.running && proc.completionMode === 'foreground');
+        if (foregroundPinned) {
           rt.notice = color.dim('interrupting · esc again to kill the running command');
+        } else {
+          rt.notice = color.dim('stopping…');
+          rt.noticeSticky = true; // live progress — the settled notice below replaces it and expires normally
         }
-        lifetime.runSession(() => client.abort(), () => {}, () => { /* already idle */ });
+        lifetime.runSession(
+          () => client.abort(),
+          () => {
+            // The pinned-command case keeps its escalation notice until the user acts on it; only the
+            // plain stop gets the completion confirmation.
+            if (!foregroundPinned) {
+              rt.notice = color.dim('agent stopped');
+              render('state:interrupt-abort-settled');
+            }
+          },
+          () => { /* already idle */ },
+        );
       } else {
         armInterrupt(next.armedUntil);
       }
-      render('input:interrupt-arm');
+      // Forced: the arm/abort feedback (footer hint, notice) must paint immediately, not wait out the
+      // normal 33ms frame interval — a user-initiated interrupt is interactive, not background traffic.
+      renderForced('input:interrupt-arm');
       return true;
     }
     if (rt.pendingImages.length > 0) {

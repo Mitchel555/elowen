@@ -69,6 +69,13 @@ export class ChatEditor extends Editor {
 
   override handleInput(data: string): void {
     if (isKeyRelease(data)) return; // Kitty flag-2 release edge — act on the press only (super filters too).
+    // A fast double-Esc arrives as one `\x1b\x1b` chunk (see isEscapeKey) — deliver both presses so the
+    // two-press stop contract holds regardless of typing speed instead of swallowing the pair.
+    if (data === '\x1b\x1b') {
+      this.handleInput('\x1b');
+      this.handleInput('\x1b');
+      return;
+    }
     // ↑ with empty editor + queued message → recall instead of history walk
     if (isUpKey(data) && this.getText() === '' && this.onQueueRecall) {
       const recalled = this.onQueueRecall();
