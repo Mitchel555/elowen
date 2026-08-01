@@ -50,6 +50,9 @@ Environment=ELOWEN_DB=${p.home}/.config/elowen/elowen.db
 Environment=ELOWEN_LOG_DIR=${p.home}/.config/elowen/logs
 Environment=ELOWEN_PORT=${p.daemonPort}
 Environment=ELOWEN_HOST=${p.daemonHost}
+# Pins the service identity for the launcher's pid check; the daemon's explicit value also keeps an
+# exported ELOWEN_DAEMON_URL from ever making it read as the web.
+Environment=ELOWEN_SERVICE=daemon
 Environment=PATH=${p.npmGlobalBin}:${BASE_PATH}
 Environment=LANG=${UTF8_LOCALE}
 ExecStart=${p.nodePath} ${p.daemonEntry}
@@ -129,6 +132,9 @@ User=${p.user}
 Environment=PORT=${p.webPort}
 Environment=HOSTNAME=${p.webHost}
 Environment=ELOWEN_DAEMON_URL=http://127.0.0.1:${p.daemonPort}${p.wsDirectPort ? `\nEnvironment=ELOWEN_WS_DIRECT_PORT=${p.wsDirectPort}` : ''}
+# Pins the service identity for the launcher's pid check — Next.js overwrites the web's argv
+# (process.title) at boot, so the env marker, not the cmdline, says what this process is.
+Environment=ELOWEN_SERVICE=web
 Environment=ELOWEN_LOG_DIR=${p.home}/.config/elowen/logs
 Environment=PATH=${p.npmGlobalBin}:${BASE_PATH}
 Environment=LANG=${UTF8_LOCALE}

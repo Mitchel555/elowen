@@ -84,6 +84,7 @@ import { setToolOutputCaps, setToolOutputPolicy } from '../brain/messageView.js'
 import { setSpillMaxResultBytes } from '../brain/session/toolResultClearing.js';
 import { makeToolOutputPolicy } from '../brain/toolOutput.js';
 import { BUILTIN_TOOL_OUTPUT_SHOWN } from '../brain/tools/index.js';
+import type { DelegatedChildBridge } from '../plugins/api.js';
 import { discoverPlugins, loadPlugins } from '../plugins/loader.js';
 import { MarketplaceService } from '../plugins/marketplace.js';
 import { PluginRegistryProvider } from '../plugins/pluginsProvider.js';
@@ -393,6 +394,30 @@ export interface BuildOpts {
   tmux?: TmuxDriver;
   bootstrap?: { username: string; password: string } | null;
   allowOpen?: boolean;
+}
+
+/** The plugin-facing bridge to the brain's DIRECT sub-agent delegation, keyed on the parent session
+ *  the registry reads off the live turn so a plugin can only ever reach its OWN children. Lifted out
+ *  of buildApp purely so the wiring test can exercise the real bridge instead of a hand-rolled replica:
+ *  a swapped (parent, child) pair typechecks (both strings) and would silently let a turn reach
+ *  another turn's children, so the argument order has to be pinned by a test on the real code. */
+export function createDelegatedChildren(
+  brainStore: BrainStore,
+  brain: BrainService | undefined,
+): DelegatedChildBridge {
+  return {
+    runs: (parentSessionId, limit) => brainStore.listDelegatedChildren(parentSessionId, limit),
+    read: (parentSessionId, childSessionId) => {
+      if (!brain) throw new Error('the brain is not available on this deployment');
+      return brain.readSubagent(parentSessionId, childSessionId);
+    },
+    continue: (parentSessionId, childSessionId, text, access, onEvent, model) => brain
+      ? brain.continueSubagent(parentSessionId, childSessionId, text, access, onEvent, model)
+      : Promise.reject(new Error('the brain is not available on this deployment')),
+    stop: (parentSessionId, childSessionId) => brain
+      ? brain.stopSubagent(parentSessionId, childSessionId)
+      : Promise.reject(new Error('the brain is not available on this deployment')),
+  };
 }
 
 export async function buildApp(opts: BuildOpts) {
@@ -755,19 +780,7 @@ export async function buildApp(opts: BuildOpts) {
       // Sub-agent transcripts already outlive their delegation in SQLite; this is what lets the agent
       // that spawned them find them again and pick one back up. Both halves are keyed on the parent
       // session the registry reads off the live turn, so a plugin can only ever reach its OWN children.
-      delegatedChildren: {
-        runs: (parentSessionId, limit) => brainStore.listDelegatedChildren(parentSessionId, limit),
-        read: (parentSessionId, childSessionId) => {
-          if (!brain) throw new Error('the brain is not available on this deployment');
-          return brain.readSubagent(parentSessionId, childSessionId);
-        },
-        continue: (parentSessionId, childSessionId, text, access, onEvent, model) => brain
-          ? brain.continueSubagent(parentSessionId, childSessionId, text, access, onEvent, model)
-          : Promise.reject(new Error('the brain is not available on this deployment')),
-        stop: (parentSessionId, childSessionId) => brain
-          ? brain.stopSubagent(parentSessionId, childSessionId)
-          : Promise.reject(new Error('the brain is not available on this deployment')),
-      },
+      delegatedChildren: createDelegatedChildren(brainStore, brain),
       // ONE answer to "what time is it for this operator", read from the single place they configure it
       // (Settings → Plugins → runtime-context → Timezone) and shared with every plugin that reasons about
       // wall-clock time. Without it, cron would silently schedule in whatever zone the SERVER happens to

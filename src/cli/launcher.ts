@@ -38,6 +38,23 @@ export function isAlive(pid: number): boolean {
 export type ServiceMark = 'daemon' | 'web';
 const ENTRY_MARK: Record<ServiceMark, string> = { daemon: 'daemon/index.js', web: 'web-dist/server.js' };
 
+/** Services whose argv is not stable get an environment identity too: Next.js overwrites the process
+ *  title (and with it the in-memory argv that /proc/<pid>/cmdline mirrors) with `next-server (v16.x)`
+ *  a moment after the web boots, so the entry mark vanishes from its cmdline. The env is a separate
+ *  region that the title rewrite does not touch, so it still answers who the process is.
+ *
+ *  ELOWEN_SERVICE is the marker meant for this, pinned by the launcher and by the unit template. The
+ *  value below is the LEGACY fallback: every install predating that marker hands the web
+ *  ELOWEN_DAEMON_URL and nothing else sets it, and `elowen update` never rewrites an installed unit —
+ *  so without it every existing deployment would silently keep failing this check. It is trusted only
+ *  when ELOWEN_SERVICE is absent entirely (see isTrackedService).
+ *
+ *  Linux only: reading another process's env needs procfs, and no portable `ps` carries it. On macOS
+ *  the web therefore stays unidentifiable — `status` reports it stopped and `stop` leaves it running,
+ *  the very bug this fixes. Failing closed there is the safe direction (a foreign pid never gets a
+ *  SIGTERM), but it is an open gap, not a decision. */
+const ENV_MARK: Partial<Record<ServiceMark, string>> = { web: 'ELOWEN_DAEMON_URL' };
+
 /** A pid liveness+identity predicate; injectable so tests need not mint real daemon processes. */
 export type IsTracked = (pid: number, mark: ServiceMark) => boolean;
 
@@ -45,11 +62,22 @@ export type IsTracked = (pid: number, mark: ServiceMark) => boolean;
  *  reboot/crash. A bare `isAlive` check is not enough: run.json survives a reboot, the OS recycles pids,
  *  and `stop` would then SIGTERM an innocent process while `start` would adopt it as "already running"
  *  and never spawn. We birth-validate by matching the process's own argv against the service's entry
- *  script; a dead pid, or one whose argv doesn't carry the entry, is "not ours". */
+ *  script — or, for a service whose argv is not stable (see ENV_MARK), the environment markers every
+ *  launch path pins on it; a dead pid, or one carrying neither, is "not ours". */
 export function isTrackedService(pid: number, mark: ServiceMark, platform: NodeJS.Platform = process.platform): boolean {
   if (!isAlive(pid)) return false;
   const argv = processArgv(pid, platform);
-  return argv !== null && argv.includes(ENTRY_MARK[mark]);
+  if (argv !== null && argv.includes(ENTRY_MARK[mark])) return true;
+  const envMark = ENV_MARK[mark];
+  if (envMark === undefined) return false; // the daemon's argv is stable — no env fallback
+  const environ = processEnviron(pid, platform);
+  if (environ === null) return false;
+  // A process we spawned always carries ELOWEN_SERVICE, pinned by the launcher (and the systemd unit),
+  // so its value is authoritative over anything the operator's shell exported. The legacy marker is
+  // trusted only in its absence — otherwise an exported ELOWEN_DAEMON_URL spread into every spawn
+  // would make the daemon read as the web and `down` would SIGTERM it.
+  if (environ.some((e) => e === `ELOWEN_SERVICE=${mark}`)) return true;
+  return !environ.some((e) => e.startsWith('ELOWEN_SERVICE=')) && environ.some((e) => e.startsWith(`${envMark}=`));
 }
 
 /** The command line of `pid`, or null when it cannot be read. procfs is the cheap path; off Linux there
@@ -63,6 +91,16 @@ function processArgv(pid: number, platform: NodeJS.Platform): string | null {
   }
   try { return execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }); }
   catch { return null; } // ps failed or the pid is gone → cannot confirm it is ours
+}
+
+/** The environment of `pid` as KEY=VALUE entries, or null when it cannot be read. procfs exposes the
+ *  env as NUL-separated bytes, readable — like cmdline — only for our own processes. Off Linux there
+ *  is no /proc and no portable `ps` output carries the env, so the env identity stays Linux-only and
+ *  the non-procfs branch keeps the argv check. */
+function processEnviron(pid: number, platform: NodeJS.Platform): string[] | null {
+  if (platform !== 'linux') return null;
+  try { return readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0'); }
+  catch { return null; } // /proc unreadable or the pid vanished mid-check
 }
 
 /** GET `url` and report whether it answered 2xx within `timeoutMs` — the single readiness probe shared by
@@ -276,8 +314,12 @@ async function startLocked(env: NodeJS.ProcessEnv, deps: StartDeps): Promise<Run
     }
     return launch(entry, extra);
   };
-  const daemonPid = await resolvePid(daemonEntry(), daemonPort, '/health', 'daemon', { ELOWEN_PORT: String(daemonPort) });
-  const webPid = await resolvePid(webServer(), webPort, '/', 'web', { PORT: String(webPort), HOSTNAME: '127.0.0.1', ELOWEN_DAEMON_URL: `http://127.0.0.1:${daemonPort}` });
+  // ELOWEN_SERVICE pins the service identity in the child's environment: the web's argv stops being
+  // readable once Next overwrites its title (see ENV_MARK), so isTrackedService reads the marker from
+  // /proc/<pid>/environ instead — and the daemon's explicit `daemon` value keeps an exported
+  // ELOWEN_DAEMON_URL from ever making it read as the web.
+  const daemonPid = await resolvePid(daemonEntry(), daemonPort, '/health', 'daemon', { ELOWEN_PORT: String(daemonPort), ELOWEN_SERVICE: 'daemon' });
+  const webPid = await resolvePid(webServer(), webPort, '/', 'web', { PORT: String(webPort), HOSTNAME: '127.0.0.1', ELOWEN_DAEMON_URL: `http://127.0.0.1:${daemonPort}`, ELOWEN_SERVICE: 'web' });
 
   // Wait for BOTH services to answer — a live daemon with a dead web must not report `elowen up` as a
   // success. The web proxies the daemon, so it's polled second within the same shared budget.

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readState, writeState, clearState, isAlive, isTrackedService, status, stop, start, waitHealthy, type RunState, type IsTracked } from '../../src/cli/launcher.js';
@@ -42,12 +42,108 @@ describe('cli/launcher.isAlive', () => {
 });
 
 describe('cli/launcher.isTrackedService', () => {
+  /** Spawn a short-lived node fixture (optionally masquerading as a Next server via process.title)
+   *  and resolve its pid once the exec has happened — the cmdline and env are fixed by then. The
+   *  caller is responsible for killing it. */
+  function spawnFixture(title: string | null, env: NodeJS.ProcessEnv): Promise<number> {
+    const script = title === null
+      ? 'setTimeout(() => {}, 30_000);'
+      : `process.title = ${JSON.stringify(title)}; setTimeout(() => {}, 30_000);`;
+    const child = spawnProcess(process.execPath, ['-e', script], { stdio: 'ignore', env });
+    return once(child, 'spawn').then(() => {
+      if (child.pid === undefined) throw new Error('failed to spawn the fixture process');
+      return child.pid;
+    });
+  }
+
   it('is false for a dead pid regardless of platform', () => {
     expect(isTrackedService(2147483646, 'daemon')).toBe(false);
   });
   it('rejects a live pid that is not our service (this test runner is not the daemon entry)', () => {
     // The vitest process's argv carries no `daemon/index.js`, so it must never be mistaken for the daemon.
     expect(isTrackedService(process.pid, 'daemon')).toBe(false);
+  });
+  it('rejects a live pid that is not our service (this test runner is not the web)', () => {
+    // The vitest process has neither the web's argv nor any of its env markers.
+    expect(isTrackedService(process.pid, 'web')).toBe(false);
+  });
+
+  it('recognizes a web whose argv was overwritten by Next via its environment markers', async () => {
+    // Production reproduction: the Next standalone server renames itself `next-server (v16.x)`, so
+    // /proc/<pid>/cmdline no longer carries web-dist/server.js — but the spawn env survives.
+    const pid = await spawnFixture('next-server (v16.2.11)', { ...process.env, ELOWEN_SERVICE: 'web', ELOWEN_DAEMON_URL: 'http://127.0.0.1:4400' });
+    try {
+      // Sanity that the scenario is real: the cmdline really no longer names the entry script.
+      expect(readFileSync(`/proc/${pid}/cmdline`, 'utf8')).toContain('next-server (v16.2.11)');
+      expect(isTrackedService(pid, 'web')).toBe(true);
+    } finally {
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+
+  it('recognizes a legacy web (no ELOWEN_SERVICE — e.g. a unit installed before the marker existed) via ELOWEN_DAEMON_URL alone', async () => {
+    const pid = await spawnFixture('next-server (v16.2.11)', { ...process.env, ELOWEN_DAEMON_URL: 'http://127.0.0.1:4400' });
+    try {
+      expect(isTrackedService(pid, 'web')).toBe(true);
+    } finally {
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+
+  it('rejects a foreign next-server that reuses the tracked pid (same title, none of our markers)', async () => {
+    // A recycled pid whose new owner is some other Next app on the box — the exact case the identity
+    // check exists for: `stop` must not SIGTERM it.
+    const env = { ...process.env };
+    delete env.ELOWEN_SERVICE;
+    delete env.ELOWEN_DAEMON_URL;
+    const pid = await spawnFixture('next-server (v16.2.11)', env);
+    try {
+      expect(isTrackedService(pid, 'web')).toBe(false);
+    } finally {
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+
+  it('never mistakes the daemon for the web, even when the operator exported ELOWEN_DAEMON_URL', async () => {
+    // The daemon spawn pins ELOWEN_SERVICE=daemon; without that pin an exported ELOWEN_DAEMON_URL
+    // (spread into every spawn from the CLI's env) would make isTrackedService(pid, 'web') true and
+    // `down` would SIGTERM the daemon instead of the web.
+    const pid = await spawnFixture(null, { ...process.env, ELOWEN_SERVICE: 'daemon', ELOWEN_DAEMON_URL: 'http://127.0.0.1:4400' });
+    try {
+      expect(isTrackedService(pid, 'web')).toBe(false);
+    } finally {
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+
+  it('still recognizes the daemon by its argv on linux', async () => {
+    const dir = join(home, 'daemon');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'index.js'), 'setTimeout(() => {}, 30_000);', 'utf8');
+    const child = spawnProcess(process.execPath, [join(dir, 'index.js')], { stdio: 'ignore' });
+    try {
+      await once(child, 'spawn');
+      const pid = child.pid;
+      if (pid === undefined) throw new Error('failed to spawn the fixture process');
+      expect(isTrackedService(pid, 'daemon')).toBe(true);
+      expect(isTrackedService(pid, 'web')).toBe(false); // alive, but a different service
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+
+  it('cannot identify a title-rewriting web off linux — a known gap, pinned to fail closed', async () => {
+    // Reading another process's env needs procfs and no portable `ps` carries it, so off Linux the web
+    // stays unidentifiable and the original bug survives there: `status` calls it stopped and `stop`
+    // leaves it running. That is a GAP, not a design choice, and this test does not bless it. What it
+    // pins is the safe direction — the non-procfs branch must fail closed rather than accept a live pid
+    // it cannot confirm, because the alternative is `down` sending SIGTERM to a stranger.
+    const pid = await spawnFixture('next-server (v16.2.11)', { ...process.env, ELOWEN_SERVICE: 'web', ELOWEN_DAEMON_URL: 'http://127.0.0.1:4400' });
+    try {
+      expect(isTrackedService(pid, 'web', 'darwin')).toBe(false);
+    } finally {
+      process.kill(pid, 'SIGKILL');
+    }
   });
 
   /** Off Linux there is no /proc, and identity used to fall back to liveness alone: after a reboot

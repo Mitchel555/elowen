@@ -9,6 +9,7 @@ import { BrainService, type BrainDeps } from '../../src/brain/brainService.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { openDb } from '../../src/store/db.js';
 import { inMemoryModelRuntime } from '../../src/brain/providers.js';
+import { createDelegatedChildren } from '../../src/daemon/bootstrap.js';
 import type { DelegatedExecutionScope } from '../../src/brain/delegatedScope.js';
 import type { DelegatedChildBridge, SubagentProgressEvent } from '../../src/plugins/api.js';
 import type { SubagentUpdate } from '../../src/brain/events.js';
@@ -50,34 +51,28 @@ function setup() {
   const svc = new BrainService(deps);
   const send = vi.fn(async () => 'the sub-agent answered');
   (svc as unknown as { channelService: { send: unknown } }).channelService.send = send;
-  return { svc, send };
+  return { store, svc, send };
 }
 
 // The chain under test: plugins/subagent DelegateContinue → registry ctx.continueSubagent →
 // delegatedChildren.continue → brain.continueSubagent → sendDelegated → channelService.send. The middle
-// hop is bootstrap.ts's INLINE lambda, which lives in buildApp's closure and is not reachable from a test
-// (buildApp exposes only app/startLoops/tickets/tmux). The bridge below replicates that lambda's exact
-// argument order; a reordering in the REAL lambda is the one mutation this suite cannot observe — it
-// would need the bridge construction extracted into an exported helper. Everything else here is real.
-async function loadRegistry(svc: BrainService) {
+// hop is the REAL createDelegatedChildren bridge (extracted from buildApp so this suite can reach it):
+// the parent anchor comes from the host turn, the child id from the tool, and the remaining arguments
+// are forwarded positionally — model AFTER onEvent. A swapped (parent, child) pair typechecks (both
+// strings), so this test pins the order on the production code itself. Everything else here is real.
+async function loadRegistry(store: BrainStore, svc: BrainService) {
   return loadPlugins({
     dirs: [join(repoRoot, 'plugins')], enabled: ['subagent'], logger: log,
-    delegatedChildren: {
-      runs: () => [],
-      read: () => { throw new Error('read is not part of the continuation path under test'); },
-      continue: (parentSessionId, childSessionId, text, access, onEvent, model) =>
-        svc.continueSubagent(parentSessionId, childSessionId, text, access, onEvent, model),
-      stop: async () => ({ stopped: false }),
-    },
+    delegatedChildren: createDelegatedChildren(store, svc),
   });
 }
 
 describe('DelegateContinue wiring — plugin tool to the brain core', () => {
   it('carries parent, child, text, access, onEvent and model to the core, in that order', async () => {
-    const { svc, send } = setup();
+    const { store, svc, send } = setup();
     // Records the bridge→core call while still running the real implementation through to sendDelegated.
     const continueSpy = vi.spyOn(svc, 'continueSubagent');
-    const reg = await loadRegistry(svc);
+    const reg = await loadRegistry(store, svc);
     const tool = reg.tools.find((t) => t.name === 'DelegateContinue');
     if (!tool) throw new Error('DelegateContinue tool is not registered');
     const executor = tool as unknown as { execute: (id: string, p: unknown) => Promise<{ content: { text: string }[] }> };
@@ -138,9 +133,9 @@ describe('DelegateContinue wiring — plugin tool to the brain core', () => {
   });
 
   it('continues on the child\'s recorded row model when the tool passes none', async () => {
-    const { svc, send } = setup();
+    const { store, svc, send } = setup();
     const continueSpy = vi.spyOn(svc, 'continueSubagent');
-    const reg = await loadRegistry(svc);
+    const reg = await loadRegistry(store, svc);
     const tool = reg.tools.find((t) => t.name === 'DelegateContinue');
     if (!tool) throw new Error('DelegateContinue tool is not registered');
     const executor = tool as unknown as { execute: (id: string, p: unknown) => Promise<{ content: { text: string }[] }> };
