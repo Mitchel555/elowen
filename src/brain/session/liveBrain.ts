@@ -7,6 +7,7 @@ import type { DelegatedExecutionScope } from '../delegatedScope.js';
 import type { TurnMode } from '../service/turnRequest.js';
 import type { ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 import type { ApplyCompaction } from './factory.js';
+import type { LiveRecallOptions } from './liveRecall.js';
 
 /** A queued mid-turn message's image attachments, in PI's ImageContent shape. */
 export type QueuedImage = { type: 'image'; data: string; mimeType: string };
@@ -59,6 +60,8 @@ export interface LiveBrain {
   thinkingLevel?: string;
   /** Resolved provider capabilities + live request switches used by `/fast` and status surfaces. */
   requestProfile: ProviderRequestProfile;
+  /** Mid-turn memory recall, when the session belongs to an owner who has it switched on. */
+  liveRecall?: LiveRecallOptions;
   fastAvailable: boolean;
   thinkingLabels: Record<string, string>;
   policy: Policy;

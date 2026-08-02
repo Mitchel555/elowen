@@ -98,6 +98,8 @@ export interface BrainDeps {
   /** Retrieval + anti-duplication over the memory store. Present (with memoryStore) ⇒ owner turns get
    *  per-turn memory injection, the memory tools, and the post-turn curator. */
   memoryService?: MemoryService;
+  /** Operator budget for mid-turn recall, read per pass so a change applies to a running conversation. */
+  liveRecallBudget?: () => { passes: number; count: number; chars: number };
   /** Builds a CHEAP inference client for the post-turn memory curator (mirrors the overseer relay,
    *  keyed on autopilot.model). Returns null when no key/model is configured → the curator no-ops. */
   inference?: () => InferenceClient | null;

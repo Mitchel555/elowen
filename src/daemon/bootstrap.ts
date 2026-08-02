@@ -885,6 +885,13 @@ export async function buildApp(opts: BuildOpts) {
         // Private long-term memory: the owner-chat memory tools + per-turn retrieval injection + the
         // post-turn curator. All owner-gated inside BrainService (channels/workers never reach them).
         memoryStore, memoryService, inference: memoryModelInference,
+        // Budget for recall that runs mid-turn. Read through the config on every pass, so raising or
+        // zeroing it in Settings reaches a conversation that is already running.
+        liveRecallBudget: () => ({
+          passes: config.get().brain.limits.memoryLiveRecallPasses,
+          count: config.get().brain.limits.memoryLiveRecallCount,
+          chars: config.get().brain.limits.memoryLiveRecallChars,
+        }),
         // Auto-categorize newly-added durable memories (fire-and-forget from the curator) + the owner's
         // memory_category_* tools (create/delete/recategorize).
         memoryCategorizer, memoryCategoryStore,

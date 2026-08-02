@@ -1,3 +1,4 @@
+import { isChannelSession } from '../sessionId.js';
 import type { PluginRegistry } from '../../plugins/registry.js';
 import { PluginHookBus } from '../../plugins/hookBus.js';
 import { logger } from '../../shared/logger.js';
@@ -38,6 +39,7 @@ interface SpawnerDeps {
   runtimeConfig?: BrainDeps['runtimeConfig'];
   memoryStore?: BrainDeps['memoryStore'];
   memoryService?: BrainDeps['memoryService'];
+  liveRecallBudget?: BrainDeps['liveRecallBudget'];
   memoryCategoryStore?: BrainDeps['memoryCategoryStore'];
   memoryCategorizer?: BrainDeps['memoryCategorizer'];
   /** The daemon-wide plugin registry (undefined when plugins aren't wired at all). */
@@ -225,6 +227,22 @@ export class LiveSessionSpawner {
       tools: allTools, toolSearch: toolSearchHandle, thinkingLevel: opts.thinkingLevel, requestProfile,
       autoCompact: opts.autoCompact, autoCompactAtPct,
       pendingCompactionMessages,
+      // Recall again mid-turn, but only for a real owner conversation: a channel session serves several
+      // senders and must never surface one person's memories to another, and an ownerless task session
+      // has no memory to search. `enabled` and the budget are read per pass, so both the owner's toggle
+      // and the operator's limits take effect on a conversation that is already running.
+      ...(memService && ownerUserId > 0 && !isChannelSession(sessionId) ? {
+        liveRecall: {
+          budget: () => this.d.liveRecallBudget?.() ?? { passes: 0, count: 0, chars: 0 },
+          enabled: () => this.d.userSettings?.(ownerUserId)?.autoLiveRecall !== false,
+          retrieve: async (query: string, maxCount: number, charBudget: number) => {
+            const found = await memService.retrieve(ownerUserId, query, { maxCount, charBudget });
+            return found.memories.map((m) => ({
+              id: m.id, body: m.body, kind: m.kind, importance: m.importance, updatedAt: m.updated_at,
+            }));
+          },
+        },
+      } : {}),
       // Project AGENTS.md/CLAUDE.md ride the system prompt for an ADMIN's own chat only. Two guards,
       // both required: (1) not a shared channel (foreign senders must never see instruction files);
       // (2) admin owner — a non-admin account with no repo of its own resolves cwd to the daemon's

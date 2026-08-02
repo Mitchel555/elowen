@@ -5,6 +5,7 @@ import type { BrainStore } from '../../store/brainStore.js';
 import { createSessionPersistenceProjector, rehydrate, settlePartialTurn } from '../persistence.js';
 import { applyProviderRequestProfile, isCanonicalThinkingLevel, type ProviderRequestProfile } from '../modelCapabilities.js';
 import type { DelegatedExecutionScope } from '../delegatedScope.js';
+import { installLiveRecall, type LiveRecallOptions } from './liveRecall.js';
 import { createCompactionModelRoute, type CompactionModelRoute } from './compactionModelRoute.js';
 import {
   installTurnBoundaryAutoCompaction,
@@ -32,6 +33,8 @@ export function initialActiveToolNames(tools: readonly ToolDefinition[], deferre
  *  worker-brain prompt. The factory only assembles. */
 export interface SessionSpec {
   sessionId: string;
+  /** Mid-turn memory recall, when the caller wants it for this session. */
+  liveRecall?: LiveRecallOptions;
   /** The Elowen user the store row belongs to (0 for ownerless task sessions). */
   ownerUserId: number;
   /** Parent conversation for delegated sessions; persisted for usage/navigation. */
@@ -118,6 +121,8 @@ export interface BrainResourceLoaderOptions {
   kimiHeaderProbe?: boolean;
   /** Marker hook for PI-owned compaction requests. The actual stream route is installed on AgentSession. */
   compactionModelRouteExtension?: CompactionModelRoute['extension'];
+  /** Recall memories again mid-turn, searching from the work rather than the opening message. */
+  liveRecall?: LiveRecallOptions;
   requestProfile?: ProviderRequestProfile;
   settingsManager: SettingsManager;
 }
@@ -215,12 +220,13 @@ function defaultResourceLoaderFactory(o: BrainResourceLoaderOptions): ResourceLo
     // feeds PI our in-memory plugin templates, which it exposes as `/name` slash commands and expands
     // ($1/$@/$ARGUMENTS/${N:-default}) itself in prompt()/steer()/followUp() — no daemon-side expansion.
     promptsOverride: () => ({ prompts, diagnostics: [] }),
-    ...(o.codexReasoningFix || o.kimiHeaderProbe || o.compactionModelRouteExtension || o.requestProfile ? {
+    ...(o.codexReasoningFix || o.kimiHeaderProbe || o.compactionModelRouteExtension || o.requestProfile || o.liveRecall ? {
       extensionFactories: [
         ...(o.codexReasoningFix ? [codexReasoningSummary] : []),
         ...(o.kimiHeaderProbe ? [kimiHeaderProbe] : []),
         ...(o.compactionModelRouteExtension ? [o.compactionModelRouteExtension] : []),
         ...(o.requestProfile ? [providerRequestProfile(o.requestProfile)] : []),
+        ...(o.liveRecall ? [((recall) => (pi: ExtensionAPI): void => { installLiveRecall(pi, recall); })(o.liveRecall)] : []),
       ],
     } : {}),
   });
@@ -280,6 +286,7 @@ export class BrainSessionFactory {
       kimiHeaderProbe: spec.model.provider === 'kimi-coding',
       compactionModelRouteExtension: compactionModelRoute?.extension,
       requestProfile: spec.requestProfile, settingsManager,
+      ...(spec.liveRecall ? { liveRecall: spec.liveRecall } : {}),
     });
     // A resource loader passed to createAgentSession is NOT auto-reloaded (only one it builds itself
     // is), so its system prompt stays empty unless we reload it here. Without this the brain falls
