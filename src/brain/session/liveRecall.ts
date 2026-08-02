@@ -81,15 +81,25 @@ function textOf(message: ContextMessage): string {
 
 /** Build the search query from what the turn has been DOING — the tail of tool results and assistant
  *  text — rather than from the opening user message the turn-start pass already used. */
-export function liveRecallQuery(messages: readonly ContextMessage[]): string {
+export function liveRecallQuery(messages: readonly ContextMessage[], includeLastUser = false): string {
   const collected: string[] = [];
   let chars = 0;
+  // Only a STEERING message earns a place in the query. The opening message does not: turn-start recall
+  // already searched with it, so including it here would reproduce the same hits and spend a pass.
+  let lastUserIndex = -1;
+  if (includeLastUser) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'user') { lastUserIndex = i; break; }
+    }
+  }
   for (let i = messages.length - 1; i >= 0 && chars < QUERY_SOURCE_CHARS; i -= 1) {
     const message = messages[i];
     if (!message) continue;
-    // The user's own words are deliberately excluded: turn-start recall already searched with them, and
-    // including them again would just reproduce the same hits and spend the budget on nothing.
-    if (message.role === 'user') continue;
+    // Earlier user messages are excluded — turn-start recall already searched with them, so including
+    // them again would reproduce the same hits and spend a pass proving it. The LAST one is different:
+    // when it arrived mid-turn as steering it is the freshest statement of what the user now wants, and
+    // searching without it would answer a question nobody is asking any more.
+    if (message.role === 'user' && i !== lastUserIndex) continue;
     const text = textOf(message).trim();
     if (!text) continue;
     collected.push(text.slice(0, QUERY_SOURCE_CHARS - chars));
@@ -113,6 +123,8 @@ function renderLiveRecall(memory: LiveRecallMemory, now: number): string {
 /** Per-session state. A turn is identified by the message count at which it started growing, so the
  *  budget resets naturally when a new turn begins rather than needing a turn-start event. */
 interface TurnState {
+  /** Set when this turn was redirected mid-flight, so the query may include that new instruction. */
+  steered: boolean;
   passes: number;
   chars: number;
   injected: Set<number>;
@@ -122,7 +134,7 @@ interface TurnState {
 }
 
 function freshTurn(): TurnState {
-  return { passes: 0, chars: 0, injected: new Set(), blocks: [], lastQuery: '' };
+  return { steered: false, passes: 0, chars: 0, injected: new Set(), blocks: [], lastQuery: '' };
 }
 
 export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): void {
@@ -139,8 +151,19 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
     // except through steering, which is itself a new instruction worth re-recalling for.
     const userCount = messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
     if (userCount !== lastUserCount) {
+      const steering = lastUserCount >= 0 && userCount > lastUserCount;
       lastUserCount = userCount;
+      // A user message arriving mid-flight is steering: it earns a fresh budget, because a redirected
+      // turn deserves to search again. What it must NOT do is drop the blocks already injected — the
+      // model has been working with those memories, and yanking them mid-turn is a silent loss with no
+      // upside. They are carried over, along with the ids, so nothing is injected twice.
+      const carried = steering ? turn : undefined;
       turn = freshTurn();
+      if (carried) {
+        turn.blocks = carried.blocks;
+        turn.injected = carried.injected;
+        turn.steered = true;
+      }
     }
 
     const budget = opts.budget();
@@ -155,7 +178,7 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
       || turn.chars >= budget.chars;
     if (exhausted) return turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined;
 
-    const query = liveRecallQuery(messages);
+    const query = liveRecallQuery(messages, turn.steered);
     // Too thin to be worth an embedding call, or the work has not moved since the last pass — recalling
     // again would return the same memories and spend a pass proving it.
     if (query.length < MIN_QUERY_CHARS || query === turn.lastQuery) {

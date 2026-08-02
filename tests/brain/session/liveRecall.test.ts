@@ -189,6 +189,35 @@ describe('live recall — budget and switches', () => {
     expect(out).toEqual(base);
   }, 15_000);
 
+  it('keeps already injected memories when the user steers mid-turn, and searches with the new instruction', async () => {
+    const seen: string[] = [];
+    let call = 0;
+    const { fire } = harness({
+      retrieve: async (q) => { seen.push(q); call += 1; return call === 1 ? [mem(1, 'First fact')] : [mem(2, 'Second fact')]; },
+    });
+
+    const before: Msg[] = [
+      { role: 'user', content: 'start the deployment work' },
+      { role: 'toolResult', content: 'output about the deployment pipeline in some detail' },
+    ];
+    const a = await fire(before);
+    expect(textOf(a[a.length - 1] as Msg)).toContain('First fact');
+
+    // The user interrupts. Dropping what was already injected would strip memories the model is working
+    // with, and searching without the new instruction would answer a question nobody is asking any more.
+    const after: Msg[] = [
+      ...before,
+      { role: 'user', content: 'actually switch to the database migration instead' },
+      { role: 'toolResult', content: 'output about the deployment pipeline in some detail' },
+    ];
+    const b = await fire(after);
+    const injected = textOf(b[b.length - 1] as Msg);
+
+    expect(injected).toContain('First fact');
+    expect(injected).toContain('Second fact');
+    expect(seen[seen.length - 1]).toContain('database migration');
+  });
+
   it('survives a failing retrieval without taking the turn down', async () => {
     const { fire } = harness({ retrieve: async () => { throw new Error('embedding endpoint down'); } });
     const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output here' }];
