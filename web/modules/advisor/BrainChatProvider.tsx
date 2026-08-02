@@ -490,6 +490,9 @@ function useBrainChatController(): BrainChatValue {
       snapshot: '1', history: String(HISTORY_PAGE), heartbeat: '1',
     });
     const es = new EventSource(`${BASE}/brain/stream?${params.toString()}`);
+    // A reconnect mints a fresh stream the daemon assumes is being watched, and the revive path
+    // reconnects while still hidden — so re-report presence here or the phone push goes quiet again.
+    elowenClient.brainVisibility({ client: clientId(), hidden: document.hidden });
     lastFrameAtRef.current = Date.now();
     // With `snapshot=1` the first frame is guaranteed, so "the stream opened" finally means "data arrived".
     // If it does not, the connection is broken in a way EventSource will not report — retry it.
@@ -1090,6 +1093,22 @@ function useBrainChatController(): BrainChatValue {
     };
     window.addEventListener('pagehide', onPageHide);
     return () => window.removeEventListener('pagehide', onPageHide);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Report whether this tab is on screen. The daemon holds an SSE stream open behind a locked phone, so
+  // being attached says nothing about whether the answer is being read — without this the "turn finished"
+  // push assumes someone is watching and never fires. Also reported on every (re)attach, because a
+  // reconnect mints a fresh stream that starts out assumed-visible: a tab that reconnects while hidden
+  // (the daemon's own revive path does exactly that) would otherwise silence the notification again.
+  useEffect(() => {
+    const report = (): void => {
+      if (!attachedRef.current) return;
+      elowenClient.brainVisibility({ client: clientId(), hidden: document.hidden });
+    };
+    report();
+    document.addEventListener('visibilitychange', report);
+    return () => document.removeEventListener('visibilitychange', report);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

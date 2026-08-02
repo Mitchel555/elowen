@@ -112,6 +112,33 @@ export class ClientAttachments {
     return n;
   }
 
+  /** Streams whose client reported it is no longer on screen — a backgrounded tab or a locked phone.
+   *  They stay fully attached (a hidden tab must keep receiving the turn so it is up to date the moment
+   *  the user looks again), so this deliberately does NOT affect `attachedCount` and the lifecycle rules
+   *  built on it: the conversation is still held, just not watched. */
+  private readonly hiddenListeners = new Set<ClientListener>();
+
+  /** Attached streams whose client is actually on screen. Used for "would a notification reach someone
+   *  who is already reading this?" — a browser keeps an SSE stream open behind a locked screen, so
+   *  attachment alone cannot answer that, and treating it as presence is what silenced the phone push. */
+  watchingCount(sessionId: string): number {
+    let n = 0;
+    for (const [listener, sid] of this.clientStreams) {
+      if (sid === sessionId && !this.hiddenListeners.has(listener)) n += 1;
+    }
+    return n;
+  }
+
+  /** Record whether one authenticated client is on screen. Returns false when the id matches no live
+   *  transport — a stale tab reporting after its stream died must not leave an entry behind. */
+  setClientVisibility(userId: number, clientId: string, hidden: boolean): boolean {
+    const listener = this.stableClients.get(this.stableKey(userId, clientId))?.listener;
+    if (!listener) return false;
+    if (hidden) this.hiddenListeners.add(listener);
+    else this.hiddenListeners.delete(listener);
+    return true;
+  }
+
   /** Whether an authenticated client that identifies itself with a STABLE client id is currently attached
    *  to this conversation — in practice, whether a terminal has it open in front of the user.
    *
@@ -324,6 +351,9 @@ export class ClientAttachments {
    *  therefore still find the replacement id even when socket abort reached the daemon first. */
   detachTransport(listener: ClientListener): void {
     this.clientStreams.delete(listener);
+    // Hygiene, not correctness: `watchingCount` only walks live streams, so a mark left on a dead
+    // listener could not change an answer — but without this the set would grow for the process's life.
+    this.hiddenListeners.delete(listener);
     // Own the removal here rather than making every call site reach into the map: rollover can re-key (or
     // merge) the session bucket a listener started in, so scan every key instead of trusting a captured id.
     for (const [id, set] of this.sessionTaps) {

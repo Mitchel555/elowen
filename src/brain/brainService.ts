@@ -213,11 +213,15 @@ export class BrainService {
       },
       afterTurnSettled: (userId, sessionId, fromWeb) => {
         this.drainDeferredPluginReload();
-        // A web-started turn just finished with NO client stream still attached — tell the user's phone.
-        // `fromWeb` alone only means the send did not come from a bound CLI, which is also true of the web
-        // tab the user is reading right now: notifying then buzzes someone who is watching the answer
-        // arrive. Enablement is implicit: no push subscription means the notifier sends nothing.
-        if (fromWeb && this.attachments.attachedCount(sessionId) === 0 && d.notifyTurnComplete) {
+        // A web-started turn just finished with nobody WATCHING it — tell the user's phone. `fromWeb`
+        // alone only means the send did not come from a bound CLI, which is also true of the web tab the
+        // user is reading right now: notifying then buzzes someone watching the answer arrive.
+        // Attachment cannot stand in for that, though — a browser holds its SSE stream open behind a
+        // locked screen or a backgrounded tab, so requiring zero attachments meant the push never fired
+        // for the case it exists to serve. Clients report whether they are on screen; one that never
+        // reports counts as watching, so a surface that has not been taught this stays silent as before.
+        // Enablement is implicit: no push subscription means the notifier sends nothing.
+        if (fromWeb && this.attachments.watchingCount(sessionId) === 0 && d.notifyTurnComplete) {
           d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
         }
       },
@@ -856,6 +860,13 @@ export class BrainService {
     const control = registry?.control('subagent');
     if (!control) return { detached: 0 };
     return control.detachForeground({ sessionId: target, principal: `elowen:${userId}` });
+  }
+
+  /** Record whether one client's window is on screen, so a finished turn knows whether anyone is actually
+   *  reading it before it notifies the user's phone. Purely presence: it does not touch attachment, so a
+   *  hidden tab keeps streaming and every lifecycle rule sees the conversation as held. */
+  setClientVisibility(userId: number, clientId: string, hidden: boolean): { applied: boolean } {
+    return { applied: this.attachments.setClientVisibility(userId, clientId, hidden) };
   }
 
   /** Convert every running foreground `Bash` command in this conversation into a detached background job.

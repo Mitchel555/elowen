@@ -16,6 +16,14 @@ export const brainStartSchema = z.object({
   generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 });
 
+/** A client reporting whether its window is on screen, so a finished turn can tell "nobody is reading
+ *  this" from "a tab is still connected behind a locked screen". The client id ties it to that tab's
+ *  live stream — the same id it opens the stream with. */
+export const brainVisibilitySchema = z.object({
+  client: z.string().min(1).max(200),
+  hidden: z.boolean(),
+});
+
 /** Finalize one stable CLI generation. `generation` is the highest start the process has issued, so the
  *  daemon can fence a request that is still buffered behind this stop on another connection. */
 export const brainStopSchema = z.object({

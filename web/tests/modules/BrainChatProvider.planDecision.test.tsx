@@ -29,6 +29,7 @@ vi.mock('../../lib/elowenClient', () => ({
     brainModels: async () => [],
     brainCommands: async () => ({ commands: [] }),
     brainSessions: async () => [],
+    brainVisibility: () => {},
   },
 }));
 

@@ -2,7 +2,7 @@ import { streamSSE } from 'hono/streaming';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseBody } from '../validation.js';
-import { brainStartSchema, brainStopSchema, brainSendSchema, brainModelSchema, brainRenameSchema, brainToggleSchema, brainThinkSchema, brainCwdSchema, brainCompactSchema, brainContextSchema, brainTerminalSchema, brainGoalSchema, brainAnswerSchema, lspInstallSchema, subagentSendSchema } from '../schemas/brain.js';
+import { brainStartSchema, brainStopSchema, brainVisibilitySchema, brainSendSchema, brainModelSchema, brainRenameSchema, brainToggleSchema, brainThinkSchema, brainCwdSchema, brainCompactSchema, brainContextSchema, brainTerminalSchema, brainGoalSchema, brainAnswerSchema, lspInstallSchema, subagentSendSchema } from '../schemas/brain.js';
 import { brainConfigFromElowen } from '../../brain/config.js';
 import { listBrainModels, fetchOpenAiModels } from '../../brain/models.js';
 import { elowenExec, isExecAllowedForUser } from '../../shared/execs.js';
@@ -344,6 +344,15 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     const boundClient = session && client && generation ? { id: client, generation } : undefined;
     try { return c.json(await brain.detachForegroundSubagents(c.get('user').id, session, boundClient)); }
     catch (e) { return c.json({ error: (e as Error).message }, 409); }
+  }));
+
+  // A tab reporting that it went to the background, or came back. Presence only: the stream stays
+  // attached either way, so nothing about the session's lifecycle changes — it only decides whether a
+  // finished turn reaches for the user's phone instead of assuming somebody is reading the answer. A
+  // browser keeps its SSE stream open behind a locked screen, so attachment alone cannot tell these apart.
+  app.post('/brain/visibility', withBrain(async (c, brain) => {
+    const { client, hidden } = await parseBody(c, brainVisibilitySchema);
+    return c.json(brain.setClientVisibility(c.get('user').id, client, hidden));
   }));
 
   // Ctrl+B: move a running foreground Bash command to the background without killing it. The plugin keeps

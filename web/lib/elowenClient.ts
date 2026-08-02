@@ -243,6 +243,15 @@ export const elowenClient = {
     }
     void fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, credentials: 'same-origin', keepalive: true }).catch(() => undefined);
   },
+  /** Tell the daemon whether this tab is on screen, so a turn that finishes while the phone is locked can
+   *  notify instead of assuming the answer is being read. Fire-and-forget with `keepalive`: the report
+   *  that matters most is the one sent as the page is being backgrounded. */
+  brainVisibility: (payload: { client: string; hidden: boolean }): void => {
+    void fetch(`${BASE}/brain/visibility`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload), credentials: 'same-origin', keepalive: true,
+    }).catch(() => undefined);
+  },
   brainSessions: () => req<BrainSessionInfo[]>('/brain/sessions'),
   brainSearch: (q: string) => req<BrainSearchHit[]>(`/brain/search?q=${encodeURIComponent(q)}`),
   brainDeleteSession: (id: string) => req<{ ok: boolean }>(`/brain/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),

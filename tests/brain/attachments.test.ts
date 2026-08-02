@@ -1,6 +1,56 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ClientAttachments } from '../../src/brain/service/attachments.js';
 
+describe('ClientAttachments client visibility', () => {
+  it('separates "attached" from "watching" so a hidden tab still counts as attached', () => {
+    const attachments = new ClientAttachments();
+    const tab = (): void => {};
+    attachments.attach(1, 'brain-s', tab, vi.fn(), 'web-tab');
+
+    expect(attachments.attachedCount('brain-s')).toBe(1);
+    expect(attachments.watchingCount('brain-s')).toBe(1);
+
+    expect(attachments.setClientVisibility(1, 'web-tab', true)).toBe(true);
+    // The stream is still held — every lifecycle rule keyed on attachment must see no change — but the
+    // turn-complete push now knows nobody is reading, which is the whole point.
+    expect(attachments.attachedCount('brain-s')).toBe(1);
+    expect(attachments.watchingCount('brain-s')).toBe(0);
+
+    expect(attachments.setClientVisibility(1, 'web-tab', false)).toBe(true);
+    expect(attachments.watchingCount('brain-s')).toBe(1);
+  });
+
+  it('does not let one hidden tab silence a second tab that is watching', () => {
+    const attachments = new ClientAttachments();
+    const phone = (): void => {};
+    const desktop = (): void => {};
+    attachments.attach(1, 'brain-s', phone, vi.fn(), 'phone');
+    attachments.attach(1, 'brain-s', desktop, vi.fn(), 'desktop');
+
+    attachments.setClientVisibility(1, 'phone', true);
+    expect(attachments.watchingCount('brain-s')).toBe(1);
+  });
+
+  it('clears the hidden mark on detach, and refuses an id with no live transport', () => {
+    const attachments = new ClientAttachments();
+    const tab = (): void => {};
+    attachments.attach(1, 'brain-s', tab, vi.fn(), 'web-tab');
+    attachments.setClientVisibility(1, 'web-tab', true);
+    attachments.detachTransport(tab);
+
+    // A reconnect mints a NEW listener; a leftover mark keyed on the dead one would keep the fresh
+    // stream looking unwatched forever.
+    const reconnected = (): void => {};
+    attachments.attach(1, 'brain-s', reconnected, vi.fn(), 'web-tab');
+    expect(attachments.watchingCount('brain-s')).toBe(1);
+
+    // Another user's id, and an id nobody holds, must not register anything.
+    expect(attachments.setClientVisibility(2, 'web-tab', true)).toBe(false);
+    expect(attachments.setClientVisibility(1, 'ghost', true)).toBe(false);
+    expect(attachments.watchingCount('brain-s')).toBe(1);
+  });
+});
+
 describe('ClientAttachments stable client grace cache', () => {
   it('bounds only detached identities while never evicting a live transport', () => {
     let now = 0;
