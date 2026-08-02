@@ -208,6 +208,11 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   // ~1500 tokens. Spread over memoryRecallCount hits that is ~1000 chars per memory, enough for one to
   // arrive whole; the previous 1500 total left ~250 each and cut most of them off mid-sentence.
   memoryRecallChars: 6000,
+  // Recall during the work itself. Three passes is enough to catch a turn changing subject (open a file,
+  // hit an error, move to a different service) without paying for a search on every single model call.
+  memoryLiveRecallPasses: 3,
+  memoryLiveRecallCount: 8,
+  memoryLiveRecallChars: 6000,
   // A goal worth starting autonomously routinely needs tens of turns — see goalMaxTurns (its ceiling).
   goalTurnBudget: 24,
   goalMaxTurns: 64,
@@ -241,6 +246,12 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // operator who wants many memories wants the char budget raised with it — hence both ceilings.
   memoryRecallCount: band('memoryRecallCount', 20),
   memoryRecallChars: band('memoryRecallChars', 20_000),
+  // Exempt from the ±50% rule because 0 has to stay reachable: an operator who does not want the agent
+  // interrupted mid-turn must be able to switch the passes off outright, which a band around 3 would
+  // forbid. The count/char ceilings mirror the turn-start ones so raising one does not strand the other.
+  memoryLiveRecallPasses: [0, 10],
+  memoryLiveRecallCount: [0, 20],
+  memoryLiveRecallChars: band('memoryLiveRecallChars', 20_000),
   // Raised past the ±50% rule at the owner's request to ~20k tokens. The ceiling is bounded by
   // MAX_PROMPT_TOTAL_CHARS (brain/delegatedScope.ts), the budget packDelegatedPromptAppend fair-shares
   // with the child's role prompt — that budget was raised to 120 000 alongside this, so the value here
