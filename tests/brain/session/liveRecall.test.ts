@@ -174,6 +174,21 @@ describe('live recall — budget and switches', () => {
     expect(calls).toBe(2);
   });
 
+  it('gives up on a hanging retrieval instead of holding the turn', async () => {
+    // Recall is awaited on the model's critical path, and the embedding client's own deadline is 30s.
+    // Waiting that long for a best-effort lookup would stall every pass of every turn, so this must
+    // resolve well before the retrieval does.
+    const { fire } = harness({
+      retrieve: () => new Promise((resolve) => { setTimeout(() => resolve([mem(1, 'Too late')]), 20_000); }),
+    });
+    const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output here' }];
+
+    const started = Date.now();
+    const out = await fire(base);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(out).toEqual(base);
+  }, 15_000);
+
   it('survives a failing retrieval without taking the turn down', async () => {
     const { fire } = harness({ retrieve: async () => { throw new Error('embedding endpoint down'); } });
     const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output here' }];

@@ -54,6 +54,11 @@ interface ContextMessage {
 }
 
 const MIN_QUERY_CHARS = 24;
+/** Recall sits on the model's critical path: pi awaits the context hook before every request. The
+ *  embedding client's own deadline is 30s, which is a sane ceiling for a user-initiated search but an
+ *  unacceptable one here — a degraded endpoint would stall each pass of every turn for half a minute.
+ *  Recall is best-effort, so it gets a deadline short enough that failing is cheaper than waiting. */
+const RECALL_DEADLINE_MS = 2500;
 /** Cap on how much recent conversation is turned into a query. A whole transcript embeds to mush; the
  *  last few thousand characters of actual work is what carries the topic. */
 const QUERY_SOURCE_CHARS = 2000;
@@ -161,7 +166,10 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
 
     let found: LiveRecallMemory[] = [];
     try {
-      found = await opts.retrieve(query, budget.count - turn.injected.size, budget.chars - turn.chars);
+      found = await withDeadline(
+        opts.retrieve(query, budget.count - turn.injected.size, budget.chars - turn.chars),
+        RECALL_DEADLINE_MS,
+      );
     } catch (e) {
       // Recall is best-effort: a failed lookup must never take the turn down with it.
       log.warn(`live recall failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -189,6 +197,22 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
     ));
     return appendBlocks(messages, turn.blocks);
   });
+}
+
+/** Lose the race rather than hold the turn. The underlying request is not cancelled — the embedding
+ *  client owns its own abort — but the turn stops waiting on it, which is the property that matters. */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`recall exceeded ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Append the frozen blocks as one synthetic user message at the very END of the array. Anthropic caches
