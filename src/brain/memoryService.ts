@@ -172,7 +172,14 @@ export class MemoryService {
     if (cfg) {
       try {
         const queryVec = await this.embeddings.embed(cfg, query);
-        return this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model);
+        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model);
+        // An embed that succeeds but clears nothing is not "no memory is relevant" — it is usually a
+        // query too thin to score, like "fix it", which cannot reach the floor against any body no
+        // matter how on-topic. Measured: that query peaks at 0.12 cosine and admits 0 of 53 memories.
+        // The manual search box has fallen through to keyword for exactly this reason (searchSemantic);
+        // recall silently returned nothing instead, which is where the "it forgot again" reports come from.
+        if (semantic.memories.length > 0) return semantic;
+        return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, true);
       } catch {
         // Embed failed (endpoint down, malformed response, …) → degrade to keyword fallback rather
         // than surfacing an error into the chat path. Memory retrieval is best-effort.
@@ -280,12 +287,17 @@ export class MemoryService {
     charBudget: number,
     provider: string | null,
     model: string | null,
+    keywordOnly = false,
   ): RetrieveResult {
     const now = Date.now();
     const keywordHits = this.store.search(userId, query, maxCount * 3);
     const keywordIds = new Set(keywordHits.map((m) => m.id));
-    // Pull recent memories so a query with no keyword hit still surfaces something sensible.
-    const recent = this.store.listRecent(userId, maxCount * 3);
+    // Recency is a sane last resort while we have NO relevance signal at all — embeddings unconfigured,
+    // or the endpoint down. It is the wrong answer after a vector pass that simply cleared nothing:
+    // there the cosine scores already established these memories are off-topic, so padding the result
+    // with whatever was written most recently would inject unrelated facts — exactly what the floor is
+    // there to prevent.
+    const recent = keywordOnly ? [] : this.store.listRecent(userId, maxCount * 3);
 
     const byId = new Map<number, MemoryRow>();
     for (const m of [...keywordHits, ...recent]) byId.set(m.id, m);
