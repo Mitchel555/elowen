@@ -21,12 +21,14 @@ export function AccountMemorySection({ onSaveState }: { onSaveState?: (section: 
   const { t } = useTranslation();
 
   const [autoRecall, setAutoRecall] = useState(true);
+  const [autoLiveRecall, setAutoLiveRecall] = useState(true);
   const [autoSave, setAutoSave] = useState(true);
 
   const [seeded, setSeeded] = useState(false);
   useEffect(() => {
     if (data && !seeded) {
       setAutoRecall(data.autoRecall);
+      setAutoLiveRecall(data.autoLiveRecall);
       setAutoSave(data.autoSave);
       setSeeded(true);
     }
@@ -34,8 +36,8 @@ export function AccountMemorySection({ onSaveState }: { onSaveState?: (section: 
 
   // Auto-persist shortly after a toggle. Sends only this section's two fields — the PATCH merges, so
   // the CLI/Personality/Profile picks stay untouched.
-  const autosave = useAutoSaveStatus([autoRecall, autoSave], async () => {
-    try { await save.mutateAsync({ autoRecall, autoSave }); }
+  const autosave = useAutoSaveStatus([autoRecall, autoLiveRecall, autoSave], async () => {
+    try { await save.mutateAsync({ autoRecall, autoLiveRecall, autoSave }); }
     catch (error) { toast(t.accountMemory.saveError, 'error'); throw error; }
   }, { ready: seeded });
   useEffect(() => onSaveState?.('memory', autosave.status, autosave.retry), [onSaveState, autosave.status, autosave.retry]);
@@ -49,6 +51,13 @@ export function AccountMemorySection({ onSaveState }: { onSaveState?: (section: 
         <label className="flex items-center gap-3 text-sm text-text">
           <Toggle checked={autoRecall} onChange={setAutoRecall} label={t.accountMemory.recallToggle} />
           <span>{t.accountMemory.recallToggle}</span>
+        </label>
+      </SpatialRow>
+
+      <SpatialRow title={t.accountMemory.liveRecallTitle} icon={Search} description={t.help.memoryLiveRecall}>
+        <label className="flex items-center gap-3 text-sm text-text">
+          <Toggle checked={autoLiveRecall} onChange={setAutoLiveRecall} label={t.accountMemory.liveRecallToggle} />
+          <span>{t.accountMemory.liveRecallToggle}</span>
         </label>
       </SpatialRow>
 

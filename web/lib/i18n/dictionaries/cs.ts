@@ -1054,6 +1054,8 @@ export const cs = {
   accountMemory: {
     recallTitle: 'Automatické vyhledávání',
     recallToggle: 'Vyhledávat v paměti po každé zprávě',
+    liveRecallTitle: 'Vybavování během práce',
+    liveRecallToggle: 'Vybavovat si i v průběhu odpovědi',
     saveTitle: 'Automatické ukládání',
     saveToggle: 'Ukládat nové vzpomínky po každé odpovědi',
     saveError: 'Nastavení paměti se nepodařilo uložit.',
@@ -2036,6 +2038,7 @@ export const cs = {
     accountWhatsappNumber: "Vaše WhatsApp číslo v mezinárodním formátu, jen číslice (např. 420778433908). Po vyplnění asistent pozná vaše WhatsApp zprávy jako tento účet Elowen — s vašimi vlastními nástroji a plným přístupem operátora.",
     accountUiScale: "Elowen se sám přizpůsobí šířce okna, aby v úzkém okně nepůsobil předimenzovaně. Tímto posuvníkem si nastavíte, jak velké chcete rozhraní oproti normálu (výchozí je 100 %). Nastavení platí jen pro toto zařízení.",
     memoryRecall: "Po odeslání vaší zprávy se automaticky prohledá paměť a nejrelevantnější vzpomínky se přidají jako kontext k odpovědi.",
+    memoryLiveRecall: "Asistent si vzpomínky vyhledá znovu i během práce, podle toho, čím se právě zabývá — otevřených souborů, spuštěných nástrojů nebo chyb. Bez toho se paměť řídí jen vaší úvodní zprávou, která o dalším průběhu práce nemusí vypovídat.",
     memorySave: "Po odpovědi asistenta se z konverzace na pozadí uloží nové trvalé poznatky do vaší paměti.",
     cliAutoCompact: "Když se konverzace blíží limitu kontextu modelu, shrne ji a uvolní místo.",
     cliThinking: "Kolik úsilí model věnuje přemýšlení, než odpoví. Vyšší úroveň znamená důkladnější, ale pomalejší odpovědi; Výchozí ponechá volbu na modelu.",

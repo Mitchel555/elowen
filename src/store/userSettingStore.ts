@@ -7,10 +7,10 @@ import { isCanonicalThinkingLevel } from '../brain/modelCapabilities.js';
 /** Typed per-user CLI/brain settings. `model`/`modelProvider` empty → use the configured brain default.
  *  `autoCompactAt` is the context-window fill percentage at which the conversation is auto-summarized.
  *  `advisorStyle` picks the advisor's communication style (the `{{personality}}` prompt paragraph). */
-export interface CliSettings { model: string; modelProvider: string; visionModel: string; visionModelProvider: string; compactModel: string; compactModelProvider: string; thinkingLevel: string; autoCompact: boolean; autoCompactAt: number; autoCompactAtByModel: Record<string, number>; advisorStyle: string; personalityBody: string; discordUserId: string; whatsappNumber: string; telegramUserId: string; autoRecall: boolean; autoSave: boolean }
+export interface CliSettings { model: string; modelProvider: string; visionModel: string; visionModelProvider: string; compactModel: string; compactModelProvider: string; thinkingLevel: string; autoCompact: boolean; autoCompactAt: number; autoCompactAtByModel: Record<string, number>; advisorStyle: string; personalityBody: string; discordUserId: string; whatsappNumber: string; telegramUserId: string; autoRecall: boolean; autoLiveRecall: boolean; autoSave: boolean }
 export interface ProjectModelPreference { provider: string; model: string }
 // autoRecall/autoSave default to true so upgrading users keep the prior always-on memory behaviour.
-const CLI_DEFAULTS: CliSettings = { model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: DEFAULT_ADVISOR_STYLE, personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoSave: true };
+const CLI_DEFAULTS: CliSettings = { model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: DEFAULT_ADVISOR_STYLE, personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: true };
 
 /** Raised when a user tries to link a Discord snowflake another user has already claimed. The route
  *  maps it to a 409 with a Czech user message; the identity link stays with the original owner. */
@@ -137,6 +137,7 @@ export class UserSettingStore {
       whatsappNumber: all.whatsappNumber ?? CLI_DEFAULTS.whatsappNumber,
       telegramUserId: all.telegramUserId ?? CLI_DEFAULTS.telegramUserId,
       autoRecall: all.autoRecall !== undefined ? all.autoRecall === 'true' : CLI_DEFAULTS.autoRecall,
+      autoLiveRecall: all.autoLiveRecall !== undefined ? all.autoLiveRecall === 'true' : CLI_DEFAULTS.autoLiveRecall,
       autoSave: all.autoSave !== undefined ? all.autoSave === 'true' : CLI_DEFAULTS.autoSave,
     };
   }
@@ -164,6 +165,7 @@ export class UserSettingStore {
       // clears every override so all models fall back to the global threshold.
       if (patch.autoCompactAtByModel !== undefined) this.set(userId, 'autoCompactAtByModel', JSON.stringify(cleanThresholdMap(patch.autoCompactAtByModel)));
       if (patch.autoRecall !== undefined) this.set(userId, 'autoRecall', String(patch.autoRecall));
+      if (patch.autoLiveRecall !== undefined) this.set(userId, 'autoLiveRecall', String(patch.autoLiveRecall));
       if (patch.autoSave !== undefined) this.set(userId, 'autoSave', String(patch.autoSave));
       if (patch.advisorStyle !== undefined && isAdvisorStyle(patch.advisorStyle)) this.set(userId, 'advisorStyle', patch.advisorStyle);
       // The global personality body — free-form instructions appended to the system prompt on every

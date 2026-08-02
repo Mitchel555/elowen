@@ -1054,6 +1054,8 @@ export const en = {
   accountMemory: {
     recallTitle: 'Auto-recall',
     recallToggle: 'Search memory after each message',
+    liveRecallTitle: 'Recall while working',
+    liveRecallToggle: 'Recall again while the answer is being prepared',
     saveTitle: 'Auto-save',
     saveToggle: 'Save new memories after each reply',
     saveError: 'Failed to save memory settings.',
@@ -2036,6 +2038,7 @@ export const en = {
     accountWhatsappNumber: "Your WhatsApp number in international format, digits only (e.g. 420778433908). When set, the assistant recognizes your WhatsApp messages as this Elowen account — with your own tools and full owner access.",
     accountUiScale: "Elowen adapts to the window width on its own, so it never feels oversized in a narrow window. This slider sets how large you want the interface relative to normal (100% is the default). It applies to this device only.",
     memoryRecall: "After you send a message, automatically search your memory and add the most relevant memories as context for the reply.",
+    memoryLiveRecall: "Let the assistant search its memory again while it works, guided by what it is actually doing — the files it opens, the tools it runs, the errors it hits. Without this, recall is driven only by your opening message, which may say little about where the work then goes.",
     memorySave: "After the assistant replies, let it save durable new facts from the exchange to your memory in the background.",
     cliAutoCompact: "When the conversation nears the model’s context limit, summarize it to free up room.",
     cliThinking: "How much effort the model puts into thinking before it answers. Higher levels mean more thorough but slower replies; Default leaves the choice to the model.",
