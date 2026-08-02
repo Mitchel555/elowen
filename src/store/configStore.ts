@@ -7,7 +7,7 @@ import type { BrainLimits, RuntimeConfig, RuntimeLimits } from '../shared/wireCo
 // The brain-limits shape is the daemon↔web wire contract (Settings → Elowen AI → Limits) — defined
 // once in src/shared and re-exported here, so the two can never drift. The runtime block is its sibling
 // group (Settings → Elowen AI → Runtime) and travels the same way.
-export type { BrainLimits, RuntimeConfig, RuntimeLimits };
+export type { BrainLimits, RuntimeConfig };
 
 /** How the memory subsystem generates embeddings. `providerId` references a brain provider whose API
  *  key is reused (no second secret is stored). `baseUrl` optionally overrides the provider's endpoint;
@@ -279,7 +279,7 @@ function clampBrainLimits(next: Partial<BrainLimits> | undefined, fallback: Brai
  *  (LiveSessionSpawner), the hourly activity-log purge (bootstrap) and the web client's stream watchdog
  *  (`web/lib/streamWatchdog.ts`, which reads them off GET /config). Same contract as the brain limits:
  *  whole numbers, clamped per field, an unset/invalid field keeping the current value. */
-export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
+const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   localShellTimeoutMs: 30_000,
   // 0.30 cosine, carried in per mille because the clamp rounds to a whole number — see RuntimeLimits.
   memorySemanticFloorPerMille: 300,

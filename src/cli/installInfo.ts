@@ -30,7 +30,7 @@ export interface InstallUnit {
 
 /** Reverse proxy vhost written for a domain deployment. Absent = no vhost was written (localhost or
  *  direct-IP deployment) — a fresh record always knows this, so absence means "none", never "unknown". */
-export interface InstallProxy {
+interface InstallProxy {
   kind: ProxyKind;
   /** Absolute path of the vhost file (sites-available), so the uninstall can find what to remove. */
   vhostPath: string;

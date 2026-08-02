@@ -29,7 +29,7 @@ function numericFields(block: string): Record<string, number> {
   return out;
 }
 
-const daemonDefaults = numericFields(objectBlock(daemon, 'export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {', 'DEFAULT_RUNTIME_LIMITS'));
+const daemonDefaults = numericFields(objectBlock(daemon, 'const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {', 'DEFAULT_RUNTIME_LIMITS'));
 const webDefaults = numericFields(objectBlock(web, 'export const RUNTIME_LIMIT_DEFAULTS: RuntimeLimits = {', 'RUNTIME_LIMIT_DEFAULTS'));
 const boundsBlock = objectBlock(daemon, 'const RUNTIME_LIMIT_BOUNDS: Record<keyof RuntimeLimits, [min: number, max: number]> = {', 'RUNTIME_LIMIT_BOUNDS');
 

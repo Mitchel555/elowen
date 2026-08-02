@@ -228,7 +228,7 @@ function buildPlan(deps: UninstallDeps, info: InstallInfo | null, purge: boolean
 
 const KNOWN_FLAGS = new Set(['--yes', '--purge', '--dry-run', '--help', '-h']);
 
-export function uninstallHelp(): string {
+function uninstallHelp(): string {
   return `elowen uninstall - remove what 'elowen install' created from this machine
   Linux  run as root: systemd units, sudoers drop-in, reverse-proxy vhost, service user
   macOS  run as yourself: per-user launchd agents (no sudoers/proxy/service user)
