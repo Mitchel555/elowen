@@ -190,6 +190,18 @@ export function register(ctx) {
       : undefined;
   };
 
+  // Delegate hands the caller a JOB id (`dlg-…`) while DelegateList shows the child's SESSION id
+  // (`brain-ch-subagent-sub-dlg-…`), and both legitimately name the same sub-agent — so accept either
+  // rather than making the caller track which tool speaks which dialect. Resolved through `getJob`
+  // instead of rebuilding the session id from a prefix literal: the host owns that shape, and going
+  // through the registry means the same ownership check applies as everywhere else. A job whose session
+  // event has not landed yet, or one lost to a plugin reload, falls through unchanged — the host's own
+  // guard then answers, exactly as it did before.
+  const asChildSessionId = (raw) => {
+    const id = String(raw ?? '').trim();
+    return getJob(id)?.sessionId || id;
+  };
+
   const elapsedSeconds = (job) => Math.round(((job.finishedAt ?? Date.now()) - job.startedAt) / 1000);
   const jobDetails = (job) => ({
     jobId: job.id,
@@ -661,7 +673,7 @@ export function register(ctx) {
       + 'the exact returned range, and the next offset when more remains. The host scopes the id to this '
       + 'conversation; another conversation\'s sub-agent is never readable.',
     parameters: Type.Object({
-      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+      id: Type.String({ description: 'Which sub-agent — either the job id Delegate returned ("dlg-…") or the session id DelegateList shows ("brain-ch-subagent-sub-dlg-…"). Both name the same one.' }),
       limit: Type.Optional(Type.Number({
         description: `Maximum characters to return (default ${DEFAULT_READ_CHARS}, capped at ${MAX_READ_CHARS}).`,
       })),
@@ -670,7 +682,7 @@ export function register(ctx) {
     execute: async (_id, p) => {
       if (!ctx.readSubagent) return ok('Error: reading a sub-agent is not wired up on this server.');
       try {
-        const text = ctx.readSubagent(String(p.id ?? '').trim());
+        const text = ctx.readSubagent(asChildSessionId(p.id));
         const requestedLimit = typeof p.limit === 'number' && Number.isFinite(p.limit)
           ? Math.floor(p.limit)
           : DEFAULT_READ_CHARS;
@@ -712,7 +724,7 @@ export function register(ctx) {
       + 'interrupted — wait for it and try again. It resumes under the exact access it was originally '
       + 'given, narrowed by whatever you hold now, so continuing one can never widen anything.',
     parameters: Type.Object({
-      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+      id: Type.String({ description: 'Which sub-agent — either the job id Delegate returned ("dlg-…") or the session id DelegateList shows ("brain-ch-subagent-sub-dlg-…"). Both name the same one.' }),
       message: Type.String({
         description: 'The follow-up. It is read by an agent that already has the task and its findings in '
           + 'context, so say what to do next — do not restate the original briefing.',
@@ -728,7 +740,7 @@ export function register(ctx) {
       const message = typeof p.message === 'string' ? p.message.trim() : '';
       if (!message) return ok('Error: `message` was empty. Say what the sub-agent should do next.');
       if (!ctx.continueSubagent) return ok('Error: continuing a sub-agent is not wired up on this server.');
-      const childSessionId = String(p.id ?? '').trim();
+      const childSessionId = asChildSessionId(p.id);
       const model = typeof p.model === 'string' ? p.model.trim() : '';
       // Mirror Delegate's live progress row so a follow-up shows as a RUNNING sub-agent in the rail, keyed
       // on THIS tool call (with the child's session for drill-in), instead of running invisibly. The child
@@ -779,12 +791,12 @@ export function register(ctx) {
       + 'available until it is actually stopped — this is the only way to end one early other than waiting '
       + 'it out. Resolves "nothing to stop" rather than erroring when the child already finished.',
     parameters: Type.Object({
-      id: Type.String({ description: 'Sub-agent session id from DelegateList (e.g. "brain-ch-subagent-sub-dlg-…").' }),
+      id: Type.String({ description: 'Which sub-agent — either the job id Delegate returned ("dlg-…") or the session id DelegateList shows ("brain-ch-subagent-sub-dlg-…"). Both name the same one.' }),
     }),
     execute: async (_id, p) => {
       if (!ctx.stopSubagent) return ok('Error: stopping a sub-agent is not wired up on this server.');
       try {
-        const { stopped } = await ctx.stopSubagent(String(p.id ?? '').trim());
+        const { stopped } = await ctx.stopSubagent(asChildSessionId(p.id));
         return ok(stopped ? 'Stopped.' : 'Nothing to stop — that sub-agent already finished (or never started).');
       } catch (e) {
         return ok(`Error: ${errorText(e)}`);
