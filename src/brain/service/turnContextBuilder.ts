@@ -16,7 +16,7 @@ import { applyToolVisibility } from '../session/capabilities.js';
 import type { LiveBrain } from '../session/liveBrain.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
 import { isPromptCommand } from '../slashCommands.js';
-import { summarizePermissions, NON_DESTRUCTIVE_BASH_RULES } from '../toolPermissions.js';
+import { summarizePermissions, dedupeRulesKeepingLast, NON_DESTRUCTIVE_BASH_RULES } from '../toolPermissions.js';
 import { xmlEscape } from '../../shared/xml.js';
 import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
@@ -282,11 +282,14 @@ export class TurnContextBuilder {
         // The operator's own DENY rules are re-asserted LAST, the same ordering readOnlyBoundary uses.
         // The shell boundary now opens with `bash * allow`, which would otherwise sit after — and so
         // silently overturn — a command this operator had explicitly forbidden.
-        ruleset: [
+        // Deduplicated because re-asserting the denies appends a second copy of each one, and a turn
+        // ruleset is later normalized under a rule cap — an operator with many rules would otherwise
+        // overflow it and be unable to delegate at all from plan mode.
+        ruleset: dedupeRulesKeepingLast([
           ...(base?.ruleset ?? []),
           ...NON_DESTRUCTIVE_BASH_RULES,
           ...(base?.ruleset ?? []).filter((rule) => rule.action === 'deny'),
-        ],
+        ]),
         yolo: base?.yolo ?? false,
       };
     return {

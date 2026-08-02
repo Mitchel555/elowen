@@ -132,6 +132,22 @@ describe('buildReadOnlyBoundary — a read-only agent cannot run destructive com
     expect(act(b, 'Write')).toBe('deny');
   });
 
+  it('mints a boundary from a MAXIMAL operator ruleset — the settings cap is 200 rules per map', () => {
+    // The reachable worst case: both rule maps full (200 each) plus the built-ins, none of them
+    // duplicated, so deduplication alone cannot save it — the clamp's own rules push the total past the
+    // old cap. The operators who configure the most were the ones who lost delegation entirely.
+    const rules: PermissionRule[] = [];
+    for (let i = 0; i < 200; i += 1) rules.push({ scope: 'tools', pattern: `Tool${i}`, action: 'allow' });
+    for (let i = 0; i < 200; i += 1) rules.push({ scope: 'bash', pattern: `cmd-${i} *`, action: 'deny' });
+    const b = buildReadOnlyBoundary({ rules, unattendedAsks: 'allow' });
+    expect(b.unattendedAsks).toBe('deny');
+    expect(act(b, 'Bash', 'cmd-0 x')).toBe('deny');
+    expect(act(b, 'Bash', 'cmd-199 x')).toBe('deny');
+    expect(act(b, 'Bash', 'rm -rf x')).toBe('deny');
+    expect(act(b, 'Bash', 'ls')).toBe('allow');
+    expect(act(b, 'Write')).toBe('deny');
+  });
+
   it('keeps a parent deny even on a command the read-only allow-list would otherwise re-permit', () => {
     // The critical narrowing case: the operator explicitly denied `cat` (a command that IS on the
     // read-only allow-list). The re-permit must NOT win — the parent's deny is re-asserted last, so the

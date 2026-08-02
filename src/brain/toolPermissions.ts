@@ -253,11 +253,33 @@ const DEFAULT_PERMISSION_RULES: readonly PermissionRule[] = [
   ...NON_DESTRUCTIVE_BASH_CLAWBACKS.map((pattern) => ({ scope: 'bash' as const, pattern, action: 'deny' as const })),
 ];
 
+/** Drop rules that a later identical rule already decides, keeping the LAST occurrence so resolution is
+ *  unchanged: `resolveToolPermission` scans from the end and takes the first match, so an earlier
+ *  duplicate of the same scope+action+pattern can never be the one that wins. Both places that clamp a
+ *  ruleset (the read-only agent boundary and plan mode) re-assert the operator's denies after the clamp,
+ *  which appends a second copy of every deny already present; those copies change nothing but still count
+ *  against MAX_BOUNDARY_RULES. */
+export function dedupeRulesKeepingLast(rules: readonly PermissionRule[]): PermissionRule[] {
+  const seen = new Set<string>();
+  const reversed: PermissionRule[] = [];
+  for (const rule of [...rules].reverse()) {
+    const key = `${rule.scope}\u0000${rule.action}\u0000${rule.pattern}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reversed.push(rule);
+  }
+  return reversed.reverse();
+}
+
 const ACTIONS: readonly PermissionAction[] = ['allow', 'ask', 'deny'];
 const isAction = (v: unknown): v is PermissionAction => ACTIONS.includes(v as PermissionAction);
 const isPermissionScope = (v: unknown): v is PermissionScope => v === 'tools' || v === 'bash';
-/** 13 built-ins + at most 200 user rules in each map today; leave bounded headroom for future defaults. */
-const MAX_BOUNDARY_RULES = 512;
+/** 13 built-ins + at most 200 user rules in each map (400) is 413 before anything is layered on, and the
+ *  non-destructive shell clamp appends 132 more — so a fully-populated operator ruleset reaches ~545 and
+ *  the old 512 cap rejected it, taking down read-only delegation and plan-mode turns for exactly the
+ *  operators who configure the most. The cap exists to bound per-call resolution cost (a pattern is
+ *  compiled per rule per segment), not to limit the operator, so it sits above the worst reachable case. */
+const MAX_BOUNDARY_RULES = 1024;
 const MAX_BOUNDARY_PATTERN_CHARS = 200;
 /** Cap on the number of user rules kept per sanitized map (distinct from the pattern-length cap above). */
 const MAX_RULES_PER_MAP = 200;
