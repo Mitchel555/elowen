@@ -19,6 +19,23 @@ const READ_ONLY_RESTRICT_RULES: readonly PermissionRule[] = [
   ...NON_DESTRUCTIVE_BASH_RULES,
 ];
 
+/** Drop rules that a later identical rule already decides, keeping the LAST occurrence so resolution is
+ *  unchanged: under last-match-wins an earlier duplicate of the same scope+pattern+action can never be
+ *  the match that wins. Re-asserting the parent's denies deliberately appends a second copy of every deny
+ *  the base already holds, and those copies still count against the normalizer's rule cap — a large
+ *  operator ruleset used to overflow it and leave delegation throwing instead of just narrower. */
+function dedupeKeepingLast(rules: readonly PermissionRule[]): PermissionRule[] {
+  const seen = new Set<string>();
+  const reversed: PermissionRule[] = [];
+  for (const rule of [...rules].reverse()) {
+    const key = `${rule.scope}\u0000${rule.action}\u0000${rule.pattern}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reversed.push(rule);
+  }
+  return reversed.reverse();
+}
+
 /**
  * Mint the immutable permission boundary for a read-only sub-agent (explore/plan).
  *
@@ -40,7 +57,7 @@ export function buildReadOnlyBoundary(parent: NoninteractivePermissionBoundary |
   const base: PermissionRule[] = parent ? parent.rules : [{ scope: 'tools', pattern: '*', action: 'allow' }];
   const parentDenies = base.filter((rule) => rule.action === 'deny');
   const boundary = normalizeNoninteractivePermissionBoundary({
-    rules: [...base, ...READ_ONLY_RESTRICT_RULES, ...parentDenies],
+    rules: dedupeKeepingLast([...base, ...READ_ONLY_RESTRICT_RULES, ...parentDenies]),
     unattendedAsks: 'deny',
   });
   // The base was already validated on read and the appended rules are well-formed literals, so this

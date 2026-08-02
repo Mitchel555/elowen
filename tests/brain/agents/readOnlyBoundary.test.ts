@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildReadOnlyBoundary } from '../../../src/brain/agents/readOnlyBoundary.js';
-import { resolveToolPermission, type NoninteractivePermissionBoundary } from '../../../src/brain/toolPermissions.js';
+import { resolveToolPermission, type NoninteractivePermissionBoundary, type PermissionRule } from '../../../src/brain/toolPermissions.js';
 
 const act = (b: NoninteractivePermissionBoundary, tool: string, command?: string) =>
   resolveToolPermission(b.rules, tool, command).action;
@@ -111,6 +111,22 @@ describe('buildReadOnlyBoundary — a read-only agent cannot run destructive com
     };
     const b = buildReadOnlyBoundary(parent);
     expect(b.unattendedAsks).toBe('deny');
+    expect(act(b, 'Bash', 'rm -rf x')).toBe('deny');
+    expect(act(b, 'Bash', 'ls')).toBe('allow');
+    expect(act(b, 'Write')).toBe('deny');
+  });
+
+  it('mints a boundary from a large operator ruleset instead of throwing, and still narrows it', () => {
+    // Re-asserting the parent's denies appends a second copy of every deny it already holds, so a big
+    // operator ruleset used to push the result past the normalizer's rule cap and throw "invalid
+    // read-only agent boundary" — a delegation that the operator's own permissions made impossible.
+    const rules: PermissionRule[] = [{ scope: 'tools', pattern: '*', action: 'allow' }];
+    for (let i = 0; i < 300; i += 1) rules.push({ scope: 'bash', pattern: `blocked-${i} *`, action: 'deny' });
+    const b = buildReadOnlyBoundary({ rules, unattendedAsks: 'allow' });
+    expect(b.unattendedAsks).toBe('deny');
+    // The parent's denies survive deduplication, so the boundary is still narrowed, not just shorter.
+    expect(act(b, 'Bash', 'blocked-0 now')).toBe('deny');
+    expect(act(b, 'Bash', 'blocked-299 now')).toBe('deny');
     expect(act(b, 'Bash', 'rm -rf x')).toBe('deny');
     expect(act(b, 'Bash', 'ls')).toBe('allow');
     expect(act(b, 'Write')).toBe('deny');
