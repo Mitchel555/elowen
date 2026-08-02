@@ -203,6 +203,35 @@ export class BrainUsageStore {
 
   constructor(private db: Db, private readonly now: () => number = Date.now) {}
 
+  /** Strip this user's recorded spend from the rows the Stats charts are derived from. Chat spend has no
+   *  separate snapshot to delete — it is read back out of the conversation itself — so clearing it means
+   *  rewriting those rows. Only the accounting is removed; message text, model and timestamp stay, so
+   *  conversations stay readable and compaction summaries keep their content. NOT reversible: the
+   *  per-message token counts and costs are gone afterwards.
+   *
+   *  Both halves of {@link USAGE_ROWS} have to be cleared — live assistant `$.usage` AND the
+   *  `$.usageRollup` array a compaction carries — or a compacted session keeps reporting the spend it
+   *  rolled up and the charts only look half-reset.
+   *
+   *  The cache clear is load-bearing: every sentinel is a MAX(rowid)/MAX(updated_at), and rewriting a
+   *  column in place moves none of them, so a cached view would serve the old totals until the TTL
+   *  lapsed — the reset would appear to do nothing, which is the complaint it exists to answer. */
+  clearUsage(userId: number): number {
+    const scope = `session_id IN (SELECT id FROM brain_sessions WHERE user_id = ?)`;
+    const live = this.db.prepare(
+      `UPDATE brain_messages SET content = json_remove(content, '$.usage')
+        WHERE ${scope} AND role = 'assistant' AND json_valid(content)
+          AND json_type(content) = 'object' AND json_type(content, '$.usage') IS NOT NULL`
+    ).run(userId);
+    const rollups = this.db.prepare(
+      `UPDATE brain_messages SET content = json_remove(content, '$.usageRollup')
+        WHERE ${scope} AND role = 'compaction' AND json_valid(content)
+          AND json_type(content, '$.usageRollup') = 'array'`
+    ).run(userId);
+    this.viewCache.clear();
+    return live.changes + rollups.changes;
+  }
+
   /** Serve a usage view from the TTL cache when the sentinel proves nothing changed, else compute and
    *  remember it. No single-flight coalescing on top: better-sqlite3 is synchronous, so concurrent HTTP
    *  requests serialize on the event loop anyway and there is no parallel computation to deduplicate —

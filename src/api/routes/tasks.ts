@@ -192,14 +192,18 @@ export function registerTaskRoutes(app: ElowenApp, ctx: RouteContext): void {
     }
     return c.json([...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)));
   });
-  // Reset the usage stats: wipe the `task_usage` snapshots. Admin-only and irreversible, but it only
-  // clears Elowen's own task snapshot rows — the agents' CLI session transcripts are left untouched, and
-  // so is brain CHAT usage: that is derived live from the conversation rows (brain_messages), not a
-  // separate snapshot, so wiping it would mean deleting chat history. Consistent with leaving CLI
-  // transcripts intact — brain chat spend clears only when its conversation is deleted.
+  // Reset the usage stats the page actually charts: the `task_usage` snapshots AND the caller's own chat
+  // spend. Admin-only and irreversible. Clearing only the snapshots used to leave every chart standing,
+  // because chat spend is read back out of the conversation rows rather than from a snapshot — so on an
+  // instance whose spend is mostly chat the button appeared to do nothing at all. Chat spend is cleared
+  // by stripping the accounting from those rows; the messages themselves are kept, so conversations stay
+  // readable. The agents' CLI session transcripts are still left untouched.
   app.post('/usage/reset', c => {
     if (notAdmin(c)) return c.json({ error: 'forbidden' }, 403);
-    return c.json({ ok: true, cleared: d.taskUsage?.deleteAll() ?? 0 });
+    const userId = c.get('user')?.id;
+    const cleared = d.taskUsage?.deleteAll() ?? 0;
+    const chat = userId != null ? d.brainStore?.clearUsage(userId) ?? 0 : 0;
+    return c.json({ ok: true, cleared, chatCleared: chat });
   });
   // The transcript of an embedded-brain (elowen:) worker run — the task detail's conversation tab.
   // CLI-run tasks have no brain session, so this returns an empty list for them.

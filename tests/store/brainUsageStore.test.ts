@@ -32,6 +32,30 @@ describe('BrainUsageStore view cache', () => {
     addUsage('s1', 'a', 100, now - 1000);
   });
 
+  it('clears BOTH live and rolled-up spend, keeps the messages, and does not wait for the TTL', () => {
+    // A compacted session carries its spend in `$.usageRollup`, so clearing only live `$.usage` would
+    // leave the charts half-populated — the exact "the button did nothing" symptom being fixed.
+    db.prepare('INSERT INTO brain_messages (id, session_id, parent_id, role, content) VALUES (?, ?, NULL, ?, ?)')
+      .run('c1', 's1', 'compaction', JSON.stringify({
+        role: 'compaction', text: 'summary of earlier turns',
+        usageRollup: [{ model: 'm', at: now - 2000, input: 5, output: 7, totalTokens: 500 }],
+      }));
+    addSession('s2', 2);
+    addUsage('s2', 'b', 900, now - 1000);
+    expect(store.usageByModel(1).map((r) => r.usage.total)).toEqual([600]); // 100 live + 500 rolled up
+
+    expect(store.clearUsage(1)).toBe(2);
+
+    // Read again at the SAME instant: a cached view would still answer 600, because rewriting a column
+    // moves no MAX(rowid) sentinel — so this also pins the explicit cache invalidation.
+    expect(store.usageByModel(1)).toEqual([]);
+    // Another user's spend is untouched, and the messages themselves survive with their text.
+    expect(store.usageByModel(2).map((r) => r.usage.total)).toEqual([900]);
+    const kept = db.prepare('SELECT content FROM brain_messages WHERE id = ?').get('c1') as { content: string };
+    expect(JSON.parse(kept.content)).toMatchObject({ text: 'summary of earlier turns' });
+    expect(db.prepare('SELECT COUNT(*) c FROM brain_messages').get()).toEqual({ c: 3 });
+  });
+
   it('runs ONE table scan for repeated reads within the TTL, and re-scans once the TTL lapses', () => {
     const spy = vi.spyOn(db, 'prepare');
     expect(store.usageByModel(1).map((r) => r.usage.total)).toEqual([100]);

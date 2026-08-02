@@ -209,6 +209,11 @@ export class BrainStore {
     return this.usage.usageByModel(userId, window);
   }
 
+  /** Irreversibly clear this user's recorded chat spend — see {@link BrainUsageStore.clearUsage}. */
+  clearUsage(userId: number): number {
+    return this.usage.clearUsage(userId);
+  }
+
   /** Cumulative token total per session (summed from each stored assistant message's usage) for the
    *  session-management panel. One grouped query — no N+1. Sessions with no usage-bearing messages
    *  come back 0. Persisted messages only, so a mid-turn session reads slightly stale (acceptable).
