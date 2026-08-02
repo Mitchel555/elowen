@@ -34,6 +34,51 @@ const assistantUsage = (cacheRead: number, timestamp: number) => ({
 
 const warnings = (): Captured[] => captured.filter((c) => c.level === 'warn' && c.scope === 'brain-cache');
 
+/** A failed or aborted attempt: the provider was never reached, so every usage figure comes back 0. */
+const failedUsage = (stopReason: 'error' | 'aborted', timestamp: number) => ({
+  type: 'message_end',
+  message: { role: 'assistant', timestamp, stopReason, usage: { cacheRead: 0 } },
+});
+
+describe('installCacheWatch — unsuccessful attempts', () => {
+  // These reported cacheRead: 0 like any other message, so the watch read them as "the prefix was
+  // rewritten". Reproduced from the live log: a warm read, a timeout, then the very next request reading
+  // the cache back at full size — proof that nothing about the prefix had changed.
+  it('ignores a timed-out attempt instead of reporting it as a cache drop', () => {
+    const { fire } = harness();
+    fire(assistantUsage(185_854, T0));
+    fire(failedUsage('error', T0 + 19_000));
+    expect(warnings()).toHaveLength(0);
+  });
+
+  it('does not let a failed attempt poison the baseline for the next comparison', () => {
+    const { fire } = harness();
+    fire(assistantUsage(185_854, T0));
+    fire(failedUsage('error', T0 + 19_000));
+    // Back to a full read. Had the failure been kept as the baseline, this RISE would reset it to a tiny
+    // number and the next ordinary read would look like a fresh drop.
+    fire(assistantUsage(187_990, T0 + 24_000));
+    expect(warnings()).toHaveLength(0);
+  });
+
+  it('ignores an aborted attempt too', () => {
+    // Five workflow children aborted within 5.4s once produced five warnings in a burst.
+    const { fire } = harness();
+    fire(assistantUsage(120_000, T0));
+    fire(failedUsage('aborted', T0 + 3_000));
+    expect(warnings()).toHaveLength(0);
+  });
+
+  it('still reports a genuine drop between two SUCCESSFUL requests', () => {
+    const { fire } = harness();
+    fire(assistantUsage(100_000, T0));
+    fire(failedUsage('aborted', T0 + 2_000));
+    fire(assistantUsage(20_000, T0 + 5_000));
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('100000 → 20000');
+  });
+});
+
 describe('installCacheWatch', () => {
   it('warns when cacheRead drops sharply within a warm window', () => {
     const { fire } = harness();

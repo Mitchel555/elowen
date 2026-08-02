@@ -17,7 +17,7 @@ const log = logger('brain-cache');
 export const CACHE_DROP_MIN_TOKENS = 2000;
 const CACHE_DROP_MIN_RATIO = 0.05;
 
-type SessionEvent = { type?: string; message?: { role?: string; timestamp?: number; usage?: { cacheRead?: number } }; aborted?: boolean; result?: unknown };
+type SessionEvent = { type?: string; message?: { role?: string; timestamp?: number; stopReason?: string; usage?: { cacheRead?: number } }; aborted?: boolean; result?: unknown };
 type Subscribable = { subscribe?: (listener: (event: SessionEvent) => void) => unknown };
 
 export interface CacheWatchOptions {
@@ -45,6 +45,12 @@ export function installCacheWatch(
     if (event.type !== 'message_end') return;
     const message = event.message;
     if (message?.role !== 'assistant') return;
+    // A request that errored or was aborted reports usage as all-zero, including cacheRead — it never
+    // reached the provider's cache, so its 0 says nothing about the prefix. Counting it produced a false
+    // "the prefix was rewritten" warning AND poisoned the baseline for the next comparison; the request
+    // right after a timeout routinely read the cache back at full size, proving nothing had changed.
+    // This accounted for the large majority of the warnings this monitor has ever emitted.
+    if (message.stopReason === 'error' || message.stopReason === 'aborted') return;
     const cacheRead = message.usage?.cacheRead;
     if (typeof cacheRead !== 'number') return;
     const at = typeof message.timestamp === 'number' ? message.timestamp : now();
