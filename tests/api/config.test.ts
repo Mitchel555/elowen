@@ -18,6 +18,17 @@ describe('PUT /config validates the patch at the trust boundary', () => {
     expect(body.error).toContain('modelNotes');
   });
 
+  // A key the schema does not declare is STRIPPED by Zod, not rejected — the request answers 200 and
+  // the value silently never reaches the config. That is how the web-push contact stayed empty after a
+  // successful-looking save, so this asserts the round trip, not the status code.
+  it('persists webPushContact through the patch', async () => {
+    const { app, token } = await makeTestApp({});
+    const res = await app.request('/config', put(token, { webPushContact: 'https://build.example.com' }));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { webPushContact?: string };
+    expect(body.webPushContact).toBe('https://build.example.com');
+  });
+
   it('rejects a non-string allowedExecs element with a 400', async () => {
     const { app, token } = await makeTestApp({});
     const res = await app.request('/config', put(token, { allowedExecs: ['sonnet', 42] }));

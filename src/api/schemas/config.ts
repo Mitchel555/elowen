@@ -96,6 +96,7 @@ export const configPatchSchema = z.object({
   sessionRetention: z.object({ enabled: z.boolean().optional(), days: z.number().optional() }).optional(),
   autoUpdate: z.boolean().optional(),
   lspEnabled: z.boolean().optional(),
+  webPushContact: z.string().optional(),
   plugins: z.object({
     enabled: z.array(z.string()).optional(),
     removed: z.array(z.string()).optional(),
