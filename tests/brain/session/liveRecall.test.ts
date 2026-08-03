@@ -237,3 +237,81 @@ describe('liveRecallQuery', () => {
     expect(q).toContain('checking the migration');
   });
 });
+
+describe('compaction', () => {
+  it('re-surfaces a memory after compaction instead of suppressing it forever', async () => {
+    // Compaction replaces the history with a summary, so the block this turn injected is GONE from the
+    // transcript the model now sees. If the already-injected ids carried across, the memory would be
+    // suppressed as a duplicate of something that no longer exists — permanently invisible for the rest
+    // of the session. A falling user count is the signal, which is why only a rising one counts as
+    // steering. Claude Code reaches the same conclusion: "compact naturally resets both — old
+    // attachments are gone from the compacted transcript, so re-surfacing is valid again."
+    // The same memory id both times, but the body changes. That is what makes the assertion sharp:
+    // if the injected ids carried across the compaction, id 1 is treated as already-seen and the block
+    // the model gets is the STALE pre-compaction copy. Comparing bodies is the only way to tell a
+    // genuine re-injection from a re-emitted old block, since both leave one block at the end.
+    let calls = 0;
+    const h = harness({
+      retrieve: async () => {
+        calls += 1;
+        return [mem(1, calls === 1 ? 'Deploy: release.sh, first copy' : 'Deploy: release.sh, refreshed copy')];
+      },
+    });
+
+    const before = await h.fire([
+      { role: 'user', content: 'fix the deploy' },
+      { role: 'assistant', content: 'inspecting the release path in detail' },
+      { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2' },
+      { role: 'assistant', content: 'checking the packaging step next' },
+      { role: 'toolResult', content: 'bash: npm pack produced no tarball' },
+    ]);
+    expect(calls).toBe(1);
+    expect(String(before[before.length - 1]?.content)).toContain('first copy');
+
+    // Post-compaction: a single summary user message replaces the history. Note the user count is
+    // UNCHANGED at 1 — only the shrinking length reveals what happened, which is exactly the case a
+    // user-message counter alone would miss.
+    const after = await h.fire([
+      { role: 'user', content: 'Summary of the conversation so far: working on the deploy path' },
+      { role: 'assistant', content: 'continuing with the release path investigation now' },
+      { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2 again' },
+    ]);
+
+    expect(calls).toBe(2);
+    expect(String(after[after.length - 1]?.content)).toContain('refreshed copy');
+    expect(String(after[after.length - 1]?.content)).not.toContain('first copy');
+  });
+
+  it('treats a compaction that arrives together with steering as a compaction', async () => {
+    // A real sequence: the turn compacts, and the user's next instruction lands on top of the summary.
+    // The history is now SHORTER than before while the user count has GONE UP, so both signals fire at
+    // once. Compaction has to win: steering deliberately carries the injected blocks over, and carrying
+    // them across a compaction is precisely what pins a stale block to a transcript that dropped it.
+    let calls = 0;
+    const h = harness({
+      retrieve: async () => {
+        calls += 1;
+        return [mem(1, calls === 1 ? 'Deploy: release.sh, first copy' : 'Deploy: release.sh, refreshed copy')];
+      },
+    });
+
+    await h.fire([
+      { role: 'user', content: 'fix the deploy' },
+      { role: 'assistant', content: 'inspecting the release path in detail' },
+      { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2' },
+      { role: 'assistant', content: 'checking the packaging step next' },
+      { role: 'toolResult', content: 'bash: npm pack produced no tarball' },
+    ]);
+    expect(calls).toBe(1);
+
+    const after = await h.fire([
+      { role: 'user', content: 'Summary of the conversation so far: working on the deploy path' },
+      { role: 'user', content: 'actually check the tarball name too' },
+      { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2 again' },
+    ]);
+
+    expect(calls).toBe(2);
+    expect(String(after[after.length - 1]?.content)).toContain('refreshed copy');
+    expect(String(after[after.length - 1]?.content)).not.toContain('first copy');
+  });
+});

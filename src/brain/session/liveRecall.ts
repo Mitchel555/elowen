@@ -142,6 +142,7 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
   const log = logger('brain-live-recall');
   let turn = freshTurn();
   let lastUserCount = -1;
+  let lastLength = -1;
 
   pi.on('context', async (event) => {
     const messages = (event.messages ?? []) as unknown as ContextMessage[];
@@ -150,13 +151,23 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
     // context hook has no turn identity of its own, and a turn cannot gain a user message mid-flight
     // except through steering, which is itself a new instruction worth re-recalling for.
     const userCount = messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
-    if (userCount !== lastUserCount) {
-      const steering = lastUserCount >= 0 && userCount > lastUserCount;
+    // Compaction is a SHRINKING history, and it needs its own signal: it usually replaces many messages
+    // with a single summary, which can leave the user count unchanged (1 -> 1) while discarding
+    // everything this turn injected. Counting user messages alone would then miss it entirely, and the
+    // stale block would keep riding along on top of a transcript it no longer belongs to.
+    const compacted = lastLength >= 0 && messages.length < lastLength;
+    lastLength = messages.length;
+    if (userCount !== lastUserCount || compacted) {
+      const steering = !compacted && lastUserCount >= 0 && userCount > lastUserCount;
       lastUserCount = userCount;
       // A user message arriving mid-flight is steering: it earns a fresh budget, because a redirected
       // turn deserves to search again. What it must NOT do is drop the blocks already injected — the
       // model has been working with those memories, and yanking them mid-turn is a silent loss with no
       // upside. They are carried over, along with the ids, so nothing is injected twice.
+      // Only a RISING count is steering. A falling one means compaction replaced the history with a
+      // summary, and then a full reset is correct rather than merely acceptable: the blocks this turn
+      // injected are gone from the compacted transcript, so re-surfacing the same memories is no longer
+      // duplication. Carrying `injected` across a compaction would suppress them forever.
       const carried = steering ? turn : undefined;
       turn = freshTurn();
       if (carried) {
