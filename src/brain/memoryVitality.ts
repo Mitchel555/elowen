@@ -36,7 +36,7 @@ function clampVitality(value: number): number {
 export function vitality(memory: VitalityMemory, retention: MemoryRetentionConfig, now: number): number {
   const lastUsedAt = parseDbTs(memory.last_used_at);
   const createdAt = parseDbTs(memory.created_at);
-  const referenceAt = lastUsedAt || createdAt;
+  const referenceAt = lastUsedAt || createdAt || now;
   const ageDays = Math.max(0, (now - referenceAt) / DAY_MS);
   const halfLife = retention.halfLifeByImportance[memory.importance] ?? 0;
   const decay = memory.importance === PIN_IMPORTANCE || halfLife === 0
@@ -52,8 +52,11 @@ export function isEvictable(memory: VitalityMemory, retention: MemoryRetentionCo
   const createdAt = parseDbTs(memory.created_at);
   const isPastGracePeriod = createdAt > 0 && now - createdAt > retention.graceDays * DAY_MS;
 
+  const halfLife = retention.halfLifeByImportance[memory.importance] ?? 0;
+
   return retention.enabled
     && memory.importance < PIN_IMPORTANCE
+    && halfLife !== 0
     && isPastGracePeriod
     && vitality(memory, retention, now) < retention.vitalityFloor;
 }

@@ -63,6 +63,12 @@ describe('vitality', () => {
     expect(vitality(memory(), DEFAULT_MEMORY_RETENTION, NOW)).toBe(50);
   });
 
+  it('treats missing, invalid, and future timestamps as fresh instead of epoch-aged', () => {
+    expect(vitality(memory({ created_at: '', last_used_at: null }), DEFAULT_MEMORY_RETENTION, NOW)).toBe(50);
+    expect(vitality(memory({ created_at: 'not-a-timestamp', last_used_at: null }), DEFAULT_MEMORY_RETENTION, NOW)).toBe(50);
+    expect(vitality(memory({ created_at: new Date(NOW + 86_400_000).toISOString() }), DEFAULT_MEMORY_RETENTION, NOW)).toBe(50);
+  });
+
   it('reduces an old low-importance memory to near zero', () => {
     const score = vitality(memory({ created_at: daysAgo(365) }), DEFAULT_MEMORY_RETENTION, NOW);
 
@@ -84,5 +90,15 @@ describe('isEvictable', () => {
     expect(isEvictable(memory({ importance: PIN_IMPORTANCE, created_at: daysAgo(20) }), aggressiveRetention, NOW)).toBe(false);
     expect(isEvictable(oldMemory, { ...aggressiveRetention, enabled: false }, NOW)).toBe(false);
     expect(isEvictable(oldMemory, { ...aggressiveRetention, vitalityFloor: 0 }, NOW)).toBe(false);
+  });
+
+  it('never evicts a non-pinned importance explicitly configured with a zero half-life', () => {
+    const retention = {
+      ...DEFAULT_MEMORY_RETENTION,
+      vitalityFloor: 60,
+      halfLifeByImportance: { ...DEFAULT_MEMORY_RETENTION.halfLifeByImportance, 2: 0 },
+    };
+
+    expect(isEvictable(memory({ importance: 2, created_at: daysAgo(10_000) }), retention, NOW)).toBe(false);
   });
 });

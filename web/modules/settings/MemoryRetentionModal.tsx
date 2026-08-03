@@ -133,7 +133,7 @@ export function MemoryRetentionModal({ runtime, applied, onChange, onClose, pres
                   value={value}
                   min={HALF_LIFE_RANGE[0]}
                   max={HALF_LIFE_RANGE[1]}
-                  step={1}
+                  step={0.1}
                   onChange={(next) => setHalfLife(level, next)}
                   aria-label={t.brain.retention.halfLifeLevel.replace('{n}', String(level))}
                   aria-valuetext={valueLabel}

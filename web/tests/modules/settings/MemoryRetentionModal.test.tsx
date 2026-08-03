@@ -59,9 +59,9 @@ describe('MemoryRetentionModal', () => {
     next = apply(2);
     expect(next.memoryRetention?.vitalityFloor).toBe(40);
 
-    fireEvent.change(screen.getByRole('slider', { name: 'Half-life — importance 2' }), { target: { value: '90' } });
+    fireEvent.change(screen.getByRole('slider', { name: 'Half-life — importance 2' }), { target: { value: '0.5' } });
     next = apply(3);
-    expect(next.memoryRetention?.halfLifeByImportance[2]).toBe(90);
+    expect(next.memoryRetention?.halfLifeByImportance[2]).toBe(0.5);
     expect(next.memoryRetention?.halfLifeByImportance[1]).toBe(30);
   });
 

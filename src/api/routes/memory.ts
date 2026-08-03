@@ -2,6 +2,7 @@ import { parseBody, queryInt } from '../validation.js';
 import { hashBody } from '../../store/memoryStore.js';
 import { toEmbeddingConfig } from '../../store/configStore.js';
 import { isEmbeddingConfigured } from '../../embeddings/embeddingService.js';
+import { vitality, type MemoryRetentionConfig } from '../../brain/memoryVitality.js';
 import {
   memoryCreateSchema, memoryPatchSchema, memoryMergeSchema, memoryRetrieveSchema, embeddingUpdateSchema,
   memoryPurgeSchema, memoryCategoryCreateSchema, memoryCategoryPatchSchema, memoryCategorySetSchema,
@@ -12,8 +13,15 @@ import type { MemoryRow } from '../../shared/wireContract.js';
 
 type MemoryWithVitality = MemoryRow & { vitality: number };
 
-function withVitality(row: MemoryRow, memoryService: RouteContext['memoryService']): MemoryRow | MemoryWithVitality {
-  return memoryService ? { ...row, vitality: memoryService.vitalityOf(row) } : row;
+function withVitality(
+  row: MemoryRow,
+  memoryService: RouteContext['memoryService'],
+  retention: () => MemoryRetentionConfig,
+): MemoryWithVitality {
+  return {
+    ...row,
+    vitality: memoryService?.vitalityOf(row) ?? vitality(row, retention(), Date.now()),
+  };
 }
 
 /** How many pending memories one self-service /memory/reindex pass will re-embed. Bounded so a big
@@ -36,6 +44,8 @@ function isUniqueViolation(err: unknown): boolean {
 export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
   const { d, canAccessProject, notAdminUnlessSetup } = ctx;
   const store = d.memoryStore;
+  const withCurrentVitality = (row: MemoryRow): MemoryWithVitality =>
+    withVitality(row, ctx.memoryService, () => d.config.get().runtime.memoryRetention);
 
   // --- Literal sub-paths registered before `/memory/:id` so they can never be captured as an id. ---
 
@@ -82,7 +92,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (!store) return c.json({ error: 'memory unavailable' }, 400);
     const userId = c.get('user').id;
     const b = await parseBody(c, memoryMergeSchema);
-    return c.json(store.merge(userId, b.ids, b.body, `user:${userId}`, 'merged via API'), 201);
+    return c.json(withCurrentVitality(store.merge(userId, b.ids, b.body, `user:${userId}`, 'merged via API')), 201);
   });
 
   // Hard-delete a batch of the caller's memories by id (any status) — a real DELETE, not a soft flip.
@@ -252,7 +262,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
       const rows = ctx.memoryService
         ? await ctx.memoryService.searchSemantic(userId, q, lim)
         : store.search(userId, q, lim);
-      return c.json(rows.map((row) => withVitality(row, ctx.memoryService)));
+      return c.json(rows.map(withCurrentVitality));
     }
     const cat = c.req.query('categoryId');
     const rows = store.list(userId, {
@@ -262,7 +272,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
       limit: queryInt(limit, { min: 1, max: 500, fallback: undefined }),
       offset: queryInt(c.req.query('offset'), { min: 0, fallback: undefined }),
     });
-    return c.json(rows.map((row) => withVitality(row, ctx.memoryService)));
+    return c.json(rows.map(withCurrentVitality));
   });
 
   // Create a memory for the caller (source='user', actor='user:<id>').
@@ -274,7 +284,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     // Same fire-and-forget the curator does. Without it a memory created from the web stayed
     // uncategorized, since classification used to hang off the post-turn curator alone.
     d.memoryCategorizer?.classifyNewMemory(userId, row.id, `user:${userId}`);
-    return c.json(row, 201);
+    return c.json(withCurrentVitality(row), 201);
   });
 
   // Read one of the caller's memories. Owner-scoped → a foreign id is 404.
@@ -282,7 +292,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (!store) return c.json({ error: 'memory unavailable' }, 400);
     const row = store.get(c.get('user').id, Number(c.req.param('id')));
     if (!row) return c.json({ error: 'not found' }, 404);
-    return c.json(withVitality(row, ctx.memoryService));
+    return c.json(withCurrentVitality(row));
   });
 
   // Partial update. The store scopes to the owner, so a patch aimed at a foreign id matches nothing and
@@ -293,7 +303,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     const b = await parseBody(c, memoryPatchSchema);
     const updated = store.update(userId, Number(c.req.param('id')), b, `user:${userId}`, 'edited via API');
     if (!updated) return c.json({ error: 'not found' }, 404);
-    return c.json(updated);
+    return c.json(withCurrentVitality(updated));
   });
 
   // Soft-delete (owner-scoped no-op on a foreign id).
@@ -333,7 +343,9 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     const b = await parseBody(c, memoryCategorySetSchema);
     const ok = store.setCategory(userId, id, b.categoryId, `user:${userId}`, 'categorized via API');
     if (!ok) return c.json({ error: 'not found' }, 404);
-    return c.json(store.get(userId, id));
+    const row = store.get(userId, id);
+    if (!row) return c.json({ error: 'not found' }, 404);
+    return c.json(withCurrentVitality(row));
   });
 
   // That one memory's audit trail (owner-scoped): verify ownership, then read events scoped to THIS
