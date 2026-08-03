@@ -100,6 +100,29 @@ describe('memory recall scope', () => {
     expect(result.memories.map((memory) => memory.body)).toEqual(['global setting']);
   });
 
+  it('allCategoriesScope inspects across projects, surfacing project memories the global scope hides', async () => {
+    const db = openDb(':memory:');
+    const store = new MemoryStore(db);
+    const categories = new MemoryCategoryStore(db);
+    const global = categories.create(1, { name: 'Global' });
+    const project = categories.create(1, { name: 'Project', projectId: 3 });
+    const globalMemory = store.add(1, { body: 'global setting' }, 'test', '');
+    const projectMemory = store.add(1, { body: 'project setting' }, 'test', '');
+    store.setCategory(1, globalMemory.id, global.id, 'test', '');
+    store.setCategory(1, projectMemory.id, project.id, 'test', '');
+    const service = new MemoryService({ store, categories, embeddings: new Embeddings() as EmbeddingService, embeddingConfig: () => null });
+
+    // The retrieval inspector runs from a web request with no turn scope: with no explicit scope it
+    // collapses to globals and hides the project memory — the regression the inspector exhibited.
+    const globalOnly = await service.retrieve(1, 'setting');
+    expect(globalOnly.memories.map((memory) => memory.body)).toEqual(['global setting']);
+
+    // allCategoriesScope is the inspector's explicit cross-project scope: every category the caller owns,
+    // so a project memory surfaces alongside the global one instead of being filtered out.
+    const inspected = await service.retrieve(1, 'setting', { scope: service.allCategoriesScope(1) });
+    expect(inspected.memories.map((memory) => memory.body).sort()).toEqual(['global setting', 'project setting']);
+  });
+
   it('prefers an explicit live-recall scope over a foreign async scope', async () => {
     const db = openDb(':memory:');
     const store = new MemoryStore(db);

@@ -1181,6 +1181,7 @@ export const en = {
     retrievalRun: 'Run retrieval',
     retrievalEmpty: 'The agent receives no memory for this query.',
     retrievalFallback: 'Fallback — embeddings unconfigured, using keyword matching.',
+    retrievalKeywordOnly: 'Semantic search returned no match above the threshold — showing keyword results.',
     retrievalProvider: 'Provider',
     retrievalModel: 'Model',
     retrievalInjected: '{n} recalled',

@@ -1181,6 +1181,7 @@ export const sk = {
     retrievalRun: 'Spustiť vybavovanie',
     retrievalEmpty: 'Pre tento dotaz agent nedostane žiadnu spomienku.',
     retrievalFallback: 'Náhradný režim — embeddingy nie sú nastavené, používa sa zhoda kľúčových slov.',
+    retrievalKeywordOnly: 'Sémantické vyhľadávanie nevrátilo zhodu nad prahom — zobrazené výsledky podľa kľúčových slov.',
     retrievalProvider: 'Poskytovateľ',
     retrievalModel: 'Model',
     retrievalInjected: 'Vybavené: {n}',

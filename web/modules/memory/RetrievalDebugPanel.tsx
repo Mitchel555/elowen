@@ -1,7 +1,7 @@
 'use client';
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Search, Sparkles, TriangleAlert, Check } from 'lucide-react';
+import { Search, Sparkles, TriangleAlert, Check, Info } from 'lucide-react';
 import type { RetrievalResult, RetrievalScore } from '../../lib/types';
 import { elowenClient, apiErrorMessage } from '../../lib/elowenClient';
 import { Button } from '../../components/ui/Button';
@@ -61,11 +61,21 @@ export function RetrievalDebugPanel() {
 
       {result ? (
         <div className="flex flex-col gap-3">
-          {/* Meta row: fallback banner or provider/model + candidate count */}
+          {/* Meta row: fallback note or provider/model + candidate count. `fallback` means "keyword path
+              answered", which has two very different causes: embeddings genuinely unavailable (no provider),
+              or embeddings that ran and simply cleared nothing above the floor. Only the first warrants the
+              "unconfigured" warning — the second is a normal empty-semantic result and gets a neutral note,
+              so a configured user is never told their embeddings are off. */}
           {result.debug.fallback ? (
-            <p className="inline-flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-              <TriangleAlert size={13} aria-hidden />{t.memory.retrievalFallback}
-            </p>
+            result.debug.provider ? (
+              <p className="inline-flex items-center gap-2 rounded-md border border-border bg-elevated px-3 py-2 text-xs text-text-muted">
+                <Info size={13} aria-hidden />{t.memory.retrievalKeywordOnly}
+              </p>
+            ) : (
+              <p className="inline-flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                <TriangleAlert size={13} aria-hidden />{t.memory.retrievalFallback}
+              </p>
+            )
           ) : null}
           <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
             {result.debug.provider ? <Badge>{t.memory.retrievalProvider}: {result.debug.provider}</Badge> : null}

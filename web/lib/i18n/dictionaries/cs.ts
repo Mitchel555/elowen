@@ -1181,6 +1181,7 @@ export const cs = {
     retrievalRun: 'Spustit vybavování',
     retrievalEmpty: 'Pro tento dotaz agent nedostane žádnou vzpomínku.',
     retrievalFallback: 'Náhradní režim — embeddingy nejsou nastavené, používá se shoda klíčových slov.',
+    retrievalKeywordOnly: 'Sémantické vyhledávání nevrátilo shodu nad prahem — zobrazeny výsledky podle klíčových slov.',
     retrievalProvider: 'Poskytovatel',
     retrievalModel: 'Model',
     retrievalInjected: 'Vybaveno: {n}',

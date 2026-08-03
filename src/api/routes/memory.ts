@@ -100,7 +100,11 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
   app.post('/memory/retrieve', async (c) => {
     if (!ctx.memoryService) return c.json({ error: 'memory unavailable' }, 400);
     const { query } = await parseBody(c, memoryRetrieveSchema);
-    return c.json(await ctx.memoryService.retrieve(c.get('user').id, query));
+    const userId = c.get('user').id;
+    // The inspector has no turn/project context, so scoping it like a real recall would collapse to the
+    // caller's global categories and hide their project memories. Inspect across every category instead;
+    // uncategorized stay excluded, matching what recall would never surface.
+    return c.json(await ctx.memoryService.retrieve(userId, query, { scope: ctx.memoryService.allCategoriesScope(userId) }));
   });
 
   // Self-service re-embed of the caller's pending (missing/stale) memories. Bounded per request and

@@ -390,6 +390,15 @@ export class MemoryService {
     };
   }
 
+  /** Every category the caller owns, ignoring project boundaries. The retrieval-debugging inspector uses
+   *  this: it runs from a web request with no turn/project context, so scoping it like a real recall would
+   *  collapse to globals and hide the caller's project memories. Uncategorized are still excluded, since
+   *  recall never surfaces them. This is an INSPECTION scope only — turn and live recall stay project-scoped. */
+  allCategoriesScope(userId: number): MemoryRecallScope | undefined {
+    if (!this.categories) return undefined;
+    return { projectId: null, categoryIds: new Set(this.categories.list(userId).map((category) => category.id)) };
+  }
+
   /** The active embedding config, or null when embeddings are disabled (no config, empty model, or
    *  neither providerId nor baseUrl to reach an endpoint). */
   private activeConfig(): EmbeddingConfig | null {

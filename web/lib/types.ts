@@ -629,8 +629,10 @@ export interface RetrievalScore {
   picked: boolean;
 }
 
-/** POST /memory/retrieve result — the picked memories plus the scoring trace. `fallback` is true when
- *  embeddings are unconfigured and the daemon fell back to keyword matching. */
+/** POST /memory/retrieve result — the picked memories plus the scoring trace. `fallback` is true whenever
+ *  the keyword path answered instead of the vector one — either embeddings are unconfigured (then `provider`
+ *  is null) or they ran but nothing cleared the relevance floor (then `provider` is set). The UI keys the
+ *  "unconfigured" warning off `provider`, not off `fallback` alone. */
 export interface RetrievalResult {
   memories: Memory[];
   debug: {
