@@ -222,8 +222,14 @@ export class BrainService {
         // for the case it exists to serve. Clients report whether they are on screen; one that never
         // reports counts as watching, so a surface that has not been taught this stays silent as before.
         // Enablement is implicit: no push subscription means the notifier sends nothing.
-        if (fromWeb && this.attachments.watchingCount(sessionId) === 0 && d.notifyTurnComplete) {
+        const watching = this.attachments.watchingCount(sessionId);
+        if (fromWeb && watching === 0 && d.notifyTurnComplete) {
           d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
+        } else if (d.notifyTurnComplete) {
+          // Both reasons for staying quiet look identical from outside — the user just does not get a
+          // notification — and the two need opposite fixes. `fromWeb` false means the turn came from a
+          // bound CLI or an internal nudge; a non-zero count means a tab reported itself on screen.
+          logger('brain').info(`no phone push for ${sessionId}: fromWeb=${fromWeb} watching=${watching}`);
         }
       },
     });
