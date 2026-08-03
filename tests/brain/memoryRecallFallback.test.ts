@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { MemoryStore, hashBody } from '../../src/store/memoryStore.js';
+import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
 import { MemoryService } from '../../src/brain/memoryService.js';
 import type { EmbeddingConfig, EmbeddingService } from '../../src/embeddings/embeddingService.js';
 
@@ -28,9 +29,13 @@ class ThrowingEmbeddings {
   async embedBatch(): Promise<Float32Array[]> { throw new Error('embedding endpoint down'); }
 }
 
+let categories: MemoryCategoryStore;
+let globalCategoryId: number;
+
 function serviceWith(store: MemoryStore, embeddings: unknown): MemoryService {
   return new MemoryService({
     store,
+    categories,
     embeddings: embeddings as EmbeddingService,
     embeddingConfig: () => CONFIG,
   });
@@ -39,6 +44,7 @@ function serviceWith(store: MemoryStore, embeddings: unknown): MemoryService {
 /** Store a memory whose vector is orthogonal to whatever the query embeds to. */
 function addOrthogonal(store: MemoryStore, body: string): void {
   const m = store.add(1, { body, importance: 3 }, 'agent', '');
+  store.setCategory(1, m.id, globalCategoryId, 'agent', '');
   const v = Float32Array.from([1, 0, 0]);
   store.setEmbedding(1, m.id, { provider: 'p', model: 'm', dimensions: v.length, vector: v, contentHash: hashBody(body) });
 }
@@ -46,7 +52,10 @@ function addOrthogonal(store: MemoryStore, body: string): void {
 describe('MemoryService — recall falls back to keyword when the vector path clears nothing', () => {
   let store: MemoryStore;
   beforeEach(() => {
-    store = new MemoryStore(openDb(':memory:'));
+    const db = openDb(':memory:');
+    store = new MemoryStore(db);
+    categories = new MemoryCategoryStore(db);
+    globalCategoryId = categories.create(1, { name: 'Global' }).id;
     addOrthogonal(store, 'Deployment of the daemon runs through release.sh');
     addOrthogonal(store, 'Something entirely unrelated about hair colouring');
   });

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { MemoryStore, hashBody } from '../../src/store/memoryStore.js';
+import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
 import { MemoryService, cosine } from '../../src/brain/memoryService.js';
 import type { EmbeddingConfig, EmbeddingService } from '../../src/embeddings/embeddingService.js';
 
@@ -22,6 +23,9 @@ class FakeEmbeddings {
 
 const CONFIG: EmbeddingConfig = { providerId: 'p', model: 'm' };
 
+let categories: MemoryCategoryStore;
+let globalCategoryId: number;
+
 function makeService(
   store: MemoryStore,
   table: Record<string, number[]>,
@@ -29,12 +33,13 @@ function makeService(
 ): MemoryService {
   const fake = new FakeEmbeddings(table, opts.failFor) as unknown as EmbeddingService;
   const config = opts.config === undefined ? CONFIG : opts.config;
-  return new MemoryService({ store, embeddings: fake, embeddingConfig: () => config });
+  return new MemoryService({ store, categories, embeddings: fake, embeddingConfig: () => config });
 }
 
 /** Add a memory and give it the embedding for its body from `table`. */
 function addWithVec(store: MemoryStore, userId: number, body: string, table: Record<string, number[]>, importance = 3): number {
   const m = store.add(userId, { body, importance }, 'agent', '');
+  store.setCategory(userId, m.id, globalCategoryId, 'agent', '');
   const v = Float32Array.from(table[body] ?? [0, 0, 0]);
   store.setEmbedding(userId, m.id, { provider: 'p', model: 'm', dimensions: v.length, vector: v, contentHash: hashBody(body) });
   return m.id;
@@ -51,7 +56,12 @@ describe('cosine', () => {
 
 describe('MemoryService.retrieve', () => {
   let store: MemoryStore;
-  beforeEach(() => { store = new MemoryStore(openDb(':memory:')); });
+  beforeEach(() => {
+    const db = openDb(':memory:');
+    store = new MemoryStore(db);
+    categories = new MemoryCategoryStore(db);
+    globalCategoryId = categories.create(1, { name: 'Global' }).id;
+  });
 
   it('empty query returns nothing', async () => {
     const svc = makeService(store, {});
@@ -141,8 +151,8 @@ describe('MemoryService.retrieve', () => {
   });
 
   it('falls back to keyword+recency when embeddings are not configured', async () => {
-    store.add(1, { body: 'prefers dark mode' }, 'agent', '');
-    store.add(1, { body: 'uses vim keybindings' }, 'agent', '');
+    addWithVec(store, 1, 'prefers dark mode', {});
+    addWithVec(store, 1, 'uses vim keybindings', {});
     const svc = makeService(store, {}, { config: null });
 
     const res = await svc.retrieve(1, 'dark');
@@ -153,7 +163,7 @@ describe('MemoryService.retrieve', () => {
   });
 
   it('falls back to keyword path when the embed call throws', async () => {
-    store.add(1, { body: 'loves keyword tea' }, 'agent', '');
+    addWithVec(store, 1, 'loves keyword tea', {});
     const svc = makeService(store, {}, { failFor: 'keyword' });
 
     const res = await svc.retrieve(1, 'keyword');
@@ -166,7 +176,12 @@ describe('MemoryService.retrieve', () => {
 
 describe('MemoryService.searchSemantic', () => {
   let store: MemoryStore;
-  beforeEach(() => { store = new MemoryStore(openDb(':memory:')); });
+  beforeEach(() => {
+    const db = openDb(':memory:');
+    store = new MemoryStore(db);
+    categories = new MemoryCategoryStore(db);
+    globalCategoryId = categories.create(1, { name: 'Global' }).id;
+  });
 
   it('ranks active memories by cosine, floors out unrelated, does not markUsed', async () => {
     const table = { query: [1, 0, 0], near: [0.95, 0.31, 0], mid: [0.8, 0.6, 0], far: [0, 1, 0] };
@@ -213,7 +228,12 @@ describe('MemoryService.searchSemantic', () => {
 
 describe('MemoryService.findSimilar', () => {
   let store: MemoryStore;
-  beforeEach(() => { store = new MemoryStore(openDb(':memory:')); });
+  beforeEach(() => {
+    const db = openDb(':memory:');
+    store = new MemoryStore(db);
+    categories = new MemoryCategoryStore(db);
+    globalCategoryId = categories.create(1, { name: 'Global' }).id;
+  });
 
   it('flags a near-duplicate and ignores a distant memory', async () => {
     const table = {

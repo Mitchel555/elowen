@@ -30,7 +30,7 @@ function toolset() {
   const store = new MemoryStore(db);
   const categories = new MemoryCategoryStore(db);
   const embeddings = { embed: async () => new Float32Array([0, 0, 0]) } as unknown as EmbeddingService;
-  const service = new MemoryService({ store, embeddings, embeddingConfig: () => null });
+  const service = new MemoryService({ store, categories, embeddings, embeddingConfig: () => null });
   // No inference wired → categorizer.configured() is false (recategorize reports "not configured").
   const categorizer = new MemoryCategorizer({ categories, memories: store, inference: () => null });
   const tools = buildMemoryTools({ store, service, categories, categorizer });
@@ -44,7 +44,7 @@ function toolsetWithCategorizer(reply: string) {
   const store = new MemoryStore(db);
   const categories = new MemoryCategoryStore(db);
   const embeddings = { embed: async () => new Float32Array([0, 0, 0]) } as unknown as EmbeddingService;
-  const service = new MemoryService({ store, embeddings, embeddingConfig: () => null });
+  const service = new MemoryService({ store, categories, embeddings, embeddingConfig: () => null });
   const inference: InferenceClient = { model: 'fake-model', decide: vi.fn(async () => ({ text: reply })) };
   const categorizer = new MemoryCategorizer({ categories, memories: store, inference: () => inference });
   const tools = buildMemoryTools({ store, service, categories, categorizer });
@@ -63,7 +63,7 @@ function toolsetWithProject(classifierReply: string | null) {
   const categories = new MemoryCategoryStore(db);
   const projects = new ProjectStore(db);
   const embeddings = { embed: async () => new Float32Array([0, 0, 0]) } as unknown as EmbeddingService;
-  const service = new MemoryService({ store, embeddings, embeddingConfig: () => null });
+  const service = new MemoryService({ store, categories, embeddings, embeddingConfig: () => null });
   const inference: InferenceClient | null = classifierReply === null
     ? null
     : { model: 'fake-model', decide: vi.fn(async () => ({ text: classifierReply })) };
@@ -121,20 +121,28 @@ describe('buildMemoryTools', () => {
   });
 
   it('owner identity: MemoryAdd stores and MemorySearch finds it', async () => {
-    const { store, byName } = toolset();
+    const { store, categories, byName } = toolset();
     const add = await run(OWNER, () => byName('MemoryAdd').execute('c1', { body: 'Filip preferuje TypeScript strict mode.' }));
     expect(txt(add)).toMatch(/Stored memory #\d+/);
     expect(store.list(1)).toHaveLength(1);
     expect(store.list(1)[0]!.body).toContain('TypeScript');
+    const memory = store.list(1)[0];
+    if (memory === undefined) throw new Error('stored memory missing');
+    const global = categories.create(1, { name: 'Global' });
+    store.setCategory(1, memory.id, global.id, 'test', '');
 
     const search = await run(OWNER, () => byName('MemorySearch').execute('c2', { query: 'TypeScript' }));
     expect(txt(search)).toContain('TypeScript');
   });
 
   it('owner identity: update / delete / list_recent operate on the acting user', async () => {
-    const { store, byName } = toolset();
+    const { store, categories, byName } = toolset();
     await run(OWNER, () => byName('MemoryAdd').execute('a', { body: 'Původní fakt.' }));
-    const id = store.list(1)[0]!.id;
+    const memory = store.list(1)[0];
+    if (memory === undefined) throw new Error('stored memory missing');
+    const id = memory.id;
+    const global = categories.create(1, { name: 'Global' });
+    store.setCategory(1, id, global.id, 'test', '');
     const upd = await run(OWNER, () => byName('MemoryUpdate').execute('u', { id, body: 'Opravený fakt.' }));
     expect(txt(upd)).toContain(`#${id}`);
     expect(store.get(1, id)!.body).toBe('Opravený fakt.');
@@ -147,12 +155,42 @@ describe('buildMemoryTools', () => {
     expect(store.get(1, id)!.status).toBe('deleted');
   });
 
+  it('MemoryListRecent excludes another project and uncategorized memories', async () => {
+    const { store, categories, projects, byName } = toolsetWithProject(null);
+    const current = projects.create({ slug: 'current', path: '/current' });
+    const other = projects.create({ slug: 'other', path: '/other' });
+    const global = categories.create(1, { name: 'Global' });
+    const currentCategory = categories.create(1, { name: 'Current', projectId: current.id });
+    const otherCategory = categories.create(1, { name: 'Other', projectId: other.id });
+    const visible = store.add(1, { body: 'visible global memory' }, 'test', '');
+    const currentMemory = store.add(1, { body: 'visible current memory' }, 'test', '');
+    const hidden = store.add(1, { body: 'hidden other memory' }, 'test', '');
+    store.add(1, { body: 'hidden uncategorized memory' }, 'test', '');
+    store.setCategory(1, visible.id, global.id, 'test', '');
+    store.setCategory(1, currentMemory.id, currentCategory.id, 'test', '');
+    store.setCategory(1, hidden.id, otherCategory.id, 'test', '');
+
+    const list = await run(OWNER, () => byName('MemoryListRecent').execute('l', { limit: 2 }), {
+      projectId: current.id,
+      categoryIds: new Set([global.id, currentCategory.id]),
+    });
+
+    expect(txt(list)).toContain('visible global memory');
+    expect(txt(list)).toContain('visible current memory');
+    expect(txt(list)).not.toContain('hidden other memory');
+    expect(txt(list)).not.toContain('hidden uncategorized memory');
+  });
+
   it('linked-owner platform turn: keys to the Elowen account (#1), not the raw Discord id', async () => {
-    const { store, byName } = toolset();
+    const { store, categories, byName } = toolset();
     const add = await run(LINKED_OWNER, () => byName('MemoryAdd').execute('c1', { body: 'Filip jede na Discordu.' }));
     expect(txt(add)).toMatch(/Stored memory #\d+/);
     // Written to Elowen account #1 (same store as the web chat), NOT under the Discord id.
     expect(store.list(1)).toHaveLength(1);
+    const memory = store.list(1)[0];
+    if (memory === undefined) throw new Error('stored memory missing');
+    const global = categories.create(1, { name: 'Global' });
+    store.setCategory(1, memory.id, global.id, 'test', '');
     const search = await run(LINKED_OWNER, () => byName('MemorySearch').execute('c2', { query: 'Discord' }));
     expect(txt(search)).toContain('Discord');
   });
@@ -160,11 +198,15 @@ describe('buildMemoryTools', () => {
   it('a regular non-owner user with an Elowen account uses their OWN memory (keyed by elowenUserId)', async () => {
     // Patricie: authenticated, not the operator (owner=false), not admin — but a resolved Elowen account.
     const MEMBER: TurnIdentity = { platform: 'elowen', userId: '2', elowenUserId: 2, admin: false, owner: false };
-    const { store, byName } = toolset();
+    const { store, categories, byName } = toolset();
     const add = await run(MEMBER, () => byName('MemoryAdd').execute('c1', { body: 'Patricie preferuje krátké odpovědi.' }));
     expect(txt(add)).toMatch(/Stored memory #\d+/);
     expect(store.list(2)).toHaveLength(1); // written under HER account (2)…
     expect(store.list(1)).toHaveLength(0); // …never the operator's (1)
+    const memory = store.list(2)[0];
+    if (memory === undefined) throw new Error('stored memory missing');
+    const global = categories.create(2, { name: 'Global' });
+    store.setCategory(2, memory.id, global.id, 'test', '');
     const search = await run(MEMBER, () => byName('MemorySearch').execute('c2', { query: 'odpovědi' }));
     expect(txt(search)).toContain('Patricie');
   });

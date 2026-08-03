@@ -38,17 +38,18 @@ function setup(opts: { fetchImpl?: typeof fetch; embeddingConfigured?: boolean }
     config.update({ embedding: { providerId: 'openai', model: 'text-embedding-3-small', dimensions: 3 } });
   }
   const memoryStore = new MemoryStore(db);
+  const memoryCategoryStore = new MemoryCategoryStore(db);
   const embeddings = new EmbeddingService({ resolveProvider, fetchImpl: opts.fetchImpl ?? stubFetch() });
   const app = createServer({
     tasks: new TaskStore(db), readiness: new Readiness(db), missions: new MissionStore(db), bus: new EventBus(),
     engine: null as never, spawn: null as never, tmux: null as never,
     project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' },
     clock: new FakeClock(0), config, users, projects: new ProjectStore(db), userProjects: new UserProjectStore(db),
-    memoryStore, embeddings,
+    memoryStore, memoryCategoryStore, embeddings,
   });
   const up = new UserProjectStore(db);
   up.assign(bob.id, 1); // let bob's per-user surface through the project gate
-  return { app, db, memoryStore, config, users, amyId: amy.id, bobId: bob.id, amyTok: users.issueToken(amy.id), bobTok: users.issueToken(bob.id) };
+  return { app, db, memoryStore, memoryCategoryStore, config, users, amyId: amy.id, bobId: bob.id, amyTok: users.issueToken(amy.id), bobTok: users.issueToken(bob.id) };
 }
 
 const auth = (t: string) => ({ headers: { authorization: `Bearer ${t}` } });
@@ -184,8 +185,10 @@ describe('memory routes', () => {
   });
 
   it('retrieve returns the picked memories plus a debug breakdown', async () => {
-    const { app, amyTok } = setup();
-    await app.request('/memory', post(amyTok, { body: 'Filip codes in TypeScript' }));
+    const { app, amyId, amyTok, memoryCategoryStore, memoryStore } = setup();
+    const category = memoryCategoryStore.create(amyId, { name: 'Global' });
+    const memory = await (await app.request('/memory', post(amyTok, { body: 'Filip codes in TypeScript' }))).json();
+    memoryStore.setCategory(amyId, memory.id, category.id, 'test', '');
     await app.request('/memory/reindex', post(amyTok, {})); // embed it first
     const res = await app.request('/memory/retrieve', post(amyTok, { query: 'what language' }));
     expect(res.status).toBe(200);
@@ -194,6 +197,23 @@ describe('memory routes', () => {
     expect(out.debug.fallback).toBe(false);
     expect(Array.isArray(out.memories)).toBe(true);
     expect(Array.isArray(out.debug.scores)).toBe(true);
+  });
+
+  it('retrieve is limited to global categories and never marks excluded memories used', async () => {
+    const { app, amyId, amyTok, memoryCategoryStore, memoryStore } = setup({ embeddingConfigured: false });
+    const global = memoryCategoryStore.create(amyId, { name: 'Global' });
+    const project = memoryCategoryStore.create(amyId, { name: 'Project', projectId: 1 });
+    const visible = memoryStore.add(amyId, { body: 'global deploy detail' }, 'test', '');
+    const hidden = memoryStore.add(amyId, { body: 'project deploy detail' }, 'test', '');
+    const uncategorized = memoryStore.add(amyId, { body: 'uncategorized deploy detail' }, 'test', '');
+    memoryStore.setCategory(amyId, visible.id, global.id, 'test', '');
+    memoryStore.setCategory(amyId, hidden.id, project.id, 'test', '');
+
+    const res = await app.request('/memory/retrieve', post(amyTok, { query: 'deploy' }));
+
+    expect((await res.json()).memories.map((memory: { id: number }) => memory.id)).toEqual([visible.id]);
+    expect(memoryStore.get(amyId, hidden.id)?.use_count).toBe(0);
+    expect(memoryStore.get(amyId, uncategorized.id)?.use_count).toBe(0);
   });
 
   it('reindex embeds the caller\'s pending memories', async () => {

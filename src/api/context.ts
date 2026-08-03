@@ -328,6 +328,7 @@ export function createRouteContext(d: ServerDeps): RouteContext {
   const memoryService = d.memoryStore && d.embeddings
     ? new MemoryService({
         store: d.memoryStore,
+        categories: d.memoryCategoryStore,
         embeddings: d.embeddings,
         embeddingConfig: () => toEmbeddingConfig(d.config.embeddingConfig()),
       })

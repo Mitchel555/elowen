@@ -131,6 +131,18 @@ export class MemoryStore {
     ).all(userId, limit) as MemoryRow[];
   }
 
+  /** Active memories in the supplied categories, most-recently created first. The category filter lives
+   * in SQL so excluded recent rows cannot crowd eligible rows out of a limited result. */
+  listRecentInCategories(userId: number, categoryIds: ReadonlySet<number>, limit: number): MemoryRow[] {
+    const ids = [...categoryIds];
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(', ');
+    return this.db.prepare(
+      `SELECT * FROM memories WHERE user_id = ? AND status = 'active' AND category_id IN (${placeholders})
+       ORDER BY created_at DESC, id DESC LIMIT ?`
+    ).all(userId, ...ids, limit) as MemoryRow[];
+  }
+
   /** v1 keyword fallback: case-insensitive LIKE scan over body, active only, newest-updated first.
    *  (Vector search lives in Phase 4 — not here.) */
   search(userId: number, query: string, limit: number): MemoryRow[] {

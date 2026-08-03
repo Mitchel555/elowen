@@ -235,7 +235,7 @@ function memoryListRecent(d: MemoryToolDeps) {
     execute: async (_id, p: { limit?: number }) => {
       const userId = actingUserId();
       if (userId === null) return text(LOCKED);
-      const rows = d.store.listRecent(userId, p.limit ?? 10);
+      const rows = d.service.listRecent(userId, p.limit ?? 10);
       if (rows.length === 0) return text('No memories stored yet.');
       return text(rows.map(renderMemory).join('\n'));
     },

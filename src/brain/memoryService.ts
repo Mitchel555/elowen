@@ -225,6 +225,13 @@ export class MemoryService {
       .slice(0, limit);
   }
 
+  /** Return only recallable recent memories. The category predicate is applied in SQLite before LIMIT,
+   * so excluded rows cannot hide eligible results later in the list. */
+  listRecent(userId: number, limit: number): MemoryRow[] {
+    const scope = this.recallScope(userId);
+    return scope ? this.store.listRecentInCategories(userId, scope.categoryIds, limit) : [];
+  }
+
   /** Semantic search for the manual memory browser (Settings → Memory search box): embed the query and
    *  return the caller's active memories ranked by cosine (most similar first), keeping only those above
    *  the relevance floor. Unlike retrieve() this does NOT markUsed — browsing isn't recall — and returns
@@ -358,12 +365,16 @@ export class MemoryService {
    * keyword and recency candidates before any scorer can rank them. */
   private recallable<T>(rows: T[], memoryOf: (row: T) => MemoryRow): T[] {
     const first = rows[0];
-    const scope = currentMemoryRecallScope() ?? (first ? this.globalScope(memoryOf(first).user_id) : undefined);
-    if (!scope) return rows;
+    const scope = first ? this.recallScope(memoryOf(first).user_id) : undefined;
+    if (!scope) return [];
     return rows.filter((row) => {
       const memory = memoryOf(row);
       return memory.category_id !== null && scope.categoryIds.has(memory.category_id);
     });
+  }
+
+  private recallScope(userId: number): MemoryRecallScope | undefined {
+    return currentMemoryRecallScope() ?? this.globalScope(userId);
   }
 
   private globalScope(userId: number): MemoryRecallScope | undefined {

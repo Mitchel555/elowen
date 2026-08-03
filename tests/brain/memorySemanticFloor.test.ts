@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { MemoryStore, hashBody } from '../../src/store/memoryStore.js';
+import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
 import { MemoryService } from '../../src/brain/memoryService.js';
 import type { EmbeddingConfig, EmbeddingService } from '../../src/embeddings/embeddingService.js';
 
@@ -32,10 +33,14 @@ const TABLE: Record<string, number[]> = {
   mid: [0.7, 0.7141, 0],
 };
 
+let categories: MemoryCategoryStore;
+let globalCategoryId: number;
+
 function serviceWith(store: MemoryStore, floorPerMille?: () => number): MemoryService {
   const embeddings = new FakeEmbeddings(TABLE) as unknown as EmbeddingService;
   return new MemoryService({
     store,
+    categories,
     embeddings,
     embeddingConfig: () => CONFIG,
     ...(floorPerMille ? { semanticFloorPerMille: floorPerMille } : {}),
@@ -44,6 +49,7 @@ function serviceWith(store: MemoryStore, floorPerMille?: () => number): MemorySe
 
 function addWithVec(store: MemoryStore, body: string): void {
   const m = store.add(1, { body, importance: 3 }, 'agent', '');
+  store.setCategory(1, m.id, globalCategoryId, 'agent', '');
   const v = Float32Array.from(TABLE[body] ?? [0, 0, 0]);
   store.setEmbedding(1, m.id, { provider: 'p', model: 'm', dimensions: v.length, vector: v, contentHash: hashBody(body) });
 }
@@ -51,7 +57,10 @@ function addWithVec(store: MemoryStore, body: string): void {
 describe('MemoryService — operator-tunable semantic floor', () => {
   let store: MemoryStore;
   beforeEach(() => {
-    store = new MemoryStore(openDb(':memory:'));
+    const db = openDb(':memory:');
+    store = new MemoryStore(db);
+    categories = new MemoryCategoryStore(db);
+    globalCategoryId = categories.create(1, { name: 'Global' }).id;
     addWithVec(store, 'near');
     addWithVec(store, 'far');
   });
