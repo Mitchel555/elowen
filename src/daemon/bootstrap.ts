@@ -709,6 +709,7 @@ export async function buildApp(opts: BuildOpts) {
   const embeddings = new EmbeddingService({ resolveProvider });
   const brainStore = new BrainStore(db);
   const memoryStore = new MemoryStore(db);
+  const memoryCategoryStore = new MemoryCategoryStore(db);
   // ONE embedding-config mapper shared by the retrieval service AND the background embed queue, so both
   // read the same live config each call (a Settings change applies without a restart). Empty
   // providerId/model → the service degrades to keyword search and the queue no-ops.
@@ -728,7 +729,7 @@ export async function buildApp(opts: BuildOpts) {
   const embeddingConfig = () => toEmbeddingConfig(config.embeddingConfig());
   // Vector retrieval + anti-duplication over the memory store (owner chat only — the caller gates it).
   const memoryService = new MemoryService({
-    store: memoryStore, embeddings, embeddingConfig,
+    store: memoryStore, categories: memoryCategoryStore, embeddings, embeddingConfig,
     // Per-turn recall size is operator-tuned (Elowen AI → Limits); read live so a change applies without a restart.
     recallDefaults: () => ({ count: config.get().brain.limits.memoryRecallCount, chars: config.get().brain.limits.memoryRecallChars }),
     // Relevance floor below which a memory counts as unrelated to the query (Elowen AI → Runtime), carried
@@ -745,7 +746,6 @@ export async function buildApp(opts: BuildOpts) {
   // referenced brain provider's endpoint+key at call time (no second secret stored), mirroring how
   // embeddings reuse the brain key. Null when unconfigured/keyless → both no-op (memory still works via
   // the explicit Memory* tools). NOTE: deliberately NOT the autopilot model — memory is its own concern.
-  const memoryCategoryStore = new MemoryCategoryStore(db);
   const memoryModelInference = (): InferenceClient | null => {
     const block = config.get().categorization;
     if (!block.providerId || !block.model) return null;
@@ -836,6 +836,7 @@ export async function buildApp(opts: BuildOpts) {
         runtime: brainRuntime,
         cwd: brainDir,
         projectPath: () => homeProject.path,
+        projects,
         // A web-started owner turn finished with no CLI watching it live → push it to the user's phone.
         // No subscription registered ⇒ sendToUsers is a no-op, so this needs no separate enable flag.
         notifyTurnComplete: (userId, title) => { void pushSender.sendToUsers([userId], buildTurnDone({ title })); },

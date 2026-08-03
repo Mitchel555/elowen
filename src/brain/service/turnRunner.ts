@@ -69,6 +69,8 @@ interface TurnRunnerDeps {
   users: BrainDeps['users'];
   userSettings?: BrainDeps['userSettings'];
   memoryService?: MemoryService;
+  memoryCategoryStore?: BrainDeps['memoryCategoryStore'];
+  projects?: BrainDeps['projects'];
   /** The daemon-wide plugin registry (undefined when plugins aren't wired at all). */
   plugins(): Promise<PluginRegistry | undefined>;
   hookAudit?: HookAuditBuffer;

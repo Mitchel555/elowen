@@ -206,6 +206,8 @@ export class BrainService {
       get users() { return d.users; },
       get userSettings() { return d.userSettings; },
       get memoryService() { return d.memoryService; },
+      get memoryCategoryStore() { return d.memoryCategoryStore; },
+      get projects() { return d.projects; },
       plugins: () => this.resolvePlugins(),
       get hookAudit() { return d.hookAudit; },
       get projectPath() { return d.projectPath; },
@@ -248,7 +250,7 @@ export class BrainService {
       maxChannels: () => this.limits().channelSessionCap,
       spawn: (o) => this.spawner.spawn(o), // composition stays in the spawner — single source
       // Verified channel senders get memory too, keyed on their linked account and their own toggles.
-      memoryService: d.memoryService, curator: this.curator, userSettings: d.userSettings,
+      memoryService: d.memoryService, memoryCategoryStore: d.memoryCategoryStore, curator: this.curator, userSettings: d.userSettings,
       elicitation: this.elicitation, // one registry so Discord interactions resolve channel questions
       titler: this.titler, // name a brand-new channel conversation, same as owner chat
       permissions: d.permissions, // deny rules apply to channel turns too (asks follow unattendedAsks there)

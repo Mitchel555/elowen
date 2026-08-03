@@ -11,6 +11,10 @@ import type { ElicitationRegistry } from '../elicitation.js';
 import type { AskQuestion, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from '../events.js';
 import type { IdentityResolver } from '../identity.js';
 import type { MemoryService } from '../memoryService.js';
+import type { MemoryCategoryStore } from '../../store/memoryCategoryStore.js';
+import type { ProjectStore } from '../../store/projectStore.js';
+import { memoryRecallScope } from '../memoryRecallScope.js';
+
 import { frameUntrusted } from '../messageView.js';
 import { memoryAgeDays, memoryStalenessNote } from '../memoryStaleness.js';
 import { applyToolVisibility } from '../session/capabilities.js';
@@ -21,7 +25,7 @@ import { summarizePermissions, dedupeRulesKeepingLast, NON_DESTRUCTIVE_BASH_RULE
 import { xmlEscape } from '../../shared/xml.js';
 import type { PermissionApprovalService } from './permissionApproval.js';
 import type { TurnMode, TurnRequest } from './turnRequest.js';
-import { turnWorkDir } from './workDir.js';
+import { clientDir, turnWorkDir } from './workDir.js';
 import { drainPostCompactionContext } from '../continuity/postCompactionContext.js';
 import { EXIT_PLAN_MODE_TOOL } from '../../shared/planTool.js';
 import { planFilePath } from '../../shared/paths.js';
@@ -38,6 +42,8 @@ interface TurnContextBuilderDeps {
   users: BrainDeps['users'];
   userSettings?: BrainDeps['userSettings'];
   memoryService?: MemoryService;
+  memoryCategoryStore?: MemoryCategoryStore;
+  projects?: ProjectStore;
   plugins(): Promise<PluginRegistry | undefined>;
   hookAudit?: HookAuditBuffer;
   projectPath?: () => string | undefined;
@@ -107,9 +113,13 @@ export class TurnContextBuilder {
     // admission rolls a rejected turn's user row back, so its mode must roll back with it.
     const previousMode = live.lastTurnMode;
     const memSettings = this.d.userSettings?.(request.userId);
-    const memoryBlock = await this.memoryBlock(request.userId, request.text, memSettings?.autoRecall !== false);
-    const hookBlock = await this.hookBlock(request.text);
     const scope = this.scopeOptions(request.userId, live, mode, request.clientCwd);
+    const memoryBlock = await runWithPolicy(
+      live.policy,
+      () => this.memoryBlock(request.userId, request.text, memSettings?.autoRecall !== false),
+      scope,
+    );
+    const hookBlock = await this.hookBlock(request.text);
     const permissionsBlock = scope.permissions ? `${summarizePermissions(scope.permissions)}\n\n` : '';
     // Each non-build mode carries its own tuned <system-reminder> directive (a self-contained block in
     // the template). Plan also restricts tools (see applyOwnerToolPolicy); Workflow is prompt-only.
@@ -264,6 +274,13 @@ export class TurnContextBuilder {
       this.d.completeWorkflow?.(live.sessionId, userId, completion);
     };
     const toolPolicy = this.applyOwnerToolPolicy(userId, live, mode);
+    const storedWorkDir = this.d.store.getSession(live.sessionId)?.work_dir || undefined;
+    // `live.workDir` is a runtime convenience, not evidence that a web chat belongs to a project. Only a
+    // client-reported cwd or the validated durable session binding can scope private memory.
+    const recallCwd = clientDir(live.policy, clientCwd ?? storedWorkDir);
+    const recallScope = this.d.memoryCategoryStore && this.d.projects
+      ? memoryRecallScope(userId, recallCwd, this.d.memoryCategoryStore, this.d.projects)
+      : { projectId: null, categoryIds: new Set<number>() };
     const workDir = turnWorkDir(live.policy, clientCwd ?? live.workDir, this.d.projectPath);
     const base = this.d.permissions.turnPermissions(userId, live, true);
     // The other half of admitting Bash in plan mode: narrow the turn's shell rules to the shared
@@ -304,6 +321,7 @@ export class TurnContextBuilder {
       toolPolicy,
       permissions,
       workDir,
+      memoryRecallScope: recallScope,
       // Carried into the turn's AsyncLocalStorage so the delegation path can see it: a turn spent
       // planning may only ever spawn a read-only child (see pathGuard.currentAccess).
       mode,

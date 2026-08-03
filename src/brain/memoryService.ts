@@ -2,6 +2,9 @@ import type { MemoryRow, MemoryStore } from '../store/memoryStore.js';
 import type { EmbeddingConfig, EmbeddingService } from '../embeddings/embeddingService.js';
 import { isEmbeddingConfigured } from '../embeddings/embeddingService.js';
 import { parseDbTs } from '../shared/time.js';
+import { currentMemoryRecallScope } from '../plugins/policyContext.js';
+import type { MemoryCategoryStore } from '../store/memoryCategoryStore.js';
+import type { MemoryRecallScope } from './memoryRecallScope.js';
 
 /** Weight of each signal in the combined retrieval score. Semantic similarity dominates; importance,
  *  recency and usage nudge ties. Sums to 1.0. */
@@ -120,6 +123,7 @@ export function cosine(a: Float32Array, b: Float32Array): number {
  *  crosses users; the caller is responsible for only ever invoking it with the genuine owner's id. */
 export class MemoryService {
   private readonly store: MemoryStore;
+  private readonly categories?: MemoryCategoryStore;
   private readonly embeddings: EmbeddingService;
   /** Returns the active embedding config, or null when embeddings are disabled. A config missing a
    *  model or both providerId and baseUrl is also treated as disabled (→ keyword fallback). */
@@ -133,12 +137,14 @@ export class MemoryService {
 
   constructor(deps: {
     store: MemoryStore;
+    categories?: MemoryCategoryStore;
     embeddings: EmbeddingService;
     embeddingConfig: () => EmbeddingConfig | null;
     recallDefaults?: () => { count: number; chars: number };
     semanticFloorPerMille?: () => number;
   }) {
     this.store = deps.store;
+    this.categories = deps.categories;
     this.embeddings = deps.embeddings;
     this.embeddingConfig = deps.embeddingConfig;
     this.recallDefaults = deps.recallDefaults;
@@ -258,7 +264,7 @@ export class MemoryService {
     model: string | null,
   ): RetrieveResult {
     const now = Date.now();
-    const ranked: Candidate[] = this.store.listActiveWithEmbeddings(userId)
+    const ranked: Candidate[] = this.recallable(this.store.listActiveWithEmbeddings(userId), ({ memory }) => memory)
       .map(({ memory, vector }) => {
         const semantic = cosine(queryVec, vector);
         const importanceWeight = importanceWeightOf(memory);
@@ -294,14 +300,14 @@ export class MemoryService {
     keywordOnly = false,
   ): RetrieveResult {
     const now = Date.now();
-    const keywordHits = this.store.search(userId, query, maxCount * 3);
+    const keywordHits = this.recallable(this.store.search(userId, query, maxCount * 3), (memory) => memory);
     const keywordIds = new Set(keywordHits.map((m) => m.id));
     // Recency is a sane last resort while we have NO relevance signal at all — embeddings unconfigured,
     // or the endpoint down. It is the wrong answer after a vector pass that simply cleared nothing:
     // there the cosine scores already established these memories are off-topic, so padding the result
     // with whatever was written most recently would inject unrelated facts — exactly what the floor is
     // there to prevent.
-    const recent = keywordOnly ? [] : this.store.listRecent(userId, maxCount * 3);
+    const recent = keywordOnly ? [] : this.recallable(this.store.listRecent(userId, maxCount * 3), (memory) => memory);
 
     const byId = new Map<number, MemoryRow>();
     for (const m of [...keywordHits, ...recent]) byId.set(m.id, m);
@@ -346,6 +352,28 @@ export class MemoryService {
       chars += len;
     }
     return picked;
+  }
+
+  /** Recall never considers uncategorized memories. The one scope from AsyncLocalStorage gates vector,
+   * keyword and recency candidates before any scorer can rank them. */
+  private recallable<T>(rows: T[], memoryOf: (row: T) => MemoryRow): T[] {
+    const first = rows[0];
+    const scope = currentMemoryRecallScope() ?? (first ? this.globalScope(memoryOf(first).user_id) : undefined);
+    if (!scope) return rows;
+    return rows.filter((row) => {
+      const memory = memoryOf(row);
+      return memory.category_id !== null && scope.categoryIds.has(memory.category_id);
+    });
+  }
+
+  private globalScope(userId: number): MemoryRecallScope | undefined {
+    if (!this.categories) return undefined;
+    return {
+      projectId: null,
+      categoryIds: new Set(this.categories.list(userId)
+        .filter((category) => category.projectId === null)
+        .map((category) => category.id)),
+    };
   }
 
   /** The active embedding config, or null when embeddings are disabled (no config, empty model, or

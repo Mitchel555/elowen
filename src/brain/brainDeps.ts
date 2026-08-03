@@ -14,6 +14,7 @@ import type { PermissionScope, PermissionSettings } from './toolPermissions.js';
 import type { BrainLimits, RuntimeConfig } from '../store/configStore.js';
 import type { BrainResourceLoaderOptions } from './session/factory.js';
 import type { ProjectModelPreference } from '../store/userSettingStore.js';
+import type { ProjectStore } from '../store/projectStore.js';
 
 // The daemon-wiring seam of the brain, in its own module so the service/* units can depend on it
 // without importing the BrainService facade back (keeps the dependency graph acyclic — depcruise
@@ -39,6 +40,8 @@ export interface BrainDeps {
   /** The daemon's primary project checkout — the final turn-workDir fallback for an all-access chat
    *  with no client-reported cwd (the daemon process itself runs at `/` under systemd). */
   projectPath?: () => string | undefined;
+  /** Registered projects resolve a canonical client cwd to the category scope used for recall. */
+  projects?: ProjectStore;
   /** The daemon-wide shared plugin registry (lazy-loaded, memoized, invalidated on plugin toggles).
    *  Shared with the brain workers and platform adapters so ALL consumers reload together. Absent →
    *  brain runs exactly as before plugins existed. */

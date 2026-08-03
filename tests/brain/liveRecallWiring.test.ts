@@ -3,6 +3,8 @@ import { BrainSessionFactory } from '../../src/brain/session/factory.js';
 import { openDb } from '../../src/store/db.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { installLiveRecall } from '../../src/brain/session/liveRecall.js';
+import { currentMemoryRecallScope, runWithPolicy } from '../../src/plugins/policyContext.js';
+import type { Policy } from '../../src/plugins/policy.js';
 
 /** End-to-end over the WIRING, not over a stubbed module: build a real session through
  *  BrainSessionFactory with a liveRecall spec, capture the extension factories it hands to the resource
@@ -57,6 +59,8 @@ async function buildWithLiveRecall(retrieve: (q: string) => Promise<{ id: number
   return handlers;
 }
 
+const POLICY: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
+
 describe('live recall wiring — a real session reaches the recall pass', () => {
   it('registers the context extension when the spec asks for recall', async () => {
     const handlers = await buildWithLiveRecall(async () => []);
@@ -94,6 +98,43 @@ describe('live recall wiring — a real session reaches the recall pass', () => 
     expect(String(result[3]?.content)).toContain('Deployment runs through release.sh');
     // Everything before the appended block is untouched, so the provider's cached prefix still matches.
     expect(JSON.stringify(result.slice(0, messages.length))).toBe(JSON.stringify(messages));
+  });
+
+  it('reads the current turn scope at each hook after the cwd changes', async () => {
+    let handler: CapturedHandlers['context'];
+    const seenProjects: (number | null)[] = [];
+    const pi = { on: (event: string, fn: unknown) => { if (event === 'context') handler = fn as CapturedHandlers['context']; } };
+    installLiveRecall(pi as never, {
+      budget: () => ({ passes: 2, count: 2, chars: 1000 }),
+      enabled: () => true,
+      retrieve: async () => {
+        seenProjects.push(currentMemoryRecallScope()?.projectId ?? null);
+        return [];
+      },
+    });
+    const context = handler;
+    if (!context) throw new Error('context handler was never registered');
+    const first = [
+      { role: 'user', content: 'first request' },
+      { role: 'assistant', content: 'checking the first project now' },
+      { role: 'toolResult', content: 'first project produced enough detail to search memory' },
+    ];
+    const second = [
+      ...first,
+      { role: 'user', content: 'second request' },
+      { role: 'assistant', content: 'checking the second project now' },
+      { role: 'toolResult', content: 'second project produced enough detail to search memory' },
+    ];
+
+    await runWithPolicy(POLICY, () => context({ messages: first }), {
+      memoryRecallScope: { projectId: 1, categoryIds: new Set([1]) },
+    });
+    await new Promise((resolve) => { setImmediate(resolve); });
+    await runWithPolicy(POLICY, () => context({ messages: second }), {
+      memoryRecallScope: { projectId: 2, categoryIds: new Set([2]) },
+    });
+
+    expect(seenProjects).toEqual([1, 2]);
   });
 
   it('registers nothing when the spec carries no recall options', async () => {
