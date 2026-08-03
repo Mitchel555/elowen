@@ -568,9 +568,9 @@ export interface SkillInstallResult {
 // wire contract). Per-user. `is_builtin` is 0/1 and `color` is a hex/token string used by the UI badge.
 
 /** Body for POST /memory/categories — only `name` is required (409 on duplicate name). */
-export interface MemoryCategoryCreate { name: string; description?: string; color?: string; icon?: string }
+export interface MemoryCategoryCreate { name: string; description?: string; color?: string; icon?: string; projectId?: number | null }
 /** Any subset of the mutable fields for PATCH /memory/categories/:cid (409 on duplicate name). */
-export interface MemoryCategoryPatch { name?: string; description?: string; color?: string; icon?: string }
+export interface MemoryCategoryPatch { name?: string; description?: string; color?: string; icon?: string; projectId?: number | null }
 
 /** Workspace-level categorization provider settings (GET /memory/categorization). `configured` reflects
  *  whether provider/model/baseUrl are complete enough to classify. */

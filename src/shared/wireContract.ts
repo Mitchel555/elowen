@@ -189,6 +189,8 @@ export interface MemoryCategoryRow {
   color: string;
   icon: string;
   is_builtin: number;
+  /** Null keeps the category global; a value binds it to one project by stable id. */
+  projectId: number | null;
   created_at: string;
 }
 

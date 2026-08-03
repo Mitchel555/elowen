@@ -35,6 +35,26 @@ describe('openDb', () => {
     expect(idx).toBeTruthy();
   });
 
+  it('migrates memory categories with a nullable project binding and its partial unique index', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'old.db');
+    const old = new Database(path);
+    old.exec(`CREATE TABLE memory_categories (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '',
+      is_builtin INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, name)
+    )`);
+    old.prepare("INSERT INTO memory_categories (user_id, name) VALUES (1, 'legacy')").run();
+    old.close();
+
+    const db = openDb(path);
+    const cols = db.prepare('PRAGMA table_info(memory_categories)').all() as { name: string }[];
+    expect(cols.map((column) => column.name)).toContain('project_id');
+    expect((db.prepare("SELECT project_id FROM memory_categories WHERE name = 'legacy'").get() as { project_id: number | null }).project_id).toBeNull();
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_memory_categories_user_project'").get()).toBeTruthy();
+  });
+
   it('migrates a pre-work_dir brain_sessions table (adds the column, existing rows read cwd-less)', () => {
     dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
     const path = join(dir, 'old.db');

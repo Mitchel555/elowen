@@ -5,7 +5,7 @@ import type { MemoryStore } from '../../src/store/memoryStore.js';
 import type { InferenceClient } from '../../src/inference/types.js';
 
 function cat(id: number, name: string, description = ''): MemoryCategoryRow {
-  return { id, user_id: 1, name, description, color: '', is_builtin: 0, created_at: '2026-01-01' };
+  return { id, user_id: 1, name, description, color: '', icon: 'Folder', is_builtin: 0, projectId: null, created_at: '2026-01-01' };
 }
 
 /** Fake category store exposing only `list` (the classify path's sole dependency). */

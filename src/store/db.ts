@@ -99,6 +99,9 @@ export function openDb(path: string): Db {
   // Memory category icon: a lucide name from the server ICON_ALLOWLIST. Empty on migrated rows → the UI
   // falls back to 'Folder'. The store clamps unknown names to 'Folder' on every create/update.
   addColumn(db, 'memory_categories', 'icon', "TEXT NOT NULL DEFAULT ''");
+  // NULL categories are global; a non-null project binding scopes recall to exactly one project.
+  addColumn(db, 'memory_categories', 'project_id', 'INTEGER');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_categories_user_project ON memory_categories(user_id, project_id) WHERE project_id IS NOT NULL');
   // Which model performed a memory mutation (curator/categorizer). Nullable — human/API events have none.
   addColumn(db, 'memory_events', 'model', 'TEXT');
   // The provider entry a conversation last ran on, kept beside `model` so a respawn can restore the

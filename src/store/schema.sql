@@ -367,6 +367,7 @@ CREATE TABLE IF NOT EXISTS memory_categories (
   -- fallback glyph ('Folder'); the store always writes a clamped allowlist value on create/update.
   icon TEXT NOT NULL DEFAULT '',
   is_builtin INTEGER NOT NULL DEFAULT 0,
+  project_id INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(user_id, name)
 );

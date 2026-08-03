@@ -26,34 +26,51 @@ function clampIcon(icon: string | null | undefined): string {
 // ICON_ALLOWLIST; is_builtin marks seeded ones. The row shape is the shared wire contract
 // (re-exported above).
 
-export interface CategoryInput { name: string; description?: string; color?: string; icon?: string; isBuiltin?: boolean }
-export interface CategoryPatch { name?: string; description?: string; color?: string; icon?: string }
+export interface CategoryInput { name: string; description?: string; color?: string; icon?: string; isBuiltin?: boolean; projectId?: number | null }
+export interface CategoryPatch { name?: string; description?: string; color?: string; icon?: string; projectId?: number | null }
 
-/** Persistence for per-user memory categories (v1: user-scoped). Every read/write is filtered by user_id.
- *  Category CRUD is UNaudited (per spec); a memory's category change is audited by MemoryStore.setCategory.
- *  memories.category_id is id-addressed (no hard FK) — delete() explicitly nulls referencing rows. */
+type MemoryCategoryDbRow = Omit<MemoryCategoryRow, 'projectId'> & { project_id: number | null };
+
+function toCategory(row: MemoryCategoryDbRow): MemoryCategoryRow {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    name: row.name,
+    description: row.description,
+    color: row.color,
+    icon: row.icon,
+    is_builtin: row.is_builtin,
+    projectId: row.project_id,
+    created_at: row.created_at,
+  };
+}
+
+/** Persistence for per-user memory categories. Every read/write is filtered by user_id. A null projectId
+ *  is global; a non-null value is a stable project binding. Category CRUD is UNaudited (per spec); a
+ *  memory's category change is audited by MemoryStore.setCategory. */
 export class MemoryCategoryStore {
   constructor(private db: Db) {}
 
   /** All of this user's categories, name-sorted (case-insensitive). */
   list(userId: number): MemoryCategoryRow[] {
-    return this.db.prepare(
+    const rows = this.db.prepare(
       'SELECT * FROM memory_categories WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC'
-    ).all(userId) as MemoryCategoryRow[];
+    ).all(userId) as MemoryCategoryDbRow[];
+    return rows.map(toCategory);
   }
 
   /** Read one category owned by this user. */
   get(userId: number, id: number): MemoryCategoryRow | undefined {
-    return this.db.prepare('SELECT * FROM memory_categories WHERE id = ? AND user_id = ?')
-      .get(id, userId) as MemoryCategoryRow | undefined;
+    const row = this.db.prepare('SELECT * FROM memory_categories WHERE id = ? AND user_id = ?')
+      .get(id, userId) as MemoryCategoryDbRow | undefined;
+    return row ? toCategory(row) : undefined;
   }
 
-  /** Insert a category and return the full row. A UNIQUE(user_id,name) violation is NOT caught here —
-   *  the SqliteError propagates so the route maps SQLITE_CONSTRAINT_UNIQUE → 409. */
+  /** Insert a category and return the full row. Unique violations propagate so routes can map them to 409. */
   create(userId: number, input: CategoryInput): MemoryCategoryRow {
     const info = this.db.prepare(
-      `INSERT INTO memory_categories (user_id, name, description, color, icon, is_builtin)
-       VALUES (@user_id, @name, @description, @color, @icon, @is_builtin)`
+      `INSERT INTO memory_categories (user_id, name, description, color, icon, is_builtin, project_id)
+       VALUES (@user_id, @name, @description, @color, @icon, @is_builtin, @project_id)`
     ).run({
       user_id: userId,
       name: input.name,
@@ -61,22 +78,25 @@ export class MemoryCategoryStore {
       color: input.color ?? '',
       icon: clampIcon(input.icon),
       is_builtin: input.isBuiltin ? 1 : 0,
+      project_id: input.projectId ?? null,
     });
-    return this.db.prepare('SELECT * FROM memory_categories WHERE id = ?')
-      .get(Number(info.lastInsertRowid)) as MemoryCategoryRow;
+    const category = this.get(userId, Number(info.lastInsertRowid));
+    if (!category) throw new Error('created memory category missing');
+    return category;
   }
 
   /** Owner-scoped patch of only the provided fields. Returns undefined if the category doesn't exist for
-   *  this user. A name collision throws (UNIQUE) → route → 409. */
+   *  this user. A unique collision throws → route → 409. */
   update(userId: number, id: number, patch: CategoryPatch): MemoryCategoryRow | undefined {
     const before = this.get(userId, id);
     if (!before) return undefined;
     const sets: string[] = [];
-    const params: Record<string, string | number> = { id, user_id: userId };
+    const params: Record<string, string | number | null> = { id, user_id: userId };
     if (patch.name !== undefined) { sets.push('name = @name'); params.name = patch.name; }
     if (patch.description !== undefined) { sets.push('description = @description'); params.description = patch.description; }
     if (patch.color !== undefined) { sets.push('color = @color'); params.color = patch.color; }
     if (patch.icon !== undefined) { sets.push('icon = @icon'); params.icon = clampIcon(patch.icon); }
+    if (patch.projectId !== undefined) { sets.push('project_id = @project_id'); params.project_id = patch.projectId; }
     if (sets.length > 0) {
       this.db.prepare(`UPDATE memory_categories SET ${sets.join(', ')} WHERE id = @id AND user_id = @user_id`).run(params);
     }

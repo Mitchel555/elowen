@@ -58,6 +58,7 @@ export const memoryCategoryCreateSchema = z.object({
   description: z.string().trim().max(1000, 'description too long').optional(),
   color: z.string().trim().max(20, 'color too long').optional(),
   icon: iconSchema,
+  projectId: z.number().int().positive('projectId must be positive').nullable().optional(),
 });
 
 /** Partial update of a category — every field optional, only the provided ones are written. A name
@@ -67,6 +68,7 @@ export const memoryCategoryPatchSchema = z.object({
   description: z.string().trim().max(1000, 'description too long').optional(),
   color: z.string().trim().max(20, 'color too long').optional(),
   icon: iconSchema,
+  projectId: z.number().int().positive('projectId must be positive').nullable().optional(),
 });
 
 /** Ask the server to suggest a category icon for a name (model-driven, fail-soft 'Folder'). */

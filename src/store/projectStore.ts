@@ -15,7 +15,9 @@ export class ProjectStore {
   constructor(private db: Db) {}
   create(p: { slug: string; path: string; notes?: string }): Project {
     const info = this.db.prepare('INSERT INTO projects (slug, path, notes) VALUES (?, ?, ?)').run(p.slug, p.path, p.notes ?? '');
-    return this.get(Number(info.lastInsertRowid))!;
+    const project = this.get(Number(info.lastInsertRowid));
+    if (!project) throw new Error('created project missing');
+    return project;
   }
   list(): Project[] { return (this.db.prepare('SELECT * FROM projects ORDER BY id').all() as ProjectRow[]).map(toProject); }
   get(id: number): Project | null {
@@ -50,6 +52,12 @@ export class ProjectStore {
       deleteTasksAndDeps(this.db, 'project', id);
       this.db.prepare('DELETE FROM agents WHERE project_id = ?').run(id);
       this.db.prepare('DELETE FROM user_projects WHERE project_id = ?').run(id);
+      // Project-scoped categories must disappear with the project. Their memories become uncategorized,
+      // which keeps them fail-closed until a person explicitly files them again.
+      this.db.prepare(
+        "UPDATE memories SET category_id = NULL, updated_at = datetime('now') WHERE category_id IN (SELECT id FROM memory_categories WHERE project_id = ?)"
+      ).run(id);
+      this.db.prepare('DELETE FROM memory_categories WHERE project_id = ?').run(id);
       this.db.prepare('DELETE FROM projects WHERE id = ?').run(id);
     })();
     return true;

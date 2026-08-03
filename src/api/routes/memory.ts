@@ -27,7 +27,7 @@ function isUniqueViolation(err: unknown): boolean {
  *  (the store is user_id-scoped and no-ops / 404s on a foreign id). Provider (embedding) settings are
  *  workspace-level and admin-gated. Degrades to 400 when the store isn't wired. */
 export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
-  const { d, notAdminUnlessSetup } = ctx;
+  const { d, canAccessProject, notAdminUnlessSetup } = ctx;
   const store = d.memoryStore;
 
   // --- Literal sub-paths registered before `/memory/:id` so they can never be captured as an id. ---
@@ -154,6 +154,11 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     const cats = d.memoryCategoryStore;
     if (!cats) return c.json({ error: 'memory unavailable' }, 400);
     const b = await parseBody(c, memoryCategoryCreateSchema);
+    if (b.projectId != null) {
+      const projectExists = b.projectId === d.project.id || !!d.projects?.get(b.projectId);
+      if (!projectExists) return c.json({ error: 'project not found' }, 404);
+      if (!canAccessProject(c, b.projectId)) return c.json({ error: 'forbidden' }, 403);
+    }
     const icon = b.icon ?? (d.memoryCategorizer ? await d.memoryCategorizer.suggestIcon(b.name) : undefined);
     try {
       return c.json(cats.create(c.get('user').id, { ...b, icon }), 201);
@@ -168,6 +173,11 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     const cats = d.memoryCategoryStore;
     if (!cats) return c.json({ error: 'memory unavailable' }, 400);
     const b = await parseBody(c, memoryCategoryPatchSchema);
+    if (b.projectId != null) {
+      const projectExists = b.projectId === d.project.id || !!d.projects?.get(b.projectId);
+      if (!projectExists) return c.json({ error: 'project not found' }, 404);
+      if (!canAccessProject(c, b.projectId)) return c.json({ error: 'forbidden' }, 403);
+    }
     try {
       const updated = cats.update(c.get('user').id, Number(c.req.param('cid')), b);
       if (!updated) return c.json({ error: 'not found' }, 404);

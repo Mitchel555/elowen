@@ -5,6 +5,8 @@ import { TaskStore } from '../../src/store/taskStore.js';
 import { MissionStore } from '../../src/store/missionStore.js';
 import { AgentStore } from '../../src/store/agentStore.js';
 import { UserProjectStore } from '../../src/store/userProjectStore.js';
+import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
+import { MemoryStore } from '../../src/store/memoryStore.js';
 
 let store: ProjectStore;
 beforeEach(() => { store = new ProjectStore(openDb(':memory:')); });
@@ -62,6 +64,26 @@ describe('ProjectStore', () => {
 });
 
 describe('ProjectStore.remove (cascade)', () => {
+  it('deletes project-bound categories and clears their memories fail-closed', () => {
+    const db = openDb(':memory:');
+    const projects = new ProjectStore(db);
+    const categories = new MemoryCategoryStore(db);
+    const memories = new MemoryStore(db);
+    db.prepare("INSERT INTO users (id,username,password_hash) VALUES (1,'u','h')").run();
+    const doomed = projects.create({ slug: 'doomed', path: '/d' });
+    const keep = projects.create({ slug: 'keep', path: '/k' });
+    const doomedCategory = categories.create(1, { name: 'Doomed', projectId: doomed.id });
+    const keepCategory = categories.create(1, { name: 'Keep', projectId: keep.id });
+    const memory = memories.add(1, { body: 'project detail' }, 'agent', '');
+    memories.setCategory(1, memory.id, doomedCategory.id, 'user:1', 'tag');
+
+    expect(projects.remove(doomed.id)).toBe(true);
+
+    expect(categories.get(1, doomedCategory.id)).toBeUndefined();
+    expect(categories.get(1, keepCategory.id)?.projectId).toBe(keep.id);
+    expect(memories.get(1, memory.id)?.category_id).toBeNull();
+  });
+
   it('detaches the project and everything scoped to it, leaving siblings untouched', () => {
     const db = openDb(':memory:');
     const projects = new ProjectStore(db);

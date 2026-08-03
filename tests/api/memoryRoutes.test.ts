@@ -288,6 +288,18 @@ describe('memory category routes', () => {
     await vi.waitFor(() => expect(memoryStore.get(amyId, row.id)?.category_id).toBe(cat.id));
   });
 
+  it('preserves projectId through category create and patch requests', async () => {
+    const { app, amyTok } = setupCat();
+    const created = await app.request('/memory/categories', post(amyTok, { name: 'Project work', projectId: 1 }));
+    expect(created.status).toBe(201);
+    const category = await created.json();
+    expect(category.projectId).toBe(1);
+
+    const patched = await app.request(`/memory/categories/${category.id}`, patch(amyTok, { projectId: null }));
+    expect(patched.status).toBe(200);
+    expect((await patched.json()).projectId).toBeNull();
+  });
+
   it('category CRUD roundtrip: create → list → patch, and a duplicate name → 409', async () => {
     const { app, amyTok } = setupCat();
     const created = await app.request('/memory/categories', post(amyTok, { name: 'Práce', description: 'work stuff', color: '#f00' }));

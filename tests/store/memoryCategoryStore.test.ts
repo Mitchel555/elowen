@@ -23,6 +23,21 @@ describe('MemoryCategoryStore', () => {
     expect(b).toMatchObject({ name: 'Systém', description: 'infra', color: '#f00', is_builtin: 1 });
   });
 
+  it('round-trips a project binding through create, list, get and update', () => {
+    const created = cats.create(1, { name: 'Project work', projectId: 42 });
+    expect(created.projectId).toBe(42);
+    expect(cats.list(1)).toMatchObject([{ id: created.id, projectId: 42 }]);
+    expect(cats.get(1, created.id)?.projectId).toBe(42);
+    expect(cats.update(1, created.id, { projectId: null })?.projectId).toBeNull();
+  });
+
+  it('rejects a second category bound to the same user and project', () => {
+    cats.create(1, { name: 'Project work', projectId: 42 });
+    expect(() => cats.create(1, { name: 'Project notes', projectId: 42 }))
+      .toThrow(/UNIQUE constraint failed/);
+    expect(cats.create(1, { name: 'Global notes' }).projectId).toBeNull();
+  });
+
   it('icon is clamped to the allowlist on create/update (unknown/missing → Folder)', () => {
     expect(cats.create(1, { name: 'a', icon: 'Server' }).icon).toBe('Server');   // known → kept
     expect(cats.create(1, { name: 'b', icon: 'Sparkles' }).icon).toBe('Folder'); // unknown → clamped
