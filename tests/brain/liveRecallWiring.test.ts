@@ -78,6 +78,11 @@ describe('live recall wiring — a real session reaches the recall pass', () => 
       { role: 'assistant', content: 'looking into the deploy path' },
       { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2' },
     ];
+    // The retrieval is non-blocking: the first call only STARTS the search and injects nothing; the
+    // second call consumes the settled result.
+    const during = await handlers.context({ messages });
+    expect(during).toBeUndefined();
+    await new Promise((resolve) => { setImmediate(resolve); });
     const out = await handlers.context({ messages });
     const result = (out?.messages ?? []) as { role?: string; content?: unknown }[];
 

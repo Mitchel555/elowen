@@ -19,6 +19,12 @@ import { logger } from '../../shared/logger.js';
  *    2. Once rendered, a block's bytes are frozen and re-emitted verbatim on later calls. Re-rendering it
  *       — a refreshed age, a different ordering — would change the prefix of the next request and drop
  *       the cache just as surely.
+ *
+ *  The passes never BLOCK the context event either. pi awaits this hook before every model call, so an
+ *  awaited embedding request here would stall the model for its full duration. Instead a pass STARTS the
+ *  retrieval and returns immediately; a later invocation of the hook consumes the result once it has
+ *  settled, or skips past it if it has not. A memory therefore lands one model call later than the pass
+ *  that searched for it — the deliberate price of taking the network off the model's critical path.
  */
 
 export interface LiveRecallMemory {
@@ -44,6 +50,7 @@ export interface LiveRecallOptions {
    *  conversation that is already running, rather than after the next respawn. */
   enabled: () => boolean;
   retrieve: (query: string, maxCount: number, charBudget: number) => Promise<LiveRecallMemory[]>;
+  /** Injectable clock: renders memory ages and drives the pending-retrieval abandon check. */
   now?: () => number;
 }
 
@@ -55,11 +62,13 @@ interface ContextMessage {
 }
 
 const MIN_QUERY_CHARS = 24;
-/** Recall sits on the model's critical path: pi awaits the context hook before every request. The
- *  embedding client's own deadline is 30s, which is a sane ceiling for a user-initiated search but an
- *  unacceptable one here — a degraded endpoint would stall each pass of every turn for half a minute.
- *  Recall is best-effort, so it gets a deadline short enough that failing is cheaper than waiting. */
-const RECALL_DEADLINE_MS = 2500;
+/** Nothing awaits a retrieval, so a slow one no longer costs the turn anything — but one that NEVER
+ *  settles would hold the single in-flight slot and silently disable recall for the rest of the session.
+ *  The embedding client enforces its own 30s deadline, so a pending older than that is a promise that is
+ *  never going to settle; the slot is reclaimed and the orphaned result, should it arrive after all, is
+ *  discarded. Checked against the injected clock on each pass rather than with a timer, so nothing has
+ *  to be torn down when the session ends mid-retrieval. */
+const PENDING_ABANDON_MS = 30_000;
 /** Cap on how much recent conversation is turned into a query. A whole transcript embeds to mush; the
  *  last few thousand characters of actual work is what carries the topic. */
 const QUERY_SOURCE_CHARS = 2000;
@@ -138,12 +147,37 @@ function freshTurn(): TurnState {
   return { steered: false, passes: 0, chars: 0, injected: new Set(), blocks: [], lastQuery: '' };
 }
 
+/** The one retrieval a session may have in flight. The hook mutates the object from the promise's own
+ *  handlers and reads `settled` on later passes — consume-if-ready, never await. */
+interface PendingRetrieval {
+  issuedAt: number;
+  settled: boolean;
+  found: LiveRecallMemory[];
+}
+
 export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): void {
   const now = opts.now ?? Date.now;
   const log = logger('brain-live-recall');
   let turn = freshTurn();
+  let pending: PendingRetrieval | undefined;
   let lastUserCount = -1;
   let lastLength = -1;
+
+  const issueRetrieval = (query: string, maxCount: number, charBudget: number): PendingRetrieval => {
+    const issued: PendingRetrieval = { issuedAt: now(), settled: false, found: [] };
+    // The rejection handler is attached HERE, at creation: nothing ever awaits this promise, so a
+    // rejection would otherwise escape as an unhandled one and take the process with it. Recall is
+    // best-effort — a failure settles the slot empty, and the next pass consumes the nothing, frees
+    // the slot and moves on.
+    opts.retrieve(query, maxCount, charBudget).then(
+      (found) => { issued.settled = true; issued.found = found; },
+      (e: unknown) => {
+        issued.settled = true;
+        log.warn(`live recall failed: ${e instanceof Error ? e.message : String(e)}`);
+      },
+    );
+    return issued;
+  };
 
   pi.on('context', async (event) => {
     const messages = (event.messages ?? []) as unknown as ContextMessage[];
@@ -176,43 +210,58 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
         turn.injected = carried.injected;
         turn.steered = true;
       }
+      // A retrieval still in flight was searching for what the PREVIOUS turn was doing. The reset hands
+      // out a fresh pass budget and the next pass searches again from the current work — including a
+      // steering instruction — so injecting the superseded result would answer a question nobody is
+      // asking any more. The orphaned promise settles into a discarded object and is never read.
+      pending = undefined;
     }
+
+    // Re-emit whatever this turn already injected. Every path that adds nothing new must still return
+    // this — dropping the blocks would rewrite the prefix mid-turn, which is exactly what we must never do.
+    const reEmit = (): { messages: PiAgentMessage[] } | undefined =>
+      (turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined);
 
     const budget = opts.budget();
-    if (budget.passes <= 0 || budget.count <= 0 || !opts.enabled()) {
-      // Switched off: emit nothing new, but keep re-emitting whatever this turn already injected —
-      // dropping it would rewrite the prefix mid-turn, which is exactly what we must never do.
-      return turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined;
+    if (budget.passes <= 0 || budget.count <= 0 || !opts.enabled()) return reEmit();
+
+    // Consume-if-ready: a settled retrieval is taken off the slot and injected below. One still in
+    // flight injects nothing and does NOT get awaited — the model proceeds and a later pass collects
+    // it. The pass that issued it was already counted, so skipping here spends nothing.
+    let found: LiveRecallMemory[] | undefined;
+    if (pending) {
+      if (pending.settled) {
+        found = pending.found;
+        pending = undefined;
+      } else if (now() - pending.issuedAt <= PENDING_ABANDON_MS) {
+        return reEmit();
+      } else {
+        log.warn(`live recall abandoned a retrieval still unsettled after ${PENDING_ABANDON_MS}ms`);
+        pending = undefined;
+      }
     }
 
-    const exhausted = turn.passes >= budget.passes
-      || turn.injected.size >= budget.count
-      || turn.chars >= budget.chars;
-    if (exhausted) return turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined;
+    if (found === undefined) {
+      const exhausted = turn.passes >= budget.passes
+        || turn.injected.size >= budget.count
+        || turn.chars >= budget.chars;
+      if (exhausted) return reEmit();
 
-    const query = liveRecallQuery(messages, turn.steered);
-    // Too thin to be worth an embedding call, or the work has not moved since the last pass — recalling
-    // again would return the same memories and spend a pass proving it.
-    if (query.length < MIN_QUERY_CHARS || query === turn.lastQuery) {
-      return turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined;
-    }
-    turn.lastQuery = query;
-    turn.passes += 1;
-
-    let found: LiveRecallMemory[] = [];
-    try {
-      found = await withDeadline(
-        opts.retrieve(query, budget.count - turn.injected.size, budget.chars - turn.chars),
-        RECALL_DEADLINE_MS,
-      );
-    } catch (e) {
-      // Recall is best-effort: a failed lookup must never take the turn down with it.
-      log.warn(`live recall failed: ${e instanceof Error ? e.message : String(e)}`);
-      return turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined;
+      const query = liveRecallQuery(messages, turn.steered);
+      // Too thin to be worth an embedding call, or the work has not moved since the last pass — recalling
+      // again would return the same memories and spend a pass proving it.
+      if (query.length < MIN_QUERY_CHARS || query === turn.lastQuery) return reEmit();
+      // Both are spent at ISSUE time, not at consume time: the pass budgets embedding searches and the
+      // search happens now whether or not its result is ever consumed, and lastQuery must be set before
+      // the result exists or the same query would be re-issued the moment the slot frees up.
+      turn.lastQuery = query;
+      turn.passes += 1;
+      pending = issueRetrieval(query, budget.count - turn.injected.size, budget.chars - turn.chars);
+      return reEmit();
     }
 
     const fresh = found.filter((m) => !turn.injected.has(m.id));
-    if (fresh.length === 0) return turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined;
+    if (fresh.length === 0) return reEmit();
 
     const rendered: string[] = [];
     for (const memory of fresh) {
@@ -223,7 +272,7 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
       turn.chars += text.length;
       if (turn.injected.size >= budget.count) break;
     }
-    if (rendered.length === 0) return turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined;
+    if (rendered.length === 0) return reEmit();
 
     // The only positive signal that recall fired at all: without it a silent no-op and a working feature
     // look identical from the outside, and the failure path is the only thing that logs.
@@ -238,22 +287,6 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
     ));
     return appendBlocks(messages, turn.blocks);
   });
-}
-
-/** Lose the race rather than hold the turn. The underlying request is not cancelled — the embedding
- *  client owns its own abort — but the turn stops waiting on it, which is the property that matters. */
-async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`recall exceeded ${ms}ms`)), ms);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 /** Append the frozen blocks as one synthetic user message at the very END of the array. Anthropic caches

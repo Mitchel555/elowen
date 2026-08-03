@@ -5,7 +5,11 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 /** Recall that runs WHILE a turn works. Two properties matter beyond "it recalls something":
  *  the injected block is only ever APPENDED (an insert earlier would invalidate the provider's cached
  *  prefix), and once rendered its bytes never change (a re-render would do the same on the next call).
- *  These tests assert both by comparing successive message arrays byte for byte. */
+ *  These tests assert both by comparing successive message arrays byte for byte.
+ *
+ *  The retrieval is NON-BLOCKING: the pass that starts a search returns immediately, and a later call
+ *  consumes the result once it has settled. A memory therefore lands one call after the pass that
+ *  searched for it, which is why these tests fire the hook twice where the result is asserted. */
 
 interface Msg { role?: string; content?: unknown }
 type Handler = (event: { messages: unknown }) => Promise<{ messages: unknown } | undefined>;
@@ -16,10 +20,21 @@ const mem = (id: number, body: string, over: Partial<LiveRecallMemory> = {}): Li
   id, body, kind: 'fact', importance: 3, updatedAt: '2026-08-02 11:00:00', ...over,
 });
 
+/** A promise the test settles by hand, so it can hold a retrieval in flight across hook calls. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: Error) => void } {
+  let resolve: (v: T) => void = () => {};
+  let reject: (e: Error) => void = () => {};
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+/** Let a settled retrieval's continuation run before the next hook call observes it. */
+const flush = async (): Promise<void> => new Promise((resolve) => { setImmediate(resolve); });
+
 /** Captures the handler installLiveRecall registers, so a test can drive `context` calls directly. */
 function harness(opts: {
   retrieve: (query: string, maxCount: number, charBudget: number) => Promise<LiveRecallMemory[]>;
-  passes?: number; count?: number; chars?: number; enabled?: () => boolean;
+  passes?: number; count?: number; chars?: number; enabled?: () => boolean; now?: () => number;
 }): { fire: (messages: Msg[]) => Promise<Msg[]> } {
   let handler: Handler = async () => undefined;
   const pi = {
@@ -30,7 +45,7 @@ function harness(opts: {
     budget: () => ({ passes: opts.passes ?? 3, count: opts.count ?? 8, chars: opts.chars ?? 6000 }),
     enabled: opts.enabled ?? (() => true),
     retrieve: opts.retrieve,
-    now: () => T0,
+    now: opts.now ?? (() => T0),
   });
 
   return {
@@ -60,17 +75,22 @@ describe('live recall — memories arrive mid-turn', () => {
     const first = await fire([{ role: 'user', content: 'fix it' }]);
     expect(first).toHaveLength(1);
 
-    // Call 2: a tool result has landed. NOW there is something to search with, and the memory arrives
-    // in the middle of the turn — which is the whole point of the feature.
-    const second = await fire([
+    // Call 2: a tool result has landed — NOW there is something to search with. The search is only
+    // STARTED here; the hook returns without waiting on the embedding endpoint.
+    const working: Msg[] = [
       { role: 'user', content: 'fix it' },
       { role: 'assistant', content: 'Looking at the deploy path' },
       { role: 'toolResult', content: 'bash: ./release.sh --dry-run failed with exit 2' },
-    ]);
+    ];
+    const second = await fire(working);
+    expect(second).toHaveLength(3);
 
-    expect(second).toHaveLength(4);
-    expect(textOf(second[3] as Msg)).toContain('Deployment runs through release.sh');
-    expect(second[3]?.role).toBe('user');
+    // Call 3: the retrieval has settled and the memory arrives in the middle of the turn — one model
+    // call after the pass that searched for it, the deliberate price of not blocking that pass.
+    const third = await fire(working);
+    expect(third).toHaveLength(4);
+    expect(textOf(third[3] as Msg)).toContain('Deployment runs through release.sh');
+    expect(third[3]?.role).toBe('user');
   });
 
   it('leaves the earlier messages byte-identical and only ever appends', async () => {
@@ -81,6 +101,7 @@ describe('live recall — memories arrive mid-turn', () => {
       { role: 'assistant', content: 'working on the deployment pipeline now' },
       { role: 'toolResult', content: 'some tool output about the pipeline' },
     ];
+    await fire(base);
     const out = await fire(base);
 
     // The cached prefix is everything before the appended block. If any of it moved or was rewritten,
@@ -96,17 +117,20 @@ describe('live recall — memories arrive mid-turn', () => {
       retrieve: async () => { call += 1; return call === 1 ? [mem(1, 'First fact')] : [mem(2, 'Second fact')]; },
     });
 
-    const a = await fire([
+    const first: Msg[] = [
       { role: 'user', content: 'go' },
       { role: 'toolResult', content: 'output mentioning the deployment pipeline in detail' },
-    ]);
+    ];
+    await fire(first);
+    const a = await fire(first);
     const injectedFirst = textOf(a[a.length - 1] as Msg);
 
-    const b = await fire([
-      { role: 'user', content: 'go' },
-      { role: 'toolResult', content: 'output mentioning the deployment pipeline in detail' },
+    const grown: Msg[] = [
+      ...first,
       { role: 'toolResult', content: 'a second, different tool result about migrations and the database' },
-    ]);
+    ];
+    await fire(grown);
+    const b = await fire(grown);
     const injectedSecond = textOf(b[b.length - 1] as Msg);
 
     // The second block must CONTAIN the first one unchanged — same bytes, same order, appended to.
@@ -123,10 +147,12 @@ describe('live recall — memories arrive mid-turn', () => {
       ],
     });
 
-    const out = await fire([
+    const base: Msg[] = [
       { role: 'user', content: 'go' },
       { role: 'toolResult', content: 'plenty of tool output about the deployment pipeline' },
-    ]);
+    ];
+    await fire(base);
+    const out = await fire(base);
     const injected = textOf(out[out.length - 1] as Msg);
 
     // 2026-06-01 → 2026-08-02 is 62 days: old enough that the environment has plausibly moved on.
@@ -139,12 +165,15 @@ describe('live recall — memories arrive mid-turn', () => {
   it('never injects the same memory twice', async () => {
     const { fire } = harness({ retrieve: async () => [mem(1, 'The one fact')] });
 
-    await fire([{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'first tool output about deployment' }]);
-    const out = await fire([
-      { role: 'user', content: 'go' },
-      { role: 'toolResult', content: 'first tool output about deployment' },
+    const first: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'first tool output about deployment' }];
+    await fire(first);
+    await fire(first);
+    const grown: Msg[] = [
+      ...first,
       { role: 'toolResult', content: 'second tool output, entirely different subject: database migrations' },
-    ]);
+    ];
+    await fire(grown);
+    const out = await fire(grown);
 
     const injected = textOf(out[out.length - 1] as Msg);
     expect(injected.match(/The one fact/g)).toHaveLength(1);
@@ -195,21 +224,6 @@ describe('live recall — budget and switches', () => {
     expect(calls).toBe(2);
   });
 
-  it('gives up on a hanging retrieval instead of holding the turn', async () => {
-    // Recall is awaited on the model's critical path, and the embedding client's own deadline is 30s.
-    // Waiting that long for a best-effort lookup would stall every pass of every turn, so this must
-    // resolve well before the retrieval does.
-    const { fire } = harness({
-      retrieve: () => new Promise((resolve) => { setTimeout(() => resolve([mem(1, 'Too late')]), 20_000); }),
-    });
-    const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output here' }];
-
-    const started = Date.now();
-    const out = await fire(base);
-    expect(Date.now() - started).toBeLessThan(10_000);
-    expect(out).toEqual(base);
-  }, 15_000);
-
   it('keeps already injected memories when the user steers mid-turn, and searches with the new instruction', async () => {
     const seen: string[] = [];
     let call = 0;
@@ -221,6 +235,7 @@ describe('live recall — budget and switches', () => {
       { role: 'user', content: 'start the deployment work' },
       { role: 'toolResult', content: 'output about the deployment pipeline in some detail' },
     ];
+    await fire(before);
     const a = await fire(before);
     expect(textOf(a[a.length - 1] as Msg)).toContain('First fact');
 
@@ -231,6 +246,7 @@ describe('live recall — budget and switches', () => {
       { role: 'user', content: 'actually switch to the database migration instead' },
       { role: 'toolResult', content: 'output about the deployment pipeline in some detail' },
     ];
+    await fire(after);
     const b = await fire(after);
     const injected = textOf(b[b.length - 1] as Msg);
 
@@ -244,6 +260,149 @@ describe('live recall — budget and switches', () => {
     const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output here' }];
     expect(await fire(base)).toEqual(base);
   });
+});
+
+describe('live recall — the retrieval never blocks the hook', () => {
+  it('injects nothing while the retrieval is in flight, then consumes it once settled', async () => {
+    const d = deferred<LiveRecallMemory[]>();
+    let calls = 0;
+    const { fire } = harness({ retrieve: () => { calls += 1; return d.promise; } });
+    const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output about deployment' }];
+
+    // The issue pass starts the search and returns without waiting on it.
+    expect(await fire(base)).toEqual(base);
+    // Still in flight: nothing new is injected, and the hook resolves without the retrieval settling.
+    expect(await fire(base)).toEqual(base);
+    expect(calls).toBe(1);
+
+    d.resolve([mem(1, 'Deployment fact')]);
+    await flush();
+    const out = await fire(base);
+    expect(out).toHaveLength(3);
+    expect(textOf(out[2] as Msg)).toContain('Deployment fact');
+  });
+
+  it('starts no second retrieval while one is in flight, even when the work has moved on', async () => {
+    const d = deferred<LiveRecallMemory[]>();
+    let calls = 0;
+    const { fire } = harness({ retrieve: () => { calls += 1; return d.promise; } });
+
+    await fire([{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'output about the deployment pipeline' }]);
+    // A grown transcript produces a DIFFERENT query, so only the in-flight slot can be what stops
+    // a second search from being issued here.
+    await fire([
+      { role: 'user', content: 'go' },
+      { role: 'toolResult', content: 'output about the deployment pipeline' },
+      { role: 'toolResult', content: 'entirely new output about database migrations' },
+    ]);
+    expect(calls).toBe(1);
+  });
+
+  it('a rejected retrieval crashes nothing and frees the slot for the next search', async () => {
+    const d = deferred<LiveRecallMemory[]>();
+    let calls = 0;
+    const { fire } = harness({
+      retrieve: () => { calls += 1; return calls === 1 ? d.promise : Promise.resolve([mem(2, 'Second search fact')]); },
+    });
+    const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'output about the deployment pipeline' }];
+
+    await fire(base);
+    d.reject(new Error('embedding endpoint down'));
+    await flush();
+    // The consume pass takes the failure off the slot and injects nothing.
+    expect(await fire(base)).toEqual(base);
+
+    // The slot is free again: new work issues a new search whose result lands normally.
+    const grown: Msg[] = [...base, { role: 'toolResult', content: 'entirely new output about database migrations' }];
+    await fire(grown);
+    expect(calls).toBe(2);
+    const out = await fire(grown);
+    expect(textOf(out[out.length - 1] as Msg)).toContain('Second search fact');
+  });
+
+  it('abandons a retrieval that never settles instead of wedging recall for the session', async () => {
+    let clock = T0;
+    const d = deferred<LiveRecallMemory[]>();
+    let calls = 0;
+    const { fire } = harness({
+      now: () => clock,
+      retrieve: () => { calls += 1; return calls === 1 ? d.promise : Promise.resolve([mem(2, 'Fresh search fact')]); },
+    });
+    const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'output about the deployment pipeline' }];
+    const grown: Msg[] = [...base, { role: 'toolResult', content: 'entirely new output about database migrations' }];
+
+    await fire(base);
+    // Within the abandon window the slot is held and no new search starts.
+    await fire(grown);
+    expect(calls).toBe(1);
+
+    // Past the embedding client's own 30s deadline the promise is never going to settle; the slot is
+    // reclaimed and a new search may start.
+    clock += 31_000;
+    await fire(grown);
+    expect(calls).toBe(2);
+    const out = await fire(grown);
+    expect(textOf(out[out.length - 1] as Msg)).toContain('Fresh search fact');
+
+    // The abandoned promise settling late must not resurrect its result.
+    d.resolve([mem(9, 'Too late fact')]);
+    await flush();
+    const after = await fire(grown);
+    expect(JSON.stringify(after)).not.toContain('Too late fact');
+  });
+
+  it('discards a result retrieved for a turn the user has since redirected', async () => {
+    const d = deferred<LiveRecallMemory[]>();
+    const seen: string[] = [];
+    const { fire } = harness({
+      retrieve: (q) => { seen.push(q); return seen.length === 1 ? d.promise : Promise.resolve([mem(2, 'Migration fact')]); },
+    });
+    const before: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'output about the deployment pipeline' }];
+    await fire(before);
+
+    // Steering resets the turn while search 1 is in flight. Its eventual result answers the
+    // pre-steer question and must be dropped, not injected into the redirected turn.
+    const after: Msg[] = [
+      ...before,
+      { role: 'user', content: 'actually switch to the database migration instead' },
+      { role: 'toolResult', content: 'output about migrations now' },
+    ];
+    await fire(after);
+    d.resolve([mem(1, 'Stale deployment fact')]);
+    await flush();
+    const out = await fire(after);
+    const injected = textOf(out[out.length - 1] as Msg);
+
+    expect(injected).toContain('Migration fact');
+    expect(injected).not.toContain('Stale deployment fact');
+    expect(seen[1]).toContain('database migration');
+  });
+
+  it('does not re-issue the query it already searched once the slot frees up', async () => {
+    let calls = 0;
+    const { fire } = harness({ retrieve: async () => { calls += 1; return [mem(1, 'A fact')]; } });
+    const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'output about the deployment pipeline' }];
+
+    await fire(base);
+    await fire(base);
+    // The work has not moved since the pass that searched, so freeing the slot must not mean
+    // searching the identical query again — lastQuery is set when the search is ISSUED.
+    await fire(base);
+    expect(calls).toBe(1);
+  });
+
+  it('resolves promptly on a hanging retrieval instead of holding the turn', async () => {
+    // Nothing awaits the retrieval, so even one that takes 20s must not delay the hook at all.
+    const { fire } = harness({
+      retrieve: () => new Promise((resolve) => { setTimeout(() => resolve([mem(1, 'Too late')]), 20_000); }),
+    });
+    const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output here' }];
+
+    const started = Date.now();
+    const out = await fire(base);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(out).toEqual(base);
+  }, 15_000);
 });
 
 describe('liveRecallQuery', () => {
@@ -279,26 +438,30 @@ describe('compaction', () => {
       },
     });
 
-    const before = await h.fire([
+    const working: Msg[] = [
       { role: 'user', content: 'fix the deploy' },
       { role: 'assistant', content: 'inspecting the release path in detail' },
       { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2' },
       { role: 'assistant', content: 'checking the packaging step next' },
       { role: 'toolResult', content: 'bash: npm pack produced no tarball' },
-    ]);
+    ];
+    await h.fire(working);
+    const before = await h.fire(working);
     expect(calls).toBe(1);
     expect(String(before[before.length - 1]?.content)).toContain('first copy');
 
     // Post-compaction: a single summary user message replaces the history. Note the user count is
     // UNCHANGED at 1 — only the shrinking length reveals what happened, which is exactly the case a
     // user-message counter alone would miss.
-    const after = await h.fire([
+    const summary: Msg[] = [
       { role: 'user', content: 'Summary of the conversation so far: working on the deploy path' },
       { role: 'assistant', content: 'continuing with the release path investigation now' },
       { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2 again' },
-    ]);
-
+    ];
+    await h.fire(summary);
     expect(calls).toBe(2);
+    const after = await h.fire(summary);
+
     expect(String(after[after.length - 1]?.content)).toContain('refreshed copy');
     expect(String(after[after.length - 1]?.content)).not.toContain('first copy');
   });
@@ -316,22 +479,26 @@ describe('compaction', () => {
       },
     });
 
-    await h.fire([
+    const working: Msg[] = [
       { role: 'user', content: 'fix the deploy' },
       { role: 'assistant', content: 'inspecting the release path in detail' },
       { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2' },
       { role: 'assistant', content: 'checking the packaging step next' },
       { role: 'toolResult', content: 'bash: npm pack produced no tarball' },
-    ]);
+    ];
+    await h.fire(working);
+    await h.fire(working);
     expect(calls).toBe(1);
 
-    const after = await h.fire([
+    const summary: Msg[] = [
       { role: 'user', content: 'Summary of the conversation so far: working on the deploy path' },
       { role: 'user', content: 'actually check the tarball name too' },
       { role: 'toolResult', content: 'bash: ./release.sh --dry-run exited 2 again' },
-    ]);
-
+    ];
+    await h.fire(summary);
     expect(calls).toBe(2);
+    const after = await h.fire(summary);
+
     expect(String(after[after.length - 1]?.content)).toContain('refreshed copy');
     expect(String(after[after.length - 1]?.content)).not.toContain('first copy');
   });
