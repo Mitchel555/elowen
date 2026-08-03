@@ -225,7 +225,16 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
       (turn.blocks.length > 0 ? appendBlocks(messages, turn.blocks) : undefined);
 
     const budget = opts.budget();
-    if (budget.passes <= 0 || budget.count <= 0 || !opts.enabled()) return reEmit();
+    if (budget.passes <= 0 || budget.count <= 0 || !opts.enabled()) {
+      // Say it once. A zero budget is indistinguishable from a working feature that simply had nothing
+      // to do, and that ambiguity already cost a full production debugging round: the budget dependency
+      // was never wired, every session ran on the zero fallback, and this gate returned in silence.
+      if (!turn.loggedSkip) {
+        turn.loggedSkip = true;
+        log.info(`off this turn: passes=${budget.passes} count=${budget.count} chars=${budget.chars} enabled=${opts.enabled()}`);
+      }
+      return reEmit();
+    }
 
     // Consume-if-ready: a settled retrieval is taken off the slot and injected below. One still in
     // flight injects nothing and does NOT get awaited — the model proceeds and a later pass collects

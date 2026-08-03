@@ -132,6 +132,32 @@ describe('BrainService', () => {
   const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
   afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
 
+  it('forwards the live-recall budget from its deps down into the spawned session', async () => {
+    // The wiring this asserts was missing in production: BrainService built the spawner without
+    // `liveRecallBudget`, the spawner fell back to `{passes: 0, ...}`, and mid-turn recall was dead in
+    // every session while every existing test stayed green — because they all drove the session factory
+    // directly and never crossed this boundary. Assert the value that actually reaches the session.
+    const d = fakeDeps();
+    const budget = { passes: 3, count: 8, chars: 6000 };
+    // Spy on the loader options, because that is the last place the spec is visible before it becomes a
+    // pi extension — `createSession` receives pi's own options, not ours.
+    const seen: ({ budget: () => typeof budget } | undefined)[] = [];
+    const deps = {
+      ...d,
+      liveRecallBudget: () => budget,
+      memoryService: { retrieve: vi.fn(async () => ({ memories: [] })) },
+      resourceLoaderFactory: (o: { liveRecall?: { budget: () => typeof budget } }) => { seen.push(o.liveRecall); return undefined; },
+    };
+
+    const svc = new BrainService(deps as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'hello', clientCwd: process.cwd(), session: 'brain-1' } as TurnRequest);
+
+    const wired = seen.find((x) => x !== undefined);
+    expect(wired, `no spawned session carried liveRecall (${seen.length} loader build(s))`).toBeDefined();
+    expect(wired?.budget()).toEqual(budget);
+  });
+
   it('accepts the complete owner turn as one named request object', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

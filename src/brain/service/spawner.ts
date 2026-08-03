@@ -39,7 +39,11 @@ interface SpawnerDeps {
   runtimeConfig?: BrainDeps['runtimeConfig'];
   memoryStore?: BrainDeps['memoryStore'];
   memoryService?: BrainDeps['memoryService'];
-  liveRecallBudget?: BrainDeps['liveRecallBudget'];
+  /** REQUIRED, though its own type is optional: this was declared optional once and BrainService simply
+   *  never forwarded it, so every session silently ran on the zero fallback below and the whole feature
+   *  was dead in production while every test passed. Making the property mandatory means a future
+   *  wiring site cannot forget it without the compiler saying so. */
+  liveRecallBudget: BrainDeps['liveRecallBudget'];
   memoryCategoryStore?: BrainDeps['memoryCategoryStore'];
   memoryCategorizer?: BrainDeps['memoryCategorizer'];
   /** The daemon-wide plugin registry (undefined when plugins aren't wired at all). */

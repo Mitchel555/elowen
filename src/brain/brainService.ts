@@ -180,6 +180,7 @@ export class BrainService {
       get runtimeConfig() { return d.runtimeConfig; },
       get memoryStore() { return d.memoryStore; },
       get memoryService() { return d.memoryService; },
+      get liveRecallBudget() { return d.liveRecallBudget; },
       get memoryCategoryStore() { return d.memoryCategoryStore; },
       get memoryCategorizer() { return d.memoryCategorizer; },
       plugins: () => this.resolvePlugins(),
