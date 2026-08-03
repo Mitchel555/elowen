@@ -111,6 +111,27 @@ describe('live recall — memories arrive mid-turn', () => {
     expect(out).toHaveLength(base.length + 1);
   });
 
+  it('emits the identical block, byte for byte, when the history has not moved', async () => {
+    // The existing verbatim test only checks that the second block STARTS WITH the first, so a suffix
+    // that changes per call slips straight through it. Compare the whole block instead: a re-render is
+    // the failure mode this frozen-string design exists to prevent, and it must be caught even when the
+    // rendered text is merely unstable rather than reordered.
+    const { fire } = harness({ retrieve: async () => [mem(1, 'A durable fact')] });
+
+    const base: Msg[] = [
+      { role: 'user', content: 'do the thing' },
+      { role: 'toolResult', content: 'some tool output about the deployment pipeline' },
+    ];
+    await fire(base);
+    const first = await fire(base);
+    const second = await fire(base);
+
+    const blockA = textOf(first[first.length - 1] as Msg);
+    const blockB = textOf(second[second.length - 1] as Msg);
+    expect(blockA).toContain('A durable fact');
+    expect(blockB).toBe(blockA);
+  });
+
   it('re-emits an already injected block verbatim instead of re-rendering it', async () => {
     let call = 0;
     const { fire } = harness({
