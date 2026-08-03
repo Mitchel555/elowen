@@ -3242,9 +3242,9 @@ describe('BrainService personality layering', () => {
 });
 
 describe('BrainService memory integration', () => {
-  const asRow = (body: string): MemoryRow => ({
+  const asRow = (body: string, updated_at = ''): MemoryRow => ({
     id: 1, user_id: 1, body, kind: 'fact', importance: 3, confidence: 0.8, source: 'user',
-    status: 'active', created_at: '', updated_at: '', last_used_at: null, use_count: 0,
+    status: 'active', created_at: '', updated_at, last_used_at: null, use_count: 0,
   });
   function fakeMemoryService(memories: MemoryRow[]) {
     return {
@@ -3272,6 +3272,24 @@ describe('BrainService memory integration', () => {
     const stored = svc.history(1).find((m) => m.role === 'user');
     expect(stored?.text).toBe('jaký jazyk mám použít?');
     expect(stored?.text).not.toContain('<user_memories>');
+  });
+
+  it('flags a stale memory in the turn-start block and leaves a fresh one clean', async () => {
+    const d = fakeDeps();
+    (d as Record<string, unknown>).memoryStore = new MemoryStore(openDb(':memory:'));
+    (d as Record<string, unknown>).memoryService = fakeMemoryService([
+      asRow('Čerstvý fakt o projektu.', new Date().toISOString()),
+      asRow('Starý fakt o nasazení.', '2020-01-01 00:00:00'),
+    ]);
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'jak nasadím projekt?' });
+    const prompt = lastPrompt(d);
+    // The stale one carries the shared warning right under its body; the fresh one must not — warning
+    // every memory would train the model to skim past the note entirely.
+    expect(prompt).toContain('- Starý fakt o nasazení.\n  (This memory was last updated');
+    expect(prompt).toContain('point-in-time observation');
+    expect(prompt).not.toContain('- Čerstvý fakt o projektu.\n  (');
   });
 
   it('owner send WITHOUT memories injects nothing', async () => {

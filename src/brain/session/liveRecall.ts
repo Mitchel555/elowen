@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import type { PiAgentMessage } from './historyImageStripping.js';
 import { frameUntrusted } from '../messageView.js';
+import { memoryAgeDays, memoryStalenessNote } from '../memoryStaleness.js';
 import { logger } from '../../shared/logger.js';
 
 /** Recall that runs WHILE a turn is working, not only at its start.
@@ -109,15 +110,15 @@ export function liveRecallQuery(messages: readonly ContextMessage[], includeLast
 }
 
 /** Render one memory the way Claude Code frames its own: state where it came from and how old it is, so
- *  the model can weigh a stale claim about code against what it can see now. */
+ *  the model can weigh a stale claim about code against what it can see now. The staleness warning is
+ *  the shared one both recall paths use (memoryStaleness.ts); the age stamp stays here because only this
+ *  path names memories individually. */
 function renderLiveRecall(memory: LiveRecallMemory, now: number): string {
-  const age = memory.updatedAt ? Math.floor((now - Date.parse(memory.updatedAt)) / 86_400_000) : NaN;
-  const stamp = Number.isFinite(age) && age >= 1 ? ` (saved ${age} day${age === 1 ? '' : 's'} ago)` : '';
+  const age = memoryAgeDays(memory.updatedAt, now);
+  const stamp = age !== null && age >= 1 ? ` (saved ${age} day${age === 1 ? '' : 's'} ago)` : '';
   const head = `Memory #${memory.id}${stamp} [${memory.kind} imp:${memory.importance}]`;
-  const stale = Number.isFinite(age) && age >= 1
-    ? '\nThis memory is a point-in-time note, not live state — verify any claim it makes about code before relying on it.'
-    : '';
-  return `${head}\n${memory.body}${stale}`;
+  const stale = memoryStalenessNote(age);
+  return `${head}\n${memory.body}${stale ? `\n${stale}` : ''}`;
 }
 
 /** Per-session state. A turn is identified by the message count at which it started growing, so the

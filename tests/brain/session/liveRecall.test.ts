@@ -115,6 +115,27 @@ describe('live recall — memories arrive mid-turn', () => {
     expect(injectedSecond).toContain('Second fact');
   });
 
+  it('appends the staleness warning to an old memory but not to a fresh one', async () => {
+    const { fire } = harness({
+      retrieve: async () => [
+        mem(1, 'Fresh fact from an hour ago'),
+        mem(2, 'Old claim about the deploy path', { updatedAt: '2026-06-01 12:00:00' }),
+      ],
+    });
+
+    const out = await fire([
+      { role: 'user', content: 'go' },
+      { role: 'toolResult', content: 'plenty of tool output about the deployment pipeline' },
+    ]);
+    const injected = textOf(out[out.length - 1] as Msg);
+
+    // 2026-06-01 → 2026-08-02 is 62 days: old enough that the environment has plausibly moved on.
+    expect(injected).toContain('Old claim about the deploy path\nThis memory was last updated 62 days ago');
+    expect(injected).toContain('point-in-time observation');
+    // The fresh memory must NOT carry the warning — flagging everything trains the model to skim it.
+    expect(injected).not.toContain('Fresh fact from an hour ago\nThis memory was last updated');
+  });
+
   it('never injects the same memory twice', async () => {
     const { fire } = harness({ retrieve: async () => [mem(1, 'The one fact')] });
 
