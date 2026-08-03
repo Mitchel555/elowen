@@ -6,7 +6,9 @@ import { openDb } from '../../src/store/db.js';
 import { MemoryStore, hashBody } from '../../src/store/memoryStore.js';
 import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
 import { MemoryService } from '../../src/brain/memoryService.js';
+import type { RetrieveOpts } from '../../src/brain/memoryService.js';
 import { memoryRecallScope } from '../../src/brain/memoryRecallScope.js';
+import type { MemoryRecallScope } from '../../src/brain/memoryRecallScope.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import type { EmbeddingConfig, EmbeddingService } from '../../src/embeddings/embeddingService.js';
 import type { Policy } from '../../src/plugins/policy.js';
@@ -96,5 +98,25 @@ describe('memory recall scope', () => {
 
     const result = await scoped(noCwdScope, () => service.retrieve(1, 'setting'));
     expect(result.memories.map((memory) => memory.body)).toEqual(['global setting']);
+  });
+
+  it('prefers an explicit live-recall scope over a foreign async scope', async () => {
+    const db = openDb(':memory:');
+    const store = new MemoryStore(db);
+    const categories = new MemoryCategoryStore(db);
+    const elowen = categories.create(1, { name: 'Elowen', projectId: 1 });
+    const kolin = categories.create(1, { name: 'Kolin', projectId: 9 });
+    const elowenMemory = store.add(1, { body: 'shared elowen memory' }, 'test', '');
+    const kolinMemory = store.add(1, { body: 'shared kolin memory' }, 'test', '');
+    store.setCategory(1, elowenMemory.id, elowen.id, 'test', '');
+    store.setCategory(1, kolinMemory.id, kolin.id, 'test', '');
+    const service = new MemoryService({ store, embeddings: new Embeddings() as EmbeddingService, embeddingConfig: () => null });
+    const elowenScope: MemoryRecallScope = { projectId: 1, categoryIds: new Set([elowen.id]) };
+    const kolinScope: MemoryRecallScope = { projectId: 9, categoryIds: new Set([kolin.id]) };
+    const opts: RetrieveOpts = { scope: elowenScope };
+
+    const result = await scoped(kolinScope, () => service.retrieve(1, 'shared', opts));
+
+    expect(result.memories.map((memory) => memory.body)).toEqual(['shared elowen memory']);
   });
 });

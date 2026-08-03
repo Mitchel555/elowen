@@ -12,12 +12,14 @@ import { createToolSearchHandle, toolSearchTool, formatDeferredToolsBlock, type 
 import { buildPromptTemplates } from '../slashCommands.js';
 import { formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
 import { personalityText } from '../personality.js';
+import { currentWorkDir } from '../../plugins/policyContext.js';
+import { memoryRecallScope } from '../memoryRecallScope.js';
 import type { BrainSessionFactory } from '../session/factory.js';
 import { resolveAutoCompactPct } from '../session/factory.js';
 import type { LiveBrain, SpawnOpts, QueuedMsg, TurnContextBlocks } from '../session/liveBrain.js';
 import type { BrainEvent } from '../events.js';
 import type { BrainDeps } from '../brainDeps.js';
-import { turnWorkDir } from './workDir.js';
+import { clientDir, turnWorkDir } from './workDir.js';
 import { modelCapabilities, qwenThinkingWire } from '../modelCapabilities.js';
 import { LiveEventReplay } from '../session/liveEventReplay.js';
 import { createSpawnEventReducer } from './spawnEventReducer.js';
@@ -252,7 +254,14 @@ export class LiveSessionSpawner {
           budget: () => this.d.liveRecallBudget?.() ?? { passes: 0, count: 0, chars: 0 },
           enabled: () => this.d.userSettings?.(ownerUserId)?.autoLiveRecall !== false,
           retrieve: async (query: string, maxCount: number, charBudget: number) => {
-            const found = await memService.retrieve(ownerUserId, query, { maxCount, charBudget });
+            // The retrieval continues after the context hook returns, so its AsyncLocalStorage scope is not
+            // a reliable recall boundary. Resolve and pass the current turn's scope before awaiting it.
+            const storedWorkDir = this.d.store.getSession(sessionId)?.work_dir || undefined;
+            const recallCwd = clientDir(opts.policy, currentWorkDir() ?? storedWorkDir);
+            const scope = memCats && memProjects
+              ? memoryRecallScope(ownerUserId, recallCwd, memCats, memProjects)
+              : { projectId: null, categoryIds: new Set<number>() };
+            const found = await memService.retrieve(ownerUserId, query, { maxCount, charBudget, scope });
             return found.memories.map((m) => ({
               id: m.id, body: m.body, kind: m.kind, importance: m.importance, updatedAt: m.updated_at,
             }));

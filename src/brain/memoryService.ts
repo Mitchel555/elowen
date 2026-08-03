@@ -45,6 +45,8 @@ const DEFAULT_SIMILAR_LIMIT = 5;
 export interface RetrieveOpts {
   maxCount?: number;
   charBudget?: number;
+  /** Explicit turn scope. This takes precedence over AsyncLocalStorage for detached recall work. */
+  scope?: MemoryRecallScope;
 }
 
 /** Per-memory score breakdown for the retrieval-debugging UI. In the keyword-fallback path `semantic`
@@ -167,6 +169,7 @@ export class MemoryService {
     const tuned = this.recallDefaults?.();
     const maxCount = opts.maxCount ?? tuned?.count ?? DEFAULT_MAX_COUNT;
     const charBudget = opts.charBudget ?? tuned?.chars ?? DEFAULT_CHAR_BUDGET;
+    const scope = this.recallScope(userId, opts.scope);
     const cfg = this.activeConfig();
     const provider = cfg ? (cfg.providerId ?? cfg.baseUrl ?? null) : null;
     const model = cfg?.model ?? null;
@@ -178,14 +181,14 @@ export class MemoryService {
     if (cfg) {
       try {
         const queryVec = await this.embeddings.embed(cfg, query);
-        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model);
+        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model, scope);
         // An embed that succeeds but clears nothing is not "no memory is relevant" — it is usually a
         // query too thin to score, like "fix it", which cannot reach the floor against any body no
         // matter how on-topic. Measured: that query peaks at 0.12 cosine and admits 0 of 53 memories.
         // The manual search box has fallen through to keyword for exactly this reason (searchSemantic);
         // recall silently returned nothing instead, which is where the "it forgot again" reports come from.
         if (semantic.memories.length > 0) return semantic;
-        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, true);
+        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, true);
         // Keep the cosine breakdown from the pass that found nothing. Otherwise the debug panel reports
         // a bare "fallback" and cannot answer the only question worth asking here — how close the best
         // candidate actually came to the floor.
@@ -196,7 +199,7 @@ export class MemoryService {
       }
     }
 
-    return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model);
+    return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope);
   }
 
   /** Find active memories whose body is a near-duplicate of `body` (cosine ≥ threshold), sorted most
@@ -227,8 +230,8 @@ export class MemoryService {
 
   /** Return only recallable recent memories. The category predicate is applied in SQLite before LIMIT,
    * so excluded rows cannot hide eligible results later in the list. */
-  listRecent(userId: number, limit: number): MemoryRow[] {
-    const scope = this.recallScope(userId);
+  listRecent(userId: number, limit: number, opts: Pick<RetrieveOpts, 'scope'> = {}): MemoryRow[] {
+    const scope = this.recallScope(userId, opts.scope);
     return scope ? this.store.listRecentInCategories(userId, scope.categoryIds, limit) : [];
   }
 
@@ -269,9 +272,10 @@ export class MemoryService {
     charBudget: number,
     provider: string | null,
     model: string | null,
+    scope: MemoryRecallScope | undefined,
   ): RetrieveResult {
     const now = Date.now();
-    const ranked: Candidate[] = this.recallable(this.store.listActiveWithEmbeddings(userId), ({ memory }) => memory)
+    const ranked: Candidate[] = this.recallable(this.store.listActiveWithEmbeddings(userId), ({ memory }) => memory, scope)
       .map(({ memory, vector }) => {
         const semantic = cosine(queryVec, vector);
         const importanceWeight = importanceWeightOf(memory);
@@ -304,17 +308,18 @@ export class MemoryService {
     charBudget: number,
     provider: string | null,
     model: string | null,
+    scope: MemoryRecallScope | undefined,
     keywordOnly = false,
   ): RetrieveResult {
     const now = Date.now();
-    const keywordHits = this.recallable(this.store.search(userId, query, maxCount * 3), (memory) => memory);
+    const keywordHits = this.recallable(this.store.search(userId, query, maxCount * 3), (memory) => memory, scope);
     const keywordIds = new Set(keywordHits.map((m) => m.id));
     // Recency is a sane last resort while we have NO relevance signal at all — embeddings unconfigured,
     // or the endpoint down. It is the wrong answer after a vector pass that simply cleared nothing:
     // there the cosine scores already established these memories are off-topic, so padding the result
     // with whatever was written most recently would inject unrelated facts — exactly what the floor is
     // there to prevent.
-    const recent = keywordOnly ? [] : this.recallable(this.store.listRecent(userId, maxCount * 3), (memory) => memory);
+    const recent = keywordOnly ? [] : this.recallable(this.store.listRecent(userId, maxCount * 3), (memory) => memory, scope);
 
     const byId = new Map<number, MemoryRow>();
     for (const m of [...keywordHits, ...recent]) byId.set(m.id, m);
@@ -361,11 +366,9 @@ export class MemoryService {
     return picked;
   }
 
-  /** Recall never considers uncategorized memories. The one scope from AsyncLocalStorage gates vector,
-   * keyword and recency candidates before any scorer can rank them. */
-  private recallable<T>(rows: T[], memoryOf: (row: T) => MemoryRow): T[] {
-    const first = rows[0];
-    const scope = first ? this.recallScope(memoryOf(first).user_id) : undefined;
+  /** Recall never considers uncategorized memories. An explicit scope gates vector, keyword and recency
+   * candidates before any scorer can rank them; AsyncLocalStorage is only the legacy fallback. */
+  private recallable<T>(rows: T[], memoryOf: (row: T) => MemoryRow, scope: MemoryRecallScope | undefined): T[] {
     if (!scope) return [];
     return rows.filter((row) => {
       const memory = memoryOf(row);
@@ -373,8 +376,8 @@ export class MemoryService {
     });
   }
 
-  private recallScope(userId: number): MemoryRecallScope | undefined {
-    return currentMemoryRecallScope() ?? this.globalScope(userId);
+  private recallScope(userId: number, explicitScope?: MemoryRecallScope): MemoryRecallScope | undefined {
+    return explicitScope ?? currentMemoryRecallScope() ?? this.globalScope(userId);
   }
 
   private globalScope(userId: number): MemoryRecallScope | undefined {
