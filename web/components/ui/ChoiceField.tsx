@@ -9,12 +9,13 @@ import { useTranslation } from '../../lib/i18n';
  *  searchable picker. Unknown persisted values remain selectable so opening the UI never drops data.
  *  `picker="always"` skips the inline form even for short lists (constellation pods pick in the
  *  drawer regardless of count). */
-export function ChoiceField({ title, options, value, onChange, picker = 'auto' }: {
+export function ChoiceField({ title, options, value, onChange, picker = 'auto', manageAriaLabel }: {
   title: string;
   options: { value: string; label: string }[];
   value: string;
   onChange: (value: string) => void;
   picker?: 'auto' | 'always';
+  manageAriaLabel?: string;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -45,6 +46,7 @@ export function ChoiceField({ title, options, value, onChange, picker = 'auto' }
         moreCount={0}
         onManage={() => setOpen(true)}
         manageLabel={t.managePicker.manage}
+        manageAriaLabel={manageAriaLabel}
       />
       <ManageSelectionModal
         title={title}

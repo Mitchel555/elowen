@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Plus, Pencil, Trash2, Tags } from 'lucide-react';
 import type { Memory, MemoryCategory } from '../../lib/types';
-import { useMemoryCategories } from '../../lib/queries';
+import { useMemoryCategories, useProjects } from '../../lib/queries';
 import { useCreateMemoryCategory, useUpdateMemoryCategory, useDeleteMemoryCategory } from '../../lib/mutations';
 import { apiErrorMessage, elowenClient } from '../../lib/elowenClient';
 import { CategoryIcon, ICON_NAMES } from '../../lib/categoryIcons';
@@ -12,6 +12,8 @@ import { Field } from '../../components/ui/Field';
 import { IconButton } from '../../components/ui/IconButton';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { ChoiceField } from '../../components/ui/ChoiceField';
+import { ErrorState, LoadingState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { categorySwatch, countByCategory, CATEGORY_COLORS } from './memoryMeta';
@@ -75,12 +77,14 @@ export function CategoryModal({ category, onClose }: { category?: MemoryCategory
   const { toast } = useToast();
   const create = useCreateMemoryCategory();
   const update = useUpdateMemoryCategory();
+  const projects = useProjects();
   const isEdit = category != null;
 
   const [name, setName] = useState(category?.name ?? '');
   const [description, setDescription] = useState(category?.description ?? '');
   const [color, setColor] = useState(category?.color?.trim() || CATEGORY_COLORS[0]);
   const [icon, setIcon] = useState(category?.icon || 'Folder');
+  const [projectId, setProjectId] = useState<number | null>(category?.projectId ?? null);
   const [suggesting, setSuggesting] = useState(false);
   // Once the user picks (or an existing category is edited) we stop auto-suggesting so a manual choice
   // is never overwritten as they keep typing the name.
@@ -115,7 +119,7 @@ export function CategoryModal({ category, onClose }: { category?: MemoryCategory
   const submit = () => {
     const next = name.trim();
     if (!next) { toast(t.memory.categoryNameRequired, 'error'); return; }
-    const body = { name: next, description: description.trim(), color, icon };
+    const body = { name: next, description: description.trim(), color, icon, projectId };
     const onSuccess = () => { toast(t.memory.categorySaved); onClose(); };
     const onError = (e: unknown) => toast(apiErrorMessage(e) || t.memory.categorySaveError, 'error');
     if (isEdit) update.mutate({ cid: category.id, patch: body }, { onSuccess, onError });
@@ -136,6 +140,23 @@ export function CategoryModal({ category, onClose }: { category?: MemoryCategory
             placeholder={t.memory.categoryDescriptionPlaceholder}
             className="w-full resize-y rounded-md border border-border bg-surface px-3 py-2 text-sm leading-relaxed text-text placeholder:text-text-muted focus:border-accent focus:outline-none"
           />
+        </Field>
+        <Field label={t.memory.categoryProject}>
+          {projects.isLoading ? <LoadingState label={t.memory.categoryProjectsLoading} /> : projects.isError ? (
+            <ErrorState message={t.memory.categoryProjectsError} onRetry={() => { void projects.refetch(); }} />
+          ) : (
+            <ChoiceField
+              title={t.memory.categoryProject}
+              options={[
+                { value: '', label: t.memory.categoryProjectGlobal },
+                ...(projects.data ?? []).map((project) => ({ value: String(project.id), label: project.slug })),
+              ]}
+              value={projectId == null ? '' : String(projectId)}
+              onChange={(value) => setProjectId(value ? Number(value) : null)}
+              picker="always"
+              manageAriaLabel={t.memory.categoryProject}
+            />
+          )}
         </Field>
         <Field label={t.memory.categoryColor}>
           <div className="flex flex-wrap gap-2">
