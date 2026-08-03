@@ -71,7 +71,7 @@ function memoryAdd(d: MemoryToolDeps) {
       + 'so you can MemoryUpdate or MemoryMerge instead of piling up paraphrases. Personal chat only.',
     parameters: Type.Object({
       body: Type.String({ description: 'The fact, self-contained' }),
-      kind: Type.Optional(Type.String({ description: "e.g. 'fact', 'preference', 'decision' (default 'fact')" })),
+      kind: Type.Optional(Type.String({ description: "e.g. 'fact', 'preference', 'decision', 'feedback' (default 'fact')" })),
       importance: Type.Optional(Type.Number({ description: '1..5 (default 3)' })),
     }),
     execute: async (_id, p: { body: string; kind?: string; importance?: number }) => {

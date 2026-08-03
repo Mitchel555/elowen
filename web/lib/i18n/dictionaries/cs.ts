@@ -1102,7 +1102,7 @@ export const cs = {
     fieldBody: 'Vzpomínka',
     fieldBodyPlaceholder: 'Trvalý, samostatně srozumitelný fakt…',
     fieldKind: 'Druh',
-    fieldKindPlaceholder: 'např. preference, fakt, rozhodnutí',
+    fieldKindPlaceholder: 'např. preference, fakt, rozhodnutí, zpětná vazba',
     fieldImportance: 'Důležitost',
     // Stav embeddingu jedné vzpomínky
     embeddingStatus: 'Embedding',

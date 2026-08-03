@@ -1102,7 +1102,7 @@ export const sk = {
     fieldBody: 'Spomienka',
     fieldBodyPlaceholder: 'Trvalý, samostatne zrozumiteľný fakt…',
     fieldKind: 'Druh',
-    fieldKindPlaceholder: 'napr. preferencia, fakt, rozhodnutie',
+    fieldKindPlaceholder: 'napr. preferencia, fakt, rozhodnutie, spätná väzba',
     fieldImportance: 'Dôležitosť',
     // Embedding status of a single memory
     embeddingStatus: 'Embedding',

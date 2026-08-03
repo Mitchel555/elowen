@@ -1102,7 +1102,7 @@ export const en = {
     fieldBody: 'Memory',
     fieldBodyPlaceholder: 'A durable, self-contained fact…',
     fieldKind: 'Kind',
-    fieldKindPlaceholder: 'e.g. preference, fact, decision',
+    fieldKindPlaceholder: 'e.g. preference, fact, decision, feedback',
     fieldImportance: 'Importance',
     // Embedding status of a single memory
     embeddingStatus: 'Embedding',
