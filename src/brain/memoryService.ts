@@ -179,7 +179,11 @@ export class MemoryService {
         // The manual search box has fallen through to keyword for exactly this reason (searchSemantic);
         // recall silently returned nothing instead, which is where the "it forgot again" reports come from.
         if (semantic.memories.length > 0) return semantic;
-        return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, true);
+        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, true);
+        // Keep the cosine breakdown from the pass that found nothing. Otherwise the debug panel reports
+        // a bare "fallback" and cannot answer the only question worth asking here — how close the best
+        // candidate actually came to the floor.
+        return { memories: keyword.memories, debug: { ...keyword.debug, scores: semantic.debug.scores, candidates: semantic.debug.candidates } };
       } catch {
         // Embed failed (endpoint down, malformed response, …) → degrade to keyword fallback rather
         // than surfacing an error into the chat path. Memory retrieval is best-effort.

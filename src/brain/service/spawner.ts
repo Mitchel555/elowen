@@ -56,6 +56,14 @@ interface SpawnerDeps {
  *  user session and a channel session: registry + store row + rehydration + persona/plugins composition
  *  + PI session construction + persistence subscription. The single spawn source for the chat brain,
  *  its lifecycle respawns and the channel service. */
+/** Whether mid-turn recall may run for this session. This is the leak boundary, so it is a named,
+ *  testable decision rather than an inline condition: a shared channel serves several senders and must
+ *  never surface one person's memories to another, and an ownerless session has no memory to search.
+ *  Sub-agent sessions are channel-keyed (`brain-ch-subagent-*`), so the same test excludes them. */
+export function liveRecallAllowed(sessionId: string, ownerUserId: number): boolean {
+  return ownerUserId > 0 && !isChannelSession(sessionId);
+}
+
 export class LiveSessionSpawner {
   constructor(private d: SpawnerDeps) {}
 
@@ -231,7 +239,7 @@ export class LiveSessionSpawner {
       // senders and must never surface one person's memories to another, and an ownerless task session
       // has no memory to search. `enabled` and the budget are read per pass, so both the owner's toggle
       // and the operator's limits take effect on a conversation that is already running.
-      ...(memService && ownerUserId > 0 && !isChannelSession(sessionId) ? {
+      ...(memService && liveRecallAllowed(sessionId, ownerUserId) ? {
         liveRecall: {
           budget: () => this.d.liveRecallBudget?.() ?? { passes: 0, count: 0, chars: 0 },
           enabled: () => this.d.userSettings?.(ownerUserId)?.autoLiveRecall !== false,

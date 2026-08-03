@@ -60,6 +60,17 @@ describe('MemoryService — recall falls back to keyword when the vector path cl
     expect(res.debug.fallback).toBe(true);
   });
 
+  it('keeps the cosine scores so the debug panel can explain what the floor rejected', async () => {
+    // The point of the fallback was that a thin query cannot clear the floor. A debug record that says
+    // only "fallback" cannot show how close the best candidate came, which is the one number an operator
+    // needs to decide whether the floor is set wrong.
+    const res = await serviceWith(store, new OrthogonalEmbeddings()).retrieve(1, 'deployment');
+
+    expect(res.debug.fallback).toBe(true);
+    expect(res.debug.candidates).toBe(2);
+    expect(res.debug.scores.length).toBeGreaterThan(0);
+  });
+
   it('still prefers the vector result whenever one clears the floor', async () => {
     // Same query, but now the embeddings agree with the stored vector, so the semantic path answers and
     // the fallback must not run — a keyword pass here would quietly widen every successful recall.
