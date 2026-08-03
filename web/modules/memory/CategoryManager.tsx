@@ -158,8 +158,8 @@ export function CategoryModal({ category, onClose }: { category?: MemoryCategory
                 <ChoiceField
                   title={t.memory.categoryProject}
                   options={[
-                    { value: '', label: t.memory.categoryProjectGlobal },
-                    ...(projects.data ?? []).map((project) => ({ value: String(project.id), label: project.slug })),
+                    { value: '', label: t.memory.categoryProjectGlobal, icon: <Globe size={16} aria-hidden className="shrink-0 text-text-muted" /> },
+                    ...(projects.data ?? []).map((project) => ({ value: String(project.id), label: project.slug, icon: <ProjectIcon project={project} size={16} className="text-text-muted" /> })),
                   ]}
                   value={projectId == null ? '' : String(projectId)}
                   onChange={(value) => setProjectId(value ? Number(value) : null)}

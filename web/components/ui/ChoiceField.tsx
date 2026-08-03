@@ -1,5 +1,5 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { ManageSelectionModal, type ManageSelectionItem } from './ManageSelectionModal';
 import { Segmented } from './Segmented';
 import { SelectionSummary } from './SelectionSummary';
@@ -11,7 +11,7 @@ import { useTranslation } from '../../lib/i18n';
  *  drawer regardless of count). */
 export function ChoiceField({ title, options, value, onChange, picker = 'auto', manageAriaLabel }: {
   title: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; icon?: ReactNode }[];
   value: string;
   onChange: (value: string) => void;
   picker?: 'auto' | 'always';
@@ -23,7 +23,7 @@ export function ChoiceField({ title, options, value, onChange, picker = 'auto', 
     const known = new Set(options.map((option) => option.value));
     return [
       ...(value && !known.has(value) ? [{ id: value, label: value, group: '' }] : []),
-      ...options.map((option) => ({ id: option.value, label: option.label, group: '' })),
+      ...options.map((option) => ({ id: option.value, label: option.label, group: '', icon: option.icon })),
     ];
   }, [options, value]);
   if (picker === 'auto' && items.length <= 3) {

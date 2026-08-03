@@ -23,4 +23,18 @@ describe('ChoiceField', () => {
     expect(screen.getByRole('searchbox', { name: 'Search…' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Auto' })).toHaveAttribute('aria-pressed', 'true');
   });
+
+  it('renders option icons inside the shared picker rows', () => {
+    render(<LanguageProvider><ChoiceField
+      title="Project scope"
+      picker="always"
+      value="project-1"
+      onChange={() => {}}
+      options={[{ value: 'project-1', label: 'elowen', icon: <span data-testid="project-icon" /> }]}
+    /></LanguageProvider>);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+
+    expect(screen.getByRole('button', { name: 'elowen' })).toContainElement(screen.getByTestId('project-icon'));
+  });
 });
