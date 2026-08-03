@@ -41,6 +41,7 @@ export interface ElowenConfig {
   security: { tokenTtlDays: number };
   sessionRetention: { enabled: boolean; days: number };
   autoUpdate: boolean;
+  webPushContact?: string;
   plugins?: { enabled: string[]; removed?: string[] };
   brain?: { providers: BrainProvider[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: BrainLimits; hiddenOauth?: string[] };
   /** Operator-tunable runtime knobs — the sibling group of `brain.limits`; absent on an older daemon. */
@@ -190,6 +191,7 @@ export interface ConfigPatch {
   security?: { tokenTtlDays?: number };
   sessionRetention?: { enabled?: boolean; days?: number };
   autoUpdate?: boolean;
+  webPushContact?: string;
   /** Wholesale brain provider list; an entry may carry `apiKey` to (re)set that provider's secret. */
   brain?: { providers?: (Omit<BrainProvider, 'apiKeySet'> & { apiKey?: string })[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
   /** Runtime knobs merged per-field by the daemon, like the brain limits above. */

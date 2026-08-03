@@ -12,6 +12,27 @@ export type Deliver = (rec: PushSubscriptionRecord, payload: string) => Promise<
 const realDeliver: Deliver = (rec, payload) =>
   webpush.sendNotification({ endpoint: rec.endpoint, keys: { p256dh: rec.p256dh, auth: rec.auth } }, payload).then(() => undefined);
 
+/** Last-resort VAPID `sub`. Every push carries this as the address a push service can reach the
+ *  operator at, and it must be REAL: Apple rejects the entire signed token with 403 BadJwtToken for a
+ *  made-up one. That is how `mailto:push@elowen.local` silently broke every push to an Apple device for
+ *  as long as it shipped — the send reported success on our side and simply never arrived. The project
+ *  URL is the only address true for every installation, so it stands in until an operator sets theirs. */
+const FALLBACK_CONTACT = 'https://github.com/dragocz95/elowen';
+
+/** Resolve the contact to sign with, preferring what the operator configured.
+ *
+ *  An unreachable address is worse than no address at all here, because the failure is a silent 403
+ *  rather than a validation error. So an instance URL is only borrowed when it is public: a private or
+ *  loopback host would reproduce the original bug with a different string. */
+export function vapidContact(configured?: string, instanceUrl?: string): string {
+  const set = configured?.trim();
+  if (set && (set.startsWith('https://') || set.startsWith('mailto:'))) return set;
+  if (!instanceUrl?.startsWith('https://') || !URL.canParse(instanceUrl)) return FALLBACK_CONTACT;
+  const host = new URL(instanceUrl).hostname;
+  const reachable = host.includes('.') && !host.endsWith('.local') && !host.endsWith('.localhost') && !host.endsWith('.internal');
+  return reachable ? instanceUrl : FALLBACK_CONTACT;
+}
+
 /** Sends web-push notifications to a set of users' devices. Resilient: a failed send is logged and
  *  skipped (never thrown), and a dead endpoint (404/410) is pruned so it isn't retried forever. */
 export class PushSender {
@@ -19,13 +40,14 @@ export class PushSender {
     private subs: PushSubscriptionStore,
     private keys: () => { publicKey: string; privateKey: string } | null,
     private deliver: Deliver = realDeliver,
+    private contact: () => { configured?: string; instanceUrl?: string } = () => ({}),
   ) {}
 
   async sendToUsers(userIds: number[], payload: PushPayload): Promise<void> {
     const keys = this.keys();
     if (!keys) return; // VAPID not configured → no-op (web push simply unavailable)
-    // contact is informational only; the daemon has no real address — a mailto is required by spec.
-    webpush.setVapidDetails('mailto:push@elowen.local', keys.publicKey, keys.privateKey);
+    const c = this.contact();
+    webpush.setVapidDetails(vapidContact(c.configured, c.instanceUrl), keys.publicKey, keys.privateKey);
     const body = JSON.stringify(payload);
     // Deliver in parallel: a single slow/hung endpoint must not delay every later device by minutes
     // (the old sequential await did). allSettled so one rejection never aborts the batch.

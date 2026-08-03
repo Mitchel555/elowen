@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 import { Activity, useCallback, useEffect, useState, useRef, useMemo, type ReactNode } from 'react';
-import { Bot, SlidersHorizontal, Plus, X, Pencil, Radio, Cpu, Gauge, Layers, Link2, KeyRound, FileText, Eye, Lock, Trash2, RefreshCw, RotateCcw, Sparkles, FlaskConical, Search, Server, CalendarClock, ScrollText } from 'lucide-react';
+import { Bot, SlidersHorizontal, Plus, X, Pencil, Radio, Cpu, Gauge, Layers, Link2, KeyRound, FileText, Eye, Lock, Trash2, RefreshCw, RotateCcw, Sparkles, FlaskConical, Search, Server, CalendarClock, ScrollText, BellRing } from 'lucide-react';
 import { PROVIDERS, ProviderLogo } from '../../modules/settings/providers';
 import { ModelIcon } from '../../components/ui/ModelIcon';
 import { BackendPicker } from '../../components/ui/BackendPicker';
@@ -205,6 +205,7 @@ export default function SettingsPage() {
   const [defMaxSessions, setDefMaxSessions] = useState(1);
   const [defTokenTtl, setDefTokenTtl] = useState(30);
   const [autoUpdate, setAutoUpdate] = useState(false);
+  const [pushContact, setPushContact] = useState('');
 
   // Conversation auto-cleanup: the daemon's hourly janitor deletes idle conversations older than N
   // days. Off by default; it never touches running/active/channel sessions. Saved immediately
@@ -253,6 +254,7 @@ export default function SettingsPage() {
       setDefMaxSessions(config.data.defaults.maxSessions);
       setDefTokenTtl(config.data.security?.tokenTtlDays ?? 30);
       setAutoUpdate(config.data.autoUpdate ?? false);
+      setPushContact(config.data.webPushContact ?? '');
     }
   }, [config.data]);
 
@@ -313,6 +315,10 @@ export default function SettingsPage() {
     try { await update.mutateAsync({ autoUpdate }); }
     catch (error) { toast(String(error), 'error'); throw error; }
   }, { ready, delay: 0 });
+  const pushContactSave = useAutoSaveStatus([pushContact], async () => {
+    try { await update.mutateAsync({ webPushContact: pushContact }); }
+    catch (error) { toast(String(error), 'error'); throw error; }
+  }, { ready });
   // Set (or clear, with null) one model's context-window override; the autosave above persists it.
   const setWindow = (key: string, value: number | null) =>
     setModelWindows((cur) => {
@@ -406,7 +412,7 @@ export default function SettingsPage() {
     providers: providersSave,
     autopilot: combineSaveFeedback(autopilotSave, defaultsSave),
     github: sectionFeedback.github,
-    system: combineSaveFeedback(autoUpdateSave, defaultsSave),
+    system: combineSaveFeedback(autoUpdateSave, defaultsSave, pushContactSave),
     brain: sectionFeedback.brain,
     memory: sectionFeedback.memory,
     plugins: sectionFeedback.plugins,
@@ -914,6 +920,11 @@ export default function SettingsPage() {
                   <Toggle checked={autoUpdate} onChange={setAutoUpdate} label={t.settings.autoUpdate} />
                 </SettingsRow>
               );
+              const rowPushContact = (
+                <SettingsRow label={t.settings.pushContact} description={t.help.pushContact} icon={BellRing}>
+                  <input value={pushContact} onChange={(e) => setPushContact(e.target.value)} placeholder={t.settings.pushContactPlaceholder} className={inputClass} aria-label={t.settings.pushContact} />
+                </SettingsRow>
+              );
               const rowTokenTtl = (
                 <SettingsRow label={t.settings.tokenTtl} description={t.help.tokenTtl} icon={KeyRound}>
                   <input type="number" min={1} value={defTokenTtl} onChange={(e) => setDefTokenTtl(Number(e.target.value))} className={inputClass} aria-label={t.settings.tokenTtl} />
@@ -980,6 +991,7 @@ export default function SettingsPage() {
                     {rowVersion}
                     {serviceRows}
                     {rowAutoUpdate}
+                    {rowPushContact}
                     {rowTokenTtl}
                     {rowRetention}
                   </SettingsGroup>

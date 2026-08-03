@@ -67,6 +67,11 @@ export interface ElowenConfig {
   /** Web Push VAPID public key (safe to expose) + whether a keypair has been generated. The private
    *  key NEVER leaves the daemon — read it only via `webPushKeys()`. */
   webPush: { publicKey: string; publicKeySet: boolean };
+  /** Contact address embedded in every push as the VAPID `sub` claim, so a push service can reach the
+   *  operator about this instance. Apple REJECTS a token whose contact is not a real address (403
+   *  BadJwtToken) and the send fails silently, so this must be a working `https://…` or `mailto:…`.
+   *  Empty falls back to the instance URL when public, else the project URL. */
+  webPushContact: string;
   /** Which plugins the admin has enabled, and which bundled ones were soft-removed (hidden from the
    *  installed list without deleting npm-owned files — restorable). Per-plugin config (which may hold
    *  secrets) is NOT exposed here — read it daemon-side via `pluginConfig(name)`. */
@@ -404,6 +409,7 @@ const DEFAULT_CONFIG: ElowenConfig = {
   autoUpdate: false,
   lspEnabled: true,
   webPush: { publicKey: '', publicKeySet: false },
+  webPushContact: '',
   // elowen-docs ships on: it is how the agent answers questions about Elowen itself and looks a setting
   // up before changing it, which has to work on a fresh install or it is never there when it is needed.
   plugins: { enabled: ['files', 'terminal', 'askuser', 'runtime-context', 'skills', 'subagent', 'elowen-docs'], removed: [] },
@@ -429,6 +435,7 @@ interface Stored {
   lspEnabled: boolean;
   /** Persisted VAPID keypair; null until generated on first boot. Private key stays daemon-side. */
   webPush: { publicKey: string; privateKey: string } | null;
+  webPushContact: string;
   /** Enabled plugin names, soft-removed (hidden) bundled plugin names, + each plugin's own config slice
    *  (secrets included, never serialized to API). */
   plugins: { enabled: string[]; removed: string[]; config: Record<string, Record<string, unknown>> };
@@ -491,6 +498,7 @@ const defaultStored = (): Stored => ({
   autoUpdate: false,
   lspEnabled: true,
   webPush: null,
+  webPushContact: '',
   plugins: { enabled: [...DEFAULT_CONFIG.plugins.enabled], removed: [], config: {} },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
   runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled },
@@ -510,6 +518,7 @@ export interface ConfigPatch {
   sessionRetention?: { enabled?: boolean; days?: number };
   autoUpdate?: boolean;
   lspEnabled?: boolean;
+  webPushContact?: string;
   plugins?: { enabled?: string[]; removed?: string[]; config?: Record<string, Record<string, unknown>> };
   /** Brain providers replace wholesale (the UI edits the full list). A patched entry with an empty/absent
    *  apiKey KEEPS the currently stored key for that id — the UI never sees (or resends) secrets. */
@@ -555,6 +564,7 @@ export class ConfigStore {
         },
         autoUpdate: typeof p.autoUpdate === 'boolean' ? p.autoUpdate : d.autoUpdate,
         lspEnabled: typeof p.lspEnabled === 'boolean' ? p.lspEnabled : d.lspEnabled,
+        webPushContact: typeof p.webPushContact === 'string' ? p.webPushContact.trim() : d.webPushContact,
         // Both halves of the keypair must be non-empty strings, else treat as not-yet-generated.
         webPush: (p.webPush && typeof p.webPush.publicKey === 'string' && p.webPush.publicKey.length > 0
           && typeof p.webPush.privateKey === 'string' && p.webPush.privateKey.length > 0)
@@ -617,6 +627,7 @@ export class ConfigStore {
       lspEnabled: s.lspEnabled,
       // Only the public key is exposed; `publicKeySet` reflects whether a full keypair exists.
       webPush: { publicKey: s.webPush?.publicKey ?? '', publicKeySet: !!s.webPush },
+      webPushContact: s.webPushContact,
       // Only the enabled + removed lists surface; per-plugin config (possible secrets) stays daemon-side.
       plugins: { enabled: s.plugins.enabled, removed: s.plugins.removed },
       brain: { providers: s.brain.providers.map(({ apiKey, ...pub }) => ({ ...pub, apiKeySet: !!apiKey })), agentName: s.brain.agentName, maxSteps: s.brain.maxSteps, modelContextWindows: s.brain.modelContextWindows, limits: s.brain.limits, hiddenOauth: s.brain.hiddenOauth },
@@ -696,6 +707,7 @@ export class ConfigStore {
       autoUpdate: patch.autoUpdate ?? cur.autoUpdate,
       lspEnabled: typeof patch.lspEnabled === 'boolean' ? patch.lspEnabled : cur.lspEnabled,
       webPush: cur.webPush, // VAPID keys are managed via setWebPushKeys, never through the config patch
+      webPushContact: typeof patch.webPushContact === 'string' ? patch.webPushContact.trim() : cur.webPushContact,
       plugins: {
         enabled: sanitizeStringList(patch.plugins?.enabled ?? cur.plugins.enabled),
         removed: sanitizeStringList(patch.plugins?.removed ?? cur.plugins.removed),

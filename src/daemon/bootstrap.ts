@@ -515,7 +515,9 @@ export async function buildApp(opts: BuildOpts) {
   // Phone push: a single bus subscriber maps lifecycle events (review escalation, needs_input, stall,
   // completion) to web-push notifications for the mission's owner + admins. No-op until a user
   // subscribes a device and (implicitly) VAPID keys exist — generated above on first boot.
-  const pushSender = new PushSender(pushSubscriptions, () => config.webPushKeys());
+  // Contact is read per send, so changing it in Settings reaches the next notification without a restart.
+  const pushSender = new PushSender(pushSubscriptions, () => config.webPushKeys(), undefined,
+    () => ({ configured: config.get().webPushContact, instanceUrl: elowenCli.url }));
   new PushDispatcher({ missions, tasks, users, sender: pushSender, missionGit }).subscribe(bus);
   // Snapshot each task's token/cost usage into task_usage as it settles, so the stats page reads
   // DB aggregates instead of re-scanning the CLIs' session stores. Resolve the same path the live
