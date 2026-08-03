@@ -118,16 +118,24 @@ export function liveRecallQuery(messages: readonly ContextMessage[], includeLast
   return collected.reverse().join('\n').trim();
 }
 
-/** Render one memory the way Claude Code frames its own: state where it came from and how old it is, so
- *  the model can weigh a stale claim about code against what it can see now. The staleness warning is
- *  the shared one both recall paths use (memoryStaleness.ts); the age stamp stays here because only this
- *  path names memories individually. */
+/** Render one memory as its own tagged element: where it came from and how old it is, so the model can
+ *  weigh a stale claim about code against what it can see now. The staleness warning is the shared one
+ *  both recall paths use (memoryStaleness.ts); the age attribute stays here because only this path names
+ *  memories individually.
+ *
+ *  The metadata is XML attributes rather than prose ("Memory #12 [fact imp:4]") because the surrounding
+ *  block is already a tag: one syntax throughout means the model reads the boundary between one memory's
+ *  body and the next structurally, instead of inferring it from a line that happens to look like a
+ *  heading — a body containing its own headings could otherwise blur where it ends. */
 function renderLiveRecall(memory: LiveRecallMemory, now: number): string {
   const age = memoryAgeDays(memory.updatedAt, now);
-  const stamp = age !== null && age >= 1 ? ` (saved ${age} day${age === 1 ? '' : 's'} ago)` : '';
-  const head = `Memory #${memory.id}${stamp} [${memory.kind} imp:${memory.importance}]`;
+  const saved = age !== null && age >= 1 ? ` saved="${age} day${age === 1 ? '' : 's'} ago"` : '';
   const stale = memoryStalenessNote(age);
-  return `${head}\n${memory.body}${stale ? `\n${stale}` : ''}`;
+  // A body is user-authored text that may itself contain a closing tag; left intact it would end the
+  // element early and promote whatever follows to instructions. Same defence frameUntrusted applies.
+  const body = memory.body.replace(/<\s*\/\s*memory\s*>/gi, '[/memory]');
+  return `<memory id="${memory.id}" kind="${memory.kind}" importance="${memory.importance}"${saved}>\n`
+    + `${body}${stale ? `\n${stale}` : ''}\n</memory>`;
 }
 
 /** Per-session state. A turn is identified by the message count at which it started growing, so the
