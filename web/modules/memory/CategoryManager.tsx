@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { Plus, Pencil, Trash2, Tags } from 'lucide-react';
+import { Plus, Pencil, Trash2, Tags, Globe } from 'lucide-react';
 import type { Memory, MemoryCategory } from '../../lib/types';
 import { useMemoryCategories, useProjects } from '../../lib/queries';
 import { useCreateMemoryCategory, useUpdateMemoryCategory, useDeleteMemoryCategory } from '../../lib/mutations';
@@ -13,6 +13,7 @@ import { IconButton } from '../../components/ui/IconButton';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { ChoiceField } from '../../components/ui/ChoiceField';
+import { ProjectIcon } from '../../components/ui/ProjectIcon';
 import { ErrorState, LoadingState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
@@ -115,6 +116,8 @@ export function CategoryModal({ category, onClose }: { category?: MemoryCategory
   };
 
   const pending = create.isPending || update.isPending;
+  // The project bound to this category, resolved from the loaded list — drives the scope glyph.
+  const selectedProject = projectId == null ? null : (projects.data ?? []).find((p) => p.id === projectId) ?? null;
 
   const submit = () => {
     const next = name.trim();
@@ -145,17 +148,26 @@ export function CategoryModal({ category, onClose }: { category?: MemoryCategory
           {projects.isLoading ? <LoadingState label={t.memory.categoryProjectsLoading} /> : projects.isError ? (
             <ErrorState message={t.memory.categoryProjectsError} onRetry={() => { void projects.refetch(); }} />
           ) : (
-            <ChoiceField
-              title={t.memory.categoryProject}
-              options={[
-                { value: '', label: t.memory.categoryProjectGlobal },
-                ...(projects.data ?? []).map((project) => ({ value: String(project.id), label: project.slug })),
-              ]}
-              value={projectId == null ? '' : String(projectId)}
-              onChange={(value) => setProjectId(value ? Number(value) : null)}
-              picker="always"
-              manageAriaLabel={t.memory.categoryProject}
-            />
+            <div className="flex items-center gap-2">
+              {/* Show the bound project's own glyph (or a globe for a global category) so the scope is
+                  readable at a glance, not only after opening the picker. */}
+              {selectedProject
+                ? <ProjectIcon project={selectedProject} size={18} className="text-text-muted" />
+                : <Globe size={18} aria-hidden className="shrink-0 text-text-muted" />}
+              <div className="min-w-0 flex-1">
+                <ChoiceField
+                  title={t.memory.categoryProject}
+                  options={[
+                    { value: '', label: t.memory.categoryProjectGlobal },
+                    ...(projects.data ?? []).map((project) => ({ value: String(project.id), label: project.slug })),
+                  ]}
+                  value={projectId == null ? '' : String(projectId)}
+                  onChange={(value) => setProjectId(value ? Number(value) : null)}
+                  picker="always"
+                  manageAriaLabel={t.memory.categoryProject}
+                />
+              </div>
+            </div>
           )}
         </Field>
         <Field label={t.memory.categoryColor}>
