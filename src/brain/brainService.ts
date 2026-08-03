@@ -183,6 +183,7 @@ export class BrainService {
       get liveRecallBudget() { return d.liveRecallBudget; },
       get memoryCategoryStore() { return d.memoryCategoryStore; },
       get memoryCategorizer() { return d.memoryCategorizer; },
+      get projects() { return d.projects; },
       plugins: () => this.resolvePlugins(),
       factory: this.factory,
       sessionTaps: (sessionId) => this.attachments.sessionTaps.get(sessionId) ?? [],

@@ -16,6 +16,7 @@ import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { MemoryStore } from '../../src/store/memoryStore.js';
 import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
+import { ProjectStore } from '../../src/store/projectStore.js';
 import { MemoryCategorizer } from '../../src/brain/memoryCategorizer.js';
 import type { MemoryService } from '../../src/brain/memoryService.js';
 import type { MemoryRow } from '../../src/store/memoryStore.js';
@@ -3351,6 +3352,9 @@ describe('BrainService memory integration', () => {
     (d as Record<string, unknown>).memoryStore = memStore;
     (d as Record<string, unknown>).memoryService = fakeMemoryService([]);
     (d as Record<string, unknown>).memoryCategoryStore = cats;
+    // The toolset requires projects: the write path resolves the current turn's project id to a name
+    // for the lazily created project category.
+    (d as Record<string, unknown>).projects = new ProjectStore(memDb);
     (d as Record<string, unknown>).memoryCategorizer = new MemoryCategorizer({ categories: cats, memories: memStore, inference: () => null });
     const svc = new BrainService(d as never);
     await svc.start(1);

@@ -10,6 +10,8 @@ import type { InferenceClient } from '../../src/inference/types.js';
 import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import type { TurnIdentity } from '../../src/plugins/policyContext.js';
 import type { Policy } from '../../src/plugins/policy.js';
+import { ProjectStore } from '../../src/store/projectStore.js';
+import type { MemoryRecallScope } from '../../src/brain/memoryRecallScope.js';
 
 const POLICY: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
 /** The genuine operator's own Elowen chat. */
@@ -50,7 +52,30 @@ function toolsetWithCategorizer(reply: string) {
 }
 
 const txt = (r: unknown) => (r as { content: { text: string }[] }).content[0]!.text;
-const run = (identity: TurnIdentity | undefined, fn: () => Promise<unknown>) => runWithPolicy(POLICY, fn, { identity });
+const run = (identity: TurnIdentity | undefined, fn: () => Promise<unknown>, scope?: MemoryRecallScope) =>
+  runWithPolicy(POLICY, fn, { identity, memoryRecallScope: scope });
+
+/** A project-aware toolset. `classifierReply` null → no categorization model wired (the classifier is
+ *  silent); otherwise the model always answers with exactly that category name. */
+function toolsetWithProject(classifierReply: string | null) {
+  const db = openDb(':memory:');
+  const store = new MemoryStore(db);
+  const categories = new MemoryCategoryStore(db);
+  const projects = new ProjectStore(db);
+  const embeddings = { embed: async () => new Float32Array([0, 0, 0]) } as unknown as EmbeddingService;
+  const service = new MemoryService({ store, embeddings, embeddingConfig: () => null });
+  const inference: InferenceClient | null = classifierReply === null
+    ? null
+    : { model: 'fake-model', decide: vi.fn(async () => ({ text: classifierReply })) };
+  const categorizer = new MemoryCategorizer({ categories, memories: store, inference: () => inference });
+  const tools = buildMemoryTools({ store, service, categories, categorizer, projects });
+  const byName = (name: string) => {
+    const tool = tools.find((t) => t.name === name);
+    if (tool === undefined) throw new Error(`tool ${name} missing`);
+    return tool;
+  };
+  return { store, categories, projects, byName };
+}
 
 describe('buildMemoryTools', () => {
   it('exposes the expected tool names', () => {
@@ -162,5 +187,52 @@ describe('buildMemoryTools', () => {
     const r = await run(undefined, () => byName('MemoryAdd').execute('c1', { body: 'worker leak' }));
     expect(txt(r)).toBe('Memory is only available to you — in your own Elowen chat or from your linked platform account.');
     expect(store.list(1)).toHaveLength(0);
+  });
+});
+
+describe('MemoryAdd project-scoped defaulting', () => {
+  it('files the memory into the project category when the classifier is silent', async () => {
+    const { store, categories, projects, byName } = toolsetWithProject(null);
+    const project = projects.create({ slug: 'kolin', path: '/var/www/kolin' });
+
+    await run(OWNER, () => byName('MemoryAdd').execute('c1', { body: 'The kolin project deploys via systemd.' }),
+      { projectId: project.id, categoryIds: new Set() });
+
+    const memory = store.list(1)[0];
+    expect(memory).toBeDefined();
+    await vi.waitFor(() => {
+      const fresh = store.list(1)[0];
+      const categoryId = fresh?.category_id;
+      const category = categoryId == null ? undefined : categories.get(1, categoryId);
+      expect(category).toBeDefined();
+      expect(category?.projectId).toBe(project.id);
+      expect(category?.name).toBe('kolin');
+    });
+  });
+
+  it('keeps the classifier pick over the project default', async () => {
+    const { store, categories, projects, byName } = toolsetWithProject('Infra');
+    const project = projects.create({ slug: 'kolin', path: '/var/www/kolin' });
+    const infra = categories.create(1, { name: 'Infra', description: 'servers, ports' });
+
+    await run(OWNER, () => byName('MemoryAdd').execute('c1', { body: 'The daemon listens on port 4400.' }),
+      { projectId: project.id, categoryIds: new Set() });
+
+    const memory = store.list(1)[0];
+    expect(memory).toBeDefined();
+    await vi.waitFor(() => {
+      expect(store.list(1)[0]?.category_id).toBe(infra.id);
+    });
+  });
+
+  it('defaults nothing when the turn has no project scope', async () => {
+    const { store, categories, byName } = toolsetWithProject(null);
+
+    await run(OWNER, () => byName('MemoryAdd').execute('c1', { body: 'A fact without any project.' }));
+
+    const memory = store.list(1)[0];
+    expect(memory).toBeDefined();
+    expect(memory?.category_id).toBeNull();
+    expect(categories.list(1)).toHaveLength(0);
   });
 });

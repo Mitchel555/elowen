@@ -1,17 +1,25 @@
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { currentIdentity } from '../../plugins/policyContext.js';
+import { currentIdentity, currentMemoryRecallScope } from '../../plugins/policyContext.js';
 import type { MemoryStore, MemoryRow, MemoryPatch } from '../../store/memoryStore.js';
 import type { MemoryService } from '../memoryService.js';
-import type { MemoryCategoryStore } from '../../store/memoryCategoryStore.js';
+import type { MemoryCategoryStore, MemoryCategoryRow } from '../../store/memoryCategoryStore.js';
 import { ICON_ALLOWLIST } from '../../store/memoryCategoryStore.js';
 import type { MemoryCategorizer } from '../memoryCategorizer.js';
+
+/** The project facts the write path needs: a project id resolves to the row that names the lazily
+ *  created project category (bound by id, named by slug). Structural — ProjectStore satisfies it. */
+export interface MemoryProjectLookup {
+  get(id: number): { id: number; slug: string } | null;
+}
 
 export interface MemoryToolDeps {
   store: MemoryStore;
   service: MemoryService;
   categories: MemoryCategoryStore;
   categorizer: MemoryCategorizer;
+  /** Resolves the current turn's project id (from the recall scope) to a name for the lazy category. */
+  projects: MemoryProjectLookup;
 }
 
 /** Message returned when a non-owner turn tries to touch memory. Memory is per-user and PRIVATE —
@@ -93,10 +101,69 @@ function memoryAdd(d: MemoryToolDeps) {
       );
       // Categorization used to hang off the post-turn curator alone, so a memory the agent stored through
       // this tool stayed uncategorized forever. Same fire-and-forget the curator has always done.
-      d.categorizer.classifyNewMemory(userId, row.id, `user:${userId}`);
+      // A PROJECT turn resolves the category itself instead: the memory must land in the project's bound
+      // category (or the classifier's pick) now, because an uncategorized memory is never recalled —
+      // fail-closed — and the background pass would race this default and could clear it. The scope is
+      // read at EXECUTE time: the cwd can change between turns (/cd), so the project is whatever THIS
+      // turn resolves to, never what the session spawned with.
+      const scope = currentMemoryRecallScope();
+      const project = scope && scope.projectId !== null ? d.projects.get(scope.projectId) : undefined;
+      if (project) {
+        void categorizeNewMemoryForProject(d, userId, row, project).catch(() => {
+          // Best-effort like the fire-and-forget path: a failed categorization must never fail the add.
+          // The memory stays uncategorized (never recalled) rather than leaking into another project.
+        });
+      } else {
+        d.categorizer.classifyNewMemory(userId, row.id, `user:${userId}`);
+      }
       return text(`Stored memory #${row.id}.`);
     },
   });
+}
+
+/** The category bound to this project — bound by ID, never matched by name — created on first use
+ *  named after the project. A UNIQUE(user_id, name) collision (the user already owns a category with
+ *  the project's name, e.g. a global one) is disambiguated with a " (project)" suffix; the existing
+ *  name-match is never reused, since rebinding it would silently change ITS scope. */
+function ensureProjectCategory(
+  d: MemoryToolDeps,
+  userId: number,
+  project: { id: number; slug: string },
+): MemoryCategoryRow {
+  const existing = d.categories.list(userId).find((c) => c.projectId === project.id);
+  if (existing) return existing;
+  try {
+    return d.categories.create(userId, { name: project.slug, projectId: project.id });
+  } catch {
+    // A concurrent first-add (the partial unique index on user_id+project_id) or a name collision.
+    // Re-read to pick up a concurrently created binding; otherwise retry once under a distinct name.
+    const concurrent = d.categories.list(userId).find((c) => c.projectId === project.id);
+    if (concurrent) return concurrent;
+    return d.categories.create(userId, { name: `${project.slug} (project)`, projectId: project.id });
+  }
+}
+
+/** File a just-stored memory inside a project conversation. The classifier decides first and its pick
+ *  wins; when it is silent (no match, no model wired, or a relay error) the memory falls back to the
+ *  project's own bound category — created here on first use — so a project memory is never left
+ *  uncategorized (uncategorized memories are never recalled — fail-closed). Fire-and-forget from the
+ *  caller, but the fallback can only be applied once the classifier's verdict is known, so this must
+ *  run inline instead of via the usual background classifyNewMemory. */
+async function categorizeNewMemoryForProject(
+  d: MemoryToolDeps,
+  userId: number,
+  row: MemoryRow,
+  project: { id: number; slug: string },
+): Promise<void> {
+  // Created BEFORE the classifier runs so the project's own category is among its options.
+  const projectCategory = ensureProjectCategory(d, userId, project);
+  let classified: number | null = null;
+  try {
+    classified = await d.categorizer.classify(userId, row.body);
+  } catch {
+    // Relay error → treat as silent and fall through to the project default (never fail the add).
+  }
+  d.store.setCategory(userId, row.id, classified ?? projectCategory.id, `user:${userId}`, 'MemoryAdd: project default');
 }
 
 function memoryUpdate(d: MemoryToolDeps) {

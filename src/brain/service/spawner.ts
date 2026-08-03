@@ -46,6 +46,9 @@ interface SpawnerDeps {
   liveRecallBudget: BrainDeps['liveRecallBudget'];
   memoryCategoryStore?: BrainDeps['memoryCategoryStore'];
   memoryCategorizer?: BrainDeps['memoryCategorizer'];
+  /** Registered projects — the write path resolves the current turn's project id to a slug for the
+   *  lazily created project category (see MemoryToolDeps.projects). */
+  projects?: BrainDeps['projects'];
   /** The daemon-wide plugin registry (undefined when plugins aren't wired at all). */
   plugins(): Promise<PluginRegistry | undefined>;
   /** Shared session assembly (store row + rehydrate + resource loader + PI session). */
@@ -138,6 +141,7 @@ export class LiveSessionSpawner {
     const memService = this.d.memoryService;
     const memCats = this.d.memoryCategoryStore;
     const memCategorizer = this.d.memoryCategorizer;
+    const memProjects = this.d.projects;
     const pluginTools = plugins?.tools ?? [];
     // Plugin hook point: after a permitted plugin tool's execute resolves, fan the call out to
     // `tools.call.after` subscribers (e.g. the formatters plugin). AWAITED by the tool gate before the
@@ -163,8 +167,8 @@ export class LiveSessionSpawner {
     const allTools = composeSessionTools({
       kind: opts.channel ? (opts.trustedChannel ? 'trusted-channel' : 'foreign-channel') : 'owner-chat',
       elowenTools: () => buildElowenTools({ url: this.d.url, token: this.d.users.ensureAdvisorToken(ownerUserId) }),
-      memoryTools: memStore && memService && memCats && memCategorizer
-        ? () => buildMemoryTools({ store: memStore, service: memService, categories: memCats, categorizer: memCategorizer })
+      memoryTools: memStore && memService && memCats && memCategorizer && memProjects
+        ? () => buildMemoryTools({ store: memStore, service: memService, categories: memCats, categorizer: memCategorizer, projects: memProjects })
         : undefined,
       // ToolSearch rides the built-in group (permission-gated, not plugin-hook-gated); present only when
       // the session actually defers tools.
