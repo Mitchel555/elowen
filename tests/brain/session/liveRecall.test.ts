@@ -3,15 +3,15 @@ import { installLiveRecall, liveRecallQuery, type LiveRecallMemory } from '../..
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 /** Recall that runs WHILE a turn works. Two properties matter beyond "it recalls something":
- *  the injected block is only ever APPENDED (an insert earlier would invalidate the provider's cached
- *  prefix), and once rendered its bytes never change (a re-render would do the same on the next call).
- *  These tests assert both by comparing successive message arrays byte for byte.
+ *  each injected block stays at the canonical boundary where it first appeared, and once rendered its
+ *  bytes never change. Together those properties make each provider message stream an append-only
+ *  extension of the previous one. These tests compare successive streams byte for byte.
  *
  *  The retrieval is NON-BLOCKING: the pass that starts a search returns immediately, and a later call
  *  consumes the result once it has settled. A memory therefore lands one call after the pass that
  *  searched for it, which is why these tests fire the hook twice where the result is asserted. */
 
-interface Msg { role?: string; content?: unknown }
+interface Msg { role?: string; content?: unknown; isMeta?: boolean }
 type Handler = (event: { messages: unknown }) => Promise<{ messages: unknown } | undefined>;
 
 const T0 = Date.parse('2026-08-02T12:00:00Z');
@@ -57,6 +57,7 @@ function harness(opts: {
 }
 
 const textOf = (m: Msg): string => (typeof m.content === 'string' ? m.content : '');
+const providerText = (messages: Msg[]): string => messages.map(textOf).join('\n');
 
 describe('live recall — memories arrive mid-turn', () => {
   let queries: string[];
@@ -132,32 +133,28 @@ describe('live recall — memories arrive mid-turn', () => {
     expect(blockB).toBe(blockA);
   });
 
-  it('re-emits an already injected block verbatim instead of re-rendering it', async () => {
-    let call = 0;
-    const { fire } = harness({
-      retrieve: async () => { call += 1; return call === 1 ? [mem(1, 'First fact')] : [mem(2, 'Second fact')]; },
-    });
+  it('keeps the whole previous provider message stream as a byte prefix after the turn grows', async () => {
+    const { fire } = harness({ passes: 1, retrieve: async () => [mem(1, 'First fact')] });
+    const providerBytes = (messages: Msg[]): string => messages.map((message) => JSON.stringify(message)).join('\n') + '\n';
 
-    const first: Msg[] = [
+    const working: Msg[] = [
       { role: 'user', content: 'go' },
       { role: 'toolResult', content: 'output mentioning the deployment pipeline in detail' },
     ];
-    await fire(first);
-    const a = await fire(first);
-    const injectedFirst = textOf(a[a.length - 1] as Msg);
+    await fire(working);
+    const recalled = await fire(working);
+    const previousPayload = providerBytes(recalled);
 
+    // The hook receives PI's canonical history, not its own prior ephemeral output. This is the exact
+    // cross-turn shape that used to move the recalled message from before new work to the new array tail.
     const grown: Msg[] = [
-      ...first,
-      { role: 'toolResult', content: 'a second, different tool result about migrations and the database' },
+      ...working,
+      { role: 'assistant', content: 'I found the deployment entry point and will inspect its result' },
+      { role: 'toolResult', content: 'release.sh returned exit 2 after validating the package' },
     ];
-    await fire(grown);
-    const b = await fire(grown);
-    const injectedSecond = textOf(b[b.length - 1] as Msg);
+    const nextPayload = providerBytes(await fire(grown));
 
-    // The second block must CONTAIN the first one unchanged — same bytes, same order, appended to.
-    expect(injectedSecond.startsWith(injectedFirst.split('</user_memories>')[0] ?? '')).toBe(true);
-    expect(injectedSecond).toContain('First fact');
-    expect(injectedSecond).toContain('Second fact');
+    expect(nextPayload.startsWith(previousPayload)).toBe(true);
   });
 
   // The block is a tag, so each memory inside it is one too: metadata as attributes, body as content.
@@ -230,8 +227,8 @@ describe('live recall — memories arrive mid-turn', () => {
     await fire(grown);
     const out = await fire(grown);
 
-    const injected = textOf(out[out.length - 1] as Msg);
-    expect(injected.match(/The one fact/g)).toHaveLength(1);
+    const injected = out.map(textOf).join('\n');
+    expect(injected.match(/The one fact/g) ?? []).toHaveLength(1);
   });
 });
 
@@ -303,10 +300,15 @@ describe('live recall — budget and switches', () => {
     ];
     await fire(after);
     const b = await fire(after);
-    const injected = textOf(b[b.length - 1] as Msg);
+    const recalledMessages = b.filter((message) => message.role === 'user' && message.isMeta === true);
 
-    expect(injected).toContain('First fact');
-    expect(injected).toContain('Second fact');
+    // A later recall is a new frozen message. Mutating the first message to append the second fact would
+    // change bytes already sent before steering and break the same prefix invariant as moving it.
+    expect(recalledMessages).toHaveLength(2);
+    expect(textOf(recalledMessages[0] as Msg)).toBe(textOf(a[a.length - 1] as Msg));
+    expect(textOf(recalledMessages[0] as Msg)).toContain('First fact');
+    expect(textOf(recalledMessages[0] as Msg)).not.toContain('Second fact');
+    expect(textOf(recalledMessages[1] as Msg)).toContain('Second fact');
     expect(seen[seen.length - 1]).toContain('database migration');
   });
 
@@ -487,6 +489,35 @@ describe('liveRecallQuery — meta messages', () => {
 });
 
 describe('compaction', () => {
+  it('drops anchors when compaction replaces history without changing its length', async () => {
+    let calls = 0;
+    const h = harness({
+      retrieve: async () => {
+        calls += 1;
+        return [mem(1, calls === 1 ? 'Fact from discarded history' : 'Fact from compacted history')];
+      },
+    });
+    const before: Msg[] = [
+      { role: 'user', content: 'fix the deploy' },
+      { role: 'assistant', content: 'inspecting the old deployment path now' },
+      { role: 'toolResult', content: 'old release command failed with exit 2' },
+    ];
+    await h.fire(before);
+    expect(providerText(await h.fire(before))).toContain('Fact from discarded history');
+
+    // Same length and same user count: only the frozen anchor snapshot proves that PI replaced history.
+    const compacted: Msg[] = [
+      { role: 'user', content: 'Summary: the old deployment investigation was compacted' },
+      { role: 'assistant', content: 'continuing from the compacted deployment summary' },
+      { role: 'toolResult', content: 'new release command failed while checking the package' },
+    ];
+    await h.fire(compacted);
+    const after = await h.fire(compacted);
+
+    expect(providerText(after)).toContain('Fact from compacted history');
+    expect(providerText(after)).not.toContain('Fact from discarded history');
+  });
+
   it('re-surfaces a memory after compaction instead of suppressing it forever', async () => {
     // Compaction replaces the history with a summary, so the block this turn injected is GONE from the
     // transcript the model now sees. If the already-injected ids carried across, the memory would be
