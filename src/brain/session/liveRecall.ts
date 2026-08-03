@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import type { PiAgentMessage } from './historyImageStripping.js';
+import { isMetaUserMessage, isUserTurn } from './userTurn.js';
 import { frameUntrusted } from '../messageView.js';
 import { memoryAgeDays, memoryStalenessNote } from '../memoryStaleness.js';
 import { logger } from '../../shared/logger.js';
@@ -99,17 +100,17 @@ export function liveRecallQuery(messages: readonly ContextMessage[], includeLast
   let lastUserIndex = -1;
   if (includeLastUser) {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i]?.role === 'user') { lastUserIndex = i; break; }
+      if (isUserTurn(messages[i])) { lastUserIndex = i; break; }
     }
   }
   for (let i = messages.length - 1; i >= 0 && chars < QUERY_SOURCE_CHARS; i -= 1) {
     const message = messages[i];
-    if (!message) continue;
+    if (!message || isMetaUserMessage(message)) continue;
     // Earlier user messages are excluded — turn-start recall already searched with them, so including
     // them again would reproduce the same hits and spend a pass proving it. The LAST one is different:
     // when it arrived mid-turn as steering it is the freshest statement of what the user now wants, and
     // searching without it would answer a question nobody is asking any more.
-    if (message.role === 'user' && i !== lastUserIndex) continue;
+    if (isUserTurn(message) && i !== lastUserIndex) continue;
     const text = textOf(message).trim();
     if (!text) continue;
     collected.push(text.slice(0, QUERY_SOURCE_CHARS - chars));
@@ -195,7 +196,7 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
     // A new user message means a new turn: reset the budget. Counting user messages is enough — the
     // context hook has no turn identity of its own, and a turn cannot gain a user message mid-flight
     // except through steering, which is itself a new instruction worth re-recalling for.
-    const userCount = messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
+    const userCount = messages.reduce((n, m) => (isUserTurn(m) ? n + 1 : n), 0);
     // Compaction is a SHRINKING history, and it needs its own signal: it usually replaces many messages
     // with a single summary, which can leave the user count unchanged (1 -> 1) while discarding
     // everything this turn injected. Counting user messages alone would then miss it entirely, and the
@@ -329,7 +330,7 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
 /** Append the frozen blocks as one synthetic user message at the very END of the array. Anthropic caches
  *  a prefix, so appending is the only placement that leaves every earlier token cached. */
 function appendBlocks(messages: readonly ContextMessage[], blocks: readonly string[]): { messages: PiAgentMessage[] } {
-  const appended = [...messages, { role: 'user', content: blocks.join('\n') }];
+  const appended = [...messages, { role: 'user', content: blocks.join('\n'), isMeta: true }];
   return { messages: appended as unknown as PiAgentMessage[] };
 }
 

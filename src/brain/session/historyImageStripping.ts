@@ -1,4 +1,5 @@
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
+import { isUserTurn } from './userTurn.js';
 
 /** PI's `transformContext` hook signature and its message type, derived from the hook itself —
  *  `@earendil-works/pi-agent-core` (where AgentMessage lives) is not a direct dependency, so the
@@ -41,7 +42,7 @@ function collapseImages(content: readonly ContentBlock[]): ContentBlock[] | null
 export function stripHistoricalImages(messages: PiAgentMessage[]): PiAgentMessage[] {
   let lastUserIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === 'user') { lastUserIndex = index; break; }
+    if (isUserTurn(messages[index])) { lastUserIndex = index; break; }
   }
   if (lastUserIndex <= 0) return messages;
   let changed = false;

@@ -90,7 +90,7 @@ describe('live recall — memories arrive mid-turn', () => {
     const third = await fire(working);
     expect(third).toHaveLength(4);
     expect(textOf(third[3] as Msg)).toContain('Deployment runs through release.sh');
-    expect(third[3]?.role).toBe('user');
+    expect(third[3]).toMatchObject({ role: 'user', isMeta: true });
   });
 
   it('leaves the earlier messages byte-identical and only ever appends', async () => {
@@ -470,6 +470,19 @@ describe('liveRecallQuery', () => {
     expect(q).not.toContain('oprav to');
     expect(q).toContain('migrations/007.sql');
     expect(q).toContain('checking the migration');
+  });
+});
+
+describe('liveRecallQuery — meta messages', () => {
+  it('does not treat a recalled-memory meta message as steering', () => {
+    const q = liveRecallQuery([
+      { role: 'user', content: 'switch to database migrations' },
+      { role: 'assistant', content: 'checking the migration path' },
+      { role: 'user', content: 'recalled deployment memory', isMeta: true },
+    ], true);
+
+    expect(q).toContain('switch to database migrations');
+    expect(q).not.toContain('recalled deployment memory');
   });
 });
 

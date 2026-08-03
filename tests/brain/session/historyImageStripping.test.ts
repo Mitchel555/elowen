@@ -58,6 +58,19 @@ describe('stripHistoricalImages', () => {
     expect(turn3[2]).toEqual({ ...turn1[2], content: [{ type: 'text', text: 'Read image file [image/png]' }, placeholder] });
   });
 
+  it('keeps a current image when a recalled-memory meta message follows the user turn', () => {
+    const recalled = { ...user('recalled memory'), isMeta: true };
+    const messages: PiAgentMessage[] = [
+      user('look at foo.png'),
+      assistantToolCall('Read'),
+      toolResult('Read', [{ type: 'text', text: 'Read image file [image/png]' }, image]),
+      recalled,
+    ];
+
+    const result = stripHistoricalImages(messages);
+    expect(result).toBe(messages);
+  });
+
   it('strips historical images from ANY source — a tool unknown to any shipped plugin', () => {
     // The global net: nothing here is MCP- or files-specific; a future plugin's image lands in a
     // toolResult content array exactly like this and is stripped the same way.

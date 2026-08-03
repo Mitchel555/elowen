@@ -102,6 +102,17 @@ describe('selectClearableToolResults / clearingCutIndex', () => {
     expect(selectClearableToolResults(messages, new Set())).toEqual([]);
   });
 
+  it('does not count a recalled-memory meta message toward retained user turns', () => {
+    const recalled = { ...user('recalled memory', T0 + 4), isMeta: true };
+    const messages: PiAgentMessage[] = [
+      user('one', T0), toolResult('old-big', big, T0 + 1),
+      user('two', T0 + 2), toolResult('current-big', big, T0 + 3), recalled,
+    ];
+
+    expect(clearingCutIndex(messages)).toBe(0);
+    expect(selectClearableToolResults(messages, new Set())).toEqual([]);
+  });
+
   it('skips already-latched ids', () => {
     const messages: PiAgentMessage[] = [
       user('one', T0), toolResult('old-big', big, T0 + 1), user('two', T0 + 2), user('three', T0 + 3),
@@ -160,6 +171,15 @@ describe('cacheColdAtTurnStart', () => {
 
   it('is false for the very first user message (nothing to compare against)', () => {
     expect(cacheColdAtTurnStart([user('one', T0)], IDLE, T0)).toBe(false);
+  });
+
+  it('uses the real user timestamp when a recalled-memory meta message is appended', () => {
+    const recalled = { ...user('recalled memory', T0 + IDLE + 2_001), isMeta: true };
+    const messages: PiAgentMessage[] = [
+      user('one', T0), assistant('a', T0 + 1_000), user('two', T0 + IDLE + 2_000), recalled,
+    ];
+
+    expect(cacheColdAtTurnStart(messages, IDLE, T0 + IDLE + 2_000)).toBe(true);
   });
 
   it('bounds a future-stamped prompt by now (clock skew can only close the gate, never open it)', () => {

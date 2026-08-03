@@ -4,6 +4,7 @@ import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import { fsSafeSegment, toolResultSpillDir } from '../../shared/paths.js';
 import { logger } from '../../shared/logger.js';
 import type { PiAgentMessage } from './historyImageStripping.js';
+import { isUserTurn } from './userTurn.js';
 
 /** Egress-only clearing of large historical tool results — the transferable core of Claude Code's
  *  time-based microcompact, adapted to Elowen's `transformContext` seam (the same hook
@@ -122,7 +123,7 @@ function textBytes(message: ToolResultMessage): number {
 export function clearingCutIndex(messages: readonly PiAgentMessage[]): number {
   let seen = 0;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role !== 'user') continue;
+    if (!isUserTurn(messages[index])) continue;
     seen += 1;
     if (seen === KEEP_USER_TURNS) return index;
   }
@@ -160,7 +161,7 @@ export function selectClearableToolResults(
  *  yet. Everything after it was produced during this turn. */
 function lastUserIndex(messages: readonly PiAgentMessage[]): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === 'user') return index;
+    if (isUserTurn(messages[index])) return index;
   }
   return -1;
 }
