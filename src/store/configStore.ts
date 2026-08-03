@@ -3,6 +3,7 @@ import { defaultPromptTemplate } from '../overseer/planner.js';
 import { DEFAULT_BINS, EXEC_NOTES, KNOWN_EXECS, isAllowedExec } from '../shared/execs.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
 import type { BrainLimits, RuntimeConfig, RuntimeLimits } from '../shared/wireContract.js';
+import { DEFAULT_MEMORY_RETENTION, type MemoryRetentionConfig } from '../brain/memoryVitality.js';
 
 // The brain-limits shape is the daemon↔web wire contract (Settings → Elowen AI → Limits) — defined
 // once in src/shared and re-exported here, so the two can never drift. The runtime block is its sibling
@@ -83,10 +84,11 @@ export interface ElowenConfig {
    *  max context window per Elowen AI model (`providerId/model`) for endpoints that don't report one. */
   brain: { providers: BrainProviderPublic[]; agentName: string; maxSteps: number; modelContextWindows: Record<string, number>; limits: BrainLimits; hiddenOauth: string[] };
   /** Operator-tunable runtime knobs (Settings → Elowen AI → Runtime): the `!` shell timeout, the memory
-   *  relevance floor, the deferred-tool policy and activity-log retention. `limits.eventRetentionDays` is
+   *  relevance floor, the deferred-tool policy, activity-log retention and the memory-retention block
+   *  (auto-eviction toggle, grace window, vitality floor and per-importance half-lives). `limits.eventRetentionDays` is
    *  the always-on twin of `sessionRetention.days` above — kept here, with the other numeric knobs, because
    *  it is a pure ceiling with no opt-in of its own, where session retention is an off-by-default feature. */
-  runtime: RuntimeConfig;
+  runtime: RuntimeConfigWithRetention;
   /** Memory embedding provider config (no secret — the API key comes from the referenced brain provider). */
   embedding: EmbeddingBlock;
   /** Memory categorization model (workspace-level; no secret — key reused from the brain provider). */
@@ -354,6 +356,52 @@ function clampRuntimeLimits(next: Partial<RuntimeLimits> | undefined, fallback: 
   return out;
 }
 
+/** The runtime block as stored/served: the wire RuntimeConfig plus the memory-retention group. The wire
+ *  contract deliberately does NOT carry the retention shape — it would have to import it from
+ *  brain/memoryVitality.ts, which already imports `MemoryRow` from the contract (a cycle). The daemon's
+ *  stored view extends the wire type; web/lib/types.ts mirrors the block on its side. */
+type RuntimeConfigWithRetention = RuntimeConfig & { memoryRetention: MemoryRetentionConfig };
+
+/** Memory-retention bounds, matching the plan: a grace window up to a year, an eviction floor up to
+ *  90/100 (the floor is a 0..100 vitality, so 90 leaves the top decile out of reach of the sweep), and
+ *  half-lives up to a decade. 0 is the "never" sentinel (importance 5, and any explicitly-zero
+ *  half-life) and must stay reachable, so the ranges are clamped, not shifted. Unlike the numeric
+ *  runtime limits these are NOT rounded to whole numbers: a half-life of 0.4 days is a legitimate fast
+ *  decay and `Math.round` would turn it into 0 — the "never" sentinel — silently. */
+const RETENTION_BOUNDS = {
+  graceDays: [0, 365] as const,
+  vitalityFloor: [0, 90] as const,
+  halfLife: [0, 3650] as const,
+};
+const RETENTION_IMPORTANCE_KEYS = [1, 2, 3, 4, 5] as const;
+
+/** A fresh copy of the default retention block — the half-life map is nested, so a plain spread would
+ *  share one object between every config instance and a caller could mutate a sibling's defaults. */
+const defaultMemoryRetention = (): MemoryRetentionConfig => ({
+  ...DEFAULT_MEMORY_RETENTION,
+  halfLifeByImportance: { ...DEFAULT_MEMORY_RETENTION.halfLifeByImportance },
+});
+
+/** Merge a (possibly partial, possibly malformed) memory-retention patch onto `fallback` — per-field,
+ *  like the runtime limits: a missing/invalid field keeps the fallback, a present number is clamped to
+ *  its bound. The half-life map merges per importance key, so a patch tuning one level leaves the rest. */
+function clampMemoryRetention(next: Partial<MemoryRetentionConfig> | undefined, fallback: MemoryRetentionConfig): MemoryRetentionConfig {
+  const clamp = (v: number | undefined, [min, max]: readonly [number, number], cur: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : cur;
+  const halfLives: Record<number, number> = { ...fallback.halfLifeByImportance };
+  for (const key of RETENTION_IMPORTANCE_KEYS) {
+    // The spread guarantees every 1..5 key exists; the ?? only satisfies the indexed-read type.
+    const cur = halfLives[key] ?? 0;
+    halfLives[key] = clamp(next?.halfLifeByImportance?.[key], RETENTION_BOUNDS.halfLife, cur);
+  }
+  return {
+    enabled: typeof next?.enabled === 'boolean' ? next.enabled : fallback.enabled,
+    graceDays: clamp(next?.graceDays, RETENTION_BOUNDS.graceDays, fallback.graceDays),
+    vitalityFloor: clamp(next?.vitalityFloor, RETENTION_BOUNDS.vitalityFloor, fallback.vitalityFloor),
+    halfLifeByImportance: halfLives,
+  };
+}
+
 /** Per-model context-window overrides, keyed `providerId/model`. Some endpoints don't report a reliable
  *  max token count, so the operator can pin one. Keep only positive whole numbers; drop anything else. */
 function sanitizeContextWindows(input: unknown): Record<string, number> {
@@ -414,7 +462,7 @@ const DEFAULT_CONFIG: ElowenConfig = {
   // up before changing it, which has to work on a fresh install or it is never there when it is needed.
   plugins: { enabled: ['files', 'terminal', 'askuser', 'runtime-context', 'skills', 'subagent', 'elowen-docs'], removed: [] },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, memoryRetention: defaultMemoryRetention() },
   embedding: { providerId: '', model: '', baseUrl: '', dimensions: null },
   categorization: { providerId: '', model: '', baseUrl: '' },
 };
@@ -442,7 +490,7 @@ interface Stored {
   /** Brain provider entries with plaintext API keys — stripped to `apiKeySet` in the public view. */
   brain: { providers: BrainProviderStored[]; agentName: string; maxSteps: number; modelContextWindows: Record<string, number>; limits: BrainLimits; hiddenOauth: string[] };
   /** Runtime knobs. Holds no secret → surfaced verbatim in the public view. */
-  runtime: RuntimeConfig;
+  runtime: RuntimeConfigWithRetention;
   /** Embedding provider config. Holds no secret (the key is reused from the brain provider), so this
    *  block is safe to surface verbatim in the public view. */
   embedding: EmbeddingBlock;
@@ -501,7 +549,7 @@ const defaultStored = (): Stored => ({
   webPushContact: '',
   plugins: { enabled: [...DEFAULT_CONFIG.plugins.enabled], removed: [], config: {} },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled, memoryRetention: defaultMemoryRetention() },
   embedding: { ...DEFAULT_CONFIG.embedding },
   categorization: { ...DEFAULT_CONFIG.categorization },
 });
@@ -524,7 +572,7 @@ export interface ConfigPatch {
    *  apiKey KEEPS the currently stored key for that id — the UI never sees (or resends) secrets. */
   brain?: { providers?: unknown; agentName?: unknown; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
   /** Runtime knobs merged per-field (like the brain limits): a patch tuning one slider leaves the rest. */
-  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean };
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; memoryRetention?: Partial<MemoryRetentionConfig> };
   /** Embedding config is merged per-field (like autopilot); `dimensions: null` clears the width hint. */
   embedding?: { providerId?: string; model?: string; baseUrl?: string; dimensions?: number | null };
   /** Categorization config merged per-field (like embedding). */
@@ -590,6 +638,7 @@ export class ConfigStore {
         runtime: {
           limits: clampRuntimeLimits(p.runtime?.limits, d.runtime.limits),
           toolDeferralEnabled: typeof p.runtime?.toolDeferralEnabled === 'boolean' ? p.runtime.toolDeferralEnabled : d.runtime.toolDeferralEnabled,
+          memoryRetention: clampMemoryRetention(p.runtime?.memoryRetention, d.runtime.memoryRetention),
         },
         embedding: {
           providerId: typeof p.embedding?.providerId === 'string' ? p.embedding.providerId : d.embedding.providerId,
@@ -743,6 +792,7 @@ export class ConfigStore {
       runtime: {
         limits: clampRuntimeLimits(patch.runtime?.limits, cur.runtime.limits),
         toolDeferralEnabled: typeof patch.runtime?.toolDeferralEnabled === 'boolean' ? patch.runtime.toolDeferralEnabled : cur.runtime.toolDeferralEnabled,
+        memoryRetention: clampMemoryRetention(patch.runtime?.memoryRetention, cur.runtime.memoryRetention),
       },
       embedding: {
         providerId: patch.embedding?.providerId ?? cur.embedding.providerId,

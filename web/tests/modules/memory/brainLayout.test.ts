@@ -4,7 +4,7 @@ import type { Memory, MemoryCategory } from '../../../lib/types';
 
 const mem = (over: Partial<Memory> = {}): Memory => ({
   id: 1, user_id: 1, body: 'b', kind: '', importance: 3, confidence: 1, source: 'user',
-  status: 'active', created_at: '', updated_at: '', last_used_at: null, use_count: 0, category_id: null, ...over,
+  status: 'active', created_at: '', updated_at: '', last_used_at: null, use_count: 0, category_id: null, vitality: 50, ...over,
 });
 const cat = (over: Partial<MemoryCategory> = {}): MemoryCategory => ({
   id: 1, user_id: 1, name: 'C', description: '', color: '#22c55e', icon: '', is_builtin: 0, projectId: null, created_at: '', ...over,

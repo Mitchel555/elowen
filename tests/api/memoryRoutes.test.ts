@@ -199,7 +199,7 @@ describe('memory routes', () => {
     expect(Array.isArray(out.debug.scores)).toBe(true);
   });
 
-  it('retrieve is limited to global categories and never marks excluded memories used', async () => {
+  it('retrieve inspects every categorized memory and never marks memories used', async () => {
     const { app, amyId, amyTok, memoryCategoryStore, memoryStore } = setup({ embeddingConfigured: false });
     const global = memoryCategoryStore.create(amyId, { name: 'Global' });
     const project = memoryCategoryStore.create(amyId, { name: 'Project', projectId: 1 });
@@ -211,7 +211,8 @@ describe('memory routes', () => {
 
     const res = await app.request('/memory/retrieve', post(amyTok, { query: 'deploy' }));
 
-    expect((await res.json()).memories.map((memory: { id: number }) => memory.id)).toEqual([visible.id]);
+    expect((await res.json()).memories.map((memory: { id: number }) => memory.id).sort()).toEqual([visible.id, hidden.id].sort());
+    expect(memoryStore.get(amyId, visible.id)?.use_count).toBe(0);
     expect(memoryStore.get(amyId, hidden.id)?.use_count).toBe(0);
     expect(memoryStore.get(amyId, uncategorized.id)?.use_count).toBe(0);
   });

@@ -93,17 +93,35 @@ export interface BrainSearchHit { sessionId: string; sessionTitle: string; role:
 import type {
   ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef, AskQuestion, BrainStreamControl,
   BrainWorkMode, BrainPendingPlan,
-  User, BrainLimits, RuntimeConfig, RuntimeLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
+  User, BrainLimits, RuntimeConfig as WireRuntimeConfig, RuntimeLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
   CommitFileChange, CommitLogEntry,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
-export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, RuntimeConfig, RuntimeLimits, BrainUsage, CommitFileChange, CommitLogEntry };
+export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, RuntimeLimits, BrainUsage, CommitFileChange, CommitLogEntry };
 export type BrainMessage = BrainMessageView;
-// The memory DTOs keep their established web-side names while sharing the daemon's row shapes.
-export type Memory = MemoryRow;
+/** One stored memory as served by `GET /memory` — the daemon's `MemoryRow` plus its server-computed
+ *  vitality (0–100), attached by the route. The web only displays it; it never recomputes it (the
+ *  half-life table lives daemon-side). */
+export type Memory = MemoryRow & { vitality: number };
 export type MemoryCategory = MemoryCategoryRow;
 export type MemoryEvent = MemoryEventRow;
 export type BrainGoal = BrainGoalState;
+
+/** Memory auto-retention (`runtime.memoryRetention`), mirrored from `src/brain/memoryVitality.ts` — the
+ *  daemon serves the block inside `runtime` and the web editor mirrors the shape here so the two stay in
+ *  step (the wire contract deliberately does not import it, to avoid a cycle). `halfLifeByImportance`
+ *  keys are 1..5 in days; 0 is the "never" sentinel. */
+export interface MemoryRetentionConfig {
+  enabled: boolean;
+  graceDays: number;
+  vitalityFloor: number;
+  halfLifeByImportance: Record<number, number>;
+}
+
+/** The runtime block the daemon serves extends the wire shape with the retention group (see the daemon's
+ *  `RuntimeConfigWithRetention` in src/store/configStore.ts). Optional like `brain.limits`: a daemon
+ *  predating the feature serves the wire shape alone, and the editor seeds the defaults. */
+export type RuntimeConfig = WireRuntimeConfig & { memoryRetention?: MemoryRetentionConfig };
 
 /** One backwards page of chat history (lazy-load). `nextBefore` is the cursor for the next older page —
  *  null once the oldest turn has been loaded, which is also when `hasMore` is false. */
@@ -195,7 +213,7 @@ export interface ConfigPatch {
   /** Wholesale brain provider list; an entry may carry `apiKey` to (re)set that provider's secret. */
   brain?: { providers?: (Omit<BrainProvider, 'apiKeySet'> & { apiKey?: string })[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
   /** Runtime knobs merged per-field by the daemon, like the brain limits above. */
-  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean };
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; memoryRetention?: Partial<MemoryRetentionConfig> };
 }
 interface MissionPrInfo { branch: string; prNumber: number | null; prUrl: string | null; prState: string | null; fixRounds: number; lastFeedback: string | null }
 export interface UserPatch { is_admin?: boolean; allowed_execs?: string[]; disabled_tools?: string[] }

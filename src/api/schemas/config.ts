@@ -55,6 +55,16 @@ const runtimeLimitsPatchSchema = z.object({
   toastDurationMs: z.number().optional(),
 });
 
+/** The memory-retention block (auto-eviction), all optional — `ConfigStore.clampMemoryRetention` owns the
+ *  per-field clamp. `halfLifeByImportance` keys are the importance levels 1..5; values are days, with
+ *  0 meaning "never". */
+const memoryRetentionPatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  graceDays: z.number().optional(),
+  vitalityFloor: z.number().optional(),
+  halfLifeByImportance: z.record(z.number(), z.number()).optional(),
+});
+
 /** A patch to the daemon config (PUT /config, admin-only). Mirrors `ConfigPatch` field-for-field so a
  *  malformed value is rejected with a clear 400 instead of reaching the store as a supposed
  *  string/number/boolean it never was — the old `await c.req.json() as ConfigPatch` cast let e.g.
@@ -113,6 +123,7 @@ export const configPatchSchema = z.object({
   runtime: z.object({
     limits: runtimeLimitsPatchSchema.optional(),
     toolDeferralEnabled: z.boolean().optional(),
+    memoryRetention: memoryRetentionPatchSchema.optional(),
   }).optional(),
   embedding: z.object({
     providerId: z.string().optional(),

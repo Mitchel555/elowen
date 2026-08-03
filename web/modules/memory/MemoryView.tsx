@@ -29,12 +29,13 @@ import { MemoryBrainMap } from './MemoryBrainMap';
 import { CategoryManager, CategoryModal } from './CategoryManager';
 import { RetrievalDebugPanel } from './RetrievalDebugPanel';
 import { RankSlider, CategorySelect } from './MemoryFields';
-import { memoryStatusTone, memoryStatusLabel, distinctKinds, categoriesById, categorySwatch } from './memoryMeta';
+import { memoryStatusTone, memoryStatusLabel, distinctKinds, categoriesById, categorySwatch, vitalityPct, vitalityTone } from './memoryMeta';
+import type { Tone } from '../../components/ui/tone';
 
 type Tab = 'list' | 'brain' | 'retrieval';
 type StatusFilter = 'active' | 'archived' | 'deleted' | 'all';
 type Layout = 'flat' | 'grouped';
-type SortKey = 'updated' | 'importance';
+type SortKey = 'updated' | 'importance' | 'vitality';
 const TABS: readonly Tab[] = ['list', 'brain', 'retrieval'];
 const STATUS_VALUES: readonly StatusFilter[] = ['active', 'archived', 'deleted', 'all'];
 const LAYOUT_VALUES: readonly Layout[] = ['flat', 'grouped'];
@@ -92,7 +93,9 @@ export function MemoryView() {
       .sort((a, b) => {
         const delta = sortKey === 'importance'
           ? a.importance - b.importance
-          : a.updated_at.localeCompare(b.updated_at);
+          : sortKey === 'vitality'
+            ? a.vitality - b.vitality
+            : a.updated_at.localeCompare(b.updated_at);
         return sortDirection === 'asc' ? delta : -delta;
       });
   }, [memories.data, kind, categoryFilter, deferredQuery, sortDirection, sortKey]);
@@ -370,7 +373,7 @@ export function MemoryView() {
                 ) : (
                   <DataTable
                     ariaLabel={t.page.memory}
-                    columns="2rem minmax(0,1fr) 11rem 8rem 6rem 7rem 1.25rem"
+                    columns="2rem minmax(0,1fr) 10rem 7rem 6rem 6rem 7rem 1.25rem"
                     compactColumns="2rem minmax(0,1fr) 1.25rem"
                   >
                     <DataTableRow header>
@@ -390,6 +393,11 @@ export function MemoryView() {
                       <DataTableCell header>{t.page.memory}</DataTableCell>
                       <DataTableCell header priority="wide">{t.memory.categoryFilter}</DataTableCell>
                       <DataTableCell header priority="wide">{t.memory.filterKind}</DataTableCell>
+                      <DataTableCell header priority="wide" aria-sort={sortKey === 'vitality' ? (sortDirection === 'desc' ? 'descending' : 'ascending') : 'none'}>
+                        <button type="button" onClick={() => changeSort('vitality')} className="inline-flex items-center gap-1 hover:text-text">
+                          {t.memory.fieldVitality}{sortKey === 'vitality' ? <span aria-hidden>{sortDirection === 'desc' ? '↓' : '↑'}</span> : null}
+                        </button>
+                      </DataTableCell>
                       <DataTableCell header priority="wide" aria-sort={sortKey === 'importance' ? (sortDirection === 'desc' ? 'descending' : 'ascending') : 'none'}>
                         <button type="button" onClick={() => changeSort('importance')} className="inline-flex items-center gap-1 hover:text-text">
                           {t.memory.fieldImportance}{sortKey === 'importance' ? <span aria-hidden>{sortDirection === 'desc' ? '↓' : '↑'}</span> : null}
@@ -567,6 +575,9 @@ function MemoryRow({ memory, category, active, selected, onSelect, onToggleSelec
         ) : <span className="italic text-text-muted/65">{t.memory.categoryUncategorized}</span>}
       </DataTableCell>
       <DataTableCell priority="wide" className="truncate font-mono text-xs text-text-muted">{memory.kind || '—'}</DataTableCell>
+      <DataTableCell priority="wide" className="whitespace-nowrap text-xs">
+        <VitalityCell value={memory.vitality} />
+      </DataTableCell>
       <DataTableCell priority="wide" className="font-mono text-xs text-text-muted">
         <span className="flex items-center gap-1"><Gauge size={12} aria-hidden />{memory.importance}/5</span>
       </DataTableCell>
@@ -575,6 +586,25 @@ function MemoryRow({ memory, category, active, selected, onSelect, onToggleSelec
       </DataTableCell>
       <DataTableCell aria-hidden className="text-text-muted/50 transition-colors group-hover:text-text"><ChevronRight size={15} /></DataTableCell>
     </DataTableRow>
+  );
+}
+
+/** Vitality bar + score for one row. The bar's colour mirrors the tone scale used for lifecycle badges:
+ *  danger near the auto-retention floor, success when healthy. */
+const VITALITY_BAR_BG: Record<Tone, string> = {
+  default: 'bg-text-muted', accent: 'bg-accent', muted: 'bg-text-muted',
+  danger: 'bg-danger', success: 'bg-success', warning: 'bg-warning',
+};
+function VitalityCell({ value }: { value: number }) {
+  const pct = vitalityPct(value);
+  const tone = vitalityTone(value);
+  return (
+    <span className="flex items-center gap-1.5" title={`${pct}/100`}>
+      <span className="h-1.5 w-10 overflow-hidden rounded-full bg-elevated" aria-hidden>
+        <span className={`block h-full rounded-full ${VITALITY_BAR_BG[tone]}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className="font-mono tabular-nums text-text-muted">{pct}</span>
+    </span>
   );
 }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { ConfigStore } from '../../src/store/configStore.js';
+import { DEFAULT_MEMORY_RETENTION } from '../../src/brain/memoryVitality.js';
 
 /** The runtime knobs are the sibling group of the brain limits: same contract (whole numbers, per-field
  *  clamp, a partial patch never resetting a sibling), different domain. Every default here must equal the
@@ -19,6 +20,7 @@ describe('ConfigStore runtime limits', () => {
         toastDurationMs: 4_500,           // TOAST_MS
       },
       toolDeferralEnabled: true,
+      memoryRetention: DEFAULT_MEMORY_RETENTION,
     });
   });
 

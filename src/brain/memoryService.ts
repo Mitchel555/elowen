@@ -4,19 +4,18 @@ import { isEmbeddingConfigured } from '../embeddings/embeddingService.js';
 import { parseDbTs } from '../shared/time.js';
 import { currentMemoryRecallScope } from '../plugins/policyContext.js';
 import type { MemoryCategoryStore } from '../store/memoryCategoryStore.js';
+import { DEFAULT_MEMORY_RETENTION, USAGE_K, vitality } from './memoryVitality.js';
+import type { MemoryRetentionConfig } from './memoryVitality.js';
 import type { MemoryRecallScope } from './memoryRecallScope.js';
 
-/** Weight of each signal in the combined retrieval score. Semantic similarity dominates; importance,
- *  recency and usage nudge ties. Sums to 1.0. */
+/** Weight of each signal in the combined retrieval score. Semantic similarity dominates; importance
+ *  and vitality break ties. Sums to 1.0. */
 const W_SEMANTIC = 0.65;
 const W_IMPORTANCE = 0.15;
-const W_RECENCY = 0.1;
-const W_USAGE = 0.1;
+const W_VITALITY = 0.2;
 
 /** Recency decay half-life (days): a memory this old contributes ~0.5 to recencyWeight. */
 const RECENCY_HALF_LIFE_DAYS = 30;
-/** Usage saturation constant: use_count === USAGE_K maps to a usageWeight of 0.5. */
-const USAGE_K = 5;
 
 /** Two retrieved results whose vectors cosine at or above this are treated as the same memory — the
  *  lower-ranked one is dropped so the set isn't padded with paraphrases of one fact. */
@@ -30,7 +29,7 @@ const DEFAULT_CHAR_BUDGET = 1500;
  *  memory is unrelated — dropping it stops a small memory store from injecting every fact into every
  *  prompt (and keeps the manual search box on-topic). Cosine-scale, tuned for the current embedding
  *  models: genuinely related pairs land well above (~0.5+), unrelated noise sits ~0.1–0.2. Only the raw
- *  `semantic` component is floored; importance/recency/usage still reorder whatever survives.
+ *  `semantic` component is floored; importance and vitality still reorder whatever survives.
  *  The operator can retune it (Settings → Elowen AI → Runtime); this is the value when nothing is wired. */
 const MIN_SEMANTIC = 0.3;
 
@@ -47,6 +46,8 @@ export interface RetrieveOpts {
   charBudget?: number;
   /** Explicit turn scope. This takes precedence over AsyncLocalStorage for detached recall work. */
   scope?: MemoryRecallScope;
+  /** Whether returned memories count as an actual recall. Inspection must leave usage unchanged. */
+  markUsed?: boolean;
 }
 
 /** Per-memory score breakdown for the retrieval-debugging UI. In the keyword-fallback path `semantic`
@@ -136,6 +137,8 @@ export class MemoryService {
   /** Operator-tuned semantic relevance floor, in per mille of cosine similarity. Absent (or non-finite)
    *  → {@link MIN_SEMANTIC}. Read per call so a Settings change applies without a restart. */
   private readonly semanticFloorPerMille?: () => number;
+  /** Active memory-retention policy. Absent → the built-in vitality defaults. */
+  private readonly retention?: () => MemoryRetentionConfig;
 
   constructor(deps: {
     store: MemoryStore;
@@ -144,6 +147,7 @@ export class MemoryService {
     embeddingConfig: () => EmbeddingConfig | null;
     recallDefaults?: () => { count: number; chars: number };
     semanticFloorPerMille?: () => number;
+    retention?: () => MemoryRetentionConfig;
   }) {
     this.store = deps.store;
     this.categories = deps.categories;
@@ -151,6 +155,7 @@ export class MemoryService {
     this.embeddingConfig = deps.embeddingConfig;
     this.recallDefaults = deps.recallDefaults;
     this.semanticFloorPerMille = deps.semanticFloorPerMille;
+    this.retention = deps.retention;
   }
 
   /** The relevance floor on the cosine scale the scorers work in. */
@@ -159,16 +164,22 @@ export class MemoryService {
     return typeof configured === 'number' && Number.isFinite(configured) ? configured / PER_MILLE : MIN_SEMANTIC;
   }
 
+  /** Current vitality for a memory under the active retention policy. */
+  vitalityOf(memory: MemoryRow): number {
+    return vitality(memory, this.retention?.() ?? DEFAULT_MEMORY_RETENTION, Date.now());
+  }
+
   /** Retrieve the most relevant memories for `queryText`. Vector path: embed the query, cosine-score
-   *  every active memory that has an embedding, blend in importance/recency/usage, sort, dedupe
-   *  near-identical hits, and pack the top ones within maxCount + charBudget. Fallback path (no config
-   *  or embed throws): keyword hits merged with recent memories, ranked by keyword match + importance +
-   *  recency. Either way the returned set is markUsed'd and a full debug breakdown is returned. */
+   *  every active memory that has an embedding, blend in importance/vitality, sort, dedupe near-identical
+   *  hits, and pack the top ones within maxCount + charBudget. Fallback path (no config or embed throws):
+   *  keyword hits merged with recent memories, ranked by keyword match + importance + recency. Actual
+   *  recall marks the returned set as used; inspection can opt out and still receives full debug scores. */
   async retrieve(userId: number, queryText: string, opts: RetrieveOpts = {}): Promise<RetrieveResult> {
     const query = queryText.trim();
     const tuned = this.recallDefaults?.();
     const maxCount = opts.maxCount ?? tuned?.count ?? DEFAULT_MAX_COUNT;
     const charBudget = opts.charBudget ?? tuned?.chars ?? DEFAULT_CHAR_BUDGET;
+    const markUsed = opts.markUsed ?? true;
     const scope = this.recallScope(userId, opts.scope);
     const cfg = this.activeConfig();
     const provider = cfg ? (cfg.providerId ?? cfg.baseUrl ?? null) : null;
@@ -181,14 +192,14 @@ export class MemoryService {
     if (cfg) {
       try {
         const queryVec = await this.embeddings.embed(cfg, query);
-        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model, scope);
+        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model, scope, markUsed);
         // An embed that succeeds but clears nothing is not "no memory is relevant" — it is usually a
         // query too thin to score, like "fix it", which cannot reach the floor against any body no
         // matter how on-topic. Measured: that query peaks at 0.12 cosine and admits 0 of 53 memories.
         // The manual search box has fallen through to keyword for exactly this reason (searchSemantic);
         // recall silently returned nothing instead, which is where the "it forgot again" reports come from.
         if (semantic.memories.length > 0) return semantic;
-        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, true);
+        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, true, markUsed);
         // Keep the cosine breakdown from the pass that found nothing. Otherwise the debug panel reports
         // a bare "fallback" and cannot answer the only question worth asking here — how close the best
         // candidate actually came to the floor.
@@ -199,7 +210,7 @@ export class MemoryService {
       }
     }
 
-    return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope);
+    return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, false, markUsed);
   }
 
   /** Find active memories whose body is a near-duplicate of `body` (cosine ≥ threshold), sorted most
@@ -263,7 +274,7 @@ export class MemoryService {
     return this.store.search(userId, q, limit);
   }
 
-  /** Vector path: score every embedded memory, sort, dedupe, pack, markUsed. */
+  /** Vector path: score every embedded memory, sort, dedupe, pack, optionally mark as used. */
   private retrieveVector(
     userId: number,
     query: string,
@@ -273,8 +284,10 @@ export class MemoryService {
     provider: string | null,
     model: string | null,
     scope: MemoryRecallScope | undefined,
+    markUsed: boolean,
   ): RetrieveResult {
     const now = Date.now();
+    const retention = this.retention?.() ?? DEFAULT_MEMORY_RETENTION;
     const ranked: Candidate[] = this.recallable(this.store.listActiveWithEmbeddings(userId), ({ memory }) => memory, scope)
       .map(({ memory, vector }) => {
         const semantic = cosine(queryVec, vector);
@@ -282,7 +295,7 @@ export class MemoryService {
         const recencyWeight = recencyWeightOf(memory, now);
         const usageWeight = usageWeightOf(memory);
         const score = semantic * W_SEMANTIC + importanceWeight * W_IMPORTANCE
-          + recencyWeight * W_RECENCY + usageWeight * W_USAGE;
+          + (vitality(memory, retention, now) / 100) * W_VITALITY;
         return { memory, vector, score, semantic, importanceWeight, recencyWeight, usageWeight };
       })
       .sort((a, b) => b.score - a.score);
@@ -292,7 +305,7 @@ export class MemoryService {
     // every candidate (including the ones floored out).
     const eligible = ranked.filter((c) => c.semantic >= this.minSemantic());
     const picked = this.pack(eligible, maxCount, charBudget, true);
-    this.store.markUsed(userId, picked.map((c) => c.memory.id));
+    if (markUsed) this.store.markUsed(userId, picked.map((c) => c.memory.id));
     return {
       memories: picked.map((c) => c.memory),
       debug: { query, fallback: false, provider, model, candidates: ranked.length, scores: toScores(ranked, picked) },
@@ -300,7 +313,7 @@ export class MemoryService {
   }
 
   /** Keyword fallback: merge keyword hits with recent memories, rank by keyword match + importance +
-   *  recency (no vectors available), dedupe by exact body, pack, markUsed. */
+   *  recency (no vectors available), dedupe by exact body, pack, optionally mark as used. */
   private retrieveFallback(
     userId: number,
     query: string,
@@ -310,6 +323,7 @@ export class MemoryService {
     model: string | null,
     scope: MemoryRecallScope | undefined,
     keywordOnly = false,
+    markUsed = true,
   ): RetrieveResult {
     const now = Date.now();
     const keywordHits = this.recallable(this.store.search(userId, query, maxCount * 3), (memory) => memory, scope);
@@ -338,7 +352,7 @@ export class MemoryService {
       .sort((a, b) => b.score - a.score);
 
     const picked = this.pack(ranked, maxCount, charBudget, false);
-    this.store.markUsed(userId, picked.map((c) => c.memory.id));
+    if (markUsed) this.store.markUsed(userId, picked.map((c) => c.memory.id));
     return {
       memories: picked.map((c) => c.memory),
       debug: { query, fallback: true, provider, model, candidates: ranked.length, scores: toScores(ranked, picked) },

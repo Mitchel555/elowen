@@ -8,6 +8,13 @@ import {
   memoryCategorySuggestIconSchema, categorizationUpdateSchema, memoryReclassifySchema,
 } from '../schemas/memory.js';
 import type { ElowenApp, RouteContext } from '../context.js';
+import type { MemoryRow } from '../../shared/wireContract.js';
+
+type MemoryWithVitality = MemoryRow & { vitality: number };
+
+function withVitality(row: MemoryRow, memoryService: RouteContext['memoryService']): MemoryRow | MemoryWithVitality {
+  return memoryService ? { ...row, vitality: memoryService.vitalityOf(row) } : row;
+}
 
 /** How many pending memories one self-service /memory/reindex pass will re-embed. Bounded so a big
  *  backlog can't turn a single request into a long-running provider hammer — the rest drains via the
@@ -96,7 +103,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
   });
 
   // Retrieval-debugging: rank the caller's memories against a query and return the picked set plus the
-  // full scoring breakdown. POST because retrieve() mutates (markUsed) the returned memories.
+  // full scoring breakdown. Inspection deliberately does not mutate usage counters.
   app.post('/memory/retrieve', async (c) => {
     if (!ctx.memoryService) return c.json({ error: 'memory unavailable' }, 400);
     const { query } = await parseBody(c, memoryRetrieveSchema);
@@ -104,7 +111,10 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     // The inspector has no turn/project context, so scoping it like a real recall would collapse to the
     // caller's global categories and hide their project memories. Inspect across every category instead;
     // uncategorized stay excluded, matching what recall would never surface.
-    return c.json(await ctx.memoryService.retrieve(userId, query, { scope: ctx.memoryService.allCategoriesScope(userId) }));
+    return c.json(await ctx.memoryService.retrieve(userId, query, {
+      scope: ctx.memoryService.allCategoriesScope(userId),
+      markUsed: false,
+    }));
   });
 
   // Self-service re-embed of the caller's pending (missing/stale) memories. Bounded per request and
@@ -239,17 +249,20 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     const limit = c.req.query('limit');
     if (q && q.trim() !== '') {
       const lim = queryInt(limit, { min: 1, max: 500, fallback: 50 }); // guard NaN → LIMIT bind → 500
-      if (ctx.memoryService) return c.json(await ctx.memoryService.searchSemantic(userId, q, lim));
-      return c.json(store.search(userId, q, lim));
+      const rows = ctx.memoryService
+        ? await ctx.memoryService.searchSemantic(userId, q, lim)
+        : store.search(userId, q, lim);
+      return c.json(rows.map((row) => withVitality(row, ctx.memoryService)));
     }
     const cat = c.req.query('categoryId');
-    return c.json(store.list(userId, {
+    const rows = store.list(userId, {
       status: c.req.query('status'),
       kind: c.req.query('kind'),
       categoryId: cat === undefined ? undefined : (cat === '' || cat === 'null' ? null : Number(cat)),
       limit: queryInt(limit, { min: 1, max: 500, fallback: undefined }),
       offset: queryInt(c.req.query('offset'), { min: 0, fallback: undefined }),
-    }));
+    });
+    return c.json(rows.map((row) => withVitality(row, ctx.memoryService)));
   });
 
   // Create a memory for the caller (source='user', actor='user:<id>').
@@ -269,7 +282,7 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (!store) return c.json({ error: 'memory unavailable' }, 400);
     const row = store.get(c.get('user').id, Number(c.req.param('id')));
     if (!row) return c.json({ error: 'not found' }, 404);
-    return c.json(row);
+    return c.json(withVitality(row, ctx.memoryService));
   });
 
   // Partial update. The store scopes to the owner, so a patch aimed at a foreign id matches nothing and

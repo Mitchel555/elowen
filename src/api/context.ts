@@ -331,6 +331,7 @@ export function createRouteContext(d: ServerDeps): RouteContext {
         categories: d.memoryCategoryStore,
         embeddings: d.embeddings,
         embeddingConfig: () => toEmbeddingConfig(d.config.embeddingConfig()),
+        retention: () => d.config.get().runtime.memoryRetention,
       })
     : undefined;
 

@@ -76,6 +76,7 @@ import type { InferenceClient } from '../inference/types.js';
 import { EmbeddingService } from '../embeddings/embeddingService.js';
 import { EmbeddingQueue } from '../embeddings/embedQueue.js';
 import { MemoryService } from '../brain/memoryService.js';
+import { isEvictable, vitality, type MemoryRetentionConfig } from '../brain/memoryVitality.js';
 import { toEmbeddingConfig } from '../store/configStore.js';
 import { brainConfigFromElowen } from '../brain/config.js';
 import { loadAgentRegistry, agentCatalog, type AgentDef } from '../brain/agents/agentRegistry.js';
@@ -99,6 +100,33 @@ import { isExecAllowedForUser, isModelVisibleForUser, elowenExec } from '../shar
 import { BrainWorkerService } from '../brain/worker/brainWorker.js';
 
 const log = logger('daemon');
+
+const MEMORY_EVICTION_BATCH_SIZE = 1_000;
+
+export interface MemoryEvictionSweepDeps {
+  memories: Pick<MemoryStore, 'listActiveForEviction' | 'softDelete'>;
+  users: { list(): Iterable<{ id: number }> };
+  retention: () => MemoryRetentionConfig;
+  now: () => number;
+}
+
+/** Soft-delete low-vitality active memories while retaining an auditable, restorable trail. */
+export function runMemoryEvictionSweep(deps: MemoryEvictionSweepDeps): number {
+  const retention = deps.retention();
+  if (!retention.enabled) return 0;
+
+  const now = deps.now();
+  let removed = 0;
+  for (const user of deps.users.list()) {
+    for (const memory of deps.memories.listActiveForEviction(user.id, MEMORY_EVICTION_BATCH_SIZE)) {
+      if (!isEvictable(memory, retention, now)) continue;
+      const score = vitality(memory, retention, now);
+      const reason = `auto-evict: vitality ${score.toFixed(2)} < ${retention.vitalityFloor}`;
+      if (deps.memories.softDelete(user.id, memory.id, 'daemon', reason)) removed += 1;
+    }
+  }
+  return removed;
+}
 
 // Bounded ring of recent log lines, installed as the logger's single sink so it captures every
 // emitted line (including plugin output prefixed `[plugin:<name>]` and `plugin skipped: <name>`).
@@ -735,6 +763,7 @@ export async function buildApp(opts: BuildOpts) {
     // Relevance floor below which a memory counts as unrelated to the query (Elowen AI → Runtime), carried
     // in per mille of cosine similarity. Read live, like the recall size above.
     semanticFloorPerMille: () => config.get().runtime.limits.memorySemanticFloorPerMille,
+    retention: () => config.get().runtime.memoryRetention,
   });
   // Background embedder: fills in missing/stale memory vectors so writes never block on the provider.
   // Driven off a startLoops tick below; no-ops until an embedding provider/model is configured.
@@ -1139,6 +1168,21 @@ export async function buildApp(opts: BuildOpts) {
     };
     void purgeStaleSessions();
     const stopSessionPurge = clock.setInterval(() => void purgeStaleSessions(), 3_600_000);
+    // Retention is a daily, bounded soft-delete sweep. Deleted memories remain in the trash and keep
+    // their audit trail, so an operator can restore a false positive.
+    const sweepMemoryRetention = () => {
+      try {
+        const removed = runMemoryEvictionSweep({
+          memories: memoryStore,
+          users: { list: () => users.list() },
+          retention: () => config.get().runtime.memoryRetention,
+          now: () => clock.now(),
+        });
+        if (removed > 0) log.info(`memory retention: soft-deleted ${removed} memory item(s)`);
+      } catch (e) { log.error('memory retention sweep failed', e); }
+    };
+    sweepMemoryRetention();
+    const stopMemoryRetentionSweep = clock.setInterval(sweepMemoryRetention, 86_400_000);
     // Sweep expired terminal-WS tickets so a burst of unredeemed tickets can't grow the map unbounded.
     const stopTicketSweep = clock.setInterval(() => tickets.sweep(clock.now()), 60_000);
     // Reconcile chat terminals against live tmux: reap orphaned tokens/bindings and stray `elowen-chat-*`
@@ -1192,7 +1236,7 @@ export async function buildApp(opts: BuildOpts) {
     const stopEmbedQueue = clock.setInterval(() => {
       void embedQueue.drain().catch((e) => log.error('embed queue drain failed', e));
     }, 30_000);
-    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopTicketSweep(); stopTerminalSweep(); stopIdleSessionReap(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
+    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopMemoryRetentionSweep(); stopTicketSweep(); stopTerminalSweep(); stopIdleSessionReap(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
   };
   return { app, startLoops, tickets, tmux };
 }

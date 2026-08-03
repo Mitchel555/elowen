@@ -52,6 +52,18 @@ export function pct01(v: number): number {
   return Math.round(Math.max(0, Math.min(1, v)) * 100);
 }
 
+/** A 0..100 vitality score as an integer percent for compact display (clamped to the range). */
+export function vitalityPct(v: number): number {
+  return Math.round(Math.max(0, Math.min(100, v)));
+}
+
+/** Bar tone for a vitality score: danger near the auto-retention floor, success when healthy. */
+export function vitalityTone(v: number): Tone {
+  if (v < 30) return 'danger';
+  if (v < 65) return 'warning';
+  return 'success';
+}
+
 /** Fallback swatch color for a category whose `color` is blank. A muted token so the chip still reads. */
 const CATEGORY_FALLBACK_COLOR = 'var(--color-text-muted)';
 

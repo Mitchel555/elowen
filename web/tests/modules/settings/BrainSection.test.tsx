@@ -6,8 +6,21 @@ import { en } from '../../../lib/i18n/dictionaries/en';
 
 const saveProviders = vi.fn();
 const disconnect = vi.fn();
-const updateConfig = vi.fn(() => Promise.resolve());
-const CONFIG = { brain: { providers: [], agentName: 'Elowen', maxSteps: 20 } };
+const updateConfig = vi.fn(() => Promise.resolve(CONFIG));
+const CONFIG = {
+  brain: { providers: [], agentName: 'Elowen', maxSteps: 20 },
+  runtime: {
+    limits: {
+      localShellTimeoutMs: 30000, memorySemanticFloorPerMille: 300, toolDeferThreshold: 10, eventRetentionDays: 30,
+      streamSilenceLimitMs: 75000, streamReviveSilenceLimitMs: 45000, toastDurationMs: 4500,
+    },
+    toolDeferralEnabled: true,
+    memoryRetention: {
+      enabled: true, graceDays: 14, vitalityFloor: 10,
+      halfLifeByImportance: { 1: 30, 2: 60, 3: 120, 4: 240, 5: 0 },
+    },
+  },
+};
 // The daemon's /brain/oauth/status returns the full supported type set (OAUTH_BUILTIN); the rendered
 // account rows are derived from these keys, so the mock mirrors the endpoint faithfully.
 const OAUTH = { 'oauth-anthropic': true, 'oauth-openai-codex': false, 'oauth-github-copilot': false, 'oauth-kimi': false };
@@ -98,7 +111,7 @@ describe('BrainSection — OAuth account model picker', () => {
     expect(container.querySelectorAll('[data-settings-group]')).toHaveLength(3);
     // One row per OAuth account type (Claude, ChatGPT, Copilot, Kimi) plus the provider entries and the
     // two editor rows (Limits, Runtime).
-    expect(container.querySelectorAll('.settings-row')).toHaveLength(8);
+    expect(container.querySelectorAll('.settings-row')).toHaveLength(9);
     expect(container.querySelector('.spatial-group')).toBeNull();
     expect(container.querySelector('.border-y.divide-y')).toBeNull();
   });
@@ -211,5 +224,19 @@ describe('BrainSection — OAuth account model picker', () => {
     expect(screen.getByText(en.brain.disconnectConfirm.replace('{provider}', en.brain.types['oauth-anthropic']))).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: en.brain.disconnect }));
     expect(disconnect).toHaveBeenCalledWith('oauth-anthropic', expect.any(Object));
+  });
+
+  it('saves a memory-retention edit through the runtime draft autosave', async () => {
+    renderSection();
+    fireEvent.click(screen.getByRole('button', { name: en.brain.retention.manage }));
+    expect(screen.getByRole('dialog', { name: en.brain.retention.title })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('slider', { name: en.brain.retention.graceDays }), { target: { value: '30' } });
+    // The RuntimeLimits-style autosave PUTs the whole runtime block after the debounce — retention included.
+    await waitFor(() => expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      runtime: expect.objectContaining({
+        memoryRetention: expect.objectContaining({ graceDays: 30 }),
+      }),
+    })), { timeout: 3000 });
   });
 });

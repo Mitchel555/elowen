@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { Brain, Pencil, Trash2, RotateCcw, Check, Hash, Gauge, Clock, Activity } from 'lucide-react';
+import { Brain, Pencil, Trash2, RotateCcw, Check, Hash, Gauge, Clock, Activity, Zap, ShieldCheck } from 'lucide-react';
 import type { Memory } from '../../lib/types';
 import { useMemory, useMemoryCategories } from '../../lib/queries';
 import { useUpdateMemory, useSetMemoryCategory, useDeleteMemory, useRestoreMemory } from '../../lib/mutations';
@@ -16,7 +16,7 @@ import { AutoSaveStatus } from '../../components/ui/AutoSaveStatus';
 import { useAutoSaveStatus } from '../../lib/useAutoSaveStatus';
 import { useTranslation } from '../../lib/i18n';
 import { formatTaskTime } from '../../lib/format';
-import { memoryStatusTone, memoryStatusLabel, categorySwatch } from './memoryMeta';
+import { memoryStatusTone, memoryStatusLabel, categorySwatch, vitalityPct } from './memoryMeta';
 import { MemoryAuditFeed } from './MemoryAuditFeed';
 import { CategoryIcon } from '../../lib/categoryIcons';
 import { RankSlider, CategorySelect } from './MemoryFields';
@@ -100,6 +100,9 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-1.5">
               <Badge tone={memoryStatusTone(memory.status)}>{memoryStatusLabel(t, memory.status)}</Badge>
+              {!isDeleted && memory.importance === 5 ? (
+                <Badge tone="accent"><ShieldCheck size={10} className="mr-0.5" aria-hidden />{t.memory.neverDeleted}</Badge>
+              ) : null}
               {category ? (
                 <span className="inline-flex items-center gap-1 rounded-md border border-border bg-elevated px-2 py-0.5 text-[11px] font-medium text-text">
                   <span className="shrink-0" style={{ color: categorySwatch(category.color) }}>
@@ -170,8 +173,9 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
           <RankSlider label={t.memory.fieldImportance} icon={Gauge} value={importance} onChange={setImportance} />
         </>
       ) : (
-        <div className="grid grid-cols-2 divide-x divide-border/70 border-y border-border/70 @sm:grid-cols-3">
+        <div className="grid grid-cols-2 divide-x divide-border/70 border-y border-border/70 @sm:grid-cols-4">
           <Metric icon={Gauge} label={t.memory.fieldImportance} value={`${memory.importance} / 5`} />
+          <Metric icon={Zap} label={t.memory.fieldVitality} value={String(vitalityPct(memory.vitality))} title={`${t.memory.fieldVitality}: ${vitalityPct(memory.vitality)}/100`} />
           <Metric icon={Activity} label={t.memory.usage} value={memory.use_count > 0 ? t.memory.useCount.replace('{n}', String(memory.use_count)) : t.memory.neverUsed} />
           <Metric icon={Clock} label={t.memory.updatedAt} value={updated.label || '—'} title={updated.title} />
         </div>

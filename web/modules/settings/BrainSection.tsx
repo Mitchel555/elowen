@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useId, useRef, useState } from 'react';
-import { BrainCircuit, Plus, Pencil, Trash2, KeyRound, Link2, Unlink, ExternalLink, Check, ListChecks, SlidersHorizontal, Gauge, EyeOff } from 'lucide-react';
+import { BrainCircuit, Plus, Pencil, Trash2, KeyRound, Link2, Unlink, ExternalLink, Check, ListChecks, SlidersHorizontal, Gauge, EyeOff, ShieldCheck } from 'lucide-react';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -13,6 +13,7 @@ import { SelectionSummary } from '../../components/ui/SelectionSummary';
 import { Modal, ModalBody } from '../../components/ui/Modal';
 import { BrainLimitsModal, BRAIN_LIMIT_DEFAULTS } from './BrainLimitsModal';
 import { RuntimeLimitsModal, RUNTIME_LIMIT_DEFAULTS } from './RuntimeLimitsModal';
+import { MemoryRetentionModal, DEFAULT_MEMORY_RETENTION } from './MemoryRetentionModal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { LoadingState } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
@@ -23,7 +24,7 @@ import { useUpdateConfig } from '../../lib/mutations';
 import { useAutoSaveStatus, type SaveStatus } from '../../lib/useAutoSaveStatus';
 import { useSaveBrainProviders, useBrainOauthDisconnect } from '../../lib/mutations';
 import { elowenClient } from '../../lib/elowenClient';
-import type { BrainProvider, BrainProviderType, OAuthFlowState, BrainLimits, RuntimeConfig, RuntimeLimits } from '../../lib/types';
+import type { BrainProvider, BrainProviderType, OAuthFlowState, BrainLimits, RuntimeConfig, RuntimeLimits, MemoryRetentionConfig } from '../../lib/types';
 import { SettingsGroup, SettingsRow, SettingsState } from './SettingsSurface';
 
 // UI-only icon slug per OAuth type. The daemon exposes the SUPPORTED type set (the keys of
@@ -37,6 +38,9 @@ const OAUTH_ICON: Record<string, string> = {
   'oauth-kimi': 'kimi',
 };
 const API_TYPES: BrainProviderType[] = ['openai', 'anthropic'];
+
+/** The importance levels the retention block carries a half-life for (mirrors the daemon's clamp keys). */
+const RETENTION_IMPORTANCE_KEYS = [1, 2, 3, 4, 5] as const;
 
 // `temperature` is a string because the field is free text: '' means "send none", which is a distinct,
 // meaningful state rather than a missing value, and 0 is a legitimate setting.
@@ -301,6 +305,7 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
   const [modelsFor, setModelsFor] = useState<BrainProviderType | null>(null);
   const [limitsOpen, setLimitsOpen] = useState(false);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
+  const [retentionOpen, setRetentionOpen] = useState(false);
   const [disconnectTarget, setDisconnectTarget] = useState<BrainProviderType | null>(null);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
@@ -360,9 +365,16 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [runtimeSeeded, setRuntimeSeeded] = useState(false);
   const [appliedRuntime, setAppliedRuntime] = useState<Partial<RuntimeLimits>>({});
+  const [appliedRetention, setAppliedRetention] = useState<Partial<MemoryRetentionConfig>>({});
   useEffect(() => {
     if (config && !runtimeSeeded) {
-      setRuntime(config.runtime ?? { limits: RUNTIME_LIMIT_DEFAULTS, toolDeferralEnabled: true });
+      setRuntime({
+        limits: config.runtime?.limits ?? RUNTIME_LIMIT_DEFAULTS,
+        toolDeferralEnabled: config.runtime?.toolDeferralEnabled ?? true,
+        // A daemon predating the feature serves the runtime block without the retention group — seed the
+        // defaults so the editor always has the full block to edit (mirrors `brain.limits ?? defaults`).
+        memoryRetention: config.runtime?.memoryRetention ?? DEFAULT_MEMORY_RETENTION,
+      });
       setRuntimeSeeded(true);
     }
   }, [config, runtimeSeeded]);
@@ -377,6 +389,23 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
         if (value !== undefined && value !== runtime.limits[key]) clamped[key] = value;
       }
       setAppliedRuntime(clamped);
+      // The retention group clamps the same way (the daemon's RETENTION_BOUNDS) — report what actually
+      // took effect per field, including each half-life level.
+      const effectiveRetention = saved.runtime?.memoryRetention;
+      const sentRetention = runtime.memoryRetention;
+      const clampedRetention: Partial<MemoryRetentionConfig> = {};
+      if (effectiveRetention && sentRetention) {
+        if (effectiveRetention.enabled !== sentRetention.enabled) clampedRetention.enabled = effectiveRetention.enabled;
+        if (effectiveRetention.graceDays !== sentRetention.graceDays) clampedRetention.graceDays = effectiveRetention.graceDays;
+        if (effectiveRetention.vitalityFloor !== sentRetention.vitalityFloor) clampedRetention.vitalityFloor = effectiveRetention.vitalityFloor;
+        const clampedHalfLives: Record<number, number> = {};
+        for (const level of RETENTION_IMPORTANCE_KEYS) {
+          const got = effectiveRetention.halfLifeByImportance[level];
+          if (got !== undefined && got !== sentRetention.halfLifeByImportance[level]) clampedHalfLives[level] = got;
+        }
+        if (Object.keys(clampedHalfLives).length > 0) clampedRetention.halfLifeByImportance = clampedHalfLives;
+      }
+      setAppliedRetention(clampedRetention);
     }
     catch (error) { toast(t.brain.saveError, 'error'); throw error; }
   }, { ready: runtimeSeeded && !!runtime });
@@ -487,6 +516,13 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
             </button>
           </SettingsRow>
         ) : null}
+        {runtime ? (
+          <SettingsRow label={t.brain.retention.title} description={t.brain.retention.hint} icon={ShieldCheck}>
+            <button type="button" data-selection-manage className="spatial-inline-action" onClick={() => setRetentionOpen(true)}>
+              <ShieldCheck size={14} aria-hidden />{t.brain.retention.manage}
+            </button>
+          </SettingsRow>
+        ) : null}
       </SettingsGroup>
       {limits && limitsOpen ? (
             <BrainLimitsModal
@@ -503,6 +539,15 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
               applied={appliedRuntime}
               onChange={(fn) => setRuntime((cur) => (cur ? fn(cur) : cur))}
               onClose={() => setRuntimeOpen(false)}
+              presentation="drawer"
+            />
+      ) : null}
+      {runtime && retentionOpen ? (
+            <MemoryRetentionModal
+              runtime={runtime}
+              applied={appliedRetention}
+              onChange={(fn) => setRuntime((cur) => (cur ? fn(cur) : cur))}
+              onClose={() => setRetentionOpen(false)}
               presentation="drawer"
             />
       ) : null}

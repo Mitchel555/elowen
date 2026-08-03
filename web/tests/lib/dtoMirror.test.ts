@@ -192,7 +192,9 @@ describe('web DTO mirrors of daemon shapes', () => {
 describe('web types ARE the shared wire contract', () => {
   it('re-exports the shared shapes, not local copies', () => {
     expectTypeOf<WebUser>().toEqualTypeOf<WireUser>();
-    expectTypeOf<WebMemory>().toEqualTypeOf<WireMemoryRow>();
+    // Memory deliberately extends the shared row: the daemon's routes attach the server-computed
+    // `vitality` (the DTO's `MemoryWithVitality`), so the web shape is the raw row plus exactly that field.
+    expectTypeOf<WebMemory>().toEqualTypeOf<WireMemoryRow & { vitality: number }>();
     expectTypeOf<WebMemoryCategory>().toEqualTypeOf<WireMemoryCategoryRow>();
     expectTypeOf<WebMemoryEvent>().toEqualTypeOf<WireMemoryEventRow>();
     expectTypeOf<WebBrainLimits>().toEqualTypeOf<WireBrainLimits>();
