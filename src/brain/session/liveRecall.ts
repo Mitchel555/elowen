@@ -141,10 +141,12 @@ interface TurnState {
   /** Frozen rendered blocks, in the order they were produced, re-emitted verbatim on every later call. */
   blocks: string[];
   lastQuery: string;
+  /** Whether this turn already reported that it had nothing worth searching for. */
+  loggedSkip: boolean;
 }
 
 function freshTurn(): TurnState {
-  return { steered: false, passes: 0, chars: 0, injected: new Set(), blocks: [], lastQuery: '' };
+  return { steered: false, passes: 0, chars: 0, injected: new Set(), blocks: [], lastQuery: '', loggedSkip: false };
 }
 
 /** The one retrieval a session may have in flight. The hook mutates the object from the promise's own
@@ -250,18 +252,36 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
       const query = liveRecallQuery(messages, turn.steered);
       // Too thin to be worth an embedding call, or the work has not moved since the last pass — recalling
       // again would return the same memories and spend a pass proving it.
-      if (query.length < MIN_QUERY_CHARS || query === turn.lastQuery) return reEmit();
+      if (query.length < MIN_QUERY_CHARS || query === turn.lastQuery) {
+        // Reported once per turn: without it, "nothing to search for" and "searched and found nothing"
+        // are the same silence in the log, and the two need completely different fixes.
+        if (!turn.loggedSkip) {
+          turn.loggedSkip = true;
+          log.info(query.length < MIN_QUERY_CHARS
+            ? `no search: only ${query.length} chars of work so far (need ${MIN_QUERY_CHARS})`
+            : 'no search: the work has not moved since the last pass');
+        }
+        return reEmit();
+      }
       // Both are spent at ISSUE time, not at consume time: the pass budgets embedding searches and the
       // search happens now whether or not its result is ever consumed, and lastQuery must be set before
       // the result exists or the same query would be re-issued the moment the slot frees up.
       turn.lastQuery = query;
       turn.passes += 1;
+      log.info(`searching (pass ${turn.passes}/${budget.passes}): ${JSON.stringify(query.slice(0, 120))}`);
       pending = issueRetrieval(query, budget.count - turn.injected.size, budget.chars - turn.chars);
       return reEmit();
     }
 
     const fresh = found.filter((m) => !turn.injected.has(m.id));
-    if (fresh.length === 0) return reEmit();
+    if (fresh.length === 0) {
+      // Distinguishes "the search came back empty" from "everything it found is already in context" —
+      // the first points at the similarity floor, the second is the dedup working as intended.
+      log.info(found.length === 0
+        ? 'search returned no memory above the similarity floor'
+        : `search returned ${found.length} memory(ies), all already injected this turn`);
+      return reEmit();
+    }
 
     const rendered: string[] = [];
     for (const memory of fresh) {
