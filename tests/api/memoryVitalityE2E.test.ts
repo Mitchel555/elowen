@@ -94,7 +94,7 @@ describe('memory vitality retention E2E', () => {
       enabled: true,
       graceDays: 14,
       vitalityFloor: 60,
-      halfLifeByImportance: { 1: 10, 2: 0, 3: 120, 4: 240, 5: 0 },
+      halfLifeByImportance: { 1: 10, 2: 0, 3: 60, 4: 90, 5: 0 },
     };
     const configured = await app.request('/config', put(token, {
       runtime: { memoryRetention: retention },

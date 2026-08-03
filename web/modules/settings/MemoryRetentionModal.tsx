@@ -15,7 +15,7 @@ export const DEFAULT_MEMORY_RETENTION: MemoryRetentionConfig = {
   enabled: true,
   graceDays: 14,
   vitalityFloor: 10,
-  halfLifeByImportance: { 1: 30, 2: 60, 3: 120, 4: 240, 5: 0, },
+  halfLifeByImportance: { 1: 15, 2: 30, 3: 60, 4: 90, 5: 0, },
 };
 
 /** Which importance levels get a half-life knob. 5 is deliberately absent: the daemon never decays or
@@ -30,7 +30,7 @@ const RETENTION_FIELDS: { key: 'graceDays' | 'vitalityFloor'; min: number; max: 
   { key: 'vitalityFloor', min: 0, max: 90, icon: Gauge },
 ];
 /** Shared range for every half-life slider; 0 is the "never" sentinel, matching the daemon's bound. */
-const HALF_LIFE_RANGE: readonly [number, number] = [0, 3650];
+const HALF_LIFE_RANGE: readonly [number, number] = [0, 90];
 
 /** Modal editor for memory auto-retention (the `runtime.memoryRetention` block, sibling of the Runtime
  *  limits editor). Edits flow straight back into the caller's state, which auto-saves through the shared

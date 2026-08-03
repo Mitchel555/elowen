@@ -17,7 +17,7 @@ const CONFIG = {
     toolDeferralEnabled: true,
     memoryRetention: {
       enabled: true, graceDays: 14, vitalityFloor: 10,
-      halfLifeByImportance: { 1: 30, 2: 60, 3: 120, 4: 240, 5: 0 },
+      halfLifeByImportance: { 1: 15, 2: 30, 3: 60, 4: 90, 5: 0 },
     },
   },
 };

@@ -362,16 +362,17 @@ function clampRuntimeLimits(next: Partial<RuntimeLimits> | undefined, fallback: 
  *  stored view extends the wire type; web/lib/types.ts mirrors the block on its side. */
 type RuntimeConfigWithRetention = RuntimeConfig & { memoryRetention: MemoryRetentionConfig };
 
-/** Memory-retention bounds, matching the plan: a grace window up to a year, an eviction floor up to
- *  90/100 (the floor is a 0..100 vitality, so 90 leaves the top decile out of reach of the sweep), and
- *  half-lives up to a decade. 0 is the "never" sentinel (importance 5, and any explicitly-zero
- *  half-life) and must stay reachable, so the ranges are clamped, not shifted. Unlike the numeric
- *  runtime limits these are NOT rounded to whole numbers: a half-life of 0.4 days is a legitimate fast
- *  decay and `Math.round` would turn it into 0 — the "never" sentinel — silently. */
+/** Memory-retention bounds: a grace window up to a year, an eviction floor up to 90/100 (the floor is a
+ *  0..100 vitality, so 90 leaves the top decile out of reach of the sweep), and half-lives up to a
+ *  quarter year — the vitality score itself carries the retention curve, so a longer knob would only be
+ *  noise; keeping a memory forever is what the 0 "never" sentinel is for. 0 must stay reachable, so the
+ *  ranges are clamped, not shifted. Unlike the numeric runtime limits these are NOT rounded to whole
+ *  numbers: a half-life of 0.4 days is a legitimate fast decay and `Math.round` would turn it into 0 —
+ *  the "never" sentinel — silently. */
 const RETENTION_BOUNDS = {
   graceDays: [0, 365] as const,
   vitalityFloor: [0, 90] as const,
-  halfLife: [0, 3650] as const,
+  halfLife: [0, 90] as const,
 };
 const RETENTION_IMPORTANCE_KEYS = [1, 2, 3, 4, 5] as const;
 

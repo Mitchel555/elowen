@@ -13,10 +13,10 @@ export const DEFAULT_MEMORY_RETENTION: MemoryRetentionConfig = {
   graceDays: 14,
   vitalityFloor: 10,
   halfLifeByImportance: {
-    1: 30,
-    2: 60,
-    3: 120,
-    4: 240,
+    1: 15,
+    2: 30,
+    3: 60,
+    4: 90,
     5: 0,
   },
 };

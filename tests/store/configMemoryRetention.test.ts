@@ -20,7 +20,7 @@ describe('ConfigStore runtime.memoryRetention', () => {
       enabled: false,
       graceDays: 21,
       vitalityFloor: 25,
-      halfLifeByImportance: { 1: 10, 2: 25, 3: 50, 4: 100, 5: 0 },
+      halfLifeByImportance: { 1: 10, 2: 25, 3: 50, 4: 90, 5: 0 },
     };
     cs.update({ runtime: { memoryRetention: block } });
     expect(cs.get().runtime.memoryRetention).toEqual(block);
@@ -44,12 +44,12 @@ describe('ConfigStore runtime.memoryRetention', () => {
     expect(cs.get().runtime.memoryRetention.graceDays).toBe(0);
     expect(cs.get().runtime.memoryRetention.vitalityFloor).toBe(90);
     expect(cs.get().runtime.memoryRetention.halfLifeByImportance[1]).toBe(0);
-    expect(cs.get().runtime.memoryRetention.halfLifeByImportance[2]).toBe(3650);
+    expect(cs.get().runtime.memoryRetention.halfLifeByImportance[2]).toBe(90);
     // 0 is the "never" sentinel and must stay reachable on both ends.
     cs.update({ runtime: { memoryRetention: { graceDays: 9999, vitalityFloor: -1, halfLifeByImportance: { 1: 99999, 5: 0 } } } });
     expect(cs.get().runtime.memoryRetention.graceDays).toBe(365);
     expect(cs.get().runtime.memoryRetention.vitalityFloor).toBe(0);
-    expect(cs.get().runtime.memoryRetention.halfLifeByImportance[1]).toBe(3650);
+    expect(cs.get().runtime.memoryRetention.halfLifeByImportance[1]).toBe(90);
     expect(cs.get().runtime.memoryRetention.halfLifeByImportance[5]).toBe(0);
   });
 
