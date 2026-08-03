@@ -9,7 +9,7 @@ import type { MemoryCategorizer } from '../memoryCategorizer.js';
 
 /** The project facts the write path needs: a project id resolves to the row that names the lazily
  *  created project category (bound by id, named by slug). Structural — ProjectStore satisfies it. */
-export interface MemoryProjectLookup {
+interface MemoryProjectLookup {
   get(id: number): { id: number; slug: string } | null;
 }
 
