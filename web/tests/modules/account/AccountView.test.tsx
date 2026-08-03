@@ -94,7 +94,7 @@ describe('AccountView', () => {
       http.get('*/api/auth/me/cli-settings', () => HttpResponse.json({
         model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '',
         autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'concise', personalityBody: '',
-        discordUserId: '', whatsappNumber: '', autoRecall: true, autoSave: true,
+        discordUserId: '', whatsappNumber: '', autoRecall: true, autoLiveRecall: true, autoSave: true,
       })),
       http.patch('*/api/auth/me/cli-settings', () => HttpResponse.json({})),
     );

@@ -10,7 +10,7 @@ vi.mock('../../../lib/mutations', () => ({ useSaveMyCliSettings: () => ({ mutate
 const SEED: CliSettings = {
   model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '',
   autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'professional', personalityBody: '', discordUserId: '', whatsappNumber: '',
-  autoRecall: true, autoSave: true,
+  autoRecall: true, autoLiveRecall: true, autoSave: true,
 };
 const state = vi.hoisted(() => ({ error: false }));
 const mocks = vi.hoisted(() => ({ refetch: vi.fn() }));
@@ -38,8 +38,27 @@ describe('AccountMemorySection — error state', () => {
 describe('AccountMemorySection', () => {
   it('seeds the toggles and autosaves a change', async () => {
     renderSection();
-    const toggle = screen.getAllByRole('switch')[0]!;
+    const toggle = screen.getAllByRole('switch')[0];
+    if (!toggle) throw new Error('no toggle rendered');
     fireEvent.click(toggle);
     await waitFor(() => expect(mutate).toHaveBeenCalled(), { timeout: 1500 });
+  });
+
+  it('offers recall-while-working as its own switch and saves it independently', async () => {
+    renderSection();
+    // Three switches now: recall at turn start, recall while working, and auto-save. The middle one is
+    // the new one, and turning it off must not disturb the other two — an operator who wants the agent
+    // undisturbed mid-turn should not lose ordinary recall as a side effect.
+    const switches = screen.getAllByRole('switch');
+    expect(switches).toHaveLength(3);
+
+    const live = switches[1];
+    if (!live) throw new Error('the live-recall switch is missing');
+    fireEvent.click(live);
+
+    await waitFor(() => expect(mutate).toHaveBeenCalled(), { timeout: 1500 });
+    expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
+      autoLiveRecall: false, autoRecall: true, autoSave: true,
+    }));
   });
 });
