@@ -55,6 +55,12 @@ A few patterns make the views easier to interpret:
 - **Cache hit rate** tells you how much of that input the provider served from its prompt cache. A healthy long conversation often sits well above 50 %, because the stable prefix — system prompt, project context, earlier turns — is cached and only the new tail is billed fresh.
 - **Context percentage** is the one to watch mid-task. As it climbs toward the window size, older history needs compacting (see below), and very full contexts also make every turn slower and more expensive.
 
+## The prompt cache
+
+Providers serve most input from a prompt cache rather than re-processing the whole context on every request. A long conversation is a natural fit: the system prompt, project context, and earlier turns are byte-identical on every call, so reading them from the cache is both cheaper and faster than rewriting them from scratch. The cache only pays off while those bytes stay unchanged — anything that rewrites the middle of the context, such as re-attaching the same large file or churning files the agent re-reads every turn, invalidates the cached prefix and the whole context is billed fresh again.
+
+Elowen keeps the stable parts stable for exactly this reason. Recalled memories are injected at a fixed, anchored position in the context instead of appended wherever the work happens to be, so a mid-turn recall does not move the bytes the provider already cached. Historical images are likewise replaced by a short placeholder, because re-serializing an old image into every request would change those bytes every time. The **cache hit** row in `/stats`, and the cache volume on the web Stats page, show how well this is working.
+
 ## Cutting costs
 
 **Use a cheaper model for routine work.** Not every job needs the frontier model. Switch the conversation model with **`/model`**, and give scheduled jobs and delegated sub-agents a smaller model when the task is mechanical — summaries, cleanups, watchers. Provider and model setup is covered in [Agents & Providers](agents-providers).

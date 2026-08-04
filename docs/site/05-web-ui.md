@@ -160,12 +160,16 @@ Read [Projects & Workflow](projects-workflow) before enabling PR automation or a
 
 The **Memory** workspace is where you inspect, search, categorize, merge, restore, or purge durable facts. It is intentionally a workspace, not a hidden prompt cache: the list and selected-memory drawer keep the current selection and surrounding results visible together. See [Memory & Embeddings](memory) for how memory works and how it is configured.
 
+The workspace has three views — **List**, **Brain**, and **Retrieval**. The list's sortable **Vitality** column shows each memory's decay score as a bar and a number, the same score the automatic retention sweep compares against its floor. The detail drawer repeats vitality as a metric beside importance, usage, and the last-updated time.
+
+**Retrieval** is a debug tool for recall: run a query through the real retrieval pipeline and see what the assistant would actually receive — the embedding provider and model, how many memories would be injected, and for each one the score breakdown across semantic similarity, importance, recency, and usage.
+
 ## Settings and account
 
 Settings has one ordered set of sections:
 
 1. **System** — readiness, service state, updates, and token lifetime.
-2. **Elowen AI** — provider accounts, agent identity, limits, and context windows.
+2. **Elowen AI** — provider accounts, agent identity, limits, memory retention, and context windows.
 3. **Models** — available executor models and their notes.
 4. **CLI Agents** — installed coding-agent executors and their launch behavior.
 5. **Data** — operational data maintenance.

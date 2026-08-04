@@ -96,6 +96,10 @@ Plugins may request their dynamic context before or after the user's text. Both 
 
 Memory is per user and durable. Before a turn, Elowen retrieves a small, relevant set of memories; semantic retrieval is used when an embedding model is configured, otherwise it falls back to keyword retrieval. Retrieved text is framed as context rather than executable instruction.
 
+Recall does not stop at the start of a turn. The opening search is driven by your message alone, which says little once the work moves on to files, tools, and errors, so additional passes search again from what the turn has actually done. Mid-turn recall never blocks the answer: the search starts and the model proceeds, and any memory it finds lands in the context one model call later. Retrieved memories are injected at a fixed, anchored position rather than appended wherever the work happens to be, so their arrival does not move the bytes the provider's prompt cache already holds. Shared channel sessions do not run mid-turn recall, because one person's memories must never surface to another sender.
+
+Both recall paths have their own switch in **Account → Memory**: auto-recall searches after each message, and the "recall while working" toggle covers the mid-turn passes. Operators bound how many mid-turn searches a single turn may run and how much context their results may add in **Settings → Elowen AI → Limits** (recall while working — passes, memories, and tokens).
+
 After an owner exchange, optional curation can extract durable facts in a capped background operation. You can inspect, create, edit, categorize, merge, restore, or purge memories in the [Memory workspace](web-ui#memory).
 
 ![Memory workspace](images/brain-memory.png)

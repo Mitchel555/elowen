@@ -25,7 +25,7 @@ elowen -p "/status"         # non-interactive slash command
 elowen status                # daemon and Web UI health
 ```
 
-`elowen setup` configures a local account, project, provider, optional memory embeddings, and optional language-server support. `elowen install` is the separate shared-server provisioning flow; run `elowen install --help` before using it.
+`elowen setup` configures a local account, project, provider, optional memory embeddings, and optional language-server support. `elowen install` is the separate shared-server provisioning flow; run `elowen install --help` before using it. `elowen uninstall` removes what an install created: the systemd units (or launchd agents on macOS), the sudoers drop-in, the reverse-proxy vhost, the service user, and the install record — but only what the install record proves the install created, and never your data (`~/.config/elowen`: database, logs, config) unless you pass `--purge`. It stops the services before removing them, asks for confirmation by default, and prints the exact manual commands for any step it cannot complete; `--dry-run` previews the plan without touching anything.
 
 ## Chat
 
@@ -75,7 +75,7 @@ Sending a message while the agent is working queues it for delivery after the cu
 
 - **`↑`** with an empty input recalls the last queued message for editing. The server reconciles — if it was already delivered, it tells you so.
 - **leader `x`** drops the last queued message.
-- **`Esc`** while the agent is thinking arms a 1.8-second window; a second **`Esc`** within it aborts the turn, and a third hard-kills a pinned foreground command.
+- **`Esc`** while the agent is thinking arms a 1.8-second window; a second **`Esc`** within it aborts the turn, and a third hard-kills a pinned foreground command. The abort is acknowledged immediately — the notice reads "stopping…" rather than waiting for the streamed turn to visibly end. A fast double-`Esc` that the terminal delivers as a single chunk still counts as two presses, so the stop works no matter how quickly you type it.
 - **`Esc`** with a non-empty queue injects the queued message immediately instead of waiting for the turn to settle.
 
 ### Sub-agent interaction
@@ -193,11 +193,12 @@ Running workers also receive a narrow, authenticated control surface through env
 
 ```bash
 elowen up
-elowen down
+elowen down            # graceful: waits for running turns to finish, then stops
+elowen down --force    # stop immediately, abandoning in-flight work
 elowen status
 elowen update
 ```
 
-API-backed commands can start a local daemon when necessary; lifecycle commands manage services explicitly. See [Configuration](configuration) for environment variables and [Production & Updates](production-updates) for the service layout.
+API-backed commands can start a local daemon when necessary; lifecycle commands manage services explicitly. `elowen down` sends the daemon a graceful stop: it finishes running turns, sub-agents and undelivered results first, so a restart or deploy does not discard in-flight work; `--force` skips that wait. `status` and `down` only ever signal a process whose identity is verified as an elowen service (its entry script and the `ELOWEN_SERVICE` environment marker) — a live process that merely reused a pid is never touched. See [Configuration](configuration) for environment variables and [Production & Updates](production-updates) for the service layout.
 
 [Next: Slash Commands](slash-commands)

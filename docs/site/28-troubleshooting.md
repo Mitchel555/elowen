@@ -34,6 +34,18 @@ The same readiness data powers the setup wizard's finish screen and `GET /system
    - **Node version** — Elowen needs Node ≥22. Check with `node -v`.
    - **Missing tmux** — agents need tmux ≥3.x. Install it: `apt install tmux`.
 
+## Stopping takes longer than expected
+
+**Symptom:** `elowen down` takes minutes, or the daemon log shows `Stopping — waiting for N turn(s), M sub-agent(s)…`.
+
+The daemon shuts down gracefully by design: on SIGTERM or SIGINT it first finishes what is in flight — running turns, sub-agents, and undelivered results — and only then exits. That drain is deliberate: a deploy's `systemctl restart` or a reboot would otherwise cut a model turn or sub-agent off mid-work and discard its result. The daemon checks every half second and waits up to 10 minutes before giving up; the systemd unit's stop timeout is slightly longer, so systemd waits with it instead of killing it. `elowen down` uses this same path and only reports success once the services have actually exited (up to roughly 11 minutes).
+
+If you can't wait:
+
+1. Interrupt the stop again — a second SIGTERM/SIGINT makes the daemon exit immediately, dropping the remaining work.
+2. Run `elowen down --force` — it sends SIGKILL directly and never reaches the drain; anything in flight is lost.
+3. If the drain never completes on its own, a turn or sub-agent is probably wedged — check the daemon log for what it still reports as running, force the stop, and investigate there.
+
 ## Chat doesn't respond
 
 **Symptom:** you send a message (web, CLI, or channel) and get nothing back, or an error about the provider.

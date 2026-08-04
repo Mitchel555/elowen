@@ -25,7 +25,7 @@ The Settings surface follows one stable order. It is administrator-controlled; u
 | Section | What it controls |
 | --- | --- |
 | **System** | Version/readiness, service controls, automatic updates, and login-token lifetime. |
-| **Elowen AI** | Agent name, provider accounts, model context windows, max steps, runtime limits, and stale-conversation auto-cleanup. |
+| **Elowen AI** | Agent name, provider accounts, model context windows, max steps, runtime limits, memory retention, and stale-conversation auto-cleanup. |
 | **Models** | Enabled executor presets, custom entries, and model notes for planning. |
 | **CLI Agents** | External coding CLI binary, arguments, permission behavior, and resume behavior. |
 | **Data** | Explicit administrative maintenance and destructive cleanup. |
@@ -48,7 +48,7 @@ Watch these rails before launching a long autonomous run. A provider at warning 
 
 ### Brain limits
 
-The limits modal in Elowen AI exposes the eight runtime knobs that bound a single brain turn. Every value is clamped to a safe range, both in the form and again by the daemon.
+The limits modal in Elowen AI exposes the runtime knobs that bound a single brain turn. Every value is clamped to a safe range, both in the form and again by the daemon.
 
 | Limit | What it bounds |
 | --- | --- |
@@ -56,10 +56,29 @@ The limits modal in Elowen AI exposes the eight runtime knobs that bound a singl
 | Tool output max chars | Character cap on the same tool output, applied alongside the line cap. |
 | Elicitation timeout | How long the brain waits for an answer to a question it asks you. |
 | Memory recall count | How many memories are recalled into a turn's context. |
-| Memory recall chars | Character budget for the recalled memory block. |
+| Memory recall — tokens | Approximate token budget for the recalled memory block, counted at four characters per token. |
+| Recall while working — passes | How many times the assistant may recall again during a single turn, searching from the work in progress (open files, errors) rather than only your opening message. Set to 0 to switch this off. |
+| Recall while working — memories | The most memories these mid-turn passes may add over a whole turn, on top of those injected at its start. |
+| Recall while working — tokens | Approximate token budget the mid-turn passes may add over a whole turn, counted at four characters per token. |
 | Goal turn budget | Total turns an autonomous goal may spend before stopping. |
 | Goal max turns | Hard ceiling on turns for a single goal step. |
 | Channel session cap | How many live agent sessions one channel may hold at once. |
+
+### Memory retention
+
+Memory retention automatically clears out unused memories whose vitality has decayed. Every memory carries a vitality score from 0 to 100: it decays with disuse, and being recalled or used lifts it back up. An active memory whose vitality falls below the configured floor is softly moved to the trash — it keeps its audit trail and can be restored from the Memory workspace, so the sweep never destroys a fact outright.
+
+The editor lives in **Elowen AI**, next to Limits and Runtime, and the mechanism is on by default. The master switch turns the whole sweep off: while it is off, no memory is ever moved to the trash automatically, whatever the values below say.
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| Grace period | 14 days | 0–365 days | New memories are never removed within this window, however unused — they get a chance to be recalled. |
+| Vitality floor | 10 | 0–90 | An active memory whose vitality falls below this score is softly moved to the trash. Higher means more aggressive cleanup. |
+| Half-life — importance 1–4 | 15, 30, 60, 90 days | 0–90 days | How many days pass before an unused memory's vitality halves; 0 means never. |
+
+The half-life is set per importance level, 1 through 4. A zero half-life means the memory never decays and is never swept — that is what "never" means in the editor. Memories marked with the highest importance (5) are always exempt: they never decay and never land in the trash automatically, so the editor shows that level as pinned rather than editable.
+
+The sweep runs once a day and only ever soft-deletes, so a false positive can be restored from the trash.
 
 ## Models and CLI agents
 
