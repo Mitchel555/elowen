@@ -1115,7 +1115,7 @@ export const en = {
     usage: 'Usage',
     useCount: 'Used {n}×',
     neverUsed: 'Never used',
-    lastUsed: 'Last used',
+    usedAt: 'Used',
     // Timestamps
     createdAt: 'Created',
     updatedAt: 'Updated',

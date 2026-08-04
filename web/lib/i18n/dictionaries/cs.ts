@@ -1115,7 +1115,7 @@ export const cs = {
     usage: 'Využití',
     useCount: 'Použito {n}×',
     neverUsed: 'Nikdy nepoužito',
-    lastUsed: 'Naposledy použito',
+    usedAt: 'Použito',
     // Časové značky
     createdAt: 'Vytvořeno',
     updatedAt: 'Upraveno',

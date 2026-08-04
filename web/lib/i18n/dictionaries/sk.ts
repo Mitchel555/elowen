@@ -1115,7 +1115,7 @@ export const sk = {
     usage: 'Využitie',
     useCount: 'Použité {n}×',
     neverUsed: 'Nikdy nepoužité',
-    lastUsed: 'Naposledy použité',
+    usedAt: 'Použité',
     // Timestamps
     createdAt: 'Vytvorené',
     updatedAt: 'Upravené',

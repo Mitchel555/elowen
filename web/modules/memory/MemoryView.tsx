@@ -1,6 +1,6 @@
 'use client';
 import { useDeferredValue, useEffect, useMemo, useState } from 'react';
-import { Brain, Search, Plus, GitMerge, X, ListChecks, Sparkles, Hash, Gauge, Tags, Trash2, RotateCcw, Layers, ChevronLeft, ChevronRight, SlidersHorizontal, Clock, CheckCircle2, Archive } from 'lucide-react';
+import { Brain, Search, Plus, GitMerge, X, ListChecks, Sparkles, Hash, Gauge, Tags, Trash2, RotateCcw, Layers, ChevronLeft, ChevronRight, SlidersHorizontal, Clock, Activity, CheckCircle2, Archive } from 'lucide-react';
 import type { Memory, MemoryCategory } from '../../lib/types';
 import { useMemories, useMemoryCategories } from '../../lib/queries';
 import { useCreateMemory, useMergeMemories, useDeleteMemory, useRestoreMemory, usePurgeMemories, useEmptyTrash, useSetMemoryCategory } from '../../lib/mutations';
@@ -22,7 +22,7 @@ import { MotionLayoutItem, MotionPresence } from '../../components/ui/Motion';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
-import { formatTaskTime } from '../../lib/format';
+import { formatTaskTime, compactElapsed, parseTs } from '../../lib/format';
 import { CategoryIcon } from '../../lib/categoryIcons';
 import { MemoryDetail } from './MemoryDetail';
 import { MemoryBrainMap } from './MemoryBrainMap';
@@ -35,7 +35,7 @@ import type { Tone } from '../../components/ui/tone';
 type Tab = 'list' | 'brain' | 'retrieval';
 type StatusFilter = 'active' | 'archived' | 'deleted' | 'all';
 type Layout = 'flat' | 'grouped';
-type SortKey = 'updated' | 'importance' | 'vitality';
+type SortKey = 'updated' | 'used' | 'importance' | 'vitality';
 const TABS: readonly Tab[] = ['list', 'brain', 'retrieval'];
 const STATUS_VALUES: readonly StatusFilter[] = ['active', 'archived', 'deleted', 'all'];
 const LAYOUT_VALUES: readonly Layout[] = ['flat', 'grouped'];
@@ -95,7 +95,10 @@ export function MemoryView() {
           ? a.importance - b.importance
           : sortKey === 'vitality'
             ? a.vitality - b.vitality
-            : a.updated_at.localeCompare(b.updated_at);
+            // Never-used sorts as the oldest, so "least recently used" surfaces it first.
+            : sortKey === 'used'
+              ? (parseTs(a.last_used_at) ?? 0) - (parseTs(b.last_used_at) ?? 0)
+              : a.updated_at.localeCompare(b.updated_at);
         return sortDirection === 'asc' ? delta : -delta;
       });
   }, [memories.data, kind, categoryFilter, deferredQuery, sortDirection, sortKey]);
@@ -408,6 +411,11 @@ export function MemoryView() {
                           {t.memory.updatedAt}{sortKey === 'updated' ? <span aria-hidden>{sortDirection === 'desc' ? '↓' : '↑'}</span> : null}
                         </button>
                       </DataTableCell>
+                      <DataTableCell header priority="wide" aria-sort={sortKey === 'used' ? (sortDirection === 'desc' ? 'descending' : 'ascending') : 'none'}>
+                        <button type="button" onClick={() => changeSort('used')} className="inline-flex items-center gap-1 hover:text-text">
+                          {t.memory.usedAt}{sortKey === 'used' ? <span aria-hidden>{sortDirection === 'desc' ? '↓' : '↑'}</span> : null}
+                        </button>
+                      </DataTableCell>
                       <DataTableCell header role="presentation" aria-hidden>{null}</DataTableCell>
                     </DataTableRow>
 
@@ -536,6 +544,13 @@ function MemoryRow({ memory, category, active, selected, onSelect, onToggleSelec
 }) {
   const { t, locale } = useTranslation();
   const updated = formatTaskTime(memory.updated_at, Date.now(), locale);
+  // Recall recency stays relative at every distance ("12m", "5d") — the question this column answers is
+  // "how long since this was last read", not "on which date". The exact stamp lives in the tooltip.
+  const usedMs = parseTs(memory.last_used_at);
+  const used = {
+    label: usedMs == null ? '—' : compactElapsed(Date.now() - usedMs),
+    title: usedMs == null ? t.memory.neverUsed : formatTaskTime(memory.last_used_at, Date.now(), locale).title,
+  };
   return (
     <DataTableRow
       data-testid="memory-row"
@@ -583,6 +598,12 @@ function MemoryRow({ memory, category, active, selected, onSelect, onToggleSelec
       </DataTableCell>
       <DataTableCell priority="wide" title={updated.title} className="whitespace-nowrap text-xs text-text-muted">
         <span className="flex items-center gap-1.5"><Clock size={12} aria-hidden />{updated.label}</span>
+      </DataTableCell>
+      <DataTableCell priority="wide" title={used.title} className="whitespace-nowrap text-xs text-text-muted">
+        <span className="flex items-center gap-1.5" data-testid="memory-used-cell">
+          <Activity size={12} aria-hidden />
+          <span className={usedMs == null ? 'text-text-muted/60' : undefined}>{used.label}</span>
+        </span>
       </DataTableCell>
       <DataTableCell aria-hidden className="text-text-muted/50 transition-colors group-hover:text-text"><ChevronRight size={15} /></DataTableCell>
     </DataTableRow>

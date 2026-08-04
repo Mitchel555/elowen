@@ -59,7 +59,6 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
   const isDeleted = memory.status === 'deleted';
   const created = formatTaskTime(memory.created_at, Date.now(), locale);
   const updated = formatTaskTime(memory.updated_at, Date.now(), locale);
-  const lastUsed = memory.last_used_at ? formatTaskTime(memory.last_used_at, Date.now(), locale) : null;
 
   // Auto-save the edits — no Save button. Two writes: the body/kind/importance PATCH (only when one
   // changed) and, when it changed, the category via the dedicated PUT (the PATCH schema ignores it). An
@@ -91,37 +90,17 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Header — identity, status, actions */}
-      <div className="flex flex-col gap-3 border-b border-border/70 pb-4">
-        <div className="flex items-start gap-3">
-          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border bg-elevated/30">
-            <Brain size={22} className="text-text-muted" aria-hidden />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Badge tone={memoryStatusTone(memory.status)}>{memoryStatusLabel(t, memory.status)}</Badge>
-              {!isDeleted && memory.importance === 5 ? (
-                <Badge tone="accent"><ShieldCheck size={10} className="mr-0.5" aria-hidden />{t.memory.neverDeleted}</Badge>
-              ) : null}
-              {category ? (
-                <span className="inline-flex items-center gap-1 rounded-md border border-border bg-elevated px-2 py-0.5 text-[11px] font-medium text-text">
-                  <span className="shrink-0" style={{ color: categorySwatch(category.color) }}>
-                    <CategoryIcon name={category.icon} size={12} />
-                  </span>
-                  {category.name}
-                </span>
-              ) : null}
-              {memory.kind ? <Badge><Hash size={10} className="mr-0.5" aria-hidden />{memory.kind}</Badge> : null}
-              {memory.source ? <Badge tone="muted">{memory.source}</Badge> : null}
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-text-muted">
-              <span>#{memory.id}</span>
-              {created.label ? <><span aria-hidden className="opacity-50">·</span><span title={created.title}>{t.memory.createdAt} {created.label}</span></> : null}
-            </div>
-          </div>
+      {/* Identity strip — what this row IS and what can be done to it, on one line. The memory's own text
+          is the headline below, so nothing decorative competes with it above the fold. */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className="font-mono text-[11px] text-text-muted">#{memory.id}</span>
+          <Badge tone={memoryStatusTone(memory.status)}>{memoryStatusLabel(t, memory.status)}</Badge>
+          {!isDeleted && memory.importance === 5 ? (
+            <Badge tone="accent"><ShieldCheck size={10} className="mr-0.5" aria-hidden />{t.memory.neverDeleted}</Badge>
+          ) : null}
         </div>
-
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {editing ? (
             <>
               {/* Changes auto-save; the status shows saving/saved/error, and Done just leaves edit mode. */}
@@ -139,9 +118,10 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
         </div>
       </div>
 
-      {/* Body — editable */}
-      <Section label={t.memory.fieldBody}>
-        {editing ? (
+      {/* The memory itself. Reading it needs no caption, so the label appears only in edit mode, where the
+          textarea genuinely is a form field. */}
+      {editing ? (
+        <Section label={t.memory.fieldBody}>
           <textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}
@@ -149,10 +129,10 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
             placeholder={t.memory.fieldBodyPlaceholder}
             className="w-full resize-y rounded-md border border-border bg-surface px-3 py-2 text-sm leading-relaxed text-text placeholder:text-text-muted focus:border-accent focus:outline-none"
           />
-        ) : (
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-text">{memory.body}</p>
-        )}
-      </Section>
+        </Section>
+      ) : (
+        <p className="whitespace-pre-wrap text-sm leading-relaxed text-text" data-testid="memory-body">{memory.body}</p>
+      )}
 
       {editing ? (
         <>
@@ -173,17 +153,31 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
           <RankSlider label={t.memory.fieldImportance} icon={Gauge} value={importance} onChange={setImportance} />
         </>
       ) : (
-        <div className="grid grid-cols-2 divide-x divide-border/70 border-y border-border/70 @sm:grid-cols-4">
-          <Metric icon={Gauge} label={t.memory.fieldImportance} value={`${memory.importance} / 5`} />
-          <Metric icon={Zap} label={t.memory.fieldVitality} value={String(vitalityPct(memory.vitality))} title={`${t.memory.fieldVitality}: ${vitalityPct(memory.vitality)}/100`} />
-          <Metric icon={Activity} label={t.memory.usage} value={memory.use_count > 0 ? t.memory.useCount.replace('{n}', String(memory.use_count)) : t.memory.neverUsed} />
-          <Metric icon={Clock} label={t.memory.updatedAt} value={updated.label || '—'} title={updated.title} />
-        </div>
+        <>
+          {/* Classification and origin, below the text it describes. */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {category ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-border bg-elevated px-2 py-0.5 text-[11px] font-medium text-text">
+                <span className="shrink-0" style={{ color: categorySwatch(category.color) }}>
+                  <CategoryIcon name={category.icon} size={12} />
+                </span>
+                {category.name}
+              </span>
+            ) : null}
+            {memory.kind ? <Badge><Hash size={10} className="mr-0.5" aria-hidden />{memory.kind}</Badge> : null}
+            {memory.source ? <Badge tone="muted">{memory.source}</Badge> : null}
+            {created.label ? (
+              <span className="font-mono text-[11px] text-text-muted" title={created.title}>{t.memory.createdAt} {created.label}</span>
+            ) : null}
+          </div>
+          <div className="grid grid-cols-2 divide-x divide-border/70 border-y border-border/70 @sm:grid-cols-4">
+            <Metric icon={Gauge} label={t.memory.fieldImportance} value={`${memory.importance} / 5`} />
+            <Metric icon={Zap} label={t.memory.fieldVitality} value={String(vitalityPct(memory.vitality))} title={`${t.memory.fieldVitality}: ${vitalityPct(memory.vitality)}/100`} />
+            <Metric icon={Activity} label={t.memory.usage} value={memory.use_count > 0 ? t.memory.useCount.replace('{n}', String(memory.use_count)) : t.memory.neverUsed} />
+            <Metric icon={Clock} label={t.memory.updatedAt} value={updated.label || '—'} title={updated.title} />
+          </div>
+        </>
       )}
-
-      {lastUsed && !editing ? (
-        <p className="font-mono text-[11px] text-text-muted" title={lastUsed.title}>{t.memory.lastUsed}: {lastUsed.label}</p>
-      ) : null}
 
       {!editing ? <MemoryAuditFeed memoryId={memory.id} /> : null}
 
