@@ -183,6 +183,62 @@ describe('installCacheWatch — payload attribution', () => {
     expect(warnings()[0]?.message).toContain('tools changed (1 tool appended, count 1→2)');
   });
 
+  // Anthropic's tool search keeps `defer_loading` schemas out of the cached prefix, so the payload growing
+  // by one of them cannot be what broke the cache — blaming it sends the reader after the wrong culprit.
+  it('does not blame an appended DEFERRED tool for the drop', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    const first = providerPayload();
+    capture(first);
+    fire(assistantUsage(100_000, T0));
+    const tools = Array.isArray(first.tools) ? first.tools : [];
+    capture(providerPayload({
+      tools: [...tools, { name: 'mcp__chrome_devtools__list_pages', input_schema: { type: 'object' }, defer_loading: true }],
+    }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).not.toContain('tools changed');
+    expect(warnings()[0]?.message).toContain('1 deferred tool in the payload');
+    expect(warnings()[0]?.message).toContain('not the cause');
+    expect(warnings()[0]?.message).toContain('likely provider eviction or routing');
+  });
+
+  it('still blames an appended UNDEFERRED tool, and reports how many are deferred', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    const deferred = { name: 'mcp__chrome_devtools__list_pages', input_schema: { type: 'object' }, defer_loading: true };
+    const first = providerPayload({ tools: [{ name: 'Read', input_schema: { type: 'object' } }, deferred] });
+    capture(first);
+    fire(assistantUsage(100_000, T0));
+    const tools = Array.isArray(first.tools) ? first.tools : [];
+    capture(providerPayload({ tools: [...tools, { name: 'Grep', input_schema: { type: 'object' } }] }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()[0]?.message).toContain('tools changed (1 tool appended, count 2→3, 1 deferred)');
+  });
+
+  // The moment the model CALLS a deferred tool it moves into the immediate block, which does rewrite the
+  // cached prefix — the one deferred-tool transition that must stay loud.
+  it('blames a deferred tool that moved into the immediate block', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    const listPages = { name: 'mcp__chrome_devtools__list_pages', input_schema: { type: 'object' } };
+    capture(providerPayload({
+      tools: [{ name: 'Read', input_schema: { type: 'object' } }, { ...listPages, defer_loading: true }],
+    }));
+    fire(assistantUsage(100_000, T0));
+    capture(providerPayload({
+      tools: [{ name: 'Read', input_schema: { type: 'object' } }, listPages],
+    }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()[0]?.message).toContain('tools changed (segments mcp)');
+  });
+
   it('attributes system-prompt and tool-schema changes separately', () => {
     const monitor = createCachePayloadMonitor();
     const capture = payloadCapture(monitor);

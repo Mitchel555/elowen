@@ -27,6 +27,9 @@ const MAX_PENDING_SNAPSHOTS = 2;
 interface HashedSegment {
   hash: string;
   label: string;
+  /** Tool segments only: the schema carries Anthropic's `defer_loading`, so the API keeps it OUT of the
+   *  cached prefix (see {@link deferredOnlyAppend}). */
+  deferred?: true;
 }
 
 interface CachePayloadSnapshot {
@@ -34,6 +37,7 @@ interface CachePayloadSnapshot {
   toolsHash: string;
   tools: HashedSegment[];
   toolCount: number;
+  deferredToolCount: number;
   history: HashedSegment[];
   historyCount: number;
 }
@@ -62,6 +66,10 @@ function historyLabel(value: unknown, index: number): string {
   return `${index}:${role}${toolResult ? '/tool_result' : ''}`;
 }
 
+function isDeferredTool(value: unknown): boolean {
+  return record(value)?.defer_loading === true;
+}
+
 function snapshotPayload(value: unknown): CachePayloadSnapshot {
   const payload = record(value);
   const tools = Array.isArray(payload?.tools) ? payload.tools : [];
@@ -70,9 +78,12 @@ function snapshotPayload(value: unknown): CachePayloadSnapshot {
     systemHash: hash(payload?.system),
     toolsHash: hash(tools),
     tools: tools.slice(0, MAX_TRACKED_TOOL_SEGMENTS).map((tool, index) => ({
-      hash: hash(tool), label: safeToolLabel(tool, index),
+      hash: hash(tool),
+      label: safeToolLabel(tool, index),
+      ...(isDeferredTool(tool) ? { deferred: true as const } : {}),
     })),
     toolCount: tools.length,
+    deferredToolCount: tools.filter(isDeferredTool).length,
     history: messages.slice(0, MAX_TRACKED_HISTORY_SEGMENTS).map((message, index) => ({
       hash: hash(message), label: historyLabel(message, index),
     })),
@@ -214,26 +225,52 @@ function describeHistoryDelta(delta: SegmentDelta): string | undefined {
   }
 }
 
+/** Anthropic excludes `defer_loading` tools from the system-prompt prefix and expands them inline through
+ *  `tool_reference` blocks, so appending one CANNOT be what broke the prefix — reporting it as the cause
+ *  sends the reader after the wrong culprit (activating a deferred tool is exactly when the payload grows
+ *  by one deferred schema). Only an append is forgiven: a tool moving out of the deferred tail, or any
+ *  edit among the immediate ones, does change the cached block. Truncated tracking abstains, since the
+ *  appended segments may lie past the tracked window. */
+function deferredOnlyAppend(
+  delta: SegmentDelta,
+  previous: CachePayloadSnapshot,
+  current: CachePayloadSnapshot,
+): boolean {
+  if (delta.kind !== 'appended') return false;
+  if (previous.tools.length !== previous.toolCount || current.tools.length !== current.toolCount) return false;
+  const appended = current.tools.slice(previous.tools.length);
+  return appended.length > 0 && appended.every((segment) => segment.deferred === true);
+}
+
 function attributePayloadChange(
   previous: CachePayloadSnapshot | undefined,
   current: CachePayloadSnapshot | undefined,
 ): string {
   if (!previous || !current) return 'payload snapshot unavailable';
   const changes: string[] = [];
+  const notes: string[] = [];
   if (previous.systemHash !== current.systemHash) changes.push('system prompt changed');
   if (previous.toolsHash !== current.toolsHash) {
-    const detail = describeToolDelta(classifySegments(previous.tools, current.tools));
+    const delta = classifySegments(previous.tools, current.tools);
     const count = previous.toolCount === current.toolCount ? '' : `, count ${previous.toolCount}→${current.toolCount}`;
-    changes.push(`tools changed (${detail}${count})`);
+    if (deferredOnlyAppend(delta, previous, current)) {
+      notes.push(`${plural(current.deferredToolCount, 'deferred tool')} in the payload`
+        + `${count} — excluded from the cached prefix, so not the cause`);
+    } else {
+      const deferred = current.deferredToolCount > 0 ? `, ${current.deferredToolCount} deferred` : '';
+      changes.push(`tools changed (${describeToolDelta(delta)}${count}${deferred})`);
+    }
   }
   const historyDelta = describeHistoryDelta(classifySegments(previous.history, current.history));
   if (historyDelta) changes.push(historyDelta);
   if (current.historyCount < previous.historyCount) {
     changes.push(`history truncated ${previous.historyCount}→${current.historyCount}`);
   }
-  if (changes.length > 0) return changes.join('; ');
+  const suffix = notes.length > 0 ? ` [${notes.join('; ')}]` : '';
+  if (changes.length > 0) return `${changes.join('; ')}${suffix}`;
   const tracked = Math.min(previous.history.length, current.history.length);
-  return `tracked payload prefix unchanged (system, tools, first ${tracked} history messages); likely provider eviction or routing`;
+  const prefix = notes.length > 0 ? 'cached prefix unchanged' : 'tracked payload prefix unchanged';
+  return `${prefix} (system, tools, first ${tracked} history messages); likely provider eviction or routing${suffix}`;
 }
 
 type SessionEvent = { type?: string; message?: { role?: string; timestamp?: number; stopReason?: string; usage?: { cacheRead?: number } }; aborted?: boolean; result?: unknown };
