@@ -53,6 +53,18 @@ describe('useElowenEvents', () => {
     expect(onReview).toHaveBeenCalledWith({ missionId: 'm-1', taskId: 'elowen-9', approve: false, rationale: 'scope creep' });
   });
 
+  // A recall changes usage and vitality with nothing on the client to hang a refresh off — queries are
+  // SSE-driven and refetchOnWindowFocus is off, so without this the open list keeps stale counters.
+  it('refreshes the memory list and its vitality curves on a recall', () => {
+    const { spy, wrapper } = wrap();
+    renderHook(() => useElowenEvents(), { wrapper });
+
+    FakeES.last.emit({ type: 'memory', userId: 1 });
+
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['memories'] });
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['memory-vitality'] });
+  });
+
   it('does not reopen the SSE connection when only the onReview identity changes', () => {
     const { wrapper } = wrap();
     const first = vi.fn();

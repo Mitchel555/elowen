@@ -17,6 +17,8 @@ function toRow(e: ElowenEvent): { type: string; target: string; detail: string }
     case 'change': return null; // transient live-refresh ping (git is its own source of truth) — not persisted
     case 'ask': return null; // transient pending-ask nudge for the Escalations inbox — not persisted
     case 'plan': return null; // transient job-status ping — not part of the persistent timeline
+    // transient "your memory counters moved" nudge — memory_events is the durable record for memories
+    case 'memory': return null;
   }
 }
 

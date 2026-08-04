@@ -18,6 +18,9 @@ export type ElowenEvent =
   // Escalations inbox refetches. Not persisted — the `message` turns are the durable record.
   | { type: 'ask'; taskId: string }
   | { type: 'change'; taskId: string }
+  // A recall delivered memories to the model, so their usage counters and vitality just moved. Carries no
+  // memory content and no ids — only whose view is now stale. The /events gate gives it to that user alone.
+  | { type: 'memory'; userId: number }
   | { type: 'plan'; jobId: string; status: PlanJobStatus; epicId?: string; phases?: Phase[]; error?: string };
 
 export class EventBus implements SignalSink {

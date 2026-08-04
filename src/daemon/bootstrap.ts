@@ -764,6 +764,9 @@ export async function buildApp(opts: BuildOpts) {
     // in per mille of cosine similarity. Read live, like the recall size above.
     semanticFloorPerMille: () => config.get().runtime.limits.memorySemanticFloorPerMille,
     retention: () => config.get().runtime.memoryRetention,
+    // A recall moves usage and vitality with no user action behind it, so the open memory view would sit
+    // on stale numbers until it remounted (queries are SSE-driven, refetchOnWindowFocus is off).
+    onRecalled: (userId) => bus.publish({ type: 'memory', userId }),
   });
   // Background embedder: fills in missing/stale memory vectors so writes never block on the provider.
   // Driven off a startLoops tick below; no-ops until an embedding provider/model is configured.

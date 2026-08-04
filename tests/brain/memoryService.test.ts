@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { MemoryStore, hashBody } from '../../src/store/memoryStore.js';
 import { MemoryCategoryStore } from '../../src/store/memoryCategoryStore.js';
@@ -29,11 +29,11 @@ let globalCategoryId: number;
 function makeService(
   store: MemoryStore,
   table: Record<string, number[]>,
-  opts: { config?: EmbeddingConfig | null; failFor?: string } = {},
+  opts: { config?: EmbeddingConfig | null; failFor?: string; onRecalled?: (userId: number) => void } = {},
 ): MemoryService {
   const fake = new FakeEmbeddings(table, opts.failFor) as unknown as EmbeddingService;
   const config = opts.config === undefined ? CONFIG : opts.config;
-  return new MemoryService({ store, categories, embeddings: fake, embeddingConfig: () => config });
+  return new MemoryService({ store, categories, embeddings: fake, embeddingConfig: () => config, onRecalled: opts.onRecalled });
 }
 
 /** Add a memory and give it the embedding for its body from `table`. */
@@ -165,6 +165,20 @@ describe('MemoryService.retrieve', () => {
     expect(store.get(1, idHit)?.use_count).toBe(1);
     expect(store.get(1, idHit)?.last_used_at).not.toBeNull();
     expect(store.get(1, idMiss)?.use_count).toBe(0);
+  });
+
+  // A recall moves usage and vitality with no user action behind it, so an open memory view would sit on
+  // stale numbers. The nudge is what tells it to refetch — and an empty delivery is not a recall.
+  it('announces a delivered recall, and stays quiet when nothing was delivered', () => {
+    const onRecalled = vi.fn();
+    const id = addWithVec(store, 1, 'hit', {});
+    const svc = makeService(store, {}, { onRecalled });
+
+    svc.markRecalled(1, []);
+    expect(onRecalled).not.toHaveBeenCalled();
+
+    svc.markRecalled(1, [id]);
+    expect(onRecalled).toHaveBeenCalledWith(1);
   });
 
   it('falls back to keyword+recency when embeddings are not configured', async () => {

@@ -228,7 +228,14 @@ export function registerConfigRoutes(app: ElowenApp, ctx: RouteContext): void {
     // Per-subscriber tenancy gate: admin/open mode (null) streams everything; a tenant receives only
     // events in its projects. An event with no resolvable project is withheld from tenants — fail closed.
     const allowed = accessibleProjects(c);
+    // Absent when auth is disabled entirely (open mode) — there is exactly one identity then, and the
+    // gate below already streams everything, so a memory nudge is not scoped either.
+    const subscriber = c.get('user');
     const visible = (e: ElowenEvent): boolean => {
+      // A memory nudge belongs to exactly one user, and memories are private per user — so it is scoped by
+      // owner rather than by project, and an admin does not get another user's. Checked before the project
+      // gate, which would withhold it from every tenant (a memory event resolves to no project).
+      if (e.type === 'memory') return !subscriber || e.userId === subscriber.id;
       if (!allowed) return true;
       const pid = eventProjectId(e, eventDeps);
       return pid !== null && allowed.has(pid);

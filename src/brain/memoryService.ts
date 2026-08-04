@@ -138,6 +138,8 @@ export class MemoryService {
   private readonly semanticFloorPerMille?: () => number;
   /** Active memory-retention policy. Absent → the built-in vitality defaults. */
   private readonly retention?: () => MemoryRetentionConfig;
+  /** Nudged after a delivered recall so live views can refresh. Absent → nobody is listening. */
+  private readonly onRecalled?: (userId: number) => void;
 
   constructor(deps: {
     store: MemoryStore;
@@ -147,6 +149,9 @@ export class MemoryService {
     recallDefaults?: () => { count: number; chars: number };
     semanticFloorPerMille?: () => number;
     retention?: () => MemoryRetentionConfig;
+    /** Called after a delivered recall bumped the counters, so live views can refresh themselves. A
+     *  recall changes memory state without any user action, and nothing else would tell the UI. */
+    onRecalled?: (userId: number) => void;
   }) {
     this.store = deps.store;
     this.categories = deps.categories;
@@ -155,6 +160,7 @@ export class MemoryService {
     this.recallDefaults = deps.recallDefaults;
     this.semanticFloorPerMille = deps.semanticFloorPerMille;
     this.retention = deps.retention;
+    this.onRecalled = deps.onRecalled;
   }
 
   /** The relevance floor on the cosine scale the scorers work in. */
@@ -220,7 +226,9 @@ export class MemoryService {
    *  feeds straight into vitality, which decides what the retention sweep evicts — so the caller that
    *  knows what it actually handed over is the only one that can mark honestly. */
   markRecalled(userId: number, ids: number[]): void {
+    if (ids.length === 0) return;
     this.store.markUsed(userId, ids);
+    this.onRecalled?.(userId);
   }
 
   /** Find active memories whose body is a near-duplicate of `body` (cosine ≥ threshold), sorted most

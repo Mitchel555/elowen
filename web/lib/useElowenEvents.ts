@@ -98,6 +98,13 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
       }
     };
 
+    // A recall delivered memories to the model, so their usage counters and vitality moved with no user
+    // action to hang a refresh off. The daemon streams this only to the memories' owner.
+    const memoryHandler = makeHandler(() => {
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.memories });
+      qc.invalidateQueries({ queryKey: ['memory-vitality'] });
+    });
+
     // Same-origin SSE through the /api proxy; the httpOnly session cookie rides along via credentials.
     // Reconnects itself with capped exponential backoff so a daemon restart / proxy timeout recovers on
     // its own — load-bearing now that cache freshness relies on SSE invalidation, not a polling fallback.
@@ -127,6 +134,7 @@ export function useElowenEvents(opts?: { onReview?: (e: ReviewEvent) => void }):
       es.addEventListener('message', messageHandler);
       es.addEventListener('ask', askHandler);
       es.addEventListener('change', changeHandler);
+      es.addEventListener('memory', memoryHandler);
     }
 
     const reconnect = createReconnectController(connect);

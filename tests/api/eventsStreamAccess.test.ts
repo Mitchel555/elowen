@@ -34,7 +34,10 @@ function setup() {
     clock: new FakeClock(0), config: new ConfigStore(db),
     users, projects: new ProjectStore(db), userProjects,
   });
-  return { app, bus, adminTok: users.issueToken(admin.id), bobTok: users.issueToken(bob.id) };
+  return {
+    app, bus, admin, bob,
+    adminTok: users.issueToken(admin.id), bobTok: users.issueToken(bob.id),
+  };
 }
 const auth = (t: string) => ({ headers: { authorization: `Bearer ${t}` } });
 
@@ -75,5 +78,21 @@ describe('GET /events tenancy filtering', () => {
     const out = await streamAfter(app, adminTok, () => { bus.publish(foreign); bus.publish(home); });
     expect(out).toContain('"taskId":"t1"');
     expect(out).toContain('"taskId":"t2"');
+  });
+
+  // A memory nudge is scoped by OWNER, not by project — memories are private per user, and the project
+  // gate would either withhold it from every tenant (it resolves to no project) or hand it to any admin.
+  describe('memory recall nudges', () => {
+    it('reaches the owner even though the event has no project', async () => {
+      const { app, bus, bob, bobTok } = setup();
+      const out = await streamAfter(app, bobTok, () => { bus.publish({ type: 'memory', userId: bob.id }); });
+      expect(out).toContain('"type":"memory"');
+    });
+
+    it('is withheld from everyone else, admin included', async () => {
+      const { app, bus, bob, adminTok } = setup();
+      const out = await streamAfter(app, adminTok, () => { bus.publish({ type: 'memory', userId: bob.id }); });
+      expect(out).not.toContain('"type":"memory"');
+    });
   });
 });

@@ -33,5 +33,9 @@ export function eventProjectId(e: ElowenEvent, d: EventProjectDeps): number | nu
     case 'plan':
       // A plan job knows its target project up front; once the epic exists, resolve via it directly.
       return e.epicId ? d.taskProject(e.epicId) : d.jobProject(e.jobId);
+    case 'memory':
+      // Memories are scoped by owner, not by project. The SSE gate handles this event by user id before
+      // reaching here; null keeps it out of the project-scoped activity log.
+      return null;
   }
 }
