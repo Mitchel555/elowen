@@ -329,6 +329,10 @@ export class ChannelSessionService {
       }
       this.d.registry.channelTouch(opts.channelId, ch); // (re-)insert → Map order doubles as LRU order
       ch.turnSender = opts.identity?.userId; // whose turn this is → mid-run injection only steers same-sender messages in
+      // Same rule for mid-turn recall as for the turn-start block below: the verified sender's memories,
+      // nobody's when they are unlinked. Never the channel owner's — that would surface their memories
+      // into a stranger's turn in a shared room.
+      ch.turnRecallUserId = opts.writerUserId ?? null;
       // One channel turn. `turnText` is what the model reads (carries any channel-history backfill);
       // `senderMsg` is the sender's CLEAN words for the title + curator; `turnOnEvent` is the live stream
       // sink (which Discord message the reply edits into). Returns the assistant reply. A same-sender

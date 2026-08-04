@@ -1,4 +1,4 @@
-import { isChannelSession } from '../sessionId.js';
+import { isChannelSession, isSubagentSession } from '../sessionId.js';
 import type { PluginRegistry } from '../../plugins/registry.js';
 import { PluginHookBus } from '../../plugins/hookBus.js';
 import { logger } from '../../shared/logger.js';
@@ -13,7 +13,7 @@ import { buildPromptTemplates } from '../slashCommands.js';
 import { formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
 import { personalityText } from '../personality.js';
 import { currentWorkDir } from '../../plugins/policyContext.js';
-import { memoryRecallScope } from '../memoryRecallScope.js';
+import { globalMemoryRecallScope, memoryRecallScope } from '../memoryRecallScope.js';
 import type { BrainSessionFactory } from '../session/factory.js';
 import { resolveAutoCompactPct } from '../session/factory.js';
 import type { LiveBrain, SpawnOpts, QueuedMsg, TurnContextBlocks } from '../session/liveBrain.js';
@@ -70,7 +70,24 @@ interface SpawnerDeps {
  *  never surface one person's memories to another, and an ownerless session has no memory to search.
  *  Sub-agent sessions are channel-keyed (`brain-ch-subagent-*`), so the same test excludes them. */
 export function liveRecallAllowed(sessionId: string, ownerUserId: number): boolean {
-  return ownerUserId > 0 && !isChannelSession(sessionId);
+  return ownerUserId > 0 && !isSubagentSession(sessionId);
+}
+
+/** WHOSE memories a mid-turn recall may search — the actual leak boundary now that shared channels are
+ *  allowed through {@link liveRecallAllowed}.
+ *
+ *  An owner conversation is always its owner's. A channel serves several senders, so it is the VERIFIED
+ *  sender of the turn in flight (`turnRecallUserId`, set per turn by the channel service) and nobody at
+ *  all when that sender is unlinked — never the channel owner, whose memories would otherwise surface
+ *  into a stranger's turn in a room they share. This mirrors the rule the channel's turn-start recall
+ *  has always applied; the two must not drift apart. */
+export function liveRecallUserId(
+  sessionId: string,
+  ownerUserId: number,
+  turnRecallUserId: number | null | undefined,
+): number | null {
+  if (!isChannelSession(sessionId)) return ownerUserId > 0 ? ownerUserId : null;
+  return turnRecallUserId != null && turnRecallUserId > 0 ? turnRecallUserId : null;
 }
 
 export class LiveSessionSpawner {
@@ -238,6 +255,13 @@ export class LiveSessionSpawner {
       text: message.queuedText ?? message.text,
       images: message.images,
     }));
+    // Declared here (assigned far below, after subscribe) so the mid-turn recall wiring can read the
+    // running turn's identity off it. Same deferred-capture pattern as the event reducer's `getLive`.
+    let live!: LiveBrain;
+    // Resolved per pass rather than captured once: on a channel the identity belongs to the turn, not to
+    // the session. Safe because the channel lock serializes turns, so it cannot change under a running
+    // retrieval. The rule itself lives in liveRecallUserId, where a test can pin it.
+    const recallUserId = (): number | null => liveRecallUserId(sessionId, ownerUserId, live.turnRecallUserId);
     const { session, applyCompaction } = await this.d.factory.create({
       sessionId, ownerUserId, parentSessionId: opts.parentSessionId, delegatedAccess: opts.delegatedAccess,
       runtime: this.d.runtime, model, providerId, compactionFallbackModel: route.compactionFallback, cwd,
@@ -245,30 +269,40 @@ export class LiveSessionSpawner {
       tools: allTools, toolSearch: toolSearchHandle, thinkingLevel: opts.thinkingLevel, requestProfile,
       autoCompact: opts.autoCompact, autoCompactAtPct,
       pendingCompactionMessages,
-      // Recall again mid-turn, but only for a real owner conversation: a channel session serves several
-      // senders and must never surface one person's memories to another, and an ownerless task session
-      // has no memory to search. `enabled` and the budget are read per pass, so both the owner's toggle
-      // and the operator's limits take effect on a conversation that is already running.
+      // Recall again mid-turn. `enabled` and the budget are read per pass, so both the user's toggle and
+      // the operator's limits take effect on a conversation that is already running.
       ...(memService && liveRecallAllowed(sessionId, ownerUserId) ? {
         liveRecall: {
           budget: () => this.d.liveRecallBudget?.() ?? { passes: 0, count: 0, chars: 0 },
-          enabled: () => this.d.userSettings?.(ownerUserId)?.autoLiveRecall !== false,
+          enabled: () => {
+            const userId = recallUserId();
+            return userId !== null && this.d.userSettings?.(userId)?.autoLiveRecall !== false;
+          },
           retrieve: async (query: string, maxCount: number, charBudget: number) => {
+            const userId = recallUserId();
+            if (userId === null) return []; // an unlinked sender in a shared room recalls nothing
             // The retrieval continues after the context hook returns, so its AsyncLocalStorage scope is not
             // a reliable recall boundary. Resolve and pass the current turn's scope before awaiting it.
             const storedWorkDir = this.d.store.getSession(sessionId)?.work_dir || undefined;
             const recallCwd = clientDir(opts.policy, currentWorkDir() ?? storedWorkDir);
+            // A channel has no project of its own — its cwd is the policy root, not the sender's work —
+            // so it searches global categories only, exactly like its turn-start recall.
             const scope = memCats && memProjects
-              ? memoryRecallScope(ownerUserId, recallCwd, memCats, memProjects)
+              ? (isChannelSession(sessionId)
+                ? globalMemoryRecallScope(userId, memCats)
+                : memoryRecallScope(userId, recallCwd, memCats, memProjects))
               : { projectId: null, categoryIds: new Set<number>() };
-            const found = await memService.retrieve(ownerUserId, query, { maxCount, charBudget, scope });
+            const found = await memService.retrieve(userId, query, { maxCount, charBudget, scope });
             return found.memories.map((m) => ({
               id: m.id, body: m.body, kind: m.kind, importance: m.importance, updatedAt: m.updated_at,
             }));
           },
           // Marked here rather than inside retrieve(): a turn issues several passes whose results
           // overlap, and only the ones that survive the dedup actually reach the model.
-          onInjected: (ids) => memService.markRecalled(ownerUserId, ids),
+          onInjected: (ids) => {
+            const userId = recallUserId();
+            if (userId !== null) memService.markRecalled(userId, ids);
+          },
         },
       } : {}),
       // Project AGENTS.md/CLAUDE.md ride the system prompt for an ADMIN's own chat only. Two guards,
@@ -293,9 +327,6 @@ export class LiveSessionSpawner {
     // would silently go dark while the client believes it is still attached.
     for (const tap of this.d.sessionTaps(opts.sessionId)) listeners.add(tap);
     const replay = new LiveEventReplay(listeners);
-    // Image-carrying mirror of PI's mid-turn queue — the SAME array instances returned on the LiveBrain, so
-    // reconciling them here (in place) keeps the live wrapper's queue in sync. PI's public queue is text-only.
-    let live!: LiveBrain;
     // The stateful event reducer that projects raw PI events into the store and fans the BrainEvent
     // contract to clients. Extracted into spawnEventReducer.ts (its own deferred terminal state per
     // session); `getLive` defers the `live` capture because it is assigned below, after subscribe — and

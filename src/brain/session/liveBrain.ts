@@ -119,6 +119,12 @@ export interface LiveBrain {
    *  from this SAME sender, so one member can never inject instructions into another's (or the admin's)
    *  turn and inherit its policy/toolset. */
   turnSender?: string;
+  /** OUR user id whose memories mid-turn recall may search during the turn currently in flight. A channel
+   *  sets it to the VERIFIED sender, and to null for an unlinked one so a stranger's turn recalls nothing —
+   *  never the channel owner's, which would surface their memories into someone else's turn in a shared
+   *  room. The channel lock serializes turns, so it cannot change under a pass already running. Unset on
+   *  an owner chat, which resolves the identity from its owner instead. */
+  turnRecallUserId?: number | null;
   /** Image-carrying mirror of PI's native mid-turn queue (steering + follow-up), kept in sync via the
    *  `queue_update` event. PI's public queue is text-only and clearQueue() drops image attachments, so
    *  these hold what a positional queue-remove needs to re-queue the survivors WITH their images. Ordered

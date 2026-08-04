@@ -35,6 +35,7 @@ function fakeBrain(providerId = 'moonshot', model = 'kimi', onPrompt?: () => voi
     requestProfile: { fast: false }, fastAvailable: false, thinkingLabels: {},
     pluginToolNames: new Set<string>(),
     turnSender: undefined as number | undefined, interactedAt: undefined as number | undefined,
+    turnRecallUserId: undefined as number | null | undefined,
     listeners, replay: new LiveEventReplay(listeners), turnContext: () => ({ beforeUser, afterUser: '' }),
   };
 }
@@ -597,5 +598,45 @@ describe('ChannelSessionService — plugin prompt-command RAW routing', () => {
     await svc.send({ ...opts(7), senderPrefix: '[V]\n' }, '/notacommand');
     const live = registry.channelGet('discord-c1')!;
     expect(live.session.prompt).toHaveBeenCalledWith('CTX /notacommand'); // gate found no template → wrapped
+  });
+});
+
+/** Mid-turn recall in a shared room reads this field, so what the channel writes into it IS the privacy
+ *  boundary (the rule it feeds is pinned in liveRecallGate.test.ts). A channel serves several senders and
+ *  the session is owned by one of them, so falling back to the owner would hand their private memories to
+ *  whoever else happens to be typing. */
+describe('ChannelSessionService — whose memories a turn may recall', () => {
+  it('pins the verified sender for the turn', async () => {
+    const { registry, svc, channelId, opts } = setup();
+
+    await svc.send({ ...opts(7), writerUserId: 42 }, 'ahoj');
+
+    expect(registry.channelGet(channelId)!.turnRecallUserId).toBe(42);
+  });
+
+  it('leaves nobody pinned for an unlinked sender rather than falling back to the channel owner', async () => {
+    const { registry, svc, channelId, opts } = setup();
+
+    await svc.send(opts(7), 'ahoj'); // no linked account → no writerUserId
+
+    expect(registry.channelGet(channelId)!.turnRecallUserId).toBeNull();
+  });
+
+  it('re-pins on every turn, so the next sender never inherits the previous one\'s identity', async () => {
+    const { registry, svc, channelId, opts } = setup();
+    await svc.send({ ...opts(7), writerUserId: 42 }, 'first');
+
+    await svc.send({ ...opts(9), writerUserId: 8 }, 'second');
+
+    expect(registry.channelGet(channelId)!.turnRecallUserId).toBe(8);
+  });
+
+  it('clears the pin when a linked sender is followed by an unlinked one', async () => {
+    const { registry, svc, channelId, opts } = setup();
+    await svc.send({ ...opts(7), writerUserId: 42 }, 'first');
+
+    await svc.send(opts(9), 'second');
+
+    expect(registry.channelGet(channelId)!.turnRecallUserId).toBeNull();
   });
 });
