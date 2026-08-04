@@ -58,12 +58,15 @@ updates:
           - patch
 
   # ── Workflow actions ──────────────────────────────────────────────────────────────────────────────
-  # Left on: actions are referenced by major tag, so this only surfaces a genuine major bump — rare, and
-  # the only automated signal that the CI supply chain has moved. It produced none of the noise above.
+  # Also off. Every workflow references its action by floating major tag (actions/checkout@v7,
+  # actions/setup-node@v7, anthropics/claude-code-action@v1), which already receives patches without a
+  # pull request. Dependabot does not read it that way: it proposes replacing the tag with an exact
+  # version (v1 -> 1.0.183), which would trade automatic patches for a pull request per release.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
     groups:
       actions:
         patterns:
