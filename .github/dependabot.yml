@@ -1,9 +1,15 @@
 # Dependency update policy. Security updates are enabled at the repository level and run regardless of
 # this file; what is configured here is the routine VERSION updates on top of them.
 #
-# Everything is grouped so a week's drift arrives as a handful of reviewable pull requests rather than one
-# per package. Each pull request runs the full required-check matrix, so an update that breaks the daemon,
-# the web app or any platform E2E shows up red before it can reach main.
+# Routine version updates are OFF: `open-pull-requests-limit: 0` stops them for an ecosystem without
+# touching security updates, which keep arriving. The routine stream was producing about fifteen pull
+# requests a week — majors that need a deliberate migration, and minors with no security content — and
+# reviewing that volume crowded out the updates that actually matter. Security fixes are taken as they
+# come; the rest is done on purpose, in its own change, with the full gate run behind it.
+#
+# The grouping below is kept deliberately: it is the recipe for re-enabling the routine stream. Raise a
+# limit above zero and a week's drift arrives grouped, as a handful of reviewable pull requests rather
+# than one per package.
 version: 2
 updates:
   # ── Daemon / CLI / plugins ────────────────────────────────────────────────────────────────────────
@@ -11,7 +17,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       # The PI packages are pinned to an EXACT version on purpose: they ship breaking changes in patch
       # releases, and they must move in lockstep or the agent runtime fails to start. Grouping them keeps
@@ -38,7 +44,7 @@ updates:
     directory: /web
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       production:
         dependency-type: production
@@ -52,8 +58,8 @@ updates:
           - patch
 
   # ── Workflow actions ──────────────────────────────────────────────────────────────────────────────
-  # Actions are referenced by major tag, so this only surfaces a genuine major bump — rare, and worth
-  # reading when it happens.
+  # Left on: actions are referenced by major tag, so this only surfaces a genuine major bump — rare, and
+  # the only automated signal that the CI supply chain has moved. It produced none of the noise above.
   - package-ecosystem: github-actions
     directory: /
     schedule:
