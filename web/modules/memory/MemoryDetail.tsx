@@ -16,6 +16,7 @@ import { AutoSaveStatus } from '../../components/ui/AutoSaveStatus';
 import { useAutoSaveStatus } from '../../lib/useAutoSaveStatus';
 import { useTranslation } from '../../lib/i18n';
 import { formatTaskTime } from '../../lib/format';
+import { useNow } from '../../lib/useNow';
 import { memoryStatusTone, memoryStatusLabel, categorySwatch, vitalityPct } from './memoryMeta';
 import { MemoryAuditFeed } from './MemoryAuditFeed';
 import { MemoryVitalityChart } from './MemoryVitalityChart';
@@ -58,8 +59,9 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
 
   const category = memory.category_id != null ? (categories.data ?? []).find((c) => c.id === memory.category_id) : undefined;
   const isDeleted = memory.status === 'deleted';
-  const created = formatTaskTime(memory.created_at, Date.now(), locale);
-  const updated = formatTaskTime(memory.updated_at, Date.now(), locale);
+  const now = useNow();
+  const created = formatTaskTime(memory.created_at, now, locale);
+  const updated = formatTaskTime(memory.updated_at, now, locale);
 
   // Auto-save the edits — no Save button. Two writes: the body/kind/importance PATCH (only when one
   // changed) and, when it changed, the category via the dedicated PUT (the PATCH schema ignores it). An

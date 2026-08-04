@@ -23,6 +23,7 @@ import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { formatTaskTime, compactElapsed, parseTs } from '../../lib/format';
+import { useNow } from '../../lib/useNow';
 import { CategoryIcon } from '../../lib/categoryIcons';
 import { MemoryDetail } from './MemoryDetail';
 import { MemoryBrainMap } from './MemoryBrainMap';
@@ -562,13 +563,16 @@ function MemoryRow({ memory, category, active, selected, onSelect, onToggleSelec
   onNavigate: (direction: 'next' | 'previous' | 'home' | 'end') => void;
 }) {
   const { t, locale } = useTranslation();
-  const updated = formatTaskTime(memory.updated_at, Date.now(), locale);
+  // Both columns are elapsed times, so they have to keep counting on their own — a recall lands from the
+  // daemon, not from anything this row did, and a frozen "2m" would quietly go on lying.
+  const now = useNow();
+  const updated = formatTaskTime(memory.updated_at, now, locale);
   // Recall recency stays relative at every distance ("12m", "5d") — the question this column answers is
   // "how long since this was last read", not "on which date". The exact stamp lives in the tooltip.
   const usedMs = parseTs(memory.last_used_at);
   const used = {
-    label: usedMs == null ? '—' : compactElapsed(Date.now() - usedMs),
-    title: usedMs == null ? t.memory.neverUsed : formatTaskTime(memory.last_used_at, Date.now(), locale).title,
+    label: usedMs == null ? '—' : compactElapsed(now - usedMs),
+    title: usedMs == null ? t.memory.neverUsed : formatTaskTime(memory.last_used_at, now, locale).title,
   };
   return (
     <DataTableRow

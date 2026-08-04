@@ -1,5 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ToastProvider } from '../../../components/ui/Toast';
 import { createWrapper } from '../../test-utils';
 import type { Memory, MemoryCategory } from '../../../lib/types';
@@ -53,9 +53,14 @@ const memorySet = (): Memory[] => [
 beforeEach(() => {
   memories.mockReset();
   categories.mockReset();
-  memories.mockImplementation(() => rows(memorySet()));
+  // Build the stamps ONCE, not per render: the rows now read a ticking clock, so regenerating
+  // "3 hours ago" on every render would race it and land on 2h59m59s — floored to "2h".
+  const set = memorySet();
+  memories.mockImplementation(() => rows(set));
   categories.mockReturnValue(cats());
 });
+
+afterEach(() => { vi.useRealTimers(); });
 
 const renderView = () => render(<ToastProvider><MemoryView /></ToastProvider>, { wrapper: createWrapper().wrapper });
 
@@ -111,6 +116,23 @@ describe('MemoryView used column', () => {
     // Past a day `formatTaskTime` would render a calendar date ("12 Jun 10:00"); this column must not.
     expect(usedCellOf('long forgotten')).toContain('40d');
     expect(usedCellOf('long forgotten')).not.toMatch(/\d{2}:\d{2}/);
+  });
+
+  // The column is an elapsed time, and nothing on this page causes a re-render between refetches — so
+  // without its own clock it would keep showing whatever it read when the row first mounted.
+  it('keeps counting without a refetch', async () => {
+    // The clock must be fake BEFORE the row mounts, otherwise its heartbeat is a real interval that
+    // advancing a fake clock never reaches.
+    vi.useFakeTimers();
+    const set = [mem({ id: 1, body: 'read recently', last_used_at: agoIso(58_000), use_count: 1 })];
+    memories.mockImplementation(() => rows(set));
+    renderView();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(usedCellOf('read recently')).toContain('58s');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+
+    expect(usedCellOf('read recently')).toContain('1m');
   });
 
   it('marks a memory that was never recalled instead of showing an epoch', async () => {
