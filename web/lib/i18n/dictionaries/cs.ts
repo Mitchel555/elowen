@@ -1354,7 +1354,7 @@ export const cs = {
       vitalityFloor: "Práh vitality",
       vitalityFloorHint: "Aktivní paměť, jejíž vitalita klesne pod toto skóre, se měkce přesune do koše. Vyšší hodnota = důraznější úklid. Rozsah 0–90, výchozí 10.",
       halfLifeLevel: "Půlčas — důležitost {n}",
-      halfLifeHint: "Za kolik dní se vitalita nepoužívané paměti rozpůlí; 0 = nikdy. Nižší hodnota = paměť slábne rychleji a dříve dosáhne prahu. Výchozí 30/60/120/240 dní.",
+      halfLifeHint: "Za kolik dní se vitalita nepoužívané paměti rozpůlí; 0 = nikdy. Nižší hodnota = paměť slábne rychleji a dříve dosáhne prahu. Rozsah 0–90 dní, výchozí 15/30/60/90.",
       never: "Nikdy",
       pinned: "Důležitost 5 — nikdy se nemaže",
       pinnedHint: "Paměti s nejvyšší důležitostí nikdy neslábnou a do koše se automaticky nedostanou, bez ohledu na hodnoty výše.",

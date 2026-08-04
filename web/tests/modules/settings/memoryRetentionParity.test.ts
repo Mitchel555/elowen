@@ -81,3 +81,29 @@ describe('memory retention — web editor against the daemon clamp', () => {
     expect(webHalfLifeRange()).toEqual([0, 90]);
   });
 });
+
+/** The checks above compare STRUCTURE — tables against tables — and that is not what the user reads. The
+ *  hint prose quotes the same numbers, and it went stale silently once: after the half-life defaults were
+ *  retuned to 15/30/60/90 the hint still advertised the old 30/60/120/240, so the settings panel stated a
+ *  default the daemon had stopped using. The numbers are identical in every translation, so all three
+ *  dictionaries are read back against the daemon's own defaults. */
+const LOCALES = ['en', 'cs', 'sk'] as const;
+
+function halfLifeHint(locale: string): string {
+  const dictionary = read(`../../../lib/i18n/dictionaries/${locale}.ts`);
+  const found = /halfLifeHint: "([^"]+)"/.exec(dictionary);
+  expect(found, `halfLifeHint not found in ${locale}.ts`).toBeTruthy();
+  return found?.[1] ?? '';
+}
+
+describe('memory retention — the hint prose against the daemon defaults', () => {
+  it('quotes the half-life defaults the daemon actually ships, in every language', () => {
+    const levels = [1, 2, 3, 4].map((level) => daemonDefaults[String(level)]);
+    expect(levels.every((value) => typeof value === 'number'), 'daemon half-life defaults 1-4 not parsed').toBe(true);
+    const quoted = levels.join('/');
+
+    for (const locale of LOCALES) {
+      expect(halfLifeHint(locale), `${locale} half-life hint must quote ${quoted}`).toContain(quoted);
+    }
+  });
+});

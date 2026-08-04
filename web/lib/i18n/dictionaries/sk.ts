@@ -1354,7 +1354,7 @@ export const sk = {
       vitalityFloor: "Práh vitality",
       vitalityFloorHint: "Aktívna pamäť, ktorej vitalita klesne pod toto skóre, sa jemne presunie do koša. Vyššia hodnota = dôraznejšie upratovanie. Rozsah 0–90, predvolených 10.",
       halfLifeLevel: "Polčas — dôležitosť {n}",
-      halfLifeHint: "Za koľko dní sa vitalita nepoužívanej pamäte rozpoly; 0 = nikdy. Nižšia hodnota = pamäť slabne rýchlejšie a skôr dosiahne prah. Predvolených 30/60/120/240 dní.",
+      halfLifeHint: "Za koľko dní sa vitalita nepoužívanej pamäte rozpolí; 0 = nikdy. Nižšia hodnota = pamäť slabne rýchlejšie a skôr dosiahne prah. Rozsah 0–90 dní, predvolené 15/30/60/90.",
       never: "Nikdy",
       pinned: "Dôležitosť 5 — nikdy sa nemaže",
       pinnedHint: "Pamäti s najvyššou dôležitosťou nikdy neslabnú a do koša sa automaticky nedostanú, bez ohľadu na hodnoty vyššie.",

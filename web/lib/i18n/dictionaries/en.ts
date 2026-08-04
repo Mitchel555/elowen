@@ -1354,7 +1354,7 @@ export const en = {
       vitalityFloor: "Vitality floor",
       vitalityFloorHint: "An active memory whose vitality falls below this score is softly moved to the trash. Higher = more aggressive cleanup. Range 0-90, default 10.",
       halfLifeLevel: "Half-life — importance {n}",
-      halfLifeHint: "How many days pass before an unused memory's vitality halves; 0 = never. Lower = it fades faster and reaches the floor sooner. Defaults 30/60/120/240 days.",
+      halfLifeHint: "How many days pass before an unused memory's vitality halves; 0 = never. Lower = it fades faster and reaches the floor sooner. Range 0-90 days, defaults 15/30/60/90.",
       never: "Never",
       pinned: "Importance 5 — never removed",
       pinnedHint: "Memories marked with the highest importance never decay and never land in the trash automatically, whatever the values above say.",
