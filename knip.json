@@ -23,11 +23,7 @@
     }
   },
   "ignoreBinaries": [
-    "tmux",
-    "systemctl",
-    "which",
     "dot",
-    "gh",
     "elowen",
     "ollama",
     "pgrep"
