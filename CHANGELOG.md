@@ -5,7 +5,7 @@ All notable changes to Elowen are documented here. The format loosely follows
 
 ## [Unreleased]
 
-## [0.28.0] - 2026-08-04
+## [0.27.80] - 2026-08-04
 
 Memory grew up in this release: it now belongs to your projects, keeps recalling while a turn is still
 working, and looks after its own size. A prompt-cache bug that made long conversations roughly ten times
