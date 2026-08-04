@@ -15,7 +15,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-43853d.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
-[**Docs**](https://elowen.run) · [Getting started](./docs/site/01-getting-started.md) · [CLI](./docs/site/06-cli.md) · [Web UI](./docs/site/05-web-ui.md) · [Architecture](./docs/site/12-architecture.md)
+[**Docs**](https://elowen.run) · [Getting started](./docs/site/01-getting-started.md) · [CLI](./docs/site/06-cli.md) · [Web UI](./docs/site/05-web-ui.md) · [Architecture](./docs/ARCHITECTURE.md)
 
 </div>
 
@@ -170,7 +170,7 @@ Chat-platform plugins ────────────────┤
                                       └──> tmux workers / embedded brain
 ```
 
-The daemon owns state, scheduling, agent sessions, plugins, and the API. The Web UI talks through a same-origin backend-for-frontend proxy; the CLI is a client of the same daemon. See [Architecture](./docs/site/12-architecture.md) for the precise boundaries.
+The daemon owns state, scheduling, agent sessions, plugins, and the API. The Web UI talks through a same-origin backend-for-frontend proxy; the CLI is a client of the same daemon. See [Architecture](./docs/ARCHITECTURE.md) for the precise boundaries.
 
 ## Documentation
 
@@ -180,16 +180,18 @@ The full user guide lives at **[elowen.run](https://elowen.run)** and in [`docs/
 |---|---|
 | [Getting started](./docs/site/01-getting-started.md) | First run, setup wizard, your first conversation |
 | [Installation](./docs/site/02-install.md) | Requirements, providers, non-interactive setup |
-| [Tasks & missions](./docs/site/03-tasks-missions.md) | Units of work, epics, phases, autonomy |
-| [Agents & autonomy](./docs/site/04-agents-autonomy.md) | Goals, delegation, pilots and overseers, permissions |
+| [Tasks & missions](./docs/site/13-tasks-missions.md) | Units of work, epics, phases, autonomy |
+| [Agents & autonomy](./docs/site/15-autonomy-safety.md) | Goals, delegation, pilots and overseers, permissions |
 | [Web UI](./docs/site/05-web-ui.md) | The operational surfaces and how they fit together |
 | [CLI](./docs/site/06-cli.md) | Terminal chat, commands, session control |
-| [Brain & chat](./docs/site/07-brain-chat.md) | The embedded agent, models, context assembly |
-| [Plugins](./docs/site/08-plugins.md) | Bundled plugins, manifests, the registry API |
-| [Projects & workflow](./docs/site/09-projects-workflow.md) | Projects, editor, Git worktrees, pull requests |
-| [Configuration](./docs/site/10-configuration.md) | Settings, providers, limits, embeddings |
-| [Account & security](./docs/site/11-account-security.md) | Users, roles, permissions, isolation |
-| [Architecture](./docs/site/12-architecture.md) | Daemon, BFF proxy, boundaries |
+| [Brain & chat](./docs/site/09-brain-chat.md) | The embedded agent, models, context assembly |
+| [Memory](./docs/site/10-memory.md) | Durable memory, project scope, vitality and retention |
+| [Channels](./docs/site/18-channels.md) | Discord, Telegram, Teams and WhatsApp surfaces |
+| [Plugins](./docs/site/23-plugins.md) | Bundled plugins, manifests, the registry API |
+| [Projects & workflow](./docs/site/16-projects-workflow.md) | Projects, editor, Git worktrees, pull requests |
+| [Configuration](./docs/site/26-configuration.md) | Settings, providers, limits, embeddings |
+| [Account & security](./docs/site/27-users-access.md) | Users, roles, permissions, isolation |
+| [Architecture](./docs/ARCHITECTURE.md) | Daemon, BFF proxy, boundaries |
 
 Contributor references: [development](./docs/DEVELOPMENT.md) · [plugin development](./docs/PLUGIN_DEV.md) · [API](./docs/API.md) · [testing](./docs/TESTING.md).
 
@@ -198,7 +200,7 @@ Contributor references: [development](./docs/DEVELOPMENT.md) · [plugin developm
 ```bash
 npm test              # backend test suite
 npm run build         # type-check and build the daemon
-npm run check         # lint + typecheck
+npm run check         # lint + knip + depcruise + typecheck + language sync
 cd web && npm test    # web test suite
 cd web && npm run dev # run the Web UI in dev mode
 ```
@@ -213,7 +215,7 @@ Elowen is a small, self-hosted stack of stable, modern tooling — no external s
 |---|---|
 | **Runtime** | [Node.js](https://nodejs.org) 22+ (ESM), distributed on [npm](https://www.npmjs.com/package/elowen) |
 | **Agent core** | The [PI](https://www.npmjs.com/package/@earendil-works/pi-ai) SDK — `pi-ai`, `pi-coding-agent`, and the `pi-tui` terminal UI |
-| **Daemon & API** | [Hono](https://hono.dev) on `@hono/node-server`, with `@hono/node-ws` for the WebSocket terminal |
+| **Daemon & API** | [Hono](https://hono.dev) on `@hono/node-server`, with `ws` for the WebSocket terminal |
 | **Storage** | [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) — a single SQLite file |
 | **Web UI** | [Next.js](https://nextjs.org) (standalone) + React |
 | **Agent execution** | [tmux](https://github.com/tmux/tmux) sessions, with [node-pty](https://github.com/microsoft/node-pty) for live PTY streaming |
