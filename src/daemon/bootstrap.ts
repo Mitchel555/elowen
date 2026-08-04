@@ -69,7 +69,7 @@ import { ModelRuntime, readStoredCredential } from '@earendil-works/pi-coding-ag
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { bearerFromAuth, type BrainCredentialAccess } from '../brain/providerUsage.js';
 import { BrainStore } from '../store/brainStore.js';
-import { MemoryStore } from '../store/memoryStore.js';
+import { MemoryStore, USAGE_HISTORY_DAYS } from '../store/memoryStore.js';
 import { MemoryCategoryStore } from '../store/memoryCategoryStore.js';
 import { MemoryCategorizer } from '../brain/memoryCategorizer.js';
 import type { InferenceClient } from '../inference/types.js';
@@ -1180,6 +1180,12 @@ export async function buildApp(opts: BuildOpts) {
         });
         if (removed > 0) log.info(`memory retention: soft-deleted ${removed} memory item(s)`);
       } catch (e) { log.error('memory retention sweep failed', e); }
+      // Recall events are the one memory table that grows with traffic (hundreds of rows a day), so it
+      // is pruned by age. Its own try: an eviction failure must not leave the log growing unbounded.
+      try {
+        const dropped = memoryStore.purgeUsageEventsOlderThan(USAGE_HISTORY_DAYS);
+        if (dropped > 0) log.info(`memory retention: dropped ${dropped} recall event(s) older than ${USAGE_HISTORY_DAYS} days`);
+      } catch (e) { log.error('memory usage-event purge failed', e); }
     };
     sweepMemoryRetention();
     const stopMemoryRetentionSweep = clock.setInterval(sweepMemoryRetention, 86_400_000);

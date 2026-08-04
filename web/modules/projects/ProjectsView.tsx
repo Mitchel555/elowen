@@ -25,8 +25,10 @@ import { ActionMenu, type ActionMenuItem } from '../../components/ui/ActionMenu'
 import { DataTable, DataTableCell, DataTableRow } from '../../components/ui/DataTable';
 import { WorkspaceDetailRail, WorkspaceMetric, SpatialWorkspaceLayout } from '../../components/ui/WorkspacePrimitives';
 import { ControlSurfaceDocument, ControlSurfaceRegister, ControlSurfaceState, ControlSurfaceToolbar } from '../../components/ui/ControlSurface';
+import { usePersistentState } from '../../lib/usePersistentState';
 
 type ProjectFilter = 'all' | 'inherit' | 'override';
+const PROJECT_FILTERS: readonly ProjectFilter[] = ['all', 'inherit', 'override'];
 
 export function ProjectsView() {
   const projects = useProjects();
@@ -35,8 +37,9 @@ export function ProjectsView() {
   const [editingCommit, setEditingCommit] = useState<string | null>(null);
   const [editingWorking, setEditingWorking] = useState(false);
   const [creating, setCreating] = useState(false);
+  // Search is transient (an immediate intent); the bucket filter is a view setting and survives a reload.
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<ProjectFilter>('all');
+  const [filter, setFilter] = usePersistentState<ProjectFilter>('elowen.projects.filter', 'all', PROJECT_FILTERS);
   const deferredQuery = useDeferredValue(query);
 
   const openProjectEditor = (projectId: number | null, commit: string | null, working = false) => {

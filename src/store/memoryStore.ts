@@ -6,6 +6,12 @@ import type { MemoryRow, MemoryEventRow } from '../shared/wireContract.js';
 // src/shared and re-exported here, so a field added on the daemon can never be missing on the web.
 export type { MemoryRow, MemoryEventRow };
 
+/** How long recall events are kept. Long enough for the vitality chart's default window (30 days) and a
+ *  season of comparison on top, short enough that the table stays a fraction of the message log at the
+ *  measured few hundred recalls a day. A code constant on purpose: exposing it as a knob would drag the
+ *  web mirror, the retention editor and its parity test along for no operational gain. */
+export const USAGE_HISTORY_DAYS = 90;
+
 /** One packed-Float32 embedding per memory. content_hash pins which body text was embedded. */
 export interface MemoryEmbeddingRow {
   memory_id: number;
@@ -207,6 +213,9 @@ export class MemoryStore {
       // id that is about to disappear (kept for the trail — the memories row is gone after this).
       this.audit(userId, id, 'purge', before, null, actor, reason);
       this.db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?').run(id, userId);
+      // Usage events go with the row (they are analytics, not audit). SQLite may hand this rowid to the
+      // next memory, which would otherwise inherit a stranger's recall history.
+      this.db.prepare('DELETE FROM memory_usage_events WHERE memory_id = ? AND user_id = ?').run(id, userId);
       return true;
     })();
   }
@@ -229,8 +238,10 @@ export class MemoryStore {
     return this.db.transaction(() => {
       const rows = this.db.prepare("SELECT * FROM memories WHERE user_id = ? AND status = 'deleted'")
         .all(userId) as MemoryRow[];
+      const dropUsage = this.db.prepare('DELETE FROM memory_usage_events WHERE memory_id = ? AND user_id = ?');
       for (const row of rows) {
         this.audit(userId, row.id, 'purge', row, null, actor, reason);
+        dropUsage.run(row.id, userId);
       }
       this.db.prepare("DELETE FROM memories WHERE user_id = ? AND status = 'deleted'").run(userId);
       return rows.length;
@@ -259,13 +270,45 @@ export class MemoryStore {
     })();
   }
 
-  /** Bump use_count and set last_used_at for each of the user's own memories. */
+  /** Bump use_count and set last_used_at for each of the user's own memories, and log one usage event
+   *  per id. The counter update and the event share ONE transaction on purpose: the vitality chart
+   *  reconstructs `use_count(t)` and `last_used_at(t)` by replaying the log, so a counter that could
+   *  move without its event (or the reverse) would make the curve disagree with the number shown next
+   *  to it. The event is written only for rows the UPDATE actually matched, so a foreign or missing id
+   *  logs nothing. */
   markUsed(userId: number, ids: number[]): void {
     if (ids.length === 0) return;
-    const stmt = this.db.prepare(
+    const bump = this.db.prepare(
       "UPDATE memories SET use_count = use_count + 1, last_used_at = datetime('now') WHERE id = ? AND user_id = ?"
     );
-    this.db.transaction(() => { for (const id of ids) stmt.run(id, userId); })();
+    const logUse = this.db.prepare(
+      "INSERT INTO memory_usage_events (memory_id, user_id, used_at) VALUES (?, ?, datetime('now'))"
+    );
+    this.db.transaction(() => {
+      for (const id of ids) {
+        if (bump.run(id, userId).changes > 0) logUse.run(id, userId);
+      }
+    })();
+  }
+
+  /** A memory's recall timestamps, oldest first — the raw series the vitality history is rebuilt from.
+   *  Unlike {@link eventsForMemory} this needs no created_at bound: usage events are deleted with their
+   *  memory, so a reused rowid cannot inherit them. */
+  usageHistory(userId: number, memoryId: number): string[] {
+    const rows = this.db.prepare(
+      'SELECT used_at FROM memory_usage_events WHERE memory_id = ? AND user_id = ? ORDER BY used_at ASC, id ASC'
+    ).all(memoryId, userId) as { used_at: string }[];
+    return rows.map((row) => row.used_at);
+  }
+
+  /** Drop usage events older than `days`. Called by the daily retention sweep — this table grows with
+   *  every recall (hundreds of rows a day), so it is the one memory table that needs age pruning.
+   *  `days` is clamped here rather than bound as a parameter because SQLite's datetime() modifier takes
+   *  a literal; the clamp is what makes the interpolation safe (same shape as EventStore.purgeOlderThan). */
+  purgeUsageEventsOlderThan(days: number): number {
+    const d = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 90;
+    return this.db.prepare(`DELETE FROM memory_usage_events WHERE used_at < datetime('now', '-${d} days')`)
+      .run().changes;
   }
 
   /** Assign (or clear with null) a memory's category. Owner-scoped; a non-null categoryId must be one
@@ -395,6 +438,7 @@ export class MemoryStore {
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM memories WHERE user_id = ?').run(userId);
       this.db.prepare('DELETE FROM memory_events WHERE user_id = ?').run(userId);
+      this.db.prepare('DELETE FROM memory_usage_events WHERE user_id = ?').run(userId);
     })();
   }
 

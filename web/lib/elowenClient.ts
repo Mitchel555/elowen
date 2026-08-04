@@ -1,4 +1,4 @@
-import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, LogFileList, LogFileContent, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, BrainWorkMode, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
+import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, LogFileList, LogFileContent, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, BrainWorkMode, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryVitalityHistory, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
 import { clearToken } from './token';
 import type { BrainBinding } from './brainSession';
 
@@ -389,8 +389,11 @@ export const elowenClient = {
   mergeMemories: (ids: number[], body: string) => req<Memory>('/memory/merge', json({ ids, body })),
   /** A single memory's audit trail (`id` set) or the whole-user event feed (`id` omitted). */
   memoryEvents: (id?: number) => req<MemoryEvent[]>(id != null ? `/memory/${id}/events` : '/memory/events'),
-  /** Run retrieval for a query and get the picked memories plus the scoring trace. POST because the
-   *  daemon marks the picked memories used (a mutation). */
+  /** One memory's vitality over time: the reconstructed past, the forecast, and when retention would
+   *  bin it. */
+  memoryVitalityHistory: (id: number) => req<MemoryVitalityHistory>(`/memory/${id}/vitality-history`),
+  /** Run retrieval for a query and get the picked memories plus the scoring trace. POST for the body,
+   *  not for a mutation — inspection leaves usage counters untouched. */
   retrievalDebug: (query: string) => req<RetrievalResult>('/memory/retrieve', json({ query })),
   /** Re-embed the caller's memories that still need an embedding (bounded, best-effort). */
   reindexMemories: () => req<{ embedded: number }>('/memory/reindex', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),

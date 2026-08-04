@@ -391,6 +391,15 @@ export const useMemory = (id: number | null) =>
 export const useMemoryEvents = (id: number | null) =>
   useQuery({ queryKey: ['memory-events', id], queryFn: () => elowenClient.memoryEvents(id ?? undefined) });
 
+/** One memory's vitality curve for the detail drawer. Disabled until a memory is selected, like
+ *  {@link useMemory}. */
+export const useMemoryVitalityHistory = (id: number | null) =>
+  useQuery({
+    queryKey: ['memory-vitality', id],
+    queryFn: () => elowenClient.memoryVitalityHistory(id as number),
+    enabled: id != null,
+  });
+
 /** Workspace embedding provider settings (Memory → embedding section). Mutations invalidate this key. */
 export const useEmbeddingSettings = () =>
   useQuery({ queryKey: QUERY_KEYS.embeddingSettings, queryFn: elowenClient.embeddingSettings });

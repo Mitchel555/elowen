@@ -353,6 +353,21 @@ CREATE TABLE IF NOT EXISTS memory_events (
 CREATE INDEX IF NOT EXISTS idx_memory_events_memory ON memory_events(memory_id);
 CREATE INDEX IF NOT EXISTS idx_memory_events_user ON memory_events(user_id, id DESC);
 
+-- One row per RECALL: the memory was actually handed to the model. `memories` only keeps the running
+-- totals (use_count, last_used_at), which cannot answer "when was this used" — this log can, and
+-- replaying it reproduces both totals exactly, which is what lets the vitality curve be reconstructed
+-- rather than guessed. Deliberately NOT an audit table: rows are pruned by age (USAGE_HISTORY_DAYS) and
+-- are deleted outright when the memory is hard-purged, so a reused rowid can never inherit the previous
+-- occupant's history the way memory_events has to defend against.
+CREATE TABLE IF NOT EXISTS memory_usage_events (
+  id INTEGER PRIMARY KEY,
+  memory_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  used_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_memory_usage_events_memory ON memory_usage_events(memory_id, used_at);
+CREATE INDEX IF NOT EXISTS idx_memory_usage_events_used_at ON memory_usage_events(used_at);
+
 -- Per-user memory categories (v1: user-scoped). name is the label; description is the LLM-facing guide
 -- text the categorizer classifies against; color is an optional UI hint; is_builtin marks seeded ones.
 -- Referenced by memories.category_id (soft, id-addressed — see below). UNIQUE(user_id,name) makes a

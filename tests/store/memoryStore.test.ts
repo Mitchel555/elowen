@@ -281,6 +281,65 @@ describe('MemoryStore', () => {
     expect(row.last_used_at).not.toBeNull();
   });
 
+  // The counter alone cannot say WHEN a memory was used, so the chart replays this log instead. Writing
+  // the event in the same transaction as the bump is what keeps the two from drifting apart.
+  it('markUsed logs one recall event per bump, oldest first', () => {
+    const m = store.add(1, { body: 'x' }, 'agent', '');
+    store.markUsed(1, [m.id]);
+    store.markUsed(1, [m.id]);
+
+    const history = store.usageHistory(1, m.id);
+    expect(history).toHaveLength(2);
+    expect(store.get(1, m.id)?.use_count).toBe(2);
+    expect([...history].sort()).toEqual(history);
+  });
+
+  it('markUsed logs nothing for a memory the caller does not own', () => {
+    const mine = store.add(1, { body: 'mine' }, 'agent', '');
+    const theirs = store.add(2, { body: 'theirs' }, 'agent', '');
+
+    store.markUsed(1, [mine.id, theirs.id]);
+
+    expect(store.usageHistory(1, mine.id)).toHaveLength(1);
+    expect(store.usageHistory(2, theirs.id)).toHaveLength(0);
+    expect(store.get(2, theirs.id)?.use_count).toBe(0);
+  });
+
+  // memories.id is a plain rowid, so SQLite hands a purged id to the next memory. Audit events defend
+  // against that by date; recall events are simply deleted, which is why they need no such bound.
+  it('purging a memory takes its recall history with it', () => {
+    const m = store.add(1, { body: 'x' }, 'agent', '');
+    store.markUsed(1, [m.id]);
+    expect(store.usageHistory(1, m.id)).toHaveLength(1);
+
+    store.purge(1, m.id, 'user:1', 'test');
+
+    expect(store.usageHistory(1, m.id)).toHaveLength(0);
+  });
+
+  it('emptying the trash takes the recall history of every purged memory', () => {
+    const m = store.add(1, { body: 'x' }, 'agent', '');
+    store.markUsed(1, [m.id]);
+    store.softDelete(1, m.id, 'user:1', 'test');
+
+    store.purgeDeleted(1, 'user:1', 'test');
+
+    expect(store.usageHistory(1, m.id)).toHaveLength(0);
+  });
+
+  it('purgeUsageEventsOlderThan drops only events past the window', () => {
+    const db = openDb(':memory:');
+    const s = new MemoryStore(db);
+    const m = s.add(1, { body: 'x' }, 'agent', '');
+    s.markUsed(1, [m.id]);
+    db.prepare("INSERT INTO memory_usage_events (memory_id, user_id, used_at) VALUES (?, 1, datetime('now', '-120 days'))")
+      .run(m.id);
+    expect(s.usageHistory(1, m.id)).toHaveLength(2);
+
+    expect(s.purgeUsageEventsOlderThan(90)).toBe(1);
+    expect(s.usageHistory(1, m.id)).toHaveLength(1);
+  });
+
   it('removeForUser wipes memories, embeddings, and events for that user', () => {
     const m = store.add(1, { body: 'x' }, 'agent', '');
     store.setEmbedding(1, m.id, { provider: 'p', model: 'm', dimensions: 1, vector: new Float32Array([1]), contentHash: hashBody('x') });

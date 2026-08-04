@@ -3,6 +3,7 @@ import { hashBody } from '../../store/memoryStore.js';
 import { toEmbeddingConfig } from '../../store/configStore.js';
 import { isEmbeddingConfigured } from '../../embeddings/embeddingService.js';
 import { vitality, type MemoryRetentionConfig } from '../../brain/memoryVitality.js';
+import { buildVitalityHistory } from '../../brain/memoryVitalityHistory.js';
 import {
   memoryCreateSchema, memoryPatchSchema, memoryMergeSchema, memoryRetrieveSchema, embeddingUpdateSchema,
   memoryPurgeSchema, memoryCategoryCreateSchema, memoryCategoryPatchSchema, memoryCategorySetSchema,
@@ -113,7 +114,8 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
   });
 
   // Retrieval-debugging: rank the caller's memories against a query and return the picked set plus the
-  // full scoring breakdown. Inspection deliberately does not mutate usage counters.
+  // full scoring breakdown. Retrieval no longer touches usage counters at all — only a caller that
+  // actually delivers the memories to the model marks them — so inspection needs no opt-out.
   app.post('/memory/retrieve', async (c) => {
     if (!ctx.memoryService) return c.json({ error: 'memory unavailable' }, 400);
     const { query } = await parseBody(c, memoryRetrieveSchema);
@@ -123,7 +125,6 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     // uncategorized stay excluded, matching what recall would never surface.
     return c.json(await ctx.memoryService.retrieve(userId, query, {
       scope: ctx.memoryService.allCategoriesScope(userId),
-      markUsed: false,
     }));
   });
 
@@ -356,5 +357,23 @@ export function registerMemoryRoutes(app: ElowenApp, ctx: RouteContext): void {
     const id = Number(c.req.param('id'));
     if (!store.get(userId, id)) return c.json({ error: 'not found' }, 404);
     return c.json(store.eventsForMemory(userId, id));
+  });
+
+  // That memory's vitality over time (owner-scoped). Reconstructed server-side because the half-life
+  // table is a daemon-side config the web deliberately does not know — same division as `vitality`
+  // itself, which the web only ever displays.
+  app.get('/memory/:id/vitality-history', (c) => {
+    if (!store) return c.json({ error: 'memory unavailable' }, 400);
+    const userId = c.get('user').id;
+    const id = Number(c.req.param('id'));
+    const row = store.get(userId, id);
+    if (!row) return c.json({ error: 'not found' }, 404);
+    return c.json(buildVitalityHistory({
+      memory: row,
+      recalls: store.usageHistory(userId, id),
+      retention: d.config.get().runtime.memoryRetention,
+      now: Date.now(),
+      pastDays: queryInt(c.req.query('days'), { min: 1, max: 365, fallback: 30 }),
+    }));
   });
 }

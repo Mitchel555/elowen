@@ -3276,6 +3276,7 @@ describe('BrainService memory integration', () => {
   function fakeMemoryService(memories: MemoryRow[]) {
     return {
       retrieve: vi.fn(async () => ({ memories, debug: { query: '', fallback: true, provider: null, model: null, candidates: memories.length, scores: [] } })),
+      markRecalled: vi.fn(),
       findSimilar: vi.fn(async () => []),
     } as unknown as MemoryService;
   }
@@ -3299,6 +3300,34 @@ describe('BrainService memory integration', () => {
     const stored = svc.history(1).find((m) => m.role === 'user');
     expect(stored?.text).toBe('jaký jazyk mám použít?');
     expect(stored?.text).not.toContain('<user_memories>');
+  });
+
+  // Retrieval stopped marking its own result, so each delivering path now owns that. If this one ever
+  // stopped marking, its memories would decay untouched and the retention sweep would bin them.
+  it('counts the turn-start block as a recall of every memory it injected', async () => {
+    const d = fakeDeps();
+    (d as Record<string, unknown>).memoryStore = new MemoryStore(openDb(':memory:'));
+    const service = fakeMemoryService([asRow('Filip preferuje TypeScript strict.')]);
+    (d as Record<string, unknown>).memoryService = service;
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+
+    await svc.send({ userId: 1, text: 'jaký jazyk mám použít?' });
+
+    expect(service.markRecalled).toHaveBeenCalledWith(1, [1]);
+  });
+
+  it('marks nothing when recall came back empty', async () => {
+    const d = fakeDeps();
+    (d as Record<string, unknown>).memoryStore = new MemoryStore(openDb(':memory:'));
+    const service = fakeMemoryService([]);
+    (d as Record<string, unknown>).memoryService = service;
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+
+    await svc.send({ userId: 1, text: 'cokoliv' });
+
+    expect(service.markRecalled).not.toHaveBeenCalled();
   });
 
   it('flags a stale memory in the turn-start block and leaves a fresh one clean', async () => {

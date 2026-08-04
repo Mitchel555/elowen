@@ -1116,6 +1116,12 @@ export const en = {
     useCount: 'Used {n}×',
     neverUsed: 'Never used',
     usedAt: 'Used',
+    // Vitality over time (detail drawer chart)
+    vitalityChart: 'Vitality over time',
+    vitalityEvictOn: 'Moves to the trash on {date}',
+    vitalityNeverEvicted: 'Never deleted automatically',
+    vitalityForecastHint: 'The dashed line assumes the memory is never recalled again.',
+    vitalityNoHistory: 'This memory was used before recall history was recorded, so only the forecast is shown.',
     // Timestamps
     createdAt: 'Created',
     updatedAt: 'Updated',

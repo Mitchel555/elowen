@@ -39,6 +39,8 @@ type SortKey = 'updated' | 'used' | 'importance' | 'vitality';
 const TABS: readonly Tab[] = ['list', 'brain', 'retrieval'];
 const STATUS_VALUES: readonly StatusFilter[] = ['active', 'archived', 'deleted', 'all'];
 const LAYOUT_VALUES: readonly Layout[] = ['flat', 'grouped'];
+const SORT_KEYS: readonly SortKey[] = ['updated', 'used', 'importance', 'vitality'];
+const SORT_DIRECTIONS: readonly ('asc' | 'desc')[] = ['asc', 'desc'];
 const PAGE_SIZE = 20;
 
 /** Memory module: a searchable master/detail list of the caller's private memories, a retrieval
@@ -48,11 +50,17 @@ export function MemoryView() {
 
   const [tab, setTab] = usePersistentState<Tab>('elowen.memory.tab', 'list', TABS);
   const [status, setStatus] = usePersistentState<StatusFilter>('elowen.memory.status', 'active', STATUS_VALUES);
+  // Search stays transient on purpose: it is an immediate intent, and a query restored after a reload
+  // would look like missing data rather than an active filter.
   const [query, setQuery] = useState('');
-  const [kind, setKind] = useState<string>('all');
+  const [kind, setKind] = usePersistentState<string>('elowen.memory.kind', 'all', () => true);
   // Category filter — 'all' | 'none' (uncategorized) | a stringified category id. Client-side over the
-  // loaded list, mirroring how `kind` narrows the same in-memory rows.
-  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  // loaded list, mirroring how `kind` narrows the same in-memory rows. The stored id is validated
+  // against the loaded categories below: a category deleted since would otherwise leave the table
+  // silently empty behind a filter the user cannot see.
+  const [categoryFilter, setCategoryFilter] = usePersistentState<string>(
+    'elowen.memory.category', 'all', (value) => value === 'all' || value === 'none' || /^\d+$/.test(value),
+  );
   const [showCategories, setShowCategories] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -64,9 +72,13 @@ export function MemoryView() {
   const [confirmEmptyTrash, setConfirmEmptyTrash] = useState(false);
   // Flat (paginated) vs grouped-by-category display of the list; persisted like the tab/status filters.
   const [layout, setLayout] = usePersistentState<Layout>('elowen.memory.layout', 'flat', LAYOUT_VALUES);
+  // The page number deliberately does NOT persist: landing on page 7 after a reload is disorienting,
+  // and it is reset on every filter change anyway.
   const [page, setPage] = useState(0);
-  const [sortKey, setSortKey] = useState<SortKey>('updated');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [sortKey, setSortKey] = usePersistentState<SortKey>('elowen.memory.sortKey', 'updated', SORT_KEYS);
+  const [sortDirection, setSortDirection] = usePersistentState<'asc' | 'desc'>(
+    'elowen.memory.sortDirection', 'desc', SORT_DIRECTIONS,
+  );
   const deferredQuery = useDeferredValue(query);
   const searchPending = query !== deferredQuery;
 
@@ -113,13 +125,20 @@ export function MemoryView() {
   }, [allMemories.data]);
 
   const changeSort = (next: SortKey) => {
-    if (sortKey === next) setSortDirection((direction) => direction === 'desc' ? 'asc' : 'desc');
+    // The persisted setter takes a value, not an updater — `sortDirection` is already the current one.
+    if (sortKey === next) setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
     else { setSortKey(next); setSortDirection('desc'); }
   };
 
   // Paginate the filtered rows; the grouped view then buckets the CURRENT page into category sections, so
   // both display modes page through the same window (mirrors how Tasks groups a page into day sections).
   useEffect(() => { setPage(0); }, [query, kind, categoryFilter, status]);
+  // A remembered category filter outlives the category itself. Once the real list is in, drop a filter
+  // that no longer resolves — otherwise a reload lands on an empty table with no visible cause.
+  useEffect(() => {
+    if (!categories.data || !/^\d+$/.test(categoryFilter)) return;
+    if (!categories.data.some((category) => String(category.id) === categoryFilter)) setCategoryFilter('all');
+  }, [categories.data, categoryFilter, setCategoryFilter]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount - 1);
   const pageItems = useMemo(() => filtered.slice(clampedPage * PAGE_SIZE, clampedPage * PAGE_SIZE + PAGE_SIZE), [filtered, clampedPage]);

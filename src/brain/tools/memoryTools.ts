@@ -65,6 +65,8 @@ function memorySearch(d: MemoryToolDeps) {
       if (userId === null) return text(LOCKED);
       const { memories } = await d.service.retrieve(userId, p.query, { maxCount: p.limit });
       if (memories.length === 0) return text('No matching memories.');
+      // The model asked for these and receives them in full, so the whole set counts as recalled.
+      d.service.markRecalled(userId, memories.map((memory) => memory.id));
       return text(memories.map(renderMemory).join('\n'));
     },
   });

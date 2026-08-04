@@ -16,6 +16,9 @@ import { EntityList } from '../../components/ui/EntityList';
 import { MotionLayoutItem, MotionPresence } from '../../components/ui/Motion';
 import { SpatialWorkspaceLayout, WorkspaceMetric } from '../../components/ui/WorkspacePrimitives';
 import { ControlSurfaceDocument, ControlSurfaceRegister, ControlSurfaceState, ControlSurfaceToolbar } from '../../components/ui/ControlSurface';
+import { usePersistentState } from '../../lib/usePersistentState';
+
+const SESSION_VIEWS: readonly ('live' | 'brain')[] = ['live', 'brain'];
 
 export function SessionsView() {
   const sessions = useSessionInfos();
@@ -24,7 +27,7 @@ export function SessionsView() {
   const params = useSearchParams();
   const { t } = useTranslation();
   const [openTerm, setOpenTerm] = useState<string | null>(null);
-  const [view, setView] = useState<'live' | 'brain'>('live');
+  const [view, setView] = usePersistentState<'live' | 'brain'>('elowen.sessions.view', 'live', SESSION_VIEWS);
 
   const filter = params.get('filter') === 'needs_input' ? 'needs_input' : 'all';
   const infos = sessions.data ?? [];

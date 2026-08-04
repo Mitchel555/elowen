@@ -266,6 +266,9 @@ export class LiveSessionSpawner {
               id: m.id, body: m.body, kind: m.kind, importance: m.importance, updatedAt: m.updated_at,
             }));
           },
+          // Marked here rather than inside retrieve(): a turn issues several passes whose results
+          // overlap, and only the ones that survive the dedup actually reach the model.
+          onInjected: (ids) => memService.markRecalled(ownerUserId, ids),
         },
       } : {}),
       // Project AGENTS.md/CLAUDE.md ride the system prompt for an ADMIN's own chat only. Two guards,

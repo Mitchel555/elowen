@@ -94,6 +94,7 @@ import type {
   ToolOutputView, BrainWorkflowView, BrainMessageView, SlashCommandDef, AskQuestion, BrainStreamControl,
   BrainWorkMode, BrainPendingPlan,
   User, BrainLimits, RuntimeConfig as WireRuntimeConfig, RuntimeLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
+  MemoryVitalityHistory, MemoryVitalityPoint,
   CommitFileChange, CommitLogEntry,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
@@ -105,6 +106,9 @@ export type BrainMessage = BrainMessageView;
 export type Memory = MemoryRow & { vitality: number };
 export type MemoryCategory = MemoryCategoryRow;
 export type MemoryEvent = MemoryEventRow;
+/** A memory's vitality over time, rebuilt daemon-side from its recall log. The web draws it as-is —
+ *  reconstructing it here would mean shipping the half-life table to the browser. */
+export type { MemoryVitalityHistory, MemoryVitalityPoint };
 export type BrainGoal = BrainGoalState;
 
 /** Memory auto-retention (`runtime.memoryRetention`), mirrored from `src/brain/memoryVitality.ts` — the

@@ -138,16 +138,33 @@ describe('MemoryService.retrieve', () => {
     expect(res.memories.map((m) => m.body)).toEqual(['0123456789']);
   });
 
-  it('markUsed bumps only the returned set', async () => {
+  // Retrieval used to mark its own result, which counted passes rather than deliveries: live recall
+  // issues several passes a turn and drops what it already injected, so an overlapping hit was counted
+  // again without ever reaching the model a second time. Marking now belongs to whoever delivers.
+  it('retrieving alone never marks anything as used', async () => {
+    const table = { query: [1, 0, 0], hit: [1, 0, 0], miss: [0, 1, 0] };
+    const idHit = addWithVec(store, 1, 'hit', table);
+    const svc = makeService(store, table);
+
+    await svc.retrieve(1, 'query', { maxCount: 1 });
+
+    const row = store.get(1, idHit);
+    expect(row?.use_count).toBe(0);
+    expect(row?.last_used_at).toBeNull();
+  });
+
+  it('markRecalled bumps exactly the delivered set', async () => {
     const table = { query: [1, 0, 0], hit: [1, 0, 0], miss: [0, 1, 0] };
     const idHit = addWithVec(store, 1, 'hit', table);
     const idMiss = addWithVec(store, 1, 'miss', table);
     const svc = makeService(store, table);
 
-    await svc.retrieve(1, 'query', { maxCount: 1 });
-    expect(store.get(1, idHit)!.use_count).toBe(1);
-    expect(store.get(1, idHit)!.last_used_at).not.toBeNull();
-    expect(store.get(1, idMiss)!.use_count).toBe(0);
+    const res = await svc.retrieve(1, 'query', { maxCount: 1 });
+    svc.markRecalled(1, res.memories.map((m) => m.id));
+
+    expect(store.get(1, idHit)?.use_count).toBe(1);
+    expect(store.get(1, idHit)?.last_used_at).not.toBeNull();
+    expect(store.get(1, idMiss)?.use_count).toBe(0);
   });
 
   it('falls back to keyword+recency when embeddings are not configured', async () => {

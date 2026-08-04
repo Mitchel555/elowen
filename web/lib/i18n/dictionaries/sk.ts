@@ -1116,6 +1116,12 @@ export const sk = {
     useCount: 'Použité {n}×',
     neverUsed: 'Nikdy nepoužité',
     usedAt: 'Použité',
+    // Vývoj vitality (graf v detaile)
+    vitalityChart: 'Vývoj vitality',
+    vitalityEvictOn: 'Presunie sa do koša {date}',
+    vitalityNeverEvicted: 'Nikdy sa nezmaže automaticky',
+    vitalityForecastHint: 'Čiarkovaná čiara predpokladá, že sa spomienka už nikdy nevybaví.',
+    vitalityNoHistory: 'Táto spomienka sa používala skôr, než sa história vybavovania zaznamenávala, preto je zobrazená len predpoveď.',
     // Timestamps
     createdAt: 'Vytvorené',
     updatedAt: 'Upravené',

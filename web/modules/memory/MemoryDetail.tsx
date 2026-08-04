@@ -18,6 +18,7 @@ import { useTranslation } from '../../lib/i18n';
 import { formatTaskTime } from '../../lib/format';
 import { memoryStatusTone, memoryStatusLabel, categorySwatch, vitalityPct } from './memoryMeta';
 import { MemoryAuditFeed } from './MemoryAuditFeed';
+import { MemoryVitalityChart } from './MemoryVitalityChart';
 import { CategoryIcon } from '../../lib/categoryIcons';
 import { RankSlider, CategorySelect } from './MemoryFields';
 
@@ -176,6 +177,9 @@ function MemoryDetailBody({ memory, t, locale }: { memory: Memory; t: ReturnType
             <Metric icon={Activity} label={t.memory.usage} value={memory.use_count > 0 ? t.memory.useCount.replace('{n}', String(memory.use_count)) : t.memory.neverUsed} />
             <Metric icon={Clock} label={t.memory.updatedAt} value={updated.label || '—'} title={updated.title} />
           </div>
+          {/* Elaborates on the Vitality metric right above it: where that number came from and where it
+              is heading. Hidden while editing, like the rest of this block. */}
+          <MemoryVitalityChart memoryId={memory.id} vitality={memory.vitality} />
         </>
       )}
 

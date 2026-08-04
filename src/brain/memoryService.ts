@@ -46,8 +46,6 @@ export interface RetrieveOpts {
   charBudget?: number;
   /** Explicit turn scope. This takes precedence over AsyncLocalStorage for detached recall work. */
   scope?: MemoryRecallScope;
-  /** Whether returned memories count as an actual recall. Inspection must leave usage unchanged. */
-  markUsed?: boolean;
 }
 
 /** Per-memory score breakdown for the retrieval-debugging UI. In the keyword-fallback path `semantic`
@@ -118,7 +116,8 @@ export function cosine(a: Float32Array, b: Float32Array): number {
 
 /** Vector retrieval + anti-duplication over MemoryStore. Pure orchestration: it embeds via
  *  EmbeddingService and scans/scores rows the store hands back, but makes no HTTP calls of its own and
- *  owns no persistence beyond calling markUsed on the returned set. When no embedding provider/model is
+ *  owns no persistence beyond {@link MemoryService.markRecalled}, which its callers invoke once they have
+ *  actually delivered a memory to the model. When no embedding provider/model is
  *  configured — or an embed call throws — it degrades gracefully to the store's keyword + recency
  *  fallback; memory still works, just without semantic ranking.
  *
@@ -179,7 +178,6 @@ export class MemoryService {
     const tuned = this.recallDefaults?.();
     const maxCount = opts.maxCount ?? tuned?.count ?? DEFAULT_MAX_COUNT;
     const charBudget = opts.charBudget ?? tuned?.chars ?? DEFAULT_CHAR_BUDGET;
-    const markUsed = opts.markUsed ?? true;
     const scope = this.recallScope(userId, opts.scope);
     const cfg = this.activeConfig();
     const provider = cfg ? (cfg.providerId ?? cfg.baseUrl ?? null) : null;
@@ -192,14 +190,14 @@ export class MemoryService {
     if (cfg) {
       try {
         const queryVec = await this.embeddings.embed(cfg, query);
-        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model, scope, markUsed);
+        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model, scope);
         // An embed that succeeds but clears nothing is not "no memory is relevant" — it is usually a
         // query too thin to score, like "fix it", which cannot reach the floor against any body no
         // matter how on-topic. Measured: that query peaks at 0.12 cosine and admits 0 of 53 memories.
         // The manual search box has fallen through to keyword for exactly this reason (searchSemantic);
         // recall silently returned nothing instead, which is where the "it forgot again" reports come from.
         if (semantic.memories.length > 0) return semantic;
-        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, true, markUsed);
+        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, true);
         // Keep the cosine breakdown from the pass that found nothing. Otherwise the debug panel reports
         // a bare "fallback" and cannot answer the only question worth asking here — how close the best
         // candidate actually came to the floor.
@@ -210,7 +208,19 @@ export class MemoryService {
       }
     }
 
-    return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, false, markUsed);
+    return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, false);
+  }
+
+  /** Record that these memories were actually DELIVERED to the model.
+   *
+   *  Retrieval deliberately does not do this itself. It used to, and the counter therefore measured
+   *  retrieval passes rather than deliveries: live recall runs several passes per turn and drops the
+   *  memories it has already injected, so a memory matching twice was counted twice while reaching the
+   *  prompt once (measured 2026-08-03: 156 of 441 marks, 35%, were such phantoms). Inflated use_count
+   *  feeds straight into vitality, which decides what the retention sweep evicts — so the caller that
+   *  knows what it actually handed over is the only one that can mark honestly. */
+  markRecalled(userId: number, ids: number[]): void {
+    this.store.markUsed(userId, ids);
   }
 
   /** Find active memories whose body is a near-duplicate of `body` (cosine ≥ threshold), sorted most
@@ -248,7 +258,7 @@ export class MemoryService {
 
   /** Semantic search for the manual memory browser (Settings → Memory search box): embed the query and
    *  return the caller's active memories ranked by cosine (most similar first), keeping only those above
-   *  the relevance floor. Unlike retrieve() this does NOT markUsed — browsing isn't recall — and returns
+   *  the relevance floor. Browsing isn't recall, so nothing here is ever marked as used, and it returns
    *  raw rows for the list UI. Degrades to the store's keyword LIKE search when embeddings aren't
    *  configured or the embed call throws, so the search box always returns something. */
   async searchSemantic(userId: number, query: string, limit: number): Promise<MemoryRow[]> {
@@ -284,7 +294,6 @@ export class MemoryService {
     provider: string | null,
     model: string | null,
     scope: MemoryRecallScope | undefined,
-    markUsed: boolean,
   ): RetrieveResult {
     const now = Date.now();
     const retention = this.retention?.() ?? DEFAULT_MEMORY_RETENTION;
@@ -305,7 +314,6 @@ export class MemoryService {
     // every candidate (including the ones floored out).
     const eligible = ranked.filter((c) => c.semantic >= this.minSemantic());
     const picked = this.pack(eligible, maxCount, charBudget, true);
-    if (markUsed) this.store.markUsed(userId, picked.map((c) => c.memory.id));
     return {
       memories: picked.map((c) => c.memory),
       debug: { query, fallback: false, provider, model, candidates: ranked.length, scores: toScores(ranked, picked) },
@@ -313,7 +321,7 @@ export class MemoryService {
   }
 
   /** Keyword fallback: merge keyword hits with recent memories, rank by keyword match + importance +
-   *  recency (no vectors available), dedupe by exact body, pack, optionally mark as used. */
+   *  recency (no vectors available), dedupe by exact body and pack. */
   private retrieveFallback(
     userId: number,
     query: string,
@@ -323,7 +331,6 @@ export class MemoryService {
     model: string | null,
     scope: MemoryRecallScope | undefined,
     keywordOnly = false,
-    markUsed = true,
   ): RetrieveResult {
     const now = Date.now();
     const keywordHits = this.recallable(this.store.search(userId, query, maxCount * 3), (memory) => memory, scope);
@@ -352,7 +359,6 @@ export class MemoryService {
       .sort((a, b) => b.score - a.score);
 
     const picked = this.pack(ranked, maxCount, charBudget, false);
-    if (markUsed) this.store.markUsed(userId, picked.map((c) => c.memory.id));
     return {
       memories: picked.map((c) => c.memory),
       debug: { query, fallback: true, provider, model, candidates: ranked.length, scores: toScores(ranked, picked) },

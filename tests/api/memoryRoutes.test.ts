@@ -296,6 +296,42 @@ function setupCat(opts: { categorizeReply?: string; categorizationConfigured?: b
   return { app, memoryStore, memoryCategoryStore, config, users, amyId: amy.id, bobId: bob.id, amyTok: users.issueToken(amy.id), bobTok: users.issueToken(bob.id) };
 }
 
+describe('memory vitality history route', () => {
+  it('serves a curve that ends on the vitality the list shows', async () => {
+    const { app, memoryStore, amyId, amyTok } = setup();
+    const created = await (await app.request('/memory', post(amyTok, { body: 'a durable fact' }))).json();
+    memoryStore.markUsed(amyId, [created.id]);
+
+    const res = await app.request(`/memory/${created.id}/vitality-history`, auth(amyTok));
+    expect(res.status).toBe(200);
+    const history = await res.json();
+
+    const current = await (await app.request(`/memory/${created.id}`, auth(amyTok))).json();
+    expect(history.points[history.points.length - 1].vitality).toBeCloseTo(current.vitality, 6);
+    expect(history.recalls).toHaveLength(1);
+    expect(history.forecast.length).toBeGreaterThan(0);
+    expect(typeof history.floor).toBe('number');
+  });
+
+  it('hides another user\'s memory behind the same 404 as the rest of the surface', async () => {
+    const { app, amyTok, bobTok } = setup();
+    const bobRow = await (await app.request('/memory', post(bobTok, { body: 'bob private' }))).json();
+
+    expect((await app.request(`/memory/${bobRow.id}/vitality-history`, auth(amyTok))).status).toBe(404);
+    expect((await app.request(`/memory/${bobRow.id}/vitality-history`, auth(bobTok))).status).toBe(200);
+  });
+
+  it('clamps the requested window instead of trusting it', async () => {
+    const { app, amyTok } = setup();
+    const row = await (await app.request('/memory', post(amyTok, { body: 'x' }))).json();
+
+    for (const days of ['0', '-5', '99999', 'nonsense']) {
+      const res = await app.request(`/memory/${row.id}/vitality-history?days=${days}`, auth(amyTok));
+      expect(res.status).toBe(200);
+    }
+  });
+});
+
 describe('memory category routes', () => {
   it('categorizes a memory created through the API, not only ones the curator stored', async () => {
     // Classification used to hang off the post-turn curator alone, so a memory created from the web (or

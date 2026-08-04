@@ -211,6 +211,27 @@ export interface MemoryEventRow {
   created_at: string;
 }
 
+/** One sample of a memory's vitality (`GET /memory/:id/vitality-history`). Timestamps are ISO-8601 UTC;
+ *  `vitality` is the same 0-100 scale the list column shows. */
+export interface MemoryVitalityPoint {
+  at: string;
+  vitality: number;
+}
+
+/** A memory's vitality over time. `points` is the PAST, reconstructed by replaying the recall log, and
+ *  is empty when the counters cannot be resolved back (a memory used before logging existed). `forecast`
+ *  runs from now forward assuming it is never recalled again, which is what makes `evictAt` meaningful.
+ *  The web only draws this — the half-life table stays daemon-side, like `vitality` itself. */
+export interface MemoryVitalityHistory {
+  points: MemoryVitalityPoint[];
+  forecast: MemoryVitalityPoint[];
+  recalls: string[];
+  floor: number;
+  evictAt: string | null;
+  historyFrom: string | null;
+  now: string;
+}
+
 /** Operator-tunable brain limits (Settings → Elowen AI → Limits): each a whole number the daemon clamps
  *  to a sane range. Served inside `ElowenConfig.brain.limits` and PATCHed back as a partial. */
 export interface BrainLimits {

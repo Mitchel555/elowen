@@ -53,6 +53,11 @@ export interface LiveRecallOptions {
    *  conversation that is already running, rather than after the next respawn. */
   enabled: () => boolean;
   retrieve: (query: string, maxCount: number, charBudget: number) => Promise<LiveRecallMemory[]>;
+  /** Called with the memories that were actually INJECTED into the context, once per successful pass.
+   *  Retrieval alone must not count as a recall: several passes a turn return overlapping sets and the
+   *  dedup below drops the repeats, so marking at retrieval time inflates use_count — and use_count
+   *  drives vitality, which drives eviction. Only this callback sees what truly reached the model. */
+  onInjected?: (ids: number[]) => void;
   /** Injectable clock: renders memory ages and drives the pending-retrieval abandon check. */
   now?: () => number;
 }
@@ -323,11 +328,14 @@ export function installLiveRecall(pi: ExtensionAPI, opts: LiveRecallOptions): vo
     }
     if (rendered.length === 0) return reEmit();
 
+    const injectedIds = fresh.slice(0, rendered.length).map((m) => m.id);
+    opts.onInjected?.(injectedIds);
+
     // The only positive signal that recall fired at all: without it a silent no-op and a working feature
     // look identical from the outside, and the failure path is the only thing that logs.
     log.info(
       `recalled ${rendered.length} memory(ies) mid-turn on pass ${turn.passes} `
-      + `(ids ${fresh.slice(0, rendered.length).map((m) => m.id).join(',')}, ${turn.chars} chars used)`,
+      + `(ids ${injectedIds.join(',')}, ${turn.chars} chars used)`,
     );
     const anchorIndex = messages.length - 1;
     const anchorMessage = messages[anchorIndex];

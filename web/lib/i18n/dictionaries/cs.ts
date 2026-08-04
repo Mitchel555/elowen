@@ -1116,6 +1116,12 @@ export const cs = {
     useCount: 'Použito {n}×',
     neverUsed: 'Nikdy nepoužito',
     usedAt: 'Použito',
+    // Vývoj vitality (graf v detailu)
+    vitalityChart: 'Vývoj vitality',
+    vitalityEvictOn: 'Přesune se do koše {date}',
+    vitalityNeverEvicted: 'Nikdy se nesmaže automaticky',
+    vitalityForecastHint: 'Čárkovaná čára předpokládá, že se vzpomínka už nikdy nevybaví.',
+    vitalityNoHistory: 'Tato vzpomínka se používala dříve, než se historie vybavování zaznamenávala, proto je zobrazena jen předpověď.',
     // Časové značky
     createdAt: 'Vytvořeno',
     updatedAt: 'Upraveno',

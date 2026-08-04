@@ -35,6 +35,7 @@ const flush = async (): Promise<void> => new Promise((resolve) => { setImmediate
 function harness(opts: {
   retrieve: (query: string, maxCount: number, charBudget: number) => Promise<LiveRecallMemory[]>;
   passes?: number; count?: number; chars?: number; enabled?: () => boolean; now?: () => number;
+  onInjected?: (ids: number[]) => void;
 }): { fire: (messages: Msg[]) => Promise<Msg[]> } {
   let handler: Handler = async () => undefined;
   const pi = {
@@ -45,6 +46,7 @@ function harness(opts: {
     budget: () => ({ passes: opts.passes ?? 3, count: opts.count ?? 8, chars: opts.chars ?? 6000 }),
     enabled: opts.enabled ?? (() => true),
     retrieve: opts.retrieve,
+    ...(opts.onInjected ? { onInjected: opts.onInjected } : {}),
     now: opts.now ?? (() => T0),
   });
 
@@ -229,6 +231,30 @@ describe('live recall — memories arrive mid-turn', () => {
 
     const injected = out.map(textOf).join('\n');
     expect(injected.match(/The one fact/g) ?? []).toHaveLength(1);
+  });
+
+  // Usage is what vitality decays from, and vitality decides what the retention sweep evicts. Retrieval
+  // used to do this marking itself, which counted a memory again on every pass that matched it — even
+  // though the dedup above means it reaches the model exactly once. Only what is injected may count.
+  it('reports only the memories it actually injected, never the ones the dedup dropped', async () => {
+    const injected: number[][] = [];
+    const { fire } = harness({
+      retrieve: async () => [mem(1, 'The one fact')],
+      onInjected: (ids) => { injected.push(ids); },
+    });
+
+    const first: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'first tool output about deployment' }];
+    await fire(first);
+    await fire(first);
+    const grown: Msg[] = [
+      ...first,
+      { role: 'toolResult', content: 'second tool output, entirely different subject: database migrations' },
+    ];
+    await fire(grown);
+    await fire(grown);
+
+    // The second pass found the same memory again; it was already in context, so it must not count twice.
+    expect(injected).toEqual([[1]]);
   });
 });
 
