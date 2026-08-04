@@ -1,31 +1,155 @@
+import { createHash } from 'node:crypto';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { logger } from '../../shared/logger.js';
 import { cacheTtlMs } from './cacheTiming.js';
 
 /** Prompt-cache observability, modeled on Claude Code's promptCacheBreakDetection. In a healthy
- *  append-only conversation `cacheRead` grows monotonically: each request reads the prefix the
- *  previous request wrote. A DROP means the prefix changed (a bug in an egress transform, a tools or
- *  system-prompt mutation) — exactly the failure mode toolResultClearing is designed to avoid, so this
- *  watcher is its production tripwire. Detection only, never repair.
+ * append-only conversation `cacheRead` grows monotonically: each request reads the prefix the previous
+ * request wrote. A DROP means the prefix changed or Anthropic evicted/routed away from it. The payload
+ * monitor hashes the exact provider request so the warning can distinguish those cases without retaining
+ * prompt content.
  *
- *  Two expected drops are suppressed: a REAL compaction (baseline resets) and an idle gap beyond the
- *  cache TTL (the entry expired; re-caching is unavoidable and not a break). Installed for Anthropic
- *  sessions only — other providers report best-effort cache stats whose drops are routine noise. */
+ * Two expected drops are suppressed: a real compaction (baseline resets) and an idle gap beyond the cache
+ * TTL. Installed for Anthropic sessions only; other providers report best-effort cache stats whose drops
+ * are routine noise. */
 
 const log = logger('brain-cache');
 
 /** Below BOTH thresholds a drop is noise: small absolute swings happen with thinking-block variance. */
 export const CACHE_DROP_MIN_TOKENS = 2000;
 const CACHE_DROP_MIN_RATIO = 0.05;
+/** The provider request can contain thousands of messages. Tracking its stable prefix is enough to catch
+ * egress rewrites while bounding both hashing work and retained digests. */
+const MAX_TRACKED_HISTORY_SEGMENTS = 512;
+const MAX_TRACKED_TOOL_SEGMENTS = 256;
+const MAX_PENDING_SNAPSHOTS = 2;
+
+interface HashedSegment {
+  hash: string;
+  label: string;
+}
+
+interface CachePayloadSnapshot {
+  systemHash: string;
+  toolsHash: string;
+  tools: HashedSegment[];
+  toolCount: number;
+  history: HashedSegment[];
+  historyCount: number;
+}
+
+function hash(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value) ?? '').digest('hex');
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function safeToolLabel(value: unknown, index: number): string {
+  const name = record(value)?.name;
+  if (typeof name !== 'string') return `#${index}`;
+  return name.startsWith('mcp__') ? 'mcp' : name;
+}
+
+function historyLabel(value: unknown, index: number): string {
+  const message = record(value);
+  const role = typeof message?.role === 'string' ? message.role : 'unknown';
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const toolResult = content.some((block) => record(block)?.type === 'tool_result');
+  return `${index}:${role}${toolResult ? '/tool_result' : ''}`;
+}
+
+function snapshotPayload(value: unknown): CachePayloadSnapshot {
+  const payload = record(value);
+  const tools = Array.isArray(payload?.tools) ? payload.tools : [];
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  return {
+    systemHash: hash(payload?.system),
+    toolsHash: hash(tools),
+    tools: tools.slice(0, MAX_TRACKED_TOOL_SEGMENTS).map((tool, index) => ({
+      hash: hash(tool), label: safeToolLabel(tool, index),
+    })),
+    toolCount: tools.length,
+    history: messages.slice(0, MAX_TRACKED_HISTORY_SEGMENTS).map((message, index) => ({
+      hash: hash(message), label: historyLabel(message, index),
+    })),
+    historyCount: messages.length,
+  };
+}
+
+/** One recorder per session. The pre-request extension stores only bounded hashes; cacheWatch consumes the
+ * corresponding snapshot when that request's assistant message ends. */
+export interface CachePayloadMonitor {
+  extension: (pi: ExtensionAPI) => void;
+  consumeSnapshot: () => CachePayloadSnapshot | undefined;
+}
+
+export function createCachePayloadMonitor(): CachePayloadMonitor {
+  const pending: CachePayloadSnapshot[] = [];
+  return {
+    extension: (pi) => {
+      pi.on('before_provider_request', (event) => {
+        pending.push(snapshotPayload(event.payload));
+        while (pending.length > MAX_PENDING_SNAPSHOTS) pending.shift();
+      });
+    },
+    consumeSnapshot: () => pending.shift(),
+  };
+}
+
+function changedLabels(previous: HashedSegment[], current: HashedSegment[]): string[] {
+  const changed: string[] = [];
+  const common = Math.min(previous.length, current.length);
+  for (let index = 0; index < common; index += 1) {
+    if (previous[index]?.hash !== current[index]?.hash) {
+      changed.push(current[index]?.label ?? `#${index}`);
+    }
+  }
+  return changed;
+}
+
+function formatLabels(labels: string[]): string {
+  const visible = labels.slice(0, 5);
+  return `${visible.join(', ')}${labels.length > visible.length ? ` (+${labels.length - visible.length} more)` : ''}`;
+}
+
+function attributePayloadChange(
+  previous: CachePayloadSnapshot | undefined,
+  current: CachePayloadSnapshot | undefined,
+): string {
+  if (!previous || !current) return 'payload snapshot unavailable';
+  const changes: string[] = [];
+  if (previous.systemHash !== current.systemHash) changes.push('system prompt changed');
+  if (previous.toolsHash !== current.toolsHash) {
+    const labels = changedLabels(previous.tools, current.tools);
+    const detail = labels.length > 0 ? `segments ${formatLabels(labels)}` : 'outside tracked segments or order';
+    const count = previous.toolCount === current.toolCount ? '' : `, count ${previous.toolCount}→${current.toolCount}`;
+    changes.push(`tools changed (${detail}${count})`);
+  }
+  const historyChanges = changedLabels(previous.history, current.history);
+  if (historyChanges.length > 0) {
+    changes.push(`history prefix changed at ${formatLabels(historyChanges)}`);
+  }
+  if (current.historyCount < previous.historyCount) {
+    changes.push(`history truncated ${previous.historyCount}→${current.historyCount}`);
+  }
+  if (changes.length > 0) return changes.join('; ');
+  const tracked = Math.min(previous.history.length, current.history.length);
+  return `tracked payload prefix unchanged (system, tools, first ${tracked} history messages); likely provider eviction or routing`;
+}
 
 type SessionEvent = { type?: string; message?: { role?: string; timestamp?: number; stopReason?: string; usage?: { cacheRead?: number } }; aborted?: boolean; result?: unknown };
 type Subscribable = { subscribe?: (listener: (event: SessionEvent) => void) => unknown };
 
 export interface CacheWatchOptions {
   /** Warm window in ms; a drop after a longer gap is TTL expiry, not a break. Defaults to the cache
-   *  TTL MINUS a 1-minute buffer — the opposite rounding direction from the clearing gate, because a
-   *  drop in the boundary minute (e.g. 60–61 min) is a real expiry and must not cry break. */
+   * TTL MINUS a 1-minute buffer — the opposite rounding direction from the clearing gate. */
   ttlMs?: number;
   now?: () => number;
+  monitor?: CachePayloadMonitor;
 }
 
 export function installCacheWatch(
@@ -35,7 +159,7 @@ export function installCacheWatch(
   if (typeof session.subscribe !== 'function') return;
   const ttlMs = options.ttlMs ?? (cacheTtlMs(process.env) - 60_000);
   const now = options.now ?? Date.now;
-  let previous: { cacheRead: number; at: number } | null = null;
+  let previous: { cacheRead: number; at: number; snapshot?: CachePayloadSnapshot } | null = null;
   session.subscribe((event) => {
     if (event.type === 'compaction_end' && !event.aborted && event.result) {
       // Post-compaction history is genuinely smaller; the next request's lower cacheRead is by design.
@@ -45,11 +169,9 @@ export function installCacheWatch(
     if (event.type !== 'message_end') return;
     const message = event.message;
     if (message?.role !== 'assistant') return;
-    // A request that errored or was aborted reports usage as all-zero, including cacheRead — it never
-    // reached the provider's cache, so its 0 says nothing about the prefix. Counting it produced a false
-    // "the prefix was rewritten" warning AND poisoned the baseline for the next comparison; the request
-    // right after a timeout routinely read the cache back at full size, proving nothing had changed.
-    // This accounted for the large majority of the warnings this monitor has ever emitted.
+    const snapshot = options.monitor?.consumeSnapshot();
+    // A request that errored or was aborted reports usage as all-zero. Consume its request snapshot, but
+    // keep the last successful response and payload as the comparison baseline.
     if (message.stopReason === 'error' || message.stopReason === 'aborted') return;
     const cacheRead = message.usage?.cacheRead;
     if (typeof cacheRead !== 'number') return;
@@ -63,10 +185,10 @@ export function installCacheWatch(
       ) {
         log.warn(
           `prompt cache read dropped within a warm window: ${previous.cacheRead} → ${cacheRead} tokens `
-          + `(${Math.round((at - previous.at) / 1000)}s apart) — an egress transform or prompt change rewrote the prefix`,
+          + `(${Math.round((at - previous.at) / 1000)}s apart) — ${attributePayloadChange(previous.snapshot, snapshot)}`,
         );
       }
     }
-    previous = { cacheRead, at };
+    previous = { cacheRead, at, ...(snapshot ? { snapshot } : {}) };
   });
 }

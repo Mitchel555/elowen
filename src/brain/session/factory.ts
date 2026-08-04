@@ -13,7 +13,7 @@ import {
 } from './turnBoundaryCompaction.js';
 import { installHistoryImageStripping } from './historyImageStripping.js';
 import { installToolResultClearing } from './toolResultClearing.js';
-import { installCacheWatch } from './cacheWatch.js';
+import { createCachePayloadMonitor, installCacheWatch, type CachePayloadMonitor } from './cacheWatch.js';
 import { seedActivatedFromHistory, type ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 import { logger } from '../../shared/logger.js';
 
@@ -123,6 +123,8 @@ export interface BrainResourceLoaderOptions {
   compactionModelRouteExtension?: CompactionModelRoute['extension'];
   /** Recall memories again mid-turn, searching from the work rather than the opening message. */
   liveRecall?: LiveRecallOptions;
+  /** Anthropic provider-payload hashes consumed by cacheWatch after each response. */
+  cacheMonitor?: CachePayloadMonitor;
   requestProfile?: ProviderRequestProfile;
   settingsManager: SettingsManager;
 }
@@ -220,13 +222,14 @@ function defaultResourceLoaderFactory(o: BrainResourceLoaderOptions): ResourceLo
     // feeds PI our in-memory plugin templates, which it exposes as `/name` slash commands and expands
     // ($1/$@/$ARGUMENTS/${N:-default}) itself in prompt()/steer()/followUp() — no daemon-side expansion.
     promptsOverride: () => ({ prompts, diagnostics: [] }),
-    ...(o.codexReasoningFix || o.kimiHeaderProbe || o.compactionModelRouteExtension || o.requestProfile || o.liveRecall ? {
+    ...(o.codexReasoningFix || o.kimiHeaderProbe || o.compactionModelRouteExtension || o.requestProfile || o.liveRecall || o.cacheMonitor ? {
       extensionFactories: [
         ...(o.codexReasoningFix ? [codexReasoningSummary] : []),
         ...(o.kimiHeaderProbe ? [kimiHeaderProbe] : []),
         ...(o.compactionModelRouteExtension ? [o.compactionModelRouteExtension] : []),
         ...(o.requestProfile ? [providerRequestProfile(o.requestProfile)] : []),
         ...(o.liveRecall ? [((recall) => (pi: ExtensionAPI): void => { installLiveRecall(pi, recall); })(o.liveRecall)] : []),
+        ...(o.cacheMonitor ? [o.cacheMonitor.extension] : []),
       ],
     } : {}),
   });
@@ -279,6 +282,7 @@ export class BrainSessionFactory {
     // `projectTrusted` lets those session-local writes land in the in-memory store instead of erroring.
     const settingsManager = SettingsManager.inMemory(undefined, { projectTrusted: true });
     const compactionModelRoute = createCompactionModelRoute(spec.compactionFallbackModel);
+    const cacheMonitor = spec.model.provider === 'anthropic' ? createCachePayloadMonitor() : undefined;
     const resourceLoader = (this.d.resourceLoaderFactory ?? defaultResourceLoaderFactory)({
       cwd: spec.cwd, systemPrompt: spec.systemPrompt, appendSystemPrompt: spec.appendSystemPrompt,
       skills: spec.skills, prompts: spec.promptTemplates, contextFiles: spec.contextFiles,
@@ -287,6 +291,7 @@ export class BrainSessionFactory {
       compactionModelRouteExtension: compactionModelRoute?.extension,
       requestProfile: spec.requestProfile, settingsManager,
       ...(spec.liveRecall ? { liveRecall: spec.liveRecall } : {}),
+      ...(cacheMonitor ? { cacheMonitor } : {}),
     });
     // A resource loader passed to createAgentSession is NOT auto-reloaded (only one it builds itself
     // is), so its system prompt stays empty unless we reload it here. Without this the brain falls
@@ -351,10 +356,10 @@ export class BrainSessionFactory {
     // history is never rewritten while a request could still cache-hit, and the per-session latch keeps
     // a cleared result cleared so the prefix stays byte-stable afterwards.
     installToolResultClearing(session, spec.sessionId);
-    // cacheWatch is the tripwire that would log if clearing (or anything else) ever broke a warm
-    // prefix. Anthropic-only: other providers report best-effort cache stats whose warm drops are
-    // routine — the warning would be noise there.
-    if (spec.model.provider === 'anthropic') installCacheWatch(session);
+    // cacheWatch is the tripwire that logs whether a warm drop came from system, tools, a history segment,
+    // or a likely provider-side eviction. Anthropic-only: other providers report best-effort cache stats
+    // whose warm drops are routine noise.
+    if (cacheMonitor) installCacheWatch(session, { monitor: cacheMonitor });
     // Compaction is PI-native: our per-user % maps to PI's absolute reserveTokens (shouldCompact fires
     // once contextTokens > contextWindow − reserveTokens). Applied AFTER create — createAgentSession reads
     // compaction lazily (getCompactionSettings at each check), so an in-memory override here takes effect;

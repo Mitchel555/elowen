@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import {
   CACHE_DROP_MIN_TOKENS,
+  createCachePayloadMonitor,
   installCacheWatch,
+  type CachePayloadMonitor,
 } from '../../../src/brain/session/cacheWatch.js';
 import { cacheTtlMs } from '../../../src/brain/session/toolResultClearing.js';
 import { setLogSink } from '../../../src/shared/logger.js';
@@ -20,11 +23,39 @@ afterEach(() => setLogSink(undefined));
 
 type Listener = (event: unknown) => void;
 
-function harness(options: { ttlMs?: number } = { ttlMs: TTL }): { fire: Listener } {
+function harness(options: { ttlMs?: number; monitor?: CachePayloadMonitor } = { ttlMs: TTL }): { fire: Listener } {
   let listener: Listener = () => undefined;
   const session = { subscribe: (fn: Listener) => { listener = fn; } };
   installCacheWatch(session, options);
   return { fire: (e) => listener(e) };
+}
+
+type ProviderRequestHandler = (event: { payload: unknown }) => void;
+
+function payloadCapture(monitor: CachePayloadMonitor): (payload: unknown) => void {
+  let handler: ProviderRequestHandler = () => undefined;
+  const pi = {
+    on: (event: string, fn: unknown) => {
+      if (event === 'before_provider_request') handler = fn as ProviderRequestHandler;
+    },
+  } as unknown as ExtensionAPI;
+  monitor.extension(pi);
+  return (payload) => handler({ payload });
+}
+
+function providerPayload(overrides: {
+  system?: unknown;
+  tools?: unknown[];
+  messages?: unknown[];
+} = {}): Record<string, unknown> {
+  return {
+    system: overrides.system ?? [{ type: 'text', text: 'stable system' }],
+    tools: overrides.tools ?? [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object' } }],
+    messages: overrides.messages ?? [
+      { role: 'user', content: [{ type: 'text', text: 'do work' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+    ],
+  };
 }
 
 const assistantUsage = (cacheRead: number, timestamp: number) => ({
@@ -76,6 +107,67 @@ describe('installCacheWatch — unsuccessful attempts', () => {
     fire(assistantUsage(20_000, T0 + 5_000));
     expect(warnings()).toHaveLength(1);
     expect(warnings()[0]?.message).toContain('100000 → 20000');
+  });
+});
+
+describe('installCacheWatch — payload attribution', () => {
+  it('identifies the changed history segment without logging its content', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    const firstMessages = [
+      { role: 'user', content: [{ type: 'text', text: 'do work' }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'old secret output' }] },
+    ];
+    capture(providerPayload({ messages: firstMessages }));
+    fire(assistantUsage(100_000, T0));
+    capture(providerPayload({
+      messages: [
+        firstMessages[0],
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'new secret output' }] },
+      ],
+    }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('history prefix changed at 1:user/tool_result');
+    expect(warnings()[0]?.message).not.toContain('secret output');
+  });
+
+  it('attributes system-prompt and tool-schema changes separately', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    capture(providerPayload());
+    fire(assistantUsage(100_000, T0));
+    capture(providerPayload({
+      system: [{ type: 'text', text: 'changed system' }],
+      tools: [{ name: 'Read', description: 'Read safely', input_schema: { type: 'object', required: ['path'] } }],
+    }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('system prompt changed');
+    expect(warnings()[0]?.message).toContain('tools changed (segments Read)');
+  });
+
+  it('reports likely provider eviction when the tracked payload prefix is append-only', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    const first = providerPayload();
+    capture(first);
+    fire(assistantUsage(100_000, T0));
+    const firstMessages = first.messages;
+    const messages = Array.isArray(firstMessages)
+      ? [...firstMessages, { role: 'user', content: [{ type: 'text', text: 'next' }] }]
+      : [];
+    capture(providerPayload({ messages }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('tracked payload prefix unchanged');
+    expect(warnings()[0]?.message).toContain('likely provider eviction or routing');
   });
 });
 

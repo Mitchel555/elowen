@@ -60,10 +60,11 @@ describe('BrainSessionFactory context-saving installers', () => {
       messages: [] as unknown[],
       setSteeringMode: vi.fn(),
     };
+    let cacheMonitor: unknown;
     const factory = new BrainSessionFactory({
       store: new BrainStore(openDb(':memory:')),
       createSession: vi.fn(async () => ({ session })) as never,
-      resourceLoaderFactory: () => undefined,
+      resourceLoaderFactory: (options) => { cacheMonitor = options.cacheMonitor; return undefined; },
     });
     await factory.create({
       sessionId: session.sessionId, ownerUserId: 1,
@@ -72,13 +73,13 @@ describe('BrainSessionFactory context-saving installers', () => {
       cwd: process.cwd(), systemPrompt: 'sp', appendSystemPrompt: [], skills: [], tools: [],
       autoCompact: false, autoCompactAtPct: 80,
     } as never);
-    return { home, listeners, session };
+    return { home, listeners, session, cacheMonitor };
   }
 
   it('installs tool-result clearing (with spill under the data dir) and subscribes cacheWatch', async () => {
     // A 66-minute idle gap exceeds BOTH the short (6m) and long (61m) gate, so the test is robust
     // regardless of PI_CACHE_RETENTION in the environment.
-    const { home, listeners, session } = await createWithProvider('anthropic');
+    const { home, listeners, session, cacheMonitor } = await createWithProvider('anthropic');
     try {
       const transform = session.agent.transformContext;
       expect(typeof transform).toBe('function');
@@ -114,8 +115,10 @@ describe('BrainSessionFactory context-saving installers', () => {
       // The full text was spilled BEFORE the placeholder replaced it.
       expect(readFileSync(join(home, '.config/elowen/tool-results/sess-anthropic/old-big.txt'), 'utf8')).toBe(big);
 
-      // cacheWatch + the persistence projector both subscribed at create time.
+      // cacheWatch + the persistence projector both subscribed at create time, and the exact provider
+      // payload recorder was handed to the resource loader's before_provider_request extension path.
       expect(listeners.length).toBeGreaterThanOrEqual(2);
+      expect(cacheMonitor).toBeDefined();
     } finally {
       vi.unstubAllEnvs();
     }
@@ -157,11 +160,12 @@ describe('BrainSessionFactory context-saving installers', () => {
   });
 
   it('skips cacheWatch for non-anthropic providers (their cache stats would make it cry wolf)', async () => {
-    const { listeners, session } = await createWithProvider('kimi-coding');
+    const { listeners, session, cacheMonitor } = await createWithProvider('kimi-coding');
     try {
       // Only the persistence projector subscribed; clearing's transformContext is still installed.
       expect(listeners).toHaveLength(1);
       expect(typeof session.agent.transformContext).toBe('function');
+      expect(cacheMonitor).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }
