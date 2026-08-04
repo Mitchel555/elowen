@@ -342,9 +342,9 @@ export class BrainSessionFactory {
       spec.toolSearch.session = session;
       seedActivatedFromHistory(spec.toolSearch, session.messages);
     }
-    // Egress-only: image blocks that have scrolled into history (a newer user turn exists) become text
-    // placeholders in every provider request, for ANY image source — Read images, MCP screenshots,
-    // future plugins. The current run's fresh image is still seen; persisted history is untouched.
+    // Egress-only: once the prompt cache is definitely cold, historical image blocks become latched text
+    // placeholders for ANY source — Read images, MCP screenshots, future plugins. Warm history and the
+    // current run's fresh images stay intact; persisted history is untouched.
     installHistoryImageStripping(session);
     // Same egress seam: large tool results that have scrolled two user turns back are swapped for a
     // placeholder + spill-file path, but only once the prompt cache has provably expired (idle gate) —

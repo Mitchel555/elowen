@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
+import { cacheColdAtTurnStart, idleThresholdMs } from './cacheTiming.js';
 import { isUserTurn } from './userTurn.js';
 
 /** PI's `transformContext` hook signature and its message type, derived from the hook itself —
@@ -58,18 +60,68 @@ export function stripHistoricalImages(messages: PiAgentMessage[]): PiAgentMessag
   return changed ? next : messages;
 }
 
+interface LatchedImageMessage {
+  sourceHash: string;
+  stripped: PiAgentMessage;
+}
+
+function messageHash(message: PiAgentMessage): string {
+  const serialized = JSON.stringify(message);
+  return createHash('sha256').update(serialized ?? '').digest('hex');
+}
+
+export interface HistoryImageStrippingOptions {
+  /** Idle gate in ms; defaults to the same shared threshold as tool-result clearing. */
+  idleMs?: number;
+  /** Clock injection for tests. */
+  now?: () => number;
+}
+
 /** Compose the stripper onto the session's `transformContext` — the hook PI runs before every provider
- *  request, applied to a local copy only (persisted history is untouched). PI's SDK already installs a
- *  transformContext of its own, so this wraps it (call the previous hook first, strip its result)
- *  instead of clobbering, mirroring installTurnBoundaryAutoCompaction's wrap pattern. */
-export function installHistoryImageStripping(session: { agent?: { transformContext?: AgentTransformContext } }): void {
+ * request, applied to a local copy only (persisted history is untouched). Historical images may first be
+ * stripped only on a definitely-cold turn. Each replacement is then latched to its original message hash:
+ * old placeholders remain byte-stable, while images first seen after that cold turn stay intact until a
+ * later cold turn makes them eligible. */
+export function installHistoryImageStripping(
+  session: { agent?: { transformContext?: AgentTransformContext } },
+  options: HistoryImageStrippingOptions = {},
+): void {
   // Injected/custom AgentSession implementations (tests) may expose only the public surface, without
   // the underlying agent — same seam-missing tolerance as installTurnBoundaryAutoCompaction.
   const agent = session.agent;
   if (!agent) return;
+  const idleMs = options.idleMs ?? idleThresholdMs(process.env);
+  const now = options.now ?? Date.now;
+  const latched = new Map<number, LatchedImageMessage>();
   const previous = agent.transformContext;
   agent.transformContext = async (messages, signal) => {
     const base = previous ? await previous(messages, signal) : messages;
-    return stripHistoricalImages(base);
+    if (cacheColdAtTurnStart(base, idleMs, now())) {
+      const stripped = stripHistoricalImages(base);
+      for (let index = 0; index < base.length; index += 1) {
+        const original = base[index];
+        const replacement = stripped[index];
+        if (original && replacement && replacement !== original) {
+          latched.set(index, { sourceHash: messageHash(original), stripped: replacement });
+        }
+      }
+    }
+    if (latched.size === 0) return base;
+
+    for (const index of latched.keys()) {
+      if (index >= base.length) latched.delete(index);
+    }
+    let changed = false;
+    const next = base.map((message, index): PiAgentMessage => {
+      const entry = latched.get(index);
+      if (!entry) return message;
+      if (messageHash(message) !== entry.sourceHash) {
+        latched.delete(index);
+        return message;
+      }
+      changed = true;
+      return entry.stripped;
+    });
+    return changed ? next : base;
   };
 }

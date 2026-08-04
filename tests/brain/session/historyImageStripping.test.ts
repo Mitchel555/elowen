@@ -6,7 +6,9 @@ import {
   type PiAgentMessage,
 } from '../../../src/brain/session/historyImageStripping.js';
 
-const user = (text: string): PiAgentMessage => ({ role: 'user', content: [{ type: 'text', text }], timestamp: 1 });
+const user = (text: string, timestamp = 1): PiAgentMessage => ({
+  role: 'user', content: [{ type: 'text', text }], timestamp,
+});
 
 const assistantToolCall = (name: string): PiAgentMessage => ({
   role: 'assistant',
@@ -20,8 +22,13 @@ const assistantToolCall = (name: string): PiAgentMessage => ({
 });
 
 type ToolResultContent = Extract<PiAgentMessage, { role: 'toolResult' }>['content'];
-const toolResult = (toolName: string, content: ToolResultContent): PiAgentMessage => ({
-  role: 'toolResult', toolCallId: 'call-1', toolName, content, isError: false, timestamp: 3,
+const toolResult = (
+  toolName: string,
+  content: ToolResultContent,
+  timestamp = 3,
+  toolCallId = 'call-1',
+): PiAgentMessage => ({
+  role: 'toolResult', toolCallId, toolName, content, isError: false, timestamp,
 });
 
 const image = { type: 'image', data: 'AAAA', mimeType: 'image/png' } as const;
@@ -114,9 +121,49 @@ describe('stripHistoricalImages', () => {
 });
 
 describe('installHistoryImageStripping', () => {
+  it('keeps historical images byte-identical while the cache is warm', async () => {
+    const session: { agent: { transformContext?: (m: PiAgentMessage[]) => Promise<PiAgentMessage[]> } } = { agent: {} };
+    installHistoryImageStripping(session, { idleMs: 60_000, now: () => 5_000 });
+    const input: PiAgentMessage[] = [
+      user('look', 1_000),
+      toolResult('Read', [image], 2_000),
+      user('next', 3_000),
+    ];
+
+    const transform = session.agent.transformContext;
+    expect(transform).toBeDefined();
+    const result = transform ? await transform(input) : [];
+    expect(result).toBe(input);
+    expect(result[1]).toBe(input[1]);
+  });
+
+  it('latches only images stripped on a cold turn and preserves the whole warm prefix', async () => {
+    const session: { agent: { transformContext?: (m: PiAgentMessage[]) => Promise<PiAgentMessage[]> } } = { agent: {} };
+    const idleMs = 60_000;
+    installHistoryImageStripping(session, { idleMs, now: () => 100_000 });
+    const laterImage = { type: 'image', data: 'BBBB', mimeType: 'image/png' } as const;
+    const cold: PiAgentMessage[] = [
+      user('one', 1_000),
+      toolResult('Read', [image], 2_000, 'call-1'),
+      user('two', 2_000 + idleMs + 1),
+      toolResult('Read', [laterImage], 2_000 + idleMs + 2, 'call-2'),
+    ];
+
+    const transform = session.agent.transformContext;
+    expect(transform).toBeDefined();
+    const first = transform ? await transform(cold) : [];
+    expect(first[1]).toEqual({ ...cold[1], content: [placeholder] });
+    expect(first[3]).toBe(cold[3]);
+
+    const warm = [...cold, user('three', 2_000 + idleMs + 3)];
+    const second = transform ? await transform(warm) : [];
+    expect(JSON.stringify(second.slice(0, first.length))).toBe(JSON.stringify(first));
+    expect(second[3]).toBe(cold[3]);
+  });
+
   it('composes with a pre-existing transformContext: previous hook runs first, then stripping', async () => {
     const calls: string[] = [];
-    const injected = user('injected-by-previous-hook');
+    const injected = user('injected-by-previous-hook', 100);
     const session = {
       agent: {
         transformContext: async (messages: PiAgentMessage[]): Promise<PiAgentMessage[]> => {
@@ -125,7 +172,7 @@ describe('installHistoryImageStripping', () => {
         },
       },
     };
-    installHistoryImageStripping(session);
+    installHistoryImageStripping(session, { idleMs: 10, now: () => 100 });
     const input: PiAgentMessage[] = [user('look'), toolResult('Read', [image])];
     const result = await session.agent.transformContext(input);
     expect(calls).toEqual(['previous']);
@@ -137,8 +184,8 @@ describe('installHistoryImageStripping', () => {
 
   it('works when no previous transformContext exists', async () => {
     const session: { agent: { transformContext?: (m: PiAgentMessage[], s?: AbortSignal) => Promise<PiAgentMessage[]> } } = { agent: {} };
-    installHistoryImageStripping(session);
-    const input: PiAgentMessage[] = [user('look'), toolResult('Read', [image]), user('next')];
+    installHistoryImageStripping(session, { idleMs: 10, now: () => 100 });
+    const input: PiAgentMessage[] = [user('look'), toolResult('Read', [image]), user('next', 100)];
     const result = await session.agent.transformContext!(input);
     expect(result[1]).toEqual({ ...input[1], content: [placeholder] });
   });

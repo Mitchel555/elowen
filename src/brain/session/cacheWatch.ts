@@ -1,5 +1,5 @@
 import { logger } from '../../shared/logger.js';
-import { cacheTtlMs } from './toolResultClearing.js';
+import { cacheTtlMs } from './cacheTiming.js';
 
 /** Prompt-cache observability, modeled on Claude Code's promptCacheBreakDetection. In a healthy
  *  append-only conversation `cacheRead` grows monotonically: each request reads the prefix the

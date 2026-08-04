@@ -4,7 +4,10 @@ import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import { fsSafeSegment, toolResultSpillDir } from '../../shared/paths.js';
 import { logger } from '../../shared/logger.js';
 import type { PiAgentMessage } from './historyImageStripping.js';
+import { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs } from './cacheTiming.js';
 import { isUserTurn } from './userTurn.js';
+
+export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
 
 /** Egress-only clearing of large historical tool results — the transferable core of Claude Code's
  *  time-based microcompact, adapted to Elowen's `transformContext` seam (the same hook
@@ -71,18 +74,6 @@ export const SPILL_PREVIEW_CHARS = 2000;
 /** How many trailing user turns keep their tool results intact: the current run (after the last user
  *  message) plus the whole previous turn. Everything older is eligible once the gate opens. */
 const KEEP_USER_TURNS = 2;
-
-/** pi-ai's short cache TTL is 5 minutes, long (PI_CACHE_RETENTION=long) is 1 hour; the daemon defaults
- *  to long. Resolved from the same env var pi-ai reads, so Elowen and pi-ai never disagree. */
-export function cacheTtlMs(env: NodeJS.ProcessEnv): number {
-  return env.PI_CACHE_RETENTION === 'long' ? 60 * 60_000 : 5 * 60_000;
-}
-
-/** The gate needs the cache to be DEFINITELY cold, so it rounds the TTL UP by a 1-minute buffer.
- *  (cacheWatch rounds the same TTL DOWN instead — a drop near the boundary is expiry, not a break.) */
-export function idleThresholdMs(env: NodeJS.ProcessEnv): number {
-  return cacheTtlMs(env) + 60_000;
-}
 
 /** Deterministic spill path — the placeholder builds it without any I/O, so the transform stays pure.
  *  The id is fs-encoded like the session id: a provider/plugin-minted toolCallId containing `/` or
@@ -207,21 +198,6 @@ export function applyToolResultClearing(
     return { ...message, content: [{ type: 'text', text: entry.placeholder }] };
   });
   return changed ? next : messages;
-}
-
-/** Was the cache definitely cold when this turn started? Compare the last user message (the prompt
- *  that opened the current turn) with the message right before it. During an active tool loop the gap
- *  is seconds; after an idle longer than the TTL the gap proves the prefix had expired. Exported for
- *  tests. */
-export function cacheColdAtTurnStart(messages: PiAgentMessage[], idleMs: number, now: number): boolean {
-  const lastUser = lastUserIndex(messages);
-  if (lastUser <= 0) return false;
-  const promptAt = messages[lastUser]?.timestamp;
-  const previousAt = messages[lastUser - 1]?.timestamp;
-  if (typeof promptAt !== 'number' || typeof previousAt !== 'number') return false;
-  // A rehydrated session's prompt is fresh while its history is old; `now` bounds a prompt stamped in
-  // the future (clock skew) so the gap can't be inflated beyond the real idle time.
-  return Math.min(promptAt, now) - previousAt > idleMs;
 }
 
 export interface ToolResultClearingOptions {
