@@ -4,7 +4,8 @@ import type { BrainRuntimeConfig } from '../providers.js';
 import { buildBrainRegistry, resolveBrainModel } from '../providers.js';
 import { extractText, shapeBrainMessages, lastAssistant, pendingSubmittedPlan } from '../messageView.js';
 import type { BrainMessageView } from '../messageView.js';
-import type { BrainPendingPlan, BrainWorkMode } from '../../shared/wireContract.js';
+import type { BrainContextBreakdown, BrainPendingPlan, BrainWorkMode } from '../../shared/wireContract.js';
+import { buildContextBreakdown, contextSnapshotOf } from '../contextBreakdown.js';
 import { sessionUsageSnapshot } from '../events.js';
 import type { AskQuestion, BrainCard, BrainUsage } from '../events.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
@@ -298,6 +299,17 @@ export class BrainStatusService {
       yolo: this.d.permissions.effectiveYolo(userId, b),
       project: { cwd, branch: cwd ? gitBranch(cwd, policy) : null },
     };
+  }
+
+  /** What is currently filling the conversation's context window, category by category — the reporting
+   *  companion to {@link status}'s single fill percentage. Same session resolution, so a bound client asks
+   *  about ITS conversation. Null when no live session holds the conversation: the breakdown describes the
+   *  prompt PI would send right now, and a stored transcript alone has neither a system prompt nor a tool
+   *  set. Read-only — it never touches what the next request sends. */
+  contextBreakdown(userId: number, session?: string): BrainContextBreakdown | null {
+    const explicit = session ? this.d.lifecycle.ownedUserSession(userId, session) : undefined;
+    const b = explicit ? this.d.sessions.get(explicit) : this.d.lifecycle.activeLive(userId);
+    return b ? buildContextBreakdown(contextSnapshotOf(b.session, b.model)) : null;
   }
 
   /** The user's conversations (channel sessions excluded), most recent first, with live/active flags and

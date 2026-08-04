@@ -82,7 +82,8 @@ import { brainConfigFromElowen } from '../brain/config.js';
 import { loadAgentRegistry, agentCatalog, type AgentDef } from '../brain/agents/agentRegistry.js';
 import { listBrainModels } from '../brain/models.js';
 import { setToolOutputCaps, setToolOutputPolicy } from '../brain/messageView.js';
-import { setSpillMaxResultBytes } from '../brain/session/toolResultClearing.js';
+import { setSpillMaxResultBytes, setToolResultGroupBudget } from '../brain/session/toolResultClearing.js';
+import { setCompactionFailureLimit } from '../brain/session/compactionCircuitBreaker.js';
 import { makeToolOutputPolicy } from '../brain/toolOutput.js';
 import { BUILTIN_TOOL_OUTPUT_SHOWN } from '../brain/tools/index.js';
 import type { DelegatedChildBridge } from '../plugins/api.js';
@@ -746,6 +747,13 @@ export async function buildApp(opts: BuildOpts) {
   // Size trigger for inline tool results (Elowen AI → Limits): a single result above this is spilled to
   // disk and the model gets a placeholder instead. Read live so a Settings change applies without a restart.
   setSpillMaxResultBytes(() => config.get().brain.limits.toolResultInlineBytes);
+  // Aggregate trigger for one wire-level tool-result message (Elowen AI → Limits): a turn's parallel
+  // results reach the provider as a single block, and its largest members are spilled until the block
+  // fits. Read live, like the two above.
+  setToolResultGroupBudget(() => config.get().brain.limits.toolResultGroupBudgetBytes);
+  // Consecutive failed automatic compactions after which a conversation stops attempting them (Elowen AI
+  // → Limits). Read live, so raising the limit lets a stopped conversation try again without a restart.
+  setCompactionFailureLimit(() => config.get().brain.limits.compactionFailureLimit);
   // Tool-output VISIBILITY policy (single source, mirrors the icon pipeline): output is hidden by
   // default; the built-in show defaults plus every enabled plugin's manifest `showOutput` are merged and
   // injected into the shared messageView renderer so the live (events.ts) and history (shapeBrainMessages)

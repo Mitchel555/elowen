@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { makeTestApp } from '../helpers/testApp.js';
+import { openDb } from '../../src/store/db.js';
+import { ConfigStore } from '../../src/store/configStore.js';
+import { brainLimitsPatchSchema, runtimeLimitsPatchSchema, memoryRetentionPatchSchema } from '../../src/api/schemas/config.js';
 
 const put = (token: string, body: unknown) => ({
   method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
@@ -63,5 +66,28 @@ describe('PUT /config validates the patch at the trust boundary', () => {
     const body = await res.json() as { allowedExecs: string[]; modelNotes: Record<string, string> };
     expect(body.allowedExecs).toEqual(['sonnet']);
     expect(body.modelNotes.sonnet).toBe('good at code');
+  });
+});
+
+// A field present in a store's default shape but missing from its patch schema is stripped by Zod
+// before ConfigStore.update ever sees it: the route answers 200, clampBrainLimits falls through to the
+// old stored value, and the save silently does nothing (this is exactly how memoryLiveRecallPasses/
+// Count/Chars went missing from brainLimitsPatchSchema). ConfigStore's own default shape — not a
+// hand-maintained list — is the source of truth, so adding a knob to the store without adding it here
+// fails this test instead of shipping a silently no-op setting.
+describe('patch schemas accept exactly the store defaults\u2019 keys', () => {
+  it('brainLimitsPatchSchema matches ConfigStore\u2019s brain.limits shape', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    expect(Object.keys(brainLimitsPatchSchema.shape).sort()).toEqual(Object.keys(cs.get().brain.limits).sort());
+  });
+
+  it('runtimeLimitsPatchSchema matches ConfigStore\u2019s runtime.limits shape', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    expect(Object.keys(runtimeLimitsPatchSchema.shape).sort()).toEqual(Object.keys(cs.get().runtime.limits).sort());
+  });
+
+  it('memoryRetentionPatchSchema matches ConfigStore\u2019s memoryRetention shape', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    expect(Object.keys(memoryRetentionPatchSchema.shape).sort()).toEqual(Object.keys(cs.get().runtime.memoryRetention).sort());
   });
 });

@@ -262,6 +262,15 @@ export class LiveSessionSpawner {
     // the session. Safe because the channel lock serializes turns, so it cannot change under a running
     // retrieval. The rule itself lives in liveRecallUserId, where a test can pin it.
     const recallUserId = (): number | null => liveRecallUserId(sessionId, ownerUserId, live.turnRecallUserId);
+    const listeners = new Set<(e: BrainEvent) => void>();
+    // Re-attach every listener ClientAttachments still has on this session id — direct subscribe()
+    // subscribers and drill-in taps alike. A respawn (model switch, restart, vision hop, idle rollover,
+    // LRU eviction + revival) always builds a fresh listener set here; without this every one of them
+    // would silently go dark while the client believes it is still attached.
+    for (const tap of this.d.sessionTaps(opts.sessionId)) listeners.add(tap);
+    // Built before the session so the compaction circuit breaker (installed inside the factory) has a
+    // channel to report on; nothing publishes until the session actually runs.
+    const replay = new LiveEventReplay(listeners);
     const { session, applyCompaction } = await this.d.factory.create({
       sessionId, ownerUserId, parentSessionId: opts.parentSessionId, delegatedAccess: opts.delegatedAccess,
       runtime: this.d.runtime, model, providerId, compactionFallbackModel: route.compactionFallback, cwd,
@@ -311,6 +320,9 @@ export class LiveSessionSpawner {
       // project path, and PI walks it plus every ancestor up to `/`, so a plain user's chat would
       // otherwise inhale the operator's private CLAUDE.md (internal hosts, prod credentials).
       contextFiles: !opts.channel && !!u?.is_admin,
+      // A conversation that gave up on compacting cannot recover on its own, so it goes out on the same
+      // channel as any other terminal session failure rather than staying a log line nobody reads.
+      onCompactionStopped: (message) => replay.publish({ type: 'error', message }),
       onSpawned: toolHookBus ? (e) => toolHookBus.emit('brain.session.afterSpawn', e) : undefined,
     });
 
@@ -320,13 +332,6 @@ export class LiveSessionSpawner {
     const iconMap = new Map<string, string>(Object.entries(BUILTIN_TOOL_ICONS));
     for (const [k, v] of plugins?.toolIcons ?? []) iconMap.set(k, v);
     const iconOf = makeToolIconResolver(iconMap);
-    const listeners = new Set<(e: BrainEvent) => void>();
-    // Re-attach every listener ClientAttachments still has on this session id — direct subscribe()
-    // subscribers and drill-in taps alike. A respawn (model switch, restart, vision hop, idle rollover,
-    // LRU eviction + revival) always builds a fresh listener set here; without this every one of them
-    // would silently go dark while the client believes it is still attached.
-    for (const tap of this.d.sessionTaps(opts.sessionId)) listeners.add(tap);
-    const replay = new LiveEventReplay(listeners);
     // The stateful event reducer that projects raw PI events into the store and fans the BrainEvent
     // contract to clients. Extracted into spawnEventReducer.ts (its own deferred terminal state per
     // session); `getLive` defers the `live` capture because it is assigned below, after subscribe — and

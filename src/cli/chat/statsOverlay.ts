@@ -6,14 +6,29 @@ import { FRAME_COLS, framed, hintRow, sectionRule, sectionTabs, titleRow } from 
 import { openCenteredModal } from './openCenteredModal.js';
 import { formatK } from '../ui/text.js';
 import type { ModelUsageView, BrainUsageView } from './brainClient.js';
+import type { BrainContextBreakdown, BrainContextCategoryId } from '../../shared/wireContract.js';
 
 interface StatsOverlayData {
   model: string | null;
   usage: BrainUsageView | null;
   models: ModelUsageView[];
+  /** What is filling the window right now; null when no live session could be measured. */
+  context: BrainContextBreakdown | null;
 }
 
-type Section = 'conversation' | 'models';
+type Section = 'conversation' | 'models' | 'context';
+
+const SECTIONS: readonly Section[] = ['conversation', 'models', 'context'];
+
+/** Human labels for the breakdown's closed category set — the CLI's own chrome, English like the rest. */
+const CATEGORY_LABEL: Record<BrainContextCategoryId, string> = {
+  system: 'system',
+  tools: 'tools',
+  user: 'you',
+  assistant: 'assistant',
+  toolResults: 'tool output',
+  other: 'other',
+};
 
 /** Right-aligned label + value pair — the calm two-column grid all etched modals share. */
 const LABEL_W = 10;
@@ -26,25 +41,31 @@ function contextBar(width: number, percent: number): string {
 
 class StatsOverlay implements Component, Focusable {
   private _focused = false;
-  private section: Section = 'conversation';
+  private section: Section;
 
   constructor(
     private readonly data: StatsOverlayData,
     private readonly onClose: () => void,
-  ) {}
+    section: Section = 'conversation',
+  ) {
+    this.section = section;
+  }
 
   get focused(): boolean { return this._focused; }
   set focused(value: boolean) { this._focused = value; }
   invalidate(): void { /* state driven */ }
 
-  private cycle(): void {
-    this.section = this.section === 'conversation' ? 'models' : 'conversation';
+  private cycle(step: 1 | -1): void {
+    const at = SECTIONS.indexOf(this.section);
+    const next = SECTIONS[(at + step + SECTIONS.length) % SECTIONS.length];
+    if (next) this.section = next;
   }
 
   handleInput(data: string): void {
     if (isKeyRelease(data)) return;
     if (isEscapeKey(data)) { this.onClose(); return; }
-    if (isLeftKey(data) || isRightKey(data)) { this.cycle(); return; }
+    if (isLeftKey(data)) { this.cycle(-1); return; }
+    if (isRightKey(data)) { this.cycle(1); return; }
   }
 
   render(width: number): string[] {
@@ -56,6 +77,7 @@ class StatsOverlay implements Component, Focusable {
     const tabs = sectionTabs([
       { label: 'Conversation', active: this.section === 'conversation' },
       { label: 'Models', active: this.section === 'models' },
+      { label: 'Context', active: this.section === 'context' },
     ]);
     body.push(titleRow('Stats', tabs.text, bodyWidth, tabs.width));
     body.push('');
@@ -87,6 +109,8 @@ class StatsOverlay implements Component, Focusable {
       } else {
         body.push(kv('', color.faint('no conversation usage data')));
       }
+    } else if (this.section === 'context') {
+      this.renderContext(body, bodyWidth);
     } else {
       body.push(sectionRule('per model', bodyWidth));
       body.push('');
@@ -127,23 +151,72 @@ class StatsOverlay implements Component, Focusable {
     body.push(hintRow('← → section · esc close'));
     return framed(body, width);
   }
+
+  /** "What is filling the window": one bar per measured category, then the heaviest tools. Every figure
+   *  here is an estimate (the daemon has no provider tokenizer), so the window line names the provider's
+   *  own count separately instead of blending the two into one authoritative-looking number. */
+  private renderContext(body: string[], bodyWidth: number): void {
+    const breakdown = this.data.context;
+    body.push(sectionRule('window', bodyWidth));
+    body.push('');
+    if (!breakdown) {
+      body.push(kv('', color.faint('no live session to measure')));
+      return;
+    }
+    const barWidth = Math.min(34, Math.max(10, bodyWidth - LABEL_W - 6));
+    body.push(kv('model', color.text(breakdown.model || '—')));
+    body.push(kv('window', color.text(formatK(breakdown.contextWindow))
+      + (breakdown.compactAtTokens != null ? color.faint(`   compacts at ${formatK(breakdown.compactAtTokens)}`) : '')));
+    if (breakdown.reportedTokens != null) {
+      body.push(kv('reported', color.text(formatK(breakdown.reportedTokens))
+        + color.faint('   provider count, last request')));
+    }
+    body.push('');
+    body.push(sectionRule('estimated breakdown', bodyWidth));
+    body.push('');
+    if (breakdown.categories.length === 0) {
+      body.push(kv('', color.faint('nothing measured yet')));
+    } else {
+      for (const category of breakdown.categories) {
+        body.push(kv(CATEGORY_LABEL[category.id], color.text(formatK(category.tokens).padStart(6))
+          + color.faint(`  ${Math.round(category.percent)}%`)));
+        body.push(kv('', contextBar(barWidth, category.percent)));
+      }
+      body.push(kv('free', color.faint(`${formatK(breakdown.free.tokens).padStart(6)}  ${Math.round(breakdown.free.percent)}%`)));
+    }
+    if (breakdown.tools.length > 0) {
+      body.push('');
+      body.push(sectionRule('heaviest tools', bodyWidth));
+      body.push('');
+      const nameW = 22, tokW = 8;
+      const pad = '   ';
+      body.push(`${pad}${color.dim('tool'.padEnd(nameW))}${color.dim('tokens'.padStart(tokW))}${color.dim('   schema / calls / output')}`);
+      for (const tool of breakdown.tools) {
+        const name = tool.name.length > nameW - 2 ? `${tool.name.slice(0, nameW - 4)}…` : tool.name;
+        const detail = `${formatK(tool.schemaTokens)} / ${formatK(tool.callTokens)} / ${formatK(tool.resultTokens)}`;
+        body.push(`${pad}${color.text(name.padEnd(nameW))}${color.text(formatK(tool.tokens).padStart(tokW))}${color.faint(`   ${detail}`)}`);
+      }
+    }
+  }
 }
 
-/** Fetch data then open the stats overlay with ←→-switchable Conversation/Models sections. */
+/** Fetch data then open the stats overlay with ←→-switchable Conversation/Models/Context sections.
+ *  `section` picks the one to land on — `/stats` opens on the conversation, `/context` on the breakdown. */
 export function openStatsOverlay(o: {
   tui: TUI;
   editor: Editor;
   data: StatsOverlayData;
+  section?: Section;
 }): void {
   const longest = Math.max(
     62,
     ...o.data.models.map((m) => Math.min(m.exec.length, 26) + 10 + 10 + 8 + 10 + 6),
-    visibleWidth('Stats        ● Conversation    ○ Models') + 8,
+    visibleWidth('Stats        ● Conversation    ○ Models    ○ Context') + 8,
   );
   openCenteredModal({
     tui: o.tui,
     editor: o.editor,
-    makeComponent: (close) => new StatsOverlay(o.data, close),
+    makeComponent: (close) => new StatsOverlay(o.data, close, o.section),
     longest,
     minWidth: 56,
     pad: 8,

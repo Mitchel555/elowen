@@ -38,7 +38,12 @@ export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
  *  yet: replacing one there APPENDS a smaller block to the prefix instead of rewriting a cached one,
  *  so rule 1 still holds. Everything older stays the time gate's business. Because the model never
  *  gets to see such a result at all, this placeholder also carries a preview of the content; the
- *  time-triggered one does not, since the model already read that result earlier in the conversation. */
+ *  time-triggered one does not, since the model already read that result earlier in the conversation.
+ *
+ *  A THIRD trigger measures what the per-result one structurally cannot: the SUM of one wire-level
+ *  tool-result message (see TOOL_RESULT_GROUP_BUDGET_BYTES). It runs on the same current-run region and
+ *  the same spill machinery, spilling the largest members of an over-budget group until it fits, and it
+ *  latches BOTH outcomes — spilled and kept — because a member left in place has by then gone out whole. */
 
 const log = logger('brain-tool-clearing');
 
@@ -57,6 +62,23 @@ export const CLEAR_MIN_BYTES = 4096;
  *  ASCII-dominant output that reaches this size the two differ by a rounding error, and one measure beats
  *  two. */
 export const SPILL_MAX_RESULT_BYTES = 50_000;
+
+/** Aggregate cap on ONE wire-level tool-result message. pi-ai's Anthropic converter coalesces every RUN
+ *  of consecutive `toolResult` messages into a single `user` message (`convertMessages`), so the parallel
+ *  tool calls of one turn reach the provider as one block — and that block, not the individual result, is
+ *  what the context pays for. The per-result trigger cannot see it: eight parallel searches of 30 kB each
+ *  add ~240 kB while every one of them sits comfortably under SPILL_MAX_RESULT_BYTES.
+ *
+ *  200 000 is Claude Code's per-message budget and lands in the right place here too — four full-size
+ *  single-result spills, ~50k tokens, the point at which one turn's fan-out alone costs a quarter of a
+ *  200k context window. Kept as the DEFAULT of the operator-tunable `toolResultGroupBudgetBytes` knob
+ *  (Elowen AI → Limits). Bytes rather than characters for the same reason as SPILL_MAX_RESULT_BYTES. */
+export const TOOL_RESULT_GROUP_BUDGET_BYTES = 200_000;
+
+/** The aggregate trigger's threshold, resolved live through the same seam as the per-result one above, so
+ *  a Limits change applies to the very next transform rather than to the next daemon start. */
+let toolResultGroupBudget: () => number = () => TOOL_RESULT_GROUP_BUDGET_BYTES;
+export function setToolResultGroupBudget(resolve: () => number): void { toolResultGroupBudget = resolve; }
 
 /** The size trigger's threshold, resolved live so a Limits change applies without a restart — the same
  *  module-level-resolver seam messageView uses for its tool-output caps ({@link setToolOutputCaps}).
@@ -177,6 +199,71 @@ export function selectOversizedToolResults(
   return selection;
 }
 
+/** The aggregate budget in force right now, floored at the operator-tunable per-result threshold: a
+ *  result the per-result layer deliberately keeps inline must not be spilled by the aggregate layer
+ *  merely for being alone in its group. Both knobs move independently, so the floor is applied here at
+ *  the point of use rather than trusted to hold in whatever was stored. */
+function groupBudgetBytes(): number {
+  return Math.max(toolResultGroupBudget(), spillMaxResultBytes());
+}
+
+/** Indices of each maximal run of consecutive toolResult messages in the CURRENT run — one run is one
+ *  wire-level message, and the current run is the only region whose results have not reached the
+ *  provider yet (same boundary, and the same cache reason, as selectOversizedToolResults). */
+function currentRunToolResultGroups(messages: readonly PiAgentMessage[]): number[][] {
+  const groups: number[][] = [];
+  let group: number[] = [];
+  for (let index = lastUserIndex(messages) + 1; index < messages.length; index += 1) {
+    if (messages[index]?.role === 'toolResult') { group.push(index); continue; }
+    if (group.length > 0) { groups.push(group); group = []; }
+  }
+  if (group.length > 0) groups.push(group);
+  return groups;
+}
+
+export interface BudgetedSelection {
+  /** Results to spill, largest first — spilling them in this order brings each group back under budget. */
+  spill: ClearableResult[];
+  /** Every candidate the budget layer weighed this pass, spilled or not. The caller latches these: a
+   *  result that has once been handed to the provider whole must never be reconsidered, or a later pass
+   *  (after a failed spill, or after a Limits change) would rewrite a prefix the provider already cached. */
+  decided: string[];
+}
+
+/** Pure selection for the aggregate trigger: per wire-level group, spill the largest members until the
+ *  group's total is back under budget. `spilled` members already reach the provider as a placeholder, so
+ *  they cost the group nothing; `kept` members are latched decisions and count at full size without ever
+ *  becoming candidates again. A member without a toolCallId has no spill path, so it can only ever be
+ *  weighed, never spilled. Exported for tests. */
+export function selectBudgetedToolResults(
+  messages: PiAgentMessage[],
+  spilled: ReadonlySet<string>,
+  kept: ReadonlySet<string>,
+): BudgetedSelection {
+  const budget = groupBudgetBytes();
+  const selection: BudgetedSelection = { spill: [], decided: [] };
+  for (const group of currentRunToolResultGroups(messages)) {
+    let total = 0;
+    const candidates: ClearableResult[] = [];
+    for (const index of group) {
+      const message = messages[index] as ToolResultMessage;
+      if (message.toolCallId && spilled.has(message.toolCallId)) continue;
+      const bytes = textBytes(message);
+      total += bytes;
+      if (!message.toolCallId || kept.has(message.toolCallId)) continue;
+      candidates.push({ index, toolCallId: message.toolCallId, bytes });
+    }
+    candidates.sort((a, b) => (b.bytes - a.bytes) || (a.index - b.index));
+    for (const candidate of candidates) {
+      if (total <= budget) break;
+      selection.spill.push(candidate);
+      total -= candidate.bytes;
+    }
+    for (const candidate of candidates) selection.decided.push(candidate.toolCallId);
+  }
+  return selection;
+}
+
 /** Pure replacement: swap each selected message's content for the placeholder text block. Input is
  *  never mutated and unselected messages keep their references (idempotence, same contract as
  *  stripHistoricalImages). Exported for tests. */
@@ -250,6 +337,12 @@ export function installToolResultClearing(
   /** toolCallIds whose spill path is occupied by a DIFFERENT file. `wx` can never overwrite it, so
    *  retrying could only ever warn again — skip permanently (for this session's lifetime). */
   const foreignSpills = new Set<string>();
+  /** toolCallIds the aggregate budget has already ruled on. The second half of the latch: a member left
+   *  in place goes to the provider whole, so re-weighing its group later — after a failed spill, or after
+   *  the threshold moved — could pick a DIFFERENT member and rewrite a prefix that is already cached.
+   *  A ruling stands for the session; the time trigger may still clear such a result once the gate is
+   *  cold, which is the only moment rewriting history is free. */
+  const budgetDecided = new Set<string>();
   let gateWasOpen = false;
   const previous = agent.transformContext;
   agent.transformContext = async (messages, signal) => {
@@ -302,6 +395,11 @@ export function installToolResultClearing(
     // Runs on every pass, gate or no gate: an oversized result of the current run has not reached the
     // provider yet, so this is the only chance to keep it out of the context entirely.
     await spillSelected(selectOversizedToolResults(base, new Set(latched.keys())), true);
+    // Then the aggregate layer, on what the per-result one left behind: many medium results in one
+    // wire-level message are individually under the per-result threshold but together are not.
+    const budgeted = selectBudgetedToolResults(base, new Set(latched.keys()), budgetDecided);
+    await spillSelected(budgeted.spill, true);
+    for (const toolCallId of budgeted.decided) budgetDecided.add(toolCallId);
     if (latched.size === 0) return base;
     const cleared = new Map<string, { index: number; placeholder: string }>();
     for (let index = 0; index < base.length; index += 1) {

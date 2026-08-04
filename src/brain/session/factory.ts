@@ -7,6 +7,7 @@ import { applyProviderRequestProfile, isCanonicalThinkingLevel, type ProviderReq
 import type { DelegatedExecutionScope } from '../delegatedScope.js';
 import { installLiveRecall, type LiveRecallOptions } from './liveRecall.js';
 import { createCompactionModelRoute, type CompactionModelRoute } from './compactionModelRoute.js';
+import { createCompactionCircuitBreaker } from './compactionCircuitBreaker.js';
 import {
   installTurnBoundaryAutoCompaction,
   type PendingCompactionMessage,
@@ -89,6 +90,10 @@ export interface SessionSpec {
   contextFiles?: boolean;
   /** Session title to set when the stored row has none yet (task sessions name themselves). */
   title?: string;
+  /** Fired once when repeated compaction failures stop this session from compacting at all. Callers
+   *  route it to the channel they already use for terminal session errors; a caller without one (a task
+   *  worker) leaves it out and the condition is only logged. */
+  onCompactionStopped?: (message: string) => void;
   /** Fired once the live session exists, carrying its REHYDRATED history. Callers forward it to the
    *  plugin hook bus as `brain.session.afterSpawn` — the seam a plugin needs to restore per-conversation
    *  state that lives in daemon memory but whose evidence lives in the transcript (the files plugin's
@@ -121,6 +126,8 @@ export interface BrainResourceLoaderOptions {
   kimiHeaderProbe?: boolean;
   /** Marker hook for PI-owned compaction requests. The actual stream route is installed on AgentSession. */
   compactionModelRouteExtension?: CompactionModelRoute['extension'];
+  /** Cancel gate for automatic compaction once it has failed too many times in a row. */
+  compactionCircuitBreakerExtension?: (pi: ExtensionAPI) => void;
   /** Recall memories again mid-turn, searching from the work rather than the opening message. */
   liveRecall?: LiveRecallOptions;
   /** Anthropic provider-payload hashes consumed by cacheWatch after each response. */
@@ -222,11 +229,13 @@ function defaultResourceLoaderFactory(o: BrainResourceLoaderOptions): ResourceLo
     // feeds PI our in-memory plugin templates, which it exposes as `/name` slash commands and expands
     // ($1/$@/$ARGUMENTS/${N:-default}) itself in prompt()/steer()/followUp() — no daemon-side expansion.
     promptsOverride: () => ({ prompts, diagnostics: [] }),
-    ...(o.codexReasoningFix || o.kimiHeaderProbe || o.compactionModelRouteExtension || o.requestProfile || o.liveRecall || o.cacheMonitor ? {
+    ...(o.codexReasoningFix || o.kimiHeaderProbe || o.compactionModelRouteExtension
+      || o.compactionCircuitBreakerExtension || o.requestProfile || o.liveRecall || o.cacheMonitor ? {
       extensionFactories: [
         ...(o.codexReasoningFix ? [codexReasoningSummary] : []),
         ...(o.kimiHeaderProbe ? [kimiHeaderProbe] : []),
         ...(o.compactionModelRouteExtension ? [o.compactionModelRouteExtension] : []),
+        ...(o.compactionCircuitBreakerExtension ? [o.compactionCircuitBreakerExtension] : []),
         ...(o.requestProfile ? [providerRequestProfile(o.requestProfile)] : []),
         ...(o.liveRecall ? [((recall) => (pi: ExtensionAPI): void => { installLiveRecall(pi, recall); })(o.liveRecall)] : []),
         ...(o.cacheMonitor ? [o.cacheMonitor.extension] : []),
@@ -282,6 +291,14 @@ export class BrainSessionFactory {
     // `projectTrusted` lets those session-local writes land in the in-memory store instead of erroring.
     const settingsManager = SettingsManager.inMemory(undefined, { projectTrusted: true });
     const compactionModelRoute = createCompactionModelRoute(spec.compactionFallbackModel);
+    // A context that is irrecoverably over the limit fails the same way on every retry, and PI re-checks
+    // the threshold after every turn — so without this the conversation would pay for a doomed
+    // summarization request for the rest of its life. The breaker only refuses attempts; it never
+    // changes when compaction triggers or what it summarizes.
+    const compactionBreaker = createCompactionCircuitBreaker({
+      sessionId: spec.sessionId,
+      ...(spec.onCompactionStopped ? { onTripped: spec.onCompactionStopped } : {}),
+    });
     const cacheMonitor = spec.model.provider === 'anthropic' ? createCachePayloadMonitor() : undefined;
     const resourceLoader = (this.d.resourceLoaderFactory ?? defaultResourceLoaderFactory)({
       cwd: spec.cwd, systemPrompt: spec.systemPrompt, appendSystemPrompt: spec.appendSystemPrompt,
@@ -289,6 +306,7 @@ export class BrainSessionFactory {
       codexReasoningFix: spec.model.provider === 'openai-codex',
       kimiHeaderProbe: spec.model.provider === 'kimi-coding',
       compactionModelRouteExtension: compactionModelRoute?.extension,
+      compactionCircuitBreakerExtension: compactionBreaker.extension,
       requestProfile: spec.requestProfile, settingsManager,
       ...(spec.liveRecall ? { liveRecall: spec.liveRecall } : {}),
       ...(cacheMonitor ? { cacheMonitor } : {}),
@@ -393,6 +411,9 @@ export class BrainSessionFactory {
       );
     }
 
+    // Count compaction outcomes for the circuit breaker installed above. Its cancel gate reads this
+    // count on the next `session_before_compact`, so a session that cannot summarize stops trying.
+    session.subscribe(compactionBreaker.observe);
     // Persist settled turns (agent_end) AND every PI compaction (auto at the threshold, manual /compact,
     // overflow recovery) — PI shrinks the live context but writes NOTHING to the store, so without this
     // the token savings evaporate on the next rehydrate. Only a REAL compaction (result present, not

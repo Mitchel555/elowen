@@ -95,10 +95,12 @@ import type {
   BrainWorkMode, BrainPendingPlan,
   User, BrainLimits, RuntimeConfig as WireRuntimeConfig, RuntimeLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
   MemoryVitalityHistory, MemoryVitalityPoint,
+  BrainContextBreakdown, BrainForkedSession,
   CommitFileChange, CommitLogEntry,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
 export type { ToolOutputView, BrainWorkflowView, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, RuntimeLimits, BrainUsage, CommitFileChange, CommitLogEntry };
+export type { BrainContextBreakdown, BrainForkedSession };
 export type BrainMessage = BrainMessageView;
 /** One stored memory as served by `GET /memory` — the daemon's `MemoryRow` plus its server-computed
  *  vitality (0–100), attached by the route. The web only displays it; it never recomputes it (the

@@ -19,7 +19,7 @@ import { PlatformOrchestrator } from './platforms.js';
 import type { BrainMessageView } from './messageView.js';
 import { runCompaction, withDescendantUsage } from './events.js';
 import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
-import { isNonUserSession, isOwnedUserSession, defaultUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
+import { isNonUserSession, isOwnedUserSession, defaultUserSessionId, freshUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
 import { lastAssistantText } from './goal.js';
 import { ClientAttachments } from './service/attachments.js';
 import { DelegatedSessionService } from './service/delegatedSession.js';
@@ -34,6 +34,7 @@ import { BrainTurnRunner } from './service/turnRunner.js';
 import type { BoundClientRequest, TurnRequest } from './service/turnRequest.js';
 import { BrainStatusService } from './service/statusService.js';
 import type { SessionListItem, SessionPage, SessionPageOpts, MessagePage, MessagePageOpts, BrainStatusView, ManagedSessionView } from './service/statusService.js';
+import type { BrainContextBreakdown, BrainForkedSession } from '../shared/wireContract.js';
 import { SessionTeardownService } from './service/sessionTeardown.js';
 import { SessionProcessService } from './service/sessionProcesses.js';
 import { SessionQueueService } from './service/sessionQueue.js';
@@ -600,6 +601,11 @@ export class BrainService {
     return this.statusView.status(userId, session);
   }
 
+  /** What is filling the conversation's context window right now — see BrainStatusService.contextBreakdown. */
+  contextBreakdown(userId: number, session?: string): BrainContextBreakdown | null {
+    return this.statusView.contextBreakdown(userId, session);
+  }
+
   /** The caller's pending mid-turn message backlog — see SessionQueueService.queueList. */
   queueList(userId: number, session?: string): { id: string; text: string }[] {
     return this.queue.queueList(userId, session);
@@ -627,6 +633,21 @@ export class BrainService {
    *  see SessionTeardownService.deleteSession. */
   async deleteSession(userId: number, sessionId: string): Promise<void> {
     return this.teardown.deleteSession(userId, sessionId);
+  }
+
+  /** Branch one of the caller's OWN conversations into a new peer conversation seeded with a copy of its
+   *  history (never a channel/task session, never someone else's — the shared isOwnedUserSession rule).
+   *
+   *  Purely a store operation, deliberately: the source's LIVE session is never consulted or disturbed, so
+   *  forking a conversation mid-turn cannot perturb the turn that is running. The fork exists only in
+   *  SQLite until someone opens it, and then spawns and rehydrates from the copied rows exactly like any
+   *  other stored conversation. It keeps the source's title — that title was derived from the first user
+   *  message, which the fork shares — and can be renamed like any other conversation. */
+  forkSession(userId: number, sessionId: string): BrainForkedSession {
+    const row = this.d.store.getSession(sessionId);
+    if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
+    const fork = this.d.store.forkSession(sessionId, freshUserSessionId(userId));
+    return { id: fork.id, title: fork.title, forkedFrom: sessionId };
   }
 
   renameSession(userId: number, sessionId: string, title: string): { id: string; title: string } {

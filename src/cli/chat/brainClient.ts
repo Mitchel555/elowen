@@ -6,6 +6,7 @@ import type { ProcessInfo } from '../../brain/processRegistry.js';
 import type { BrainMessageView } from '../../brain/messageView.js';
 import type { SlashCommandDef } from '../../brain/slashCommands.js';
 import type { LspStatus } from '../../lsp/manager.js';
+import type { BrainContextBreakdown } from '../../shared/wireContract.js';
 import {
   stampBrainEventReplayCursor,
   type BrainStreamSnapshot,
@@ -466,6 +467,15 @@ export class BrainClient {
     if (res.status === 401) throw new Unauthorized();
     if (!res.ok) throw new Error(`elowen brain ${res.status} on /usage/by-model`);
     return (await res.json()) as ModelUsageView[];
+  }
+
+  /** What is filling the bound conversation's context window, for the /context overlay. Null when no live
+   *  session holds the conversation — there is no prompt to measure yet. */
+  async contextBreakdown(): Promise<BrainContextBreakdown | null> {
+    const res = await this.f(`${this.o.base}/brain/context-usage${this.boundQs()}`, { headers: this.headers() });
+    if (res.status === 401) throw new Unauthorized();
+    if (!res.ok) throw new Error(`elowen brain ${res.status} on /brain/context-usage`);
+    return (await res.json()) as BrainContextBreakdown | null;
   }
 
   /** Delete a stored conversation (404 → Error). */

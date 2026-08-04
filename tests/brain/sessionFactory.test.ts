@@ -162,8 +162,9 @@ describe('BrainSessionFactory context-saving installers', () => {
   it('skips cacheWatch for non-anthropic providers (their cache stats would make it cry wolf)', async () => {
     const { listeners, session, cacheMonitor } = await createWithProvider('kimi-coding');
     try {
-      // Only the persistence projector subscribed; clearing's transformContext is still installed.
-      expect(listeners).toHaveLength(1);
+      // Only the two unconditional subscribers — the compaction circuit breaker and the persistence
+      // projector — are here; cacheWatch did not subscribe. Clearing's transformContext is still installed.
+      expect(listeners).toHaveLength(2);
       expect(typeof session.agent.transformContext).toBe('function');
       expect(cacheMonitor).toBeUndefined();
     } finally {

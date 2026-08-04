@@ -68,6 +68,17 @@ describe('slash command registry', () => {
     for (const c of SLASH_COMMANDS) expect(c.description.trim().length, c.name).toBeGreaterThan(0);
   });
 
+  // `context` names two unrelated commands — the CLI's context breakdown and the platforms' channel
+  // re-key — so the invariant that matters is per surface: a menu carrying the same name twice would make
+  // a chat platform's bulk slash registration fail and drop every command for the guild.
+  it('never shows one surface two commands under the same name', () => {
+    for (const surface of ['cli', 'discord', 'whatsapp', 'telegram', 'msteams', 'web'] as const) {
+      const names = commandsFor(surface, true).map((c) => c.name);
+      expect(new Set(names).size, surface).toBe(names.length);
+    }
+  });
+
+
   describe('plugin-contributed prompt commands', () => {
     const plugin = [{ name: 'deploy', description: 'Ship it', prompt: 'Deploy to $1 with notes: $ARGS', plugin: 'ops' }];
 
@@ -130,15 +141,15 @@ describe('slash command registry', () => {
     });
   });
 
-  it('publishes /context to every platform channel surface but never the CLI (no channel to re-key)', () => {
-    const context = findCommand('context')!;
-    expect(context.kind).toBe('picker');
+  // `context` is one name over two unrelated commands, split strictly by surface: the channel re-key on
+  // the platforms (there is no channel to re-key from a terminal) and the context breakdown in the CLI.
+  it('publishes the channel re-key /context to every platform surface and the breakdown to the CLI', () => {
     for (const surface of ['discord', 'whatsapp', 'telegram', 'web'] as const) {
-      expect(commandsFor(surface, true).some((c) => c.name === 'context'), `${surface} context`).toBe(true);
+      expect(commandsFor(surface, true).find((c) => c.name === 'context')?.kind, `${surface} context`).toBe('picker');
     }
-    // CLI keeps /resume + /sessions; /context must be absent there for both operators and non-operators.
-    expect(commandsFor('cli', true).some((c) => c.name === 'context')).toBe(false);
-    expect(commandsFor('cli', false).some((c) => c.name === 'context')).toBe(false);
+    // The CLI's own /context is the read-only breakdown, for operators and non-operators alike.
+    expect(commandsFor('cli', true).find((c) => c.name === 'context')?.kind).toBe('info');
+    expect(commandsFor('cli', false).find((c) => c.name === 'context')?.kind).toBe('info');
   });
 
   it('gates /lsp behind adminOnly (daemon-wide toggle)', () => {

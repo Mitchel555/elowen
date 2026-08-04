@@ -2862,6 +2862,35 @@ describe('BrainService', () => {
     await expect(svc.deleteSession(1, 'brain-ch-x')).rejects.toThrow(/unknown session/);
   });
 
+  it('forkSession branches an owned conversation into a peer and refuses foreign/channel ones', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    await svc.send({ userId: 1, text: 'ahoj' });
+
+    const fork = svc.forkSession(1, sessionId);
+
+    expect(fork.forkedFrom).toBe(sessionId);
+    expect(fork.id).not.toBe(sessionId);
+    // The copy is a normal stored conversation of the same owner, carrying the source's transcript…
+    expect(d.store.getMessages(fork.id).map((m) => m.role))
+      .toEqual(d.store.getMessages(sessionId).map((m) => m.role));
+    expect(svc.listSessions(1).map((s) => s.id)).toContain(fork.id);
+    // …while the source's LIVE session is left exactly as it was: no respawn, still the active one.
+    expect(d.createSession).toHaveBeenCalledTimes(1);
+    expect(svc.status(1).sessionId).toBe(sessionId);
+
+    // Refused sources create nothing: a channel session the caller owns is still not a conversation,
+    // and another user's conversation is invisible to this caller.
+    d.store.createSession({ id: 'brain-ch-x', userId: 1, model: 'm' });
+    d.store.createSession({ id: 'brain-77', userId: 77, model: 'm' });
+    const owned = d.store.listSessions(1).length;
+    expect(() => svc.forkSession(1, 'brain-ch-x')).toThrow(/unknown session/);
+    expect(() => svc.forkSession(1, 'brain-77')).toThrow(/unknown session/);
+    expect(d.store.listSessions(1)).toHaveLength(owned);
+    expect(d.store.listSessions(77).map((s) => s.id)).toEqual(['brain-77']);
+  });
+
   it('status exposes usage numbers for the active conversation', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);

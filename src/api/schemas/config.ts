@@ -29,13 +29,18 @@ const providerConfigPatchSchema = z.object({
 
 /** The operator-tunable brain limits, all optional (a partial patch tunes one knob without resetting the
  *  rest — `ConfigStore.clampBrainLimits` does the actual per-field clamp). */
-const brainLimitsPatchSchema = z.object({
+export const brainLimitsPatchSchema = z.object({
   toolOutputMaxLines: z.number().optional(),
   toolOutputMaxChars: z.number().optional(),
   toolResultInlineBytes: z.number().optional(),
+  toolResultGroupBudgetBytes: z.number().optional(),
+  compactionFailureLimit: z.number().optional(),
   elicitationTimeoutMs: z.number().optional(),
   memoryRecallCount: z.number().optional(),
   memoryRecallChars: z.number().optional(),
+  memoryLiveRecallPasses: z.number().optional(),
+  memoryLiveRecallCount: z.number().optional(),
+  memoryLiveRecallChars: z.number().optional(),
   goalTurnBudget: z.number().optional(),
   goalMaxTurns: z.number().optional(),
   channelSessionCap: z.number().optional(),
@@ -45,7 +50,7 @@ const brainLimitsPatchSchema = z.object({
 
 /** The operator-tunable runtime limits, all optional for the same reason as the brain limits above —
  *  `ConfigStore.clampRuntimeLimits` owns the per-field clamp. */
-const runtimeLimitsPatchSchema = z.object({
+export const runtimeLimitsPatchSchema = z.object({
   localShellTimeoutMs: z.number().optional(),
   memorySemanticFloorPerMille: z.number().optional(),
   toolDeferThreshold: z.number().optional(),
@@ -58,7 +63,7 @@ const runtimeLimitsPatchSchema = z.object({
 /** The memory-retention block (auto-eviction), all optional — `ConfigStore.clampMemoryRetention` owns the
  *  per-field clamp. `halfLifeByImportance` keys are the importance levels 1..5; values are days, with
  *  0 meaning "never". */
-const memoryRetentionPatchSchema = z.object({
+export const memoryRetentionPatchSchema = z.object({
   enabled: z.boolean().optional(),
   graceDays: z.number().optional(),
   vitalityFloor: z.number().optional(),

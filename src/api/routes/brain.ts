@@ -121,6 +121,15 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     } catch { return c.json({ error: 'unknown session' }, 404); }
   });
 
+  /** What is filling the conversation's context window right now, category by category — the data behind
+   *  the CLI's `/context` overlay and the web's Usage → Context section. Read-only; `null` when no live
+   *  session holds the conversation (there is no prompt to measure yet). Distinct path from the
+   *  `POST /brain/context` channel re-key, which is a different operation entirely. */
+  app.get('/brain/context-usage', withBrain((c, brain) => {
+    try { return c.json(brain.contextBreakdown(c.get('user').id, c.req.query('session'))); }
+    catch { return c.json({ error: 'unknown session' }, 404); }
+  }));
+
   /** OAuth subscription usage for every connected account, keyed by pi provider id — independent of the
    *  active model. The settings page renders a per-account usage rail from this; accounts without a usable
    *  OAuth credential (or no rail) return null and are omitted. */
@@ -223,6 +232,15 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     // before the teardown has actually run — a client that reloads its list on the response would
     // otherwise still see the conversation it just deleted.
     try { await brain.deleteSession(c.get('user').id, c.req.param('id')!); return c.json({ ok: true }); }
+    catch { return c.json({ error: 'unknown session' }, 404); }
+  }));
+
+  // Branch one of the caller's OWN conversations: a new peer conversation seeded with a copy of the
+  // source's history, which the client then opens like any other stored conversation. Distinct path
+  // segment (`/fork`) so it never collides with the `:id` handlers above; ownership is enforced in
+  // forkSession via the shared isOwnedUserSession rule, so a foreign/unknown source is a 404.
+  app.post('/brain/sessions/:id/fork', withBrain((c, brain) => {
+    try { return c.json(brain.forkSession(c.get('user').id, c.req.param('id')!), 201); }
     catch { return c.json({ error: 'unknown session' }, 404); }
   }));
 

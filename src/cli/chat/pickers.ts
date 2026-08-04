@@ -26,7 +26,8 @@ export interface Pickers {
   openThemePicker(): void;
   openHelpModal(): void;
   openStatusModal(): void;
-  openStatsModal(): void;
+  /** `/stats` opens on the conversation section; `/context` passes 'context' to land on the breakdown. */
+  openStatsModal(section?: 'conversation' | 'models' | 'context'): void;
   openSessionsModal(): void;
   openMcpModal(): void;
   openSkillsModal(): void;
@@ -337,15 +338,21 @@ export function createPickers(
     }, fail);
   };
 
-  // /stats as an interactive overlay with ←→-switchable sections: Conversation usage and per-model totals.
-  const openStatsModal = (): void => {
-    runSession(() => Promise.all([client.status().catch(() => null), client.usageByModel().catch(() => null)]), ([s, models]) => {
+  // /stats as an interactive overlay with ←→-switchable sections: Conversation usage, per-model totals
+  // and the context breakdown. `/context` opens the SAME overlay straight on the breakdown section.
+  const openStatsModal = (section?: 'conversation' | 'models' | 'context'): void => {
+    runSession(() => Promise.all([
+      client.status().catch(() => null),
+      client.usageByModel().catch(() => null),
+      client.contextBreakdown().catch(() => null),
+    ]), ([s, models, context]) => {
       openStatsOverlay({
-        tui, editor,
+        tui, editor, section,
         data: {
           model: s?.model ?? null,
           usage: s?.usage ?? null,
           models: models ?? [],
+          context: context ?? null,
         },
       });
     }, fail);

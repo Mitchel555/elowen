@@ -210,6 +210,13 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   // Matches Claude Code's DEFAULT_MAX_RESULT_SIZE_CHARS — a single result above this is spilled to disk
   // and the model gets a placeholder instead (toolResultClearing's size trigger).
   toolResultInlineBytes: 50_000,
+  // Matches Claude Code's per-message budget: four full-size single results, ~50k tokens, the point at
+  // which one turn's fan-out alone costs a quarter of a 200k window (toolResultClearing's group trigger).
+  toolResultGroupBudgetBytes: 200_000,
+  // Three failed automatic compactions in a row. PI's own retry budget is already spent INSIDE each
+  // attempt, so three failures mean three exhausted retry chains — a transient provider outage does not
+  // reach it, while an irrecoverable context wastes three calls rather than one per turn forever.
+  compactionFailureLimit: 3,
   elicitationTimeoutMs: 300_000,
   memoryRecallCount: 6,
   // ~1500 tokens. Spread over memoryRecallCount hits that is ~1000 chars per memory, enough for one to
@@ -248,6 +255,14 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // Plain ±50% rule (25 000–75 000): unlike the transcript-preview caps this is what the model actually
   // receives inline, so its tuning margin is the default band rather than a raised operator ceiling.
   toolResultInlineBytes: band('toolResultInlineBytes'),
+  // Plain ±50% rule (100 000–300 000). The floor is what matters: it stays above the per-result ceiling
+  // (75 000), so a group can always hold one full-size inline result and the aggregate layer can never be
+  // tuned into spilling every result it sees. selectBudgetedToolResults re-floors it at the value in force.
+  toolResultGroupBudgetBytes: band('toolResultGroupBudgetBytes'),
+  // Exempt from the ±50% rule: 0 must NOT be reachable — it would trip the breaker before a session ever
+  // attempted a compaction, i.e. silently mean "never compact automatically", which is the one outcome
+  // this knob exists to prevent. 1 stops after a single failure; 10 is patient without being unbounded.
+  compactionFailureLimit: [1, 10],
   // memoryRecallChars is the budget these hits SHARE, so raising the count alone makes each hit smaller:
   // at the 6000-char default, 20 memories leave ~300 chars each and most get cut mid-sentence. An
   // operator who wants many memories wants the char budget raised with it — hence both ceilings.

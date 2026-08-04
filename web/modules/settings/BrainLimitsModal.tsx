@@ -1,5 +1,5 @@
 'use client';
-import { SlidersHorizontal, AlignLeft, Type, HardDrive, Timer, Brain, ListChecks, Target, Repeat, MessagesSquare, Share2, MessageCircleQuestion, type LucideIcon } from 'lucide-react';
+import { SlidersHorizontal, AlignLeft, Type, HardDrive, Layers, ShieldAlert, Timer, Brain, ListChecks, Target, Repeat, MessagesSquare, Share2, MessageCircleQuestion, type LucideIcon } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { HelpTip } from '../../components/ui/HelpTip';
@@ -10,7 +10,8 @@ import type { BrainLimits } from '../../lib/types';
 
 /** Fallback for seeding the Limits form before the daemon's config arrives (it always sends real values). */
 export const BRAIN_LIMIT_DEFAULTS: BrainLimits = {
-  toolOutputMaxLines: 80, toolOutputMaxChars: 30000, toolResultInlineBytes: 50000, elicitationTimeoutMs: 300000,
+  toolOutputMaxLines: 80, toolOutputMaxChars: 30000, toolResultInlineBytes: 50000,
+  toolResultGroupBudgetBytes: 200000, compactionFailureLimit: 3, elicitationTimeoutMs: 300000,
   memoryRecallCount: 6, memoryRecallChars: 6000,
   memoryLiveRecallPasses: 3, memoryLiveRecallCount: 8, memoryLiveRecallChars: 6000,
   goalTurnBudget: 24, goalMaxTurns: 64, channelSessionCap: 32,
@@ -39,6 +40,8 @@ const BRAIN_LIMIT_FIELDS: BrainLimitField[] = [
   { key: 'toolOutputMaxLines', kind: 'count', min: 40, max: 200, step: 10, icon: AlignLeft },
   { key: 'toolOutputMaxChars', kind: 'size', min: 15000, max: 80000, step: 1000, icon: Type },
   { key: 'toolResultInlineBytes', kind: 'size', min: 25000, max: 75000, step: 5000, icon: HardDrive },
+  { key: 'toolResultGroupBudgetBytes', kind: 'size', min: 100000, max: 300000, step: 10000, icon: Layers },
+  { key: 'compactionFailureLimit', kind: 'count', min: 1, max: 10, step: 1, icon: ShieldAlert },
   { key: 'elicitationTimeoutMs', kind: 'duration', min: 30000, max: 21600000, step: 30000, icon: Timer },
   { key: 'memoryRecallCount', kind: 'count', min: 3, max: 20, step: 1, icon: Brain },
   { key: 'memoryRecallChars', kind: 'size', min: 3000, max: 20000, step: 500, icon: ListChecks },

@@ -16,6 +16,10 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   { name: 'stop', description: 'Stop the running agent', kind: 'action' },
   { name: 'status', description: 'Session info — model, context and usage', kind: 'info' },
   { name: 'stats', description: 'Usage stats — this conversation and per-model totals', kind: 'info', surfaces: ['cli', 'web'] },
+  // CLI-only: the /stats overlay opened straight on its context-breakdown section. The name is
+  // deliberately shared with the channel re-key `context` further down, which is explicitly absent from
+  // the CLI — every surface renders and dispatches from `commandsFor`, and no surface ever sees both.
+  { name: 'context', description: 'Context breakdown — what is filling the window', kind: 'info', surfaces: ['cli'] },
   { name: 'mcp', description: 'Inspect MCP servers, tools and reconnect health', kind: 'picker', surfaces: ['cli'] },
   { name: 'skills', description: 'Inspect and manage loaded skills', kind: 'picker', surfaces: ['cli', 'web'] },
   { name: 'goal', description: 'Create, inspect, pause, resume or clear a persistent goal', kind: 'action', surfaces: ['cli'] },
@@ -34,7 +38,8 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   { name: 'model', description: 'Switch the AI model', kind: 'picker' },
   // Move (not fork) one of the caller's own conversations INTO this channel/thread so the bot continues in
   // it. A `picker` (not `action`), so it is never server-dispatched through POST /brain/command — its
-  // dedicated endpoint is POST /brain/context. Absent from the CLI: there is no shared channel to re-key.
+  // dedicated endpoint is POST /brain/context. Absent from the CLI: there is no shared channel to re-key,
+  // and the CLI's own `context` above is the unrelated context-breakdown overlay.
   { name: 'context', description: 'Continue this channel in one of your conversations', kind: 'picker', surfaces: ['discord', 'whatsapp', 'telegram', 'msteams', 'web'] },
   { name: 'fast', description: 'Toggle OpenAI OAuth priority processing', kind: 'action', surfaces: ['cli', 'discord', 'whatsapp', 'telegram', 'msteams', 'web'] },
   // The reasoning-effort picker is wired in the CLI TUI and as a native /reasoning command on Discord,
@@ -88,7 +93,10 @@ export function commandsFor(surface: SlashSurface, isAdmin: boolean): SlashComma
   );
 }
 
-/** Look up one command by name (any surface). */
+/** Look up one command by name (any surface). `context` is deliberately carried twice — the CLI's context
+ *  breakdown and the platforms' channel re-key — so this returns the FIRST match and is only safe for
+ *  surface-independent questions. Anything that renders or dispatches per surface must use
+ *  {@link commandsFor}, where each name resolves once. */
 export function findCommand(name: string): SlashCommandDef | undefined {
   return SLASH_COMMANDS.find((c) => c.name === name);
 }

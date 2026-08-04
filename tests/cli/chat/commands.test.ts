@@ -42,6 +42,12 @@ describe('parseCommand — /stats', () => {
   });
 });
 
+describe('parseCommand — /context', () => {
+  it('recognises the context-breakdown command', () => {
+    expect(parseCommand('/context')).toEqual({ cmd: 'context' });
+  });
+});
+
 describe('parseCommand — /cd', () => {
   it('captures the path, including one containing spaces', () => {
     expect(parseCommand('/cd ~/projects/api')).toEqual({ cmd: 'cd', arg: '~/projects/api' });

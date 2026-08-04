@@ -46,7 +46,8 @@ describe('ConfigStore brain limits', () => {
   it('defaults to the built-in limits', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     expect(cs.get().brain.limits).toEqual({
-      toolOutputMaxLines: 80, toolOutputMaxChars: 30000, toolResultInlineBytes: 50000, elicitationTimeoutMs: 300000,
+      toolOutputMaxLines: 80, toolOutputMaxChars: 30000, toolResultInlineBytes: 50000,
+      toolResultGroupBudgetBytes: 200000, compactionFailureLimit: 3, elicitationTimeoutMs: 300000,
       memoryRecallCount: 6, memoryRecallChars: 6000,
       memoryLiveRecallPasses: 3, memoryLiveRecallCount: 8, memoryLiveRecallChars: 6000,
       goalTurnBudget: 24, goalMaxTurns: 64, channelSessionCap: 32,
@@ -79,6 +80,34 @@ describe('ConfigStore brain limits', () => {
     expect(cs.get().brain.limits.toolOutputMaxChars).toBe(80000); // explicit ceiling, ~20k tokens
     expect(cs.get().brain.limits.memoryRecallChars).toBe(20000);  // explicit ceiling, ~5k tokens
     expect(cs.get().brain.limits.toolOutputMaxLines).toBe(40);    // 80 − 50%
+  });
+
+  // The aggregate tool-result budget bands at ±50%, and its floor is the load-bearing part: 100 000 stays
+  // above the per-result ceiling (75 000), so no reachable setting can make the aggregate layer spill a
+  // result the per-result layer would have kept inline.
+  it('keeps the tool-result group budget above the per-result ceiling', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ brain: { limits: { toolResultGroupBudgetBytes: 120_000 } } });
+    expect(cs.get().brain.limits.toolResultGroupBudgetBytes).toBe(120_000);
+    cs.update({ brain: { limits: { toolResultGroupBudgetBytes: 1_000 } } });
+    expect(cs.get().brain.limits.toolResultGroupBudgetBytes).toBe(100_000); // 200 000 − 50%
+    expect(cs.get().brain.limits.toolResultGroupBudgetBytes).toBeGreaterThan(cs.get().brain.limits.toolResultInlineBytes);
+    cs.update({ brain: { limits: { toolResultGroupBudgetBytes: 5_000_000 } } });
+    expect(cs.get().brain.limits.toolResultGroupBudgetBytes).toBe(300_000); // 200 000 + 50%
+  });
+
+  // 0 must stay unreachable: it would trip the compaction breaker before a session ever attempted a
+  // compaction, turning the knob into a silent "never compact automatically".
+  it('never lets the compaction failure limit reach zero', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ brain: { limits: { compactionFailureLimit: 0 } } });
+    expect(cs.get().brain.limits.compactionFailureLimit).toBe(1);
+    cs.update({ brain: { limits: { compactionFailureLimit: -5 } } });
+    expect(cs.get().brain.limits.compactionFailureLimit).toBe(1);
+    cs.update({ brain: { limits: { compactionFailureLimit: 7 } } });
+    expect(cs.get().brain.limits.compactionFailureLimit).toBe(7);
+    cs.update({ brain: { limits: { compactionFailureLimit: 99 } } });
+    expect(cs.get().brain.limits.compactionFailureLimit).toBe(10);
   });
 
   // These four are exempt from the ±50% rule because their range is load-bearing: the far ends are real

@@ -26,6 +26,7 @@ const client = vi.hoisted(() => ({
   brainSearch: vi.fn(() => Promise.resolve([{ sessionId: 's9', sessionTitle: 'Hit session', role: 'user', snippet: 'hello world', ts: '2026-07-08T00:00:00Z' }])),
   brainRenameSession: vi.fn(() => Promise.resolve({ id: 's1', title: 'Renamed' })),
   brainExportSession: vi.fn(() => Promise.resolve()),
+  brainForkSession: vi.fn(() => Promise.resolve({ id: 's1-fork', title: 'First', forkedFrom: 's1' })),
 }));
 
 vi.mock('../../../modules/advisor/BrainChatProvider', () => ({ useBrainChat: () => ctrl.value }));
@@ -41,7 +42,7 @@ const openRowMenu = (rowIndex: number) => {
   fireEvent.click(screen.getAllByRole('button', { name: /More actions|Další akce/i })[rowIndex]!);
 };
 
-beforeEach(() => { ctrl.switchSession.mockClear(); ctrl.deleteSession.mockClear(); client.brainSearch.mockClear(); client.brainRenameSession.mockClear(); client.brainExportSession.mockClear(); });
+beforeEach(() => { ctrl.switchSession.mockClear(); ctrl.deleteSession.mockClear(); client.brainSearch.mockClear(); client.brainRenameSession.mockClear(); client.brainExportSession.mockClear(); client.brainForkSession.mockClear(); });
 
 describe('ChatHistoryRail', () => {
   it('lists the conversations off the shared controller', () => {
@@ -118,6 +119,15 @@ describe('ChatHistoryRail', () => {
     openRowMenu(0);
     fireEvent.click(screen.getByRole('button', { name: /Export as JSONL|Exportovat jako JSONL/i }));
     expect(client.brainExportSession).toHaveBeenCalledWith('s1', 'jsonl');
+  });
+
+  it('branches a conversation and opens the copy, leaving the source selected until then', async () => {
+    renderRail('rail');
+    openRowMenu(0);
+    fireEvent.click(screen.getByRole('button', { name: /Branch conversation|Větvit konverzaci|Vetviť konverzáciu/i }));
+    await waitFor(() => expect(client.brainForkSession).toHaveBeenCalledWith('s1'));
+    // The user lands in the NEW conversation — never back in the one they branched off.
+    await waitFor(() => expect(ctrl.switchSession).toHaveBeenCalledWith({ session: 's1-fork' }));
   });
 
   it('runs a fulltext search (≥2 chars) and highlights the match', async () => {

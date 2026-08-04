@@ -35,6 +35,7 @@ export const QUERY_KEYS = {
   categorizationSettings: ['categorization-settings'] as const,
   brainCommands: ['brain-commands'] as const,
   brainRateLimits: ['brain-rate-limits'] as const,
+  brainContextUsage: ['brain-context-usage'] as const,
 };
 
 /** The published slash-command menu for the web surface — the single source of truth is the daemon's
@@ -364,6 +365,17 @@ export const useBrainRateLimitsAll = () =>
     refetchOnWindowFocus: true,
     refetchOnMount: true,
     staleTime: 0,
+  });
+
+/** What is filling the chat's context window, for the Usage modal's Context section. Fetched only while
+ *  that section is on screen (`enabled`) — it walks the live transcript, so there is no reason to poll it
+ *  from a closed modal. Keyed by conversation so switching chats cannot show the previous one's figures. */
+export const useBrainContextUsage = (session: string | null, enabled = true) =>
+  useQuery({
+    queryKey: [...QUERY_KEYS.brainContextUsage, session],
+    queryFn: () => elowenClient.brainContextUsage(session ?? undefined),
+    enabled,
+    refetchInterval: 15_000,
   });
 
 export const useUserProjects = (userId: number | null, enabled = true) =>

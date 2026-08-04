@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useQueryClient } from '@tanstack/react-query';
-import { Plus, Search, Trash2, X, MoreVertical, Pencil, Download, ArrowLeft } from 'lucide-react';
+import { Plus, Search, Trash2, X, MoreVertical, Pencil, Download, GitBranch, ArrowLeft } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
 import { useToast } from '../../components/ui/Toast';
 import { elowenClient } from '../../lib/elowenClient';
@@ -94,6 +94,16 @@ export function ChatHistoryRail({ variant, open = false, onClose, className, hom
       await elowenClient.brainRenameSession(id, title);
       await qc.invalidateQueries({ queryKey: ['brain-sessions'] });
     } catch { toast(t.chat.renameError, 'error'); }
+  };
+
+  // Branch a conversation and open the copy, so the user lands in the new thread and the original stays
+  // untouched. The daemon creates it purely in the store, so this is a plain client call like rename.
+  const forkSession = async (id: string) => {
+    setMenuFor(null);
+    try {
+      const fork = await elowenClient.brainForkSession(id);
+      openSession({ session: fork.id });
+    } catch { toast(t.chat.forkError, 'error'); }
   };
 
   const exportSession = (id: string, format: 'html' | 'jsonl') => {
@@ -231,6 +241,9 @@ export function ChatHistoryRail({ variant, open = false, onClose, className, hom
                       <div className="absolute right-0 top-full z-30 mt-1 flex w-44 flex-col rounded-md border border-border bg-surface p-1 shadow-lg">
                         <button type="button" onClick={() => beginRename(s.id, s.title || '')} className={MENU_ITEM}>
                           <Pencil size={13} aria-hidden /> {t.chat.rename}
+                        </button>
+                        <button type="button" onClick={() => void forkSession(s.id)} className={MENU_ITEM}>
+                          <GitBranch size={13} aria-hidden /> {t.chat.fork}
                         </button>
                         <button type="button" onClick={() => exportSession(s.id, 'html')} className={MENU_ITEM}>
                           <Download size={13} aria-hidden /> {t.chat.exportHtml}

@@ -167,6 +167,12 @@ CREATE TABLE IF NOT EXISTS brain_sessions (
   -- Immutable, validated execution boundary for a delegated child. NULL is a legacy/non-delegated row;
   -- an idle child without this value must fail closed instead of resuming under its account owner's scope.
   delegated_access TEXT,
+  -- Provenance of a forked conversation: the session whose history was copied into this one. Kept apart
+  -- from `parent_session_id` on purpose — a fork is a PEER, not a delegated child, and that column is
+  -- read as "delegated child" by the usage roll-up, the retention janitor, the sub-agent listing and the
+  -- eviction guard for parents with running children. Recorded as provenance only: never joined on (so
+  -- no index) and never dereferenced, because deleting the source leaves this pointing at a gone row.
+  forked_from_session_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -1,11 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import { openStatsOverlay } from '../../../src/cli/chat/statsOverlay.js';
 import type { ModelUsageView } from '../../../src/cli/chat/brainClient.js';
+import type { BrainContextBreakdown } from '../../../src/shared/wireContract.js';
 
 interface Overlay { render(width: number): string[]; handleInput(data: string): void }
 
-/** Render the Models section of the overlay and return its Σ row, stripped of styling. */
-function sigmaRow(models: ModelUsageView[]): string {
+/** Open the overlay on `section` and return its rendered lines, stripped of styling. */
+function renderOverlay(o: {
+  models?: ModelUsageView[];
+  context?: BrainContextBreakdown | null;
+  section?: 'conversation' | 'models' | 'context';
+  keys?: string[];
+}): string[] {
   const shown: Overlay[] = [];
   const tui = {
     terminal: { columns: 120 },
@@ -13,10 +19,21 @@ function sigmaRow(models: ModelUsageView[]): string {
     requestRender: vi.fn(),
     showOverlay: vi.fn((c: Overlay) => { shown.push(c); return { hide: vi.fn(), focus: vi.fn() }; }),
   };
-  openStatsOverlay({ tui: tui as never, editor: {} as never, data: { model: 'm', usage: null, models } });
-  const overlay = shown[0]!;
-  overlay.handleInput('\x1b[C'); // ←/→ cycles Conversation → Models
-  const lines = overlay.render(100).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  openStatsOverlay({
+    tui: tui as never,
+    editor: {} as never,
+    section: o.section,
+    data: { model: 'm', usage: null, models: o.models ?? [], context: o.context ?? null },
+  });
+  const overlay = shown[0];
+  if (!overlay) throw new Error('the overlay was never shown');
+  for (const key of o.keys ?? []) overlay.handleInput(key);
+  return overlay.render(100).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+}
+
+/** Render the Models section of the overlay and return its Σ row, stripped of styling. */
+function sigmaRow(models: ModelUsageView[]): string {
+  const lines = renderOverlay({ models, keys: ['\x1b[C'] }); // ←/→ cycles Conversation → Models
   return lines.find((l) => l.includes('Σ')) ?? '';
 }
 
@@ -40,5 +57,45 @@ describe('stats overlay — Σ speed', () => {
     const row = sigmaRow([model('elowen:x', { output: 100, total: 100, costUsd: 1.5, outputTps: 40 })]);
     expect(row).toContain('—');
     expect(row).not.toMatch(/\s40\s/);
+  });
+});
+
+const breakdown = (over: Partial<BrainContextBreakdown> = {}): BrainContextBreakdown => ({
+  model: 'test-model',
+  contextWindow: 200_000,
+  reportedTokens: 96_000,
+  estimatedTokens: 90_000,
+  percent: 45,
+  categories: [
+    { id: 'system', tokens: 12_000, percent: 6 },
+    { id: 'toolResults', tokens: 78_000, percent: 39 },
+  ],
+  free: { tokens: 110_000, percent: 55 },
+  tools: [{ name: 'Bash', schemaTokens: 1_000, callTokens: 2_000, resultTokens: 75_000, tokens: 78_000, percent: 39, active: true }],
+  compactAtTokens: 160_000,
+  ...over,
+});
+
+describe('stats overlay — context section', () => {
+  it('opens straight on the breakdown when asked, naming the categories and the heaviest tools', () => {
+    const lines = renderOverlay({ context: breakdown(), section: 'context' });
+    const text = lines.join('\n');
+    expect(text).toContain('● Context');
+    expect(text).toContain('tool output');
+    expect(text).toContain('Bash');
+    expect(text).toContain('compacts at 160k');
+    // The provider's own count is shown as such, never merged into the estimated rows.
+    expect(text).toContain('reported');
+  });
+
+  it('renders a bar only for the categories that carry tokens', () => {
+    const lines = renderOverlay({ context: breakdown(), section: 'context' });
+    expect(lines.filter((l) => l.includes('▰') || l.includes('▱'))).toHaveLength(2);
+    expect(lines.join('\n')).not.toContain('assistant');
+  });
+
+  it('says so plainly when there is no live session to measure', () => {
+    const lines = renderOverlay({ context: null, section: 'context' });
+    expect(lines.join('\n')).toContain('no live session to measure');
   });
 });

@@ -117,6 +117,7 @@ const DYNAMIC_NAMESPACES = [
   'plugins',           // PluginsSection: t.plugins[CATEGORY_META[c].key]
   'providers',         // settings/page + pickers: t.providers[p.id]
   'settings',          // settings/page deck sections: t.settings[id] per category
+  'stats.contextCategory', // StatsModal: t.stats.contextCategory[category.id] — the context breakdown's categories
   'terminal.fonts',    // TerminalSection: t.terminal.fonts[id]
   'terminal.palette',  // TerminalSection: t.terminal.palette[key] — 21 palette slot labels
 ];

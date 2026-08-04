@@ -202,6 +202,12 @@ function fakeBrain() {
         cleanup: () => { this.cleaned.push(path); rmSync(dir, { recursive: true, force: true }); },
       });
     },
+    /** The service enforces ownership (isOwnedUserSession); a 'missing' id stands for a source the
+     *  caller cannot reach, which the route must map to 404. */
+    forkSession: (id: number, sessionId: string) => {
+      if (sessionId === 'missing') throw new Error('unknown session');
+      return { id: `brain-${id}-fork`, title: 'A', forkedFrom: sessionId };
+    },
     stop: (id: number) => { started.delete(id); },
     setFast: (id: number, on?: boolean, session?: string) => {
       fastCalls.push({ id, on, session });
@@ -822,6 +828,15 @@ describe('brain routes', () => {
 
     // The route removes each temp file after streaming it out.
     expect(brain.cleaned).toHaveLength(2);
+  });
+
+  it('POST /brain/sessions/:id/fork returns the new conversation, 404s an unreachable source', async () => {
+    const { app, amyTok, agentTok } = setup();
+    const res = await app.request('/brain/sessions/s-2/fork', post(amyTok, {}));
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ id: 'brain-2-fork', title: 'A', forkedFrom: 's-2' });
+    expect((await app.request('/brain/sessions/missing/fork', post(amyTok, {}))).status).toBe(404);
+    expect((await app.request('/brain/sessions/s-2/fork', post(agentTok, {}))).status).toBe(403);
   });
 
   it('export 404s an unknown/foreign session and 403s an agent token', async () => {

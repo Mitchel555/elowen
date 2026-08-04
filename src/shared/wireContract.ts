@@ -238,6 +238,14 @@ export interface BrainLimits {
   toolOutputMaxLines: number;
   toolOutputMaxChars: number;
   toolResultInlineBytes: number;
+  /** Aggregate byte cap on ONE wire-level tool-result message — the provider coalesces a turn's parallel
+   *  tool results into a single block, so this is what a fan-out actually costs. Members are spilled
+   *  largest-first until the block fits; never applied below `toolResultInlineBytes`. */
+  toolResultGroupBudgetBytes: number;
+  /** Consecutive failed AUTOMATIC compactions after which a conversation stops attempting them. A context
+   *  that cannot be summarized fails identically on every retry, and the threshold is re-checked after
+   *  every turn, so without a stop each further turn spends a doomed summarization request. */
+  compactionFailureLimit: number;
   elicitationTimeoutMs: number;
   memoryRecallCount: number;
   memoryRecallChars: number;
@@ -314,6 +322,61 @@ export interface BrainUsage {
   /** Average output tokens/sec across the session's measured generations; null when none measured yet. */
   outputTps?: number | null;
 }
+
+/** One measured slice of a conversation's context window. The id set is closed because every surface
+ *  switches over it to pick a label and an order. `free` is NOT one of them — it is the remainder, not a
+ *  measurement, and lives in its own field on the breakdown. */
+export type BrainContextCategoryId = 'system' | 'tools' | 'user' | 'assistant' | 'toolResults' | 'other';
+
+/** A category's estimated cost and its share of the window (0-100). Referenced only through the
+ *  breakdown below, so it stays unexported — clients read it off `categories`/`free`. */
+interface BrainContextSlice { tokens: number; percent: number }
+
+export interface BrainContextCategory extends BrainContextSlice { id: BrainContextCategoryId }
+
+/** What one tool costs the window: its advertised schema (only while the tool is active), the arguments
+ *  of its calls still in history, and the results those calls returned. `tokens` is the sum — the figure
+ *  the ranking sorts on. A tool with no active schema but heavy results stays listed: its output is what
+ *  occupies the window. */
+export interface BrainContextToolCost {
+  name: string;
+  schemaTokens: number;
+  callTokens: number;
+  resultTokens: number;
+  tokens: number;
+  percent: number;
+  /** Whether the tool's schema is currently advertised to the model (a deferred tool costs nothing). */
+  active: boolean;
+}
+
+/** What is filling a conversation's context window right now (`GET /brain/context-usage`).
+ *
+ *  EVERY token figure except `reportedTokens` is an ESTIMATE: the daemon has no tokenizer for the
+ *  provider's vocabulary, so categories are measured with the same chars/4 heuristic PI's own compaction
+ *  uses. `reportedTokens` is the provider's authoritative count for the last request and is the number a
+ *  client should trust for "how full"; the categories answer "of what". They are not expected to match. */
+export interface BrainContextBreakdown {
+  model: string;
+  contextWindow: number;
+  /** Provider-reported context tokens of the last request; null before anything has been sent. */
+  reportedTokens: number | null;
+  /** Sum of every measured category (estimated). */
+  estimatedTokens: number;
+  /** `estimatedTokens` as a share of the window (0-100; 0 when the window is unknown). */
+  percent: number;
+  /** Measured categories in display order, zero-token ones omitted. */
+  categories: BrainContextCategory[];
+  /** The window still free after the estimate, never negative. */
+  free: BrainContextSlice;
+  /** The biggest tool consumers, largest first. */
+  tools: BrainContextToolCost[];
+  /** Context tokens at which auto-compaction fires; null when the session reports no threshold. */
+  compactAtTokens: number | null;
+}
+
+/** The conversation created by `POST /brain/sessions/:id/fork` — a peer of the source that starts with a
+ *  copy of its history. `forkedFrom` is the source id, kept so a client can report what it branched off. */
+export interface BrainForkedSession { id: string; title: string; forkedFrom: string }
 
 /** Durable state of one autonomous goal, served in the stream snapshot frame (`goal`). The store row
  *  and every client view use the same shape so lifecycle transitions cannot drift between polling and

@@ -27,6 +27,7 @@ export type { BrainWorkflowRun } from './brainDelegationStore.js';
 export interface BrainSessionRow {
   id: string; user_id: number; title: string; model: string; provider: string; work_dir: string; parent_session_id: string | null;
   delegated_access: string | null;
+  forked_from_session_id: string | null;
   created_at: string; updated_at: string;
 }
 export interface BrainMessageRow {
@@ -125,6 +126,48 @@ export class BrainStore {
       });
     })();
     return this.getSession(input.id)!;
+  }
+
+  /** Branch a conversation: a NEW session seeded with a copy of the source's transcript, so the user can
+   *  take it in a different direction without touching the original thread. ONE transaction — the session
+   *  row and every message land together or not at all, so a failure partway through can never leave an
+   *  empty orphan row in the picker.
+   *
+   *  The fork is a PEER of its source, never a delegated child: the origin is recorded in
+   *  `forked_from_session_id`, NOT `parent_session_id`. That column means "delegated child" to the usage
+   *  roll-up (which would count the copied messages a second time into the source's tree), to the
+   *  retention janitor (which never deletes a child), to the sub-agent listing and to the eviction guard
+   *  for parents with running children — so reusing it would make a fork look like a running sub-agent.
+   *
+   *  Copies exactly what a conversation needs to RESUME — owner, model, provider, work_dir and the
+   *  transcript. Sidecar state is deliberately NOT copied: sub-agent runs/results, workflow DAGs, cards,
+   *  goals and session-event markers all describe work that ran in the SOURCE, and duplicating a running
+   *  child's bookkeeping under a second session id would give two conversations a claim on one child.
+   *  A fork therefore starts with a clean slate for those.
+   *
+   *  Message rows are copied with fresh ids (the id is the table's primary key) in transcript order,
+   *  keeping their original role, content, timestamp and `pending` flag — a provisional mid-turn row
+   *  carries the same "graduate on the next respawn" meaning in the fork as it does in the source.
+   *  `parent_id` references source message ids and nothing reads it, so it is dropped rather than left
+   *  pointing at another session's rows. */
+  forkSession(sourceId: string, newId: string): BrainSessionRow {
+    this.db.transaction(() => {
+      const source = this.getSession(sourceId);
+      if (!source) throw new Error(`brain session not found: ${sourceId}`);
+      this.db.prepare(
+        `INSERT INTO brain_sessions (id, user_id, title, model, provider, work_dir, forked_from_session_id)
+         VALUES (@id, @user_id, @title, @model, @provider, @work_dir, @forked_from_session_id)`
+      ).run({
+        id: newId, user_id: source.user_id, title: source.title, model: source.model,
+        provider: source.provider, work_dir: source.work_dir, forked_from_session_id: sourceId,
+      });
+      this.db.prepare(
+        `INSERT INTO brain_messages (id, session_id, parent_id, role, content, created_at, pending)
+         SELECT lower(hex(randomblob(16))), @new_id, NULL, role, content, created_at, pending
+           FROM brain_messages WHERE session_id = @source_id ORDER BY rowid ASC`
+      ).run({ new_id: newId, source_id: sourceId });
+    })();
+    return this.getSession(newId)!;
   }
 
   getSession(id: string): BrainSessionRow | undefined {

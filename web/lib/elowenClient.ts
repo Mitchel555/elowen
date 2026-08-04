@@ -1,4 +1,4 @@
-import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, LogFileList, LogFileContent, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, BrainWorkMode, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryVitalityHistory, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
+import type { Task, Mission, CreateTaskInput, UpdateTaskInput, PlanInput, PlanSubmitResult, PlanJob, InsertPhasesInput, InsertPhasesResult, EngageInput, ElowenConfig, ConfigPatch, User, UserPatch, ProfilePatch, CliSettings, TerminalSettings, PermissionSettings, PluginInfo, PluginDetail, PluginContributions, PluginLogs, LogFileList, LogFileContent, PluginHookExecutions, Marketplace, CronJob, DiscordChannelOption, WhatsAppPairing, PluginSkill, PluginSubagent, BrainModelOption, BrainSessionInfo, BrainWorkMode, ManagedSession, BrainSearchHit, BrainMessage, BrainMessagePage, BrainStatus, BrainContextBreakdown, BrainForkedSession, ProviderUsage, ProcessInfo, SlashCommandDef, AskAnswer, OAuthFlowState, AuthResult, ActivityEvent, PendingAsk, Project, ProjectGit, CommitLogEntry, Note, CliDetectionResult, GithubAuthStatus, TokenUsage, ModelUsage, DayUsage, ResetUsageResult, FileNode, DirListing, SessionInfo, SystemInfo, SystemReadiness, SkillsInfo, SkillInstallResult, Memory, MemoryEvent, MemoryVitalityHistory, MemoryCreate, MemoryPatch, MemoryFilters, EmbeddingSettings, EmbeddingSettingsPatch, RetrievalResult, UserToolPill, UserStats, MemoryCategory, MemoryCategoryCreate, MemoryCategoryPatch, CategorizationSettings, CategorizationSettingsPatch } from './types';
 import { clearToken } from './token';
 import type { BrainBinding } from './brainSession';
 
@@ -204,6 +204,10 @@ export const elowenClient = {
   /** `session` binds the query to the caller's own explicit conversation (a session-bound chat client);
    *  absent → the server's active pointer. */
   brainStatus: (session?: string) => req<BrainStatus>(`/brain/status${session ? `?session=${encodeURIComponent(session)}` : ''}`),
+  /** What is filling the conversation's context window (the Usage modal's Context section). Null when no
+   *  live session holds the conversation — there is no prompt to measure yet. */
+  brainContextUsage: (session?: string) =>
+    req<BrainContextBreakdown | null>(`/brain/context-usage${session ? `?session=${encodeURIComponent(session)}` : ''}`),
   /** `identity` claims the tab's stable client id + the new start generation on the selected conversation,
    *  so the daemon fences a network-reordered older selection (mirror of the CLI's start()). */
   brainStart: (opts: { session?: string; fresh?: boolean } = {}, identity?: { client: string; generation: number }) =>
@@ -255,6 +259,10 @@ export const elowenClient = {
   brainSessions: () => req<BrainSessionInfo[]>('/brain/sessions'),
   brainSearch: (q: string) => req<BrainSearchHit[]>(`/brain/search?q=${encodeURIComponent(q)}`),
   brainDeleteSession: (id: string) => req<{ ok: boolean }>(`/brain/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Branch a conversation into a new one seeded with a copy of its history. The source is left exactly
+   *  as it is; the returned id is a normal stored conversation the caller then opens. */
+  brainForkSession: (id: string) =>
+    req<BrainForkedSession>(`/brain/sessions/${encodeURIComponent(id)}/fork`, { method: 'POST' }),
   /** Rename a conversation (metadata only — no rebind). PATCH mirrors the daemon's title update. */
   brainRenameSession: (id: string, title: string) =>
     req<{ id: string; title: string }>(`/brain/sessions/${encodeURIComponent(id)}`, json({ title }, 'PATCH')),
