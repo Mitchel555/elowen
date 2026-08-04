@@ -116,6 +116,104 @@ function formatLabels(labels: string[]): string {
   return `${visible.join(', ')}${labels.length > visible.length ? ` (+${labels.length - visible.length} more)` : ''}`;
 }
 
+/** A position-aligned comparison cannot tell a REWRITE from a SHIFT: insert one message mid-history and
+ *  every later index mismatches, which reads as though the whole tail was rewritten. The distinction is
+ *  the whole point of this warning — a rewrite of an already-sent message is a cost defect we must fix,
+ *  while an insertion is ordinary (live recall anchors a frozen meta message into the stream). So the
+ *  divergence is classified instead of merely listed. */
+type SegmentDelta =
+  | { kind: 'none' }
+  | { kind: 'appended'; count: number }
+  | { kind: 'dropped'; count: number }
+  | { kind: 'rewritten'; label: string; labels: string[] }
+  | { kind: 'inserted'; label: string; count: number }
+  | { kind: 'removed'; label: string; count: number };
+
+/** How far ahead to look for the originals resuming. Past a handful of segments the shift hypothesis
+ *  stops being more likely than a genuine rewrite, and saying "rewritten" is the safer report. */
+const MAX_SHIFT_PROBE = 16;
+
+/** Do `original`'s segments resume `shift` positions later in `shifted` — i.e. was something inserted at
+ *  `at`? Two consecutive matches are required so a single coincidental hash cannot pass as a shift. */
+function resumesAfterShift(
+  original: HashedSegment[],
+  shifted: HashedSegment[],
+  at: number,
+  shift: number,
+): boolean {
+  const probe = Math.min(2, original.length - at);
+  if (probe <= 0) return false;
+  for (let offset = 0; offset < probe; offset += 1) {
+    if (original[at + offset]?.hash !== shifted[at + shift + offset]?.hash) return false;
+  }
+  return true;
+}
+
+/** Anthropic's cache is prefix-based, so only the FIRST divergence can explain a drop; everything after
+ *  it is already past the break. */
+function classifySegments(previous: HashedSegment[], current: HashedSegment[]): SegmentDelta {
+  const common = Math.min(previous.length, current.length);
+  let diverged = -1;
+  for (let index = 0; index < common; index += 1) {
+    if (previous[index]?.hash !== current[index]?.hash) { diverged = index; break; }
+  }
+  if (diverged < 0) {
+    if (current.length > previous.length) return { kind: 'appended', count: current.length - previous.length };
+    if (current.length < previous.length) return { kind: 'dropped', count: previous.length - current.length };
+    return { kind: 'none' };
+  }
+  for (let shift = 1; shift <= MAX_SHIFT_PROBE; shift += 1) {
+    if (resumesAfterShift(previous, current, diverged, shift)) {
+      return { kind: 'inserted', label: current[diverged]?.label ?? `#${diverged}`, count: shift };
+    }
+    if (resumesAfterShift(current, previous, diverged, shift)) {
+      return { kind: 'removed', label: previous[diverged]?.label ?? `#${diverged}`, count: shift };
+    }
+  }
+  return {
+    kind: 'rewritten',
+    label: current[diverged]?.label ?? `#${diverged}`,
+    labels: changedLabels(previous, current),
+  };
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** The tools array is hashed into the cached prefix as one block, so ANY delta there — an append
+ *  included — invalidates every message behind it. Activating a deferred tool mid-conversation is the
+ *  common cause and is worth naming as such rather than as an anonymous change. */
+function describeToolDelta(delta: SegmentDelta): string {
+  switch (delta.kind) {
+    case 'appended': return `${plural(delta.count, 'tool')} appended`;
+    case 'dropped': return `${plural(delta.count, 'tool')} dropped`;
+    case 'inserted': return `${plural(delta.count, 'tool')} inserted at ${delta.label}`;
+    case 'removed': return `${plural(delta.count, 'tool')} removed at ${delta.label}`;
+    case 'rewritten': return `segments ${formatLabels(delta.labels)}`;
+    case 'none': return 'outside tracked segments or order';
+  }
+}
+
+/** History is append-only in a healthy conversation, so an append is silence. Everything else is
+ *  reported, and only `rewritten` is the alarming one. */
+function describeHistoryDelta(delta: SegmentDelta): string | undefined {
+  switch (delta.kind) {
+    case 'none':
+    case 'appended':
+      return undefined;
+    case 'dropped':
+      return `history lost ${plural(delta.count, 'trailing message')}`;
+    case 'inserted':
+      return `${plural(delta.count, 'message')} inserted into history at ${delta.label} `
+        + '(a shift, not a rewrite — the prefix resumes unchanged after it)';
+    case 'removed':
+      return `${plural(delta.count, 'message')} removed from history at ${delta.label}`;
+    case 'rewritten':
+      return `history REWRITTEN IN PLACE at ${delta.label} — an already-sent message changed`;
+  }
+}
+
 function attributePayloadChange(
   previous: CachePayloadSnapshot | undefined,
   current: CachePayloadSnapshot | undefined,
@@ -124,15 +222,12 @@ function attributePayloadChange(
   const changes: string[] = [];
   if (previous.systemHash !== current.systemHash) changes.push('system prompt changed');
   if (previous.toolsHash !== current.toolsHash) {
-    const labels = changedLabels(previous.tools, current.tools);
-    const detail = labels.length > 0 ? `segments ${formatLabels(labels)}` : 'outside tracked segments or order';
+    const detail = describeToolDelta(classifySegments(previous.tools, current.tools));
     const count = previous.toolCount === current.toolCount ? '' : `, count ${previous.toolCount}→${current.toolCount}`;
     changes.push(`tools changed (${detail}${count})`);
   }
-  const historyChanges = changedLabels(previous.history, current.history);
-  if (historyChanges.length > 0) {
-    changes.push(`history prefix changed at ${formatLabels(historyChanges)}`);
-  }
+  const historyDelta = describeHistoryDelta(classifySegments(previous.history, current.history));
+  if (historyDelta) changes.push(historyDelta);
   if (current.historyCount < previous.historyCount) {
     changes.push(`history truncated ${previous.historyCount}→${current.historyCount}`);
   }

@@ -130,8 +130,57 @@ describe('installCacheWatch — payload attribution', () => {
     fire(assistantUsage(20_000, T0 + 5_000));
 
     expect(warnings()).toHaveLength(1);
-    expect(warnings()[0]?.message).toContain('history prefix changed at 1:user/tool_result');
+    expect(warnings()[0]?.message).toContain('history REWRITTEN IN PLACE at 1:user/tool_result');
     expect(warnings()[0]?.message).not.toContain('secret output');
+  });
+
+  // Live recall anchors a frozen meta message into the stream, which shifts every later index. Compared
+  // position by position that reads as "the whole tail was rewritten" — the exact signal that sent this
+  // investigation down the wrong path on 2026-08-04.
+  it('reports a mid-history insertion as a shift rather than a rewrite', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    const before = [
+      { role: 'user', content: [{ type: 'text', text: 'do work' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'output' }] },
+    ];
+    capture(providerPayload({ messages: before }));
+    fire(assistantUsage(100_000, T0));
+    capture(providerPayload({
+      messages: [
+        before[0],
+        { role: 'user', content: [{ type: 'text', text: 'recalled memory' }] },
+        before[1],
+        before[2],
+      ],
+    }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('1 message inserted into history at 1:user');
+    expect(warnings()[0]?.message).toContain('a shift, not a rewrite');
+    expect(warnings()[0]?.message).not.toContain('REWRITTEN IN PLACE');
+  });
+
+  // What actually happened on 2026-08-04: ToolSearch activated five deferred tools mid-conversation.
+  // The tools block sits ahead of every message, so the whole prefix re-caches.
+  it('names an appended tool schema instead of reporting an anonymous change', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    const first = providerPayload();
+    capture(first);
+    fire(assistantUsage(100_000, T0));
+    const tools = Array.isArray(first.tools) ? first.tools : [];
+    capture(providerPayload({
+      tools: [...tools, { name: 'mcp__chrome_devtools__take_screenshot', input_schema: { type: 'object' } }],
+    }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('tools changed (1 tool appended, count 1→2)');
   });
 
   it('attributes system-prompt and tool-schema changes separately', () => {
