@@ -5,6 +5,74 @@ All notable changes to Elowen are documented here. The format loosely follows
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-04
+
+Memory grew up in this release: it now belongs to your projects, keeps recalling while a turn is still
+working, and looks after its own size. A prompt-cache bug that made long conversations roughly ten times
+more expensive than they should be is also fixed.
+
+### Added
+- **Memories belong to your projects.** A memory category can be bound to a project, and recall then only
+  surfaces that project's memories plus your global ones — work on one client no longer bleeds into
+  another. The category picker shows the bound project's icon, and a memory written while you work in a
+  project lands in that project's category by default.
+- **Every memory has a vitality score, and the store keeps itself tidy.** Vitality (0–100) rises with use
+  and decays with time; the decay half-life is set per importance, importance 5 never decays. A memory that
+  falls below the floor after a grace period moves to the trash — recoverable, never a hard delete. Tune it
+  all, or switch it off, in Settings → Memory retention. The memory list gained a Vitality column and the
+  detail view a Vitality metric.
+- **Recall keeps working during a turn.** Elowen now searches memory again mid-turn, not only when the turn
+  starts, so a fact that only becomes relevant halfway through still reaches the answer. It never blocks the
+  model: the search runs in the background and lands on a later step. Operators can budget it (passes, count
+  and characters) in Settings, and users can switch it off.
+- **Recalled memories say how old they are**, so a stale fact is visible as stale instead of being read as
+  current, and each one is rendered as its own tagged element rather than a single blob.
+- **The curator learns how you want to be worked with**, capturing standing "work like this" feedback as
+  memory instead of only factual notes.
+- **`elowen uninstall`.** A clean removal path for the CLI, and a missing entry script no longer sends the
+  daemon into a crash loop.
+- **Read-only sub-agents get the full reading toolset** plus a deny-list shell, so an exploration agent can
+  actually explore without being handed the ability to change anything.
+- **`DelegateContinue` can resume a sub-agent on a different model**, and a continued sub-agent otherwise
+  stays on its own model instead of silently switching.
+- **The daemon announces every boot on your chat platforms**, not only an operator-triggered restart, and a
+  finished workflow leaves a marker in the timeline.
+- **More operator settings instead of hardcoded values** — chat constants, stream-silence limits, plugin
+  limits and several runtime values are now configurable in Settings.
+
+### Changed
+- **Stopping the daemon drains running work first.** A stop announces itself, lets in-flight turns and
+  delivered results finish within a budget, and only then exits.
+- **A conversation remembers its working directory across a cold restart**, so a respawn resumes where the
+  work actually was.
+- **The web shares the daemon's DTOs** instead of mirroring them by hand, with a test that catches drift.
+- **The chat's bottom status line stays on one line on a phone.** Model, context, tokens and cost no longer
+  wrap onto a second row and push the composer down; the model name truncates instead, with the full id on
+  hover.
+
+### Fixed
+- **Long conversations cost roughly ten times less.** Recalled memories were being inserted at a moving
+  point in the request, which broke Anthropic's prompt cache between turns: every call re-wrote the whole
+  context instead of reading it. Recall is now anchored to a fixed message, so the cache holds across turns
+  (measured: cache reads up from ~56k to ~374k tokens, cache writes down from ~220k to ~8k).
+- **Recall no longer leaks another project's memories.** Mid-turn recall resolved its scope from ambient
+  async context, which could hand it the wrong project; it now receives the turn's scope explicitly.
+- **The retrieval inspector searches across your projects again** and stops claiming "embeddings
+  unconfigured" when embeddings are configured and simply nothing cleared the relevance threshold.
+- **Recall survives steering.** Sending a message mid-turn no longer drops the memories already recalled for
+  that turn, and compaction is detected by a shrinking history rather than a message count.
+- **Recall falls back to keyword search when the vector pass finds nothing**, instead of returning nothing at
+  all for a query too thin to score.
+- **Phone notifications reach Apple again.** The VAPID contact is a real, configurable address (Settings →
+  System) instead of a placeholder Apple rejects, a push is sent when the tab is merely backgrounded, and the
+  daemon logs why a turn produced no notification.
+- **Failed requests are no longer counted as prompt-cache drops**, so the cache-health signal means what it
+  says.
+- **"Reset usage" actually clears the charts.**
+- **A dismissed plan stays dismissed**, and a large operator ruleset no longer breaks read-only delegation or
+  trips the boundary cap.
+- **Workflow nodes no longer show as "unknown" with no model.**
+
 ## [0.27.73] - 2026-07-20
 
 ### Added
