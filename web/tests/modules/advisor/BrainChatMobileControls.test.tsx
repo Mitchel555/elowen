@@ -125,4 +125,31 @@ describe('conversation bar controls', () => {
 
     await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBe('on'));
   });
+
+  // The footer metrics (model / context / tokens / cost) must stay ONE line on a phone: a second row
+  // pushes the composer down and eats the little vertical space a phone has. jsdom does no layout, so
+  // what is guarded here is the class contract that produces the single line — the row itself must not
+  // wrap, each metric must not wrap internally (a no-wrap flex row still lets an item's own text break),
+  // and the model name — the long, expendable part — absorbs the squeeze by truncating.
+  it('keeps the model/context/tokens/cost footer on one line for a phone', async () => {
+    server.use(http.get('*/api/brain/status', () => HttpResponse.json({
+      running: false, sessionId: 'brain-1', model: 'claude-opus-5', cards: [], queued: [],
+      statusline: { showModel: true, showContext: true, showTokens: true, showCost: true },
+      usage: { tokens: 258_000, contextWindow: 1_000_000, percent: 26, totalTokens: 126_300_000, cost: 59.08 },
+    })));
+    setViewport(true);
+    renderSurface();
+
+    const line = await screen.findByTestId('chat-statusline');
+    expect(line.className).not.toContain('flex-wrap');
+
+    const spans = [...line.querySelectorAll('span')];
+    const model = spans.find((s) => s.textContent === 'claude-opus-5');
+    expect(model?.className).toContain('truncate');
+    expect(model?.getAttribute('title')).toBe('claude-opus-5'); // truncation must not hide which model ran
+
+    const metrics = spans.filter((s) => /26%|Σ|59\.08/.test(s.textContent ?? ''));
+    expect(metrics).toHaveLength(3);
+    for (const metric of metrics) expect(metric.className).toContain('whitespace-nowrap');
+  });
 });

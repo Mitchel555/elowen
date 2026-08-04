@@ -1043,7 +1043,11 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           for a phone where the metrics crowd the composer. Collapsed leaves only the chevron to bring it
           back. */}
       {lineCfg && (lineCfg.showModel || lineCfg.showContext || lineCfg.showTokens || lineCfg.showCost) ? (
-        <div className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 py-1 font-mono text-text-muted ${variant === 'full' ? 'chat-gutter text-[0.6875rem]' : 'px-3 text-tiny'}`}>
+        // Exactly ONE line, phone included: a second row here pushes the composer down and eats the little
+        // vertical room a phone has. The metrics are the point and stay whole (`shrink-0 whitespace-nowrap`,
+        // needed because a no-wrap FLEX row still lets each item's own text wrap); the model name is the
+        // long, expendable part, so it alone absorbs the squeeze and truncates, with the full id on title.
+        <div data-testid="chat-statusline" className={`flex min-w-0 items-center gap-x-2 overflow-hidden py-1 font-mono text-text-muted sm:gap-x-3 ${variant === 'full' ? 'chat-gutter text-[0.6875rem]' : 'px-3 text-tiny'}`}>
           <button
             type="button"
             onClick={() => setStatuslinePref(statuslineShown ? 'hidden' : 'shown')}
@@ -1056,12 +1060,14 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           </button>
           {statuslineShown ? (
             <>
-              {lineCfg.showModel && (currentModel || active?.model) ? <span>{currentModel || active?.model}</span> : null}
+              {lineCfg.showModel && (currentModel || active?.model)
+                ? <span className="min-w-0 truncate" title={currentModel || active?.model}>{currentModel || active?.model}</span>
+                : null}
               {lineCfg.showContext && usage && usage.percent != null ? (
-                <span>{t.brainChat.context} {Math.round(usage.percent)}% ({formatTokens(usage.tokens ?? 0)}/{formatTokens(usage.contextWindow)})</span>
+                <span className="shrink-0 whitespace-nowrap">{t.brainChat.context} {Math.round(usage.percent)}% ({formatTokens(usage.tokens ?? 0)}/{formatTokens(usage.contextWindow)})</span>
               ) : null}
-              {lineCfg.showTokens && usage ? <span>Σ {formatTokens(usage.totalTokens)} {t.sessionsPanel.tok}</span> : null}
-              {lineCfg.showCost && usage ? <span>{formatCost(usage.cost, 2)}</span> : null}
+              {lineCfg.showTokens && usage ? <span className="shrink-0 whitespace-nowrap">Σ {formatTokens(usage.totalTokens)} {t.sessionsPanel.tok}</span> : null}
+              {lineCfg.showCost && usage ? <span className="shrink-0 whitespace-nowrap">{formatCost(usage.cost, 2)}</span> : null}
             </>
           ) : null}
         </div>
