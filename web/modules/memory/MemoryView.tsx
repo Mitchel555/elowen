@@ -376,7 +376,7 @@ export function MemoryView() {
                 ) : (
                   <DataTable
                     ariaLabel={t.page.memory}
-                    columns="2rem minmax(0,1fr) 10rem 7rem 6rem 6rem 7rem 1.25rem"
+                    columns="2rem minmax(0,1fr) 8rem 5rem 5.5rem 5.5rem 5.5rem 4.5rem 1.25rem"
                     compactColumns="2rem minmax(0,1fr) 1.25rem"
                   >
                     <DataTableRow header>

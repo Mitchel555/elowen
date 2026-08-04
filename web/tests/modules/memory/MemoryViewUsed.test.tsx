@@ -65,6 +65,43 @@ const usedCellOf = (body: string): string => {
   return within(row).getByTestId('memory-used-cell').textContent ?? '';
 };
 
+/** The grid declares its columns once as a track list, while the cells are written out one by one, so the
+ *  two drift apart silently: a ninth cell against eight tracks does not raise anything, it just wraps onto
+ *  a second row under the checkbox. Counting them against each other is the only cheap guard, since jsdom
+ *  performs no grid layout and every rendering assertion stays green through that break. */
+const trackCount = (list: string): number => list.replace(/\([^)]*\)/g, '').trim().split(/\s+/).length;
+
+const firstRow = (): HTMLElement => {
+  const [row] = screen.getAllByTestId('memory-row');
+  if (!row) throw new Error('no rows rendered');
+  return row;
+};
+
+describe('MemoryView column grid', () => {
+  it('declares one track per cell, so no cell wraps onto a second row', async () => {
+    renderView();
+    await waitFor(() => expect(screen.getByText('read recently')).toBeInTheDocument());
+
+    const table = screen.getByRole('table');
+    const tracks = trackCount(table.style.getPropertyValue('--data-table-columns'));
+    expect(tracks).toBe(firstRow().children.length);
+
+    const headerRow = screen.getByRole('button', { name: 'Used' }).closest('[role="row"]');
+    if (!headerRow) throw new Error('used header is outside a row');
+    expect(headerRow.children.length).toBe(tracks);
+  });
+
+  it('keeps the compact grid aligned with the cells that survive the narrow breakpoint', async () => {
+    renderView();
+    await waitFor(() => expect(screen.getByText('read recently')).toBeInTheDocument());
+
+    const table = screen.getByRole('table');
+    const wide = Array.from(firstRow().children).filter((cell) => cell.getAttribute('data-priority') === 'wide');
+    expect(trackCount(table.style.getPropertyValue('--data-table-compact-columns')))
+      .toBe(firstRow().children.length - wide.length);
+  });
+});
+
 describe('MemoryView used column', () => {
   it('shows the elapsed time since the last recall, relative at every distance', async () => {
     renderView();
