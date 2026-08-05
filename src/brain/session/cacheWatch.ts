@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { logger } from '../../shared/logger.js';
 import { cacheTtlMs } from './cacheTiming.js';
+import { currentTurnMode, type TurnWorkMode } from '../../plugins/policyContext.js';
 
 /** Prompt-cache observability, modeled on Claude Code's promptCacheBreakDetection. In a healthy
  * append-only conversation `cacheRead` grows monotonically: each request reads the prefix the previous
@@ -40,6 +41,8 @@ interface CachePayloadSnapshot {
   deferredToolCount: number;
   history: HashedSegment[];
   historyCount: number;
+  /** Work mode of the turn that sent this request, captured while the prompt scope is still active. */
+  turnMode?: TurnWorkMode;
 }
 
 function hash(value: unknown): string {
@@ -70,7 +73,7 @@ function isDeferredTool(value: unknown): boolean {
   return record(value)?.defer_loading === true;
 }
 
-function snapshotPayload(value: unknown): CachePayloadSnapshot {
+function snapshotPayload(value: unknown, turnMode: TurnWorkMode | undefined): CachePayloadSnapshot {
   const payload = record(value);
   const tools = Array.isArray(payload?.tools) ? payload.tools : [];
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
@@ -88,6 +91,7 @@ function snapshotPayload(value: unknown): CachePayloadSnapshot {
       hash: hash(message), label: historyLabel(message, index),
     })),
     historyCount: messages.length,
+    ...(turnMode ? { turnMode } : {}),
   };
 }
 
@@ -96,6 +100,8 @@ function snapshotPayload(value: unknown): CachePayloadSnapshot {
 export interface CachePayloadMonitor {
   extension: (pi: ExtensionAPI) => void;
   consumeSnapshot: () => CachePayloadSnapshot | undefined;
+  /** Drop snapshots that predate a compaction, so none can pair with a post-compaction response. */
+  clearPending: () => void;
 }
 
 export function createCachePayloadMonitor(): CachePayloadMonitor {
@@ -103,11 +109,14 @@ export function createCachePayloadMonitor(): CachePayloadMonitor {
   return {
     extension: (pi) => {
       pi.on('before_provider_request', (event) => {
-        pending.push(snapshotPayload(event.payload));
+        // currentTurnMode() is only meaningful here, inside the prompt scope that owns the request; the
+        // message_end handler that consumes the snapshot has no such guarantee.
+        pending.push(snapshotPayload(event.payload, currentTurnMode()));
         while (pending.length > MAX_PENDING_SNAPSHOTS) pending.shift();
       });
     },
     consumeSnapshot: () => pending.shift(),
+    clearPending: () => { pending.length = 0; },
   };
 }
 
@@ -249,6 +258,12 @@ function attributePayloadChange(
   if (!previous || !current) return 'payload snapshot unavailable';
   const changes: string[] = [];
   const notes: string[] = [];
+  // A mode switch narrows the tool set (plan exposes a fraction of the build tools), which rehashes the
+  // whole cached prefix — an expected break that the tool/history deltas below would otherwise pin on the
+  // wrong culprit.
+  if (previous.turnMode && current.turnMode && previous.turnMode !== current.turnMode) {
+    changes.push(`turn mode changed ${previous.turnMode}→${current.turnMode}`);
+  }
   if (previous.systemHash !== current.systemHash) changes.push('system prompt changed');
   if (previous.toolsHash !== current.toolsHash) {
     const delta = classifySegments(previous.tools, current.tools);
@@ -282,6 +297,8 @@ export interface CacheWatchOptions {
   ttlMs?: number;
   now?: () => number;
   monitor?: CachePayloadMonitor;
+  /** Conversation id to report in warnings, so a drop can be traced to the session it happened in. */
+  sessionId?: string;
 }
 
 export function installCacheWatch(
@@ -296,6 +313,10 @@ export function installCacheWatch(
     if (event.type === 'compaction_end' && !event.aborted && event.result) {
       // Post-compaction history is genuinely smaller; the next request's lower cacheRead is by design.
       previous = null;
+      // A snapshot taken by a request BEFORE the compaction describes a payload that no longer exists;
+      // leaving it queued would pair it with the first response after the compaction and attribute the
+      // next drop to that stale request.
+      options.monitor?.clearPending();
       return;
     }
     if (event.type !== 'message_end') return;
@@ -316,7 +337,8 @@ export function installCacheWatch(
         && at - previous.at < ttlMs
       ) {
         log.warn(
-          `prompt cache read dropped within a warm window: ${previous.cacheRead} → ${cacheRead} tokens `
+          `${options.sessionId ? `[session ${options.sessionId}] ` : ''}`
+          + `prompt cache read dropped within a warm window: ${previous.cacheRead} → ${cacheRead} tokens `
           + `(${Math.round((at - previous.at) / 1000)}s apart) — ${attributePayloadChange(previous.snapshot, snapshot)}`,
         );
       }

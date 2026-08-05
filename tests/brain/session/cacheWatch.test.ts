@@ -7,6 +7,7 @@ import {
   type CachePayloadMonitor,
 } from '../../../src/brain/session/cacheWatch.js';
 import { cacheTtlMs } from '../../../src/brain/session/toolResultClearing.js';
+import { runWithPolicy } from '../../../src/plugins/policyContext.js';
 import { setLogSink } from '../../../src/shared/logger.js';
 
 const T0 = 1_000_000;
@@ -23,7 +24,7 @@ afterEach(() => setLogSink(undefined));
 
 type Listener = (event: unknown) => void;
 
-function harness(options: { ttlMs?: number; monitor?: CachePayloadMonitor } = { ttlMs: TTL }): { fire: Listener } {
+function harness(options: { ttlMs?: number; monitor?: CachePayloadMonitor; sessionId?: string } = { ttlMs: TTL }): { fire: Listener } {
   let listener: Listener = () => undefined;
   const session = { subscribe: (fn: Listener) => { listener = fn; } };
   installCacheWatch(session, options);
@@ -335,5 +336,57 @@ describe('installCacheWatch', () => {
     // Measured against the PREVIOUS event: past the window → expiry, silent.
     fire(assistantUsage(10_000, T0 + 2 * windowMs + 30_000));
     expect(warnings()).toHaveLength(1);
+  });
+});
+
+describe('installCacheWatch — warning context', () => {
+  // Without the session id a log line is untraceable: this investigation once pinned a drop to the wrong
+  // conversation and nearly reported a bug that did not exist.
+  it('reports the session id in the warning when one is provided', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, sessionId: 'brain-session-42' });
+    capture(providerPayload());
+    fire(assistantUsage(100_000, T0));
+    capture(providerPayload());
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('brain-session-42');
+  });
+
+  // Switching to plan mode narrows the tool set, rehashing the cached prefix by design. The mode is only
+  // readable while the request's prompt scope is live, so it is latched into the snapshot, not the log.
+  it('attributes a drop to the turn mode changing between requests', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    runWithPolicy({ allowedProjectIds: new Set([1]) }, () => capture(providerPayload()), { mode: 'build' });
+    fire(assistantUsage(100_000, T0));
+    runWithPolicy({ allowedProjectIds: new Set([1]) }, () => capture(providerPayload()), { mode: 'plan' });
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('turn mode changed build→plan');
+  });
+
+  // A snapshot taken by a request BEFORE the compaction describes a payload that no longer exists. If it
+  // survived the compaction it would become the baseline for the first post-compaction comparison and the
+  // next drop would be attributed to that stale request.
+  it('never attributes a post-compaction drop to a pre-compaction payload snapshot', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor });
+    capture(providerPayload({ system: 'pre-compaction system' }));
+    fire({ type: 'compaction_end', aborted: false, result: { summary: '…' } });
+    capture(providerPayload());
+    fire(assistantUsage(20_000, T0 + 10_000));
+    capture(providerPayload());
+    fire(assistantUsage(15_000, T0 + 20_000));
+
+    expect(warnings()).toHaveLength(1);
+    // The two POST-compaction payloads are identical; only the stale pre-compaction one differs.
+    expect(warnings()[0]?.message).not.toContain('system prompt changed');
+    expect(warnings()[0]?.message).toContain('tracked payload prefix unchanged');
   });
 });

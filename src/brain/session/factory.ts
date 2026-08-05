@@ -380,7 +380,7 @@ export class BrainSessionFactory {
     // cacheWatch is the tripwire that logs whether a warm drop came from system, tools, a history segment,
     // or a likely provider-side eviction. Anthropic-only: other providers report best-effort cache stats
     // whose warm drops are routine noise.
-    if (cacheMonitor) installCacheWatch(session, { monitor: cacheMonitor });
+    if (cacheMonitor) installCacheWatch(session, { monitor: cacheMonitor, sessionId: spec.sessionId });
     // Compaction is PI-native: our per-user % maps to PI's absolute reserveTokens (shouldCompact fires
     // once contextTokens > contextWindow − reserveTokens). Applied AFTER create — createAgentSession reads
     // compaction lazily (getCompactionSettings at each check), so an in-memory override here takes effect;
