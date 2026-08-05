@@ -120,7 +120,11 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<PluginRegis
   const loaded = new Set<string>(); // a name found in an earlier dir wins; don't double-load
   for (const dir of opts.dirs) {
     if (!existsSync(dir)) continue;
-    for (const name of readdirSync(dir)) {
+    // Sort plugin folders by name before loading: tool registration order is part of the cached prompt
+    // prefix, so it must not depend on the filesystem's readdir order (which varies across machines and
+    // restarts). Locale-independent compare on purpose — localeCompare depends on the process locale.
+    const names = readdirSync(dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const name of names) {
       if (!wanted.has(name) || loaded.has(name)) continue;
       const pluginDir = join(dir, name);
       try {

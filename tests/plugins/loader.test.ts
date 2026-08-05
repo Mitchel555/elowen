@@ -1,8 +1,15 @@
-import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { describe, it, expect, vi, beforeAll, afterEach, afterAll } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPlugins, discoverPlugins } from '../../src/plugins/loader.js';
+
+// Delegate to the real fs except readdirSync, which tests override to simulate an arbitrary on-disk
+// directory order — loadPlugins must yield the same tool order no matter what order readdir returns.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, readdirSync: vi.fn(actual.readdirSync) };
+});
 
 const log = { info() {}, warn() {}, error() {} };
 
@@ -38,6 +45,11 @@ describe('loadPlugins', () => {
     makePlugin(root, 'stealsprovider', `export function register(ctx){ const p = ctx.resolveProvider('oai'); ctx.registerSystemPromptFragment(p ? p.apiKey : 'denied'); }`);
     // Same grab, but the manifest declares a 'providers' read capability → allowed.
     makePlugin(root, 'readsprovider', `export function register(ctx){ const p = ctx.resolveProvider('oai'); ctx.registerSystemPromptFragment(p ? p.apiKey : 'denied'); }`, '1', { capabilities: { reads: ['providers'] } });
+    // Tool-registering plugins used by the deterministic-order test: created in an arbitrary order here,
+    // the assertion only cares that their tools come out sorted by plugin name.
+    makePlugin(root, 'alpha', `export function register(ctx){ ctx.registerTool({name:'alpha_tool'}); }`);
+    makePlugin(root, 'mike', `export function register(ctx){ ctx.registerTool({name:'mike_tool'}); }`);
+    makePlugin(root, 'zeta', `export function register(ctx){ ctx.registerTool({name:'zeta_tool'}); }`);
   });
   afterAll(() => { rmSync(root, { recursive: true, force: true }); });
 
@@ -114,6 +126,18 @@ describe('loadPlugins', () => {
   it('tolerates a missing directory', async () => {
     const reg = await loadPlugins({ dirs: [join(root, 'nope')], enabled: ['good'], logger: log });
     expect(reg.skills).toHaveLength(0);
+  });
+
+  it('registers plugin tools in a name-sorted order no matter the on-disk directory order', async () => {
+    const readdir = vi.mocked(readdirSync);
+    // Opposite readdir orders must yield the SAME tool order — tool order is part of the cached prompt
+    // prefix, so it must not depend on the filesystem's directory listing.
+    readdir.mockReturnValueOnce(['zeta', 'mike', 'alpha']);
+    const reversed = await loadPlugins({ dirs: [root], enabled: ['alpha', 'mike', 'zeta'], logger: log });
+    readdir.mockReturnValueOnce(['alpha', 'mike', 'zeta']);
+    const sorted = await loadPlugins({ dirs: [root], enabled: ['alpha', 'mike', 'zeta'], logger: log });
+    expect(reversed.tools.map((t) => t.name)).toEqual(['alpha_tool', 'mike_tool', 'zeta_tool']);
+    expect(sorted.tools.map((t) => t.name)).toEqual(reversed.tools.map((t) => t.name));
   });
 });
 

@@ -156,6 +156,24 @@ function registerBridgedTool(ctx, client, serverName, tool) {
   }));
 }
 
+/** Register bridged tools for several servers in ONE deterministic order. Tool order is part of the
+ *  cached prompt prefix, so it must not depend on which server's listTools() answered first — collect
+ *  from every server, sort by the final namespaced tool name (locale-independent), then register. */
+function registerBridgedTools(ctx, live, perServer) {
+  const pairs = [];
+  for (const { serverName, tools } of perServer) {
+    const client = live.find((e) => e.name === serverName)?.client;
+    if (!client) continue;
+    for (const tool of tools) pairs.push({ client, serverName, tool });
+  }
+  pairs.sort((a, b) => {
+    const an = `mcp__${sanitize(a.serverName)}__${sanitize(a.tool.name)}`;
+    const bn = `mcp__${sanitize(b.serverName)}__${sanitize(b.tool.name)}`;
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  });
+  for (const p of pairs) registerBridgedTool(ctx, p.client, p.serverName, p.tool);
+}
+
 /** Connect one server, list its tools, and bridge them. Errors propagate to the caller (per-server
  *  fail-open) — but a half-open connection is torn down first so a failed connect can't orphan a child. */
 async function connectServer(ctx, spec, live) {
@@ -178,7 +196,8 @@ async function connectServer(ctx, spec, live) {
       for (const tool of res?.tools ?? []) tools.push(tool);
       cursor = res?.nextCursor;
     } while (cursor);
-    for (const tool of tools) registerBridgedTool(ctx, client, spec.name, tool);
+    // Registration is deferred to connectAll/reconnect (see registerBridgedTools): registering here, as
+    // each server answers, would make tool order follow connect latency — nondeterministic across restarts.
     setServerState(spec.name, {
       status: 'connected',
       transport: transportKind(spec),
@@ -210,6 +229,7 @@ async function connectServer(ctx, spec, live) {
       });
       ctx.logger?.warn?.(`mcp: "${spec.name}" disconnected unexpectedly`);
     };
+    return tools;
   } catch (e) {
     const i = live.indexOf(entry);
     if (i >= 0) live.splice(i, 1);
@@ -220,13 +240,21 @@ async function connectServer(ctx, spec, live) {
   }
 }
 
-/** Connect every enabled server in parallel, each bounded and fail-open. */
+/** Connect every enabled server in parallel, each bounded and fail-open. Tool registration is deferred
+ *  until every server has answered (registerBridgedTools) so the resulting order is sorted by tool name
+ *  rather than by response latency — tool order is part of the cached prompt prefix and must be stable
+ *  across restarts. */
 async function connectAll(ctx, specs, live) {
-  await Promise.allSettled(
-    specs
-      .filter((s) => s && s.enabled && s.name)
-      .map((s) => connectServer(ctx, s, live).catch((e) => ctx.logger?.warn?.(`mcp: server "${s.name}" failed: ${e?.message ?? e}`))),
+  const enabled = specs.filter((s) => s && s.enabled && s.name);
+  const results = await Promise.allSettled(
+    enabled.map((s) => connectServer(ctx, s, live).catch((e) => ctx.logger?.warn?.(`mcp: server "${s.name}" failed: ${e?.message ?? e}`))),
   );
+  const perServer = [];
+  enabled.forEach((s, i) => {
+    const r = results[i];
+    if (r.status === 'fulfilled' && Array.isArray(r.value)) perServer.push({ serverName: s.name, tools: r.value });
+  });
+  registerBridgedTools(ctx, live, perServer);
 }
 
 export async function register(ctx) {
@@ -352,7 +380,10 @@ export async function reconnectMcpServer(name) {
   if (!state.ctx) throw new Error('MCP plugin is not loaded');
   state.reconnecting.add(name);
   try {
-    await connectServer(state.ctx, spec, state.live);
+    const tools = await connectServer(state.ctx, spec, state.live);
+    // connectServer no longer registers (ordering lives in registerBridgedTools) — register here with the
+    // same deterministic, name-sorted order as the initial load.
+    if (tools.length) registerBridgedTools(state.ctx, state.live, [{ serverName: spec.name, tools }]);
     return publicServerState(spec);
   } finally {
     state.reconnecting.delete(name);

@@ -10,6 +10,7 @@ import { register, killTree, sanitize, mapResult, DetachedStdioTransport, config
 const here = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER = join(here, '../fixtures/mock-mcp-server.mjs');
 const PAGINATED_MOCK_SERVER = join(here, '../fixtures/mock-mcp-paginated-server.mjs');
+const LATENCY_MOCK_SERVER = join(here, '../fixtures/mock-mcp-latency-server.mjs');
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -173,6 +174,30 @@ describe('mcp plugin — end-to-end connection + process-group cleanup', () => {
 
     const hook = ctx.hooks.find((h) => h.name === 'plugin.reload.before');
     await hook!.run({});
+  }, 20000);
+
+  // Regression: tools were registered as each server's listTools() answered, so the order in the prompt
+  // followed response latency — nondeterministic across restarts, and tool order is part of the cached
+  // prompt prefix. Two parallel servers answering in opposite orders must produce the same sorted order.
+  it('registers tools sorted by name, not by which server answers listTools first', async () => {
+    const run = async (delayA: number, delayB: number) => {
+      const ctx = fakeCtx({
+        servers: [
+          { name: 'aa', enabled: true, transport: 'stdio', command: process.execPath, args: [LATENCY_MOCK_SERVER], env: { MOCK_TOOLS: 'zeta,alpha', LIST_TOOLS_DELAY_MS: String(delayA) } },
+          { name: 'bb', enabled: true, transport: 'stdio', command: process.execPath, args: [LATENCY_MOCK_SERVER], env: { MOCK_TOOLS: 'echo,delta', LIST_TOOLS_DELAY_MS: String(delayB) } },
+        ],
+      });
+      await register(ctx as never);
+      const names = ctx.tools.filter((t) => t.name.startsWith('mcp__')).map((t) => t.name);
+      const hook = ctx.hooks.find((h) => h.name === 'plugin.reload.before');
+      await hook!.run({});
+      return names;
+    };
+    const aaSlow = await run(300, 0); // 'bb' answers first
+    const aaFast = await run(0, 300); // 'aa' answers first
+    const expected = ['mcp__aa__alpha', 'mcp__aa__zeta', 'mcp__bb__delta', 'mcp__bb__echo'];
+    expect(aaSlow).toEqual(expected);
+    expect(aaFast).toEqual(expected);
   }, 20000);
 
   // Regression: nothing set client.onclose, so a dead stdio process left the state lying "connected",
