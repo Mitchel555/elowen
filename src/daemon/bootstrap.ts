@@ -1223,10 +1223,15 @@ export async function buildApp(opts: BuildOpts) {
     // produced output, or a deleted conversation, leaves files nothing points at. Reclaim them daily,
     // keeping anything written in the last hour — a turn writes its files before committing the row that
     // references them, so a sweep landing in between must not delete a live attachment.
+    // A message queued mid-turn is the exception the grace period cannot cover: its files are written at
+    // admission but its row only at delivery, so a turn running longer than an hour would leave them
+    // looking abandoned. Ask the live sessions what is still in flight and treat that as referenced too.
     const sweepChatAttachments = () => {
       if (!chatImagesDir) return;
       try {
-        const removed = sweepChatImages(chatImagesDir, brainStore.referencedChatImages(), 3_600_000, clock.now());
+        const referenced = brainStore.referencedChatImages();
+        for (const file of brain?.pendingChatImageFiles() ?? []) referenced.add(file);
+        const removed = sweepChatImages(chatImagesDir, referenced, 3_600_000, clock.now());
         if (removed > 0) log.info(`chat images: removed ${removed} unreferenced attachment(s)`);
       } catch (e) { log.error('chat image sweep failed', e); }
     };

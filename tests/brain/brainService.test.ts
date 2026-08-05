@@ -3972,6 +3972,26 @@ describe('sub-agent session tap + owner steering', () => {
     expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
   });
 
+  // A message queued mid-turn writes its files at admission but its row only at delivery, so for the
+  // length of the turn nothing in the database points at them. The sweep's one-hour grace runs from the
+  // write, which a long turn outlives — without this the attachment would be reclaimed while still on its
+  // way in, and would come back as a broken image after a reload.
+  it('reports queued attachments so the sweep cannot reclaim them mid-turn', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const sessions = (svc as unknown as { sessions: { get(id: string): unknown; set(id: string, b: unknown): void } }).sessions;
+    const live = sessions.get('brain-1') as Record<string, unknown>;
+    sessions.set('brain-1', {
+      ...live,
+      queuedSteer: [{ text: 'a', echo: { images: [{ file: 'steered.jpg', mimeType: 'image/jpeg' }] } }],
+      queuedFollowUp: [{ text: 'b', echo: { images: [{ file: 'followed.jpg', mimeType: 'image/jpeg' }] } }],
+      deliveringUserEchoes: [{ text: 'c', echo: { images: [{ file: 'delivering.jpg', mimeType: 'image/jpeg' }] } }],
+    });
+
+    expect(svc.pendingChatImageFiles().sort()).toEqual(['delivering.jpg', 'followed.jpg', 'steered.jpg']);
+  });
+
   // An internal goal or nudge turn is the one case the user never asked for. It runs on its own schedule,
   // possibly for hours, and buzzing a phone for each one would make the notification worthless — this is
   // the only thing standing between autonomous work and a night of alerts.

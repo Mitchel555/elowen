@@ -902,6 +902,22 @@ export class BrainService {
   /** Record whether one client's window is on screen, so a finished turn knows whether anyone is actually
    *  reading it before it notifies the user's phone. Purely presence: it does not touch attachment, so a
    *  hidden tab keeps streaming and every lifecycle rule sees the conversation as held. */
+  /** Attachment files of messages still sitting in a live queue. Their durable row is only written when
+   *  PI delivers them, so until then nothing in the database refers to the files — and the sweep's grace
+   *  period is measured from the write, which a turn running longer than an hour outlives. Without this
+   *  the sweep would reclaim an attachment that is still on its way in. */
+  pendingChatImageFiles(): string[] {
+    const files: string[] = [];
+    for (const [, live] of this.sessions.liveEntries()) {
+      for (const queue of [live.queuedSteer, live.queuedFollowUp, live.deliveringUserEchoes]) {
+        for (const item of queue ?? []) {
+          for (const image of item.echo?.images ?? []) files.push(image.file);
+        }
+      }
+    }
+    return files;
+  }
+
   setClientVisibility(userId: number, clientId: string, hidden: boolean): { applied: boolean } {
     return { applied: this.attachments.setClientVisibility(userId, clientId, hidden) };
   }
