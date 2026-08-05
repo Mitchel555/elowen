@@ -5,6 +5,7 @@ import type { ToolOutputView } from './messageView.js';
 import type { AskQuestion, BrainUsage, BrainGoalState, BrainMessageImage } from '../shared/wireContract.js';
 import type { ProcessInfo } from './processRegistry.js';
 import { extractReason } from './toolReason.js';
+import { collapseWhitespace } from '../shared/text.js';
 
 // The usage and goal shapes are the daemon↔web wire contract (idle/status events + the snapshot
 // frame's `goal`) — defined once in src/shared and re-exported here, so the two can never drift.
@@ -326,7 +327,7 @@ function retryReason(raw: unknown): string {
       text = inner || prefix;
     } catch { text = prefix; }
   }
-  return text.replace(/\s+/g, ' ').trim().slice(0, 70);
+  return collapseWhitespace(text).slice(0, 70);
 }
 
 /** Only this tool streams live progress — every other tool's `tool_execution_update` is dropped so a

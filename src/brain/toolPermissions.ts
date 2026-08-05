@@ -1,4 +1,5 @@
 import type { AskAnswer, AskQuestion } from './events.js';
+import { collapseWhitespace } from '../shared/text.js';
 
 /** Granular tool permissions (opencode-style): every tool call resolves to one of three actions.
  *  `allow` runs, `deny` returns an error result to the model, `ask` blocks on a human approval prompt
@@ -440,7 +441,7 @@ function scanDoubleQuoted(input: string, openIdx: number, segments: string[], st
  *  inner command of every substitution. See {@link splitBashSegments}. */
 function scanBashLevel(input: string, segments: string[], state: { ambiguous: boolean }): void {
   let current = '';
-  const flush = (): void => { const s = current.replace(/\s+/g, ' ').trim(); if (s) segments.push(s); current = ''; };
+  const flush = (): void => { const s = collapseWhitespace(current); if (s) segments.push(s); current = ''; };
   let i = 0;
   while (i < input.length) {
     const ch = input[i]!;
@@ -498,7 +499,7 @@ export function splitBashSegments(command: string): { segments: string[]; ambigu
  *  always index 0: resolveBashPermission grants an `allow` on that form ALONE, because the canonical
  *  form is there to stop a deny being dodged and must never hand out a permission instead. */
 function segmentMatchValues(segment: string): string[] {
-  const full = segment.replace(/\s+/g, ' ').trim();
+  const full = collapseWhitespace(segment);
   let tokens = full.split(' ').filter(Boolean);
   for (;;) { // strip leading assignments, then unwrap a wrapper — repeat (e.g. `env FOO=1 rm`)
     while (tokens.length > 1 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!)) tokens = tokens.slice(1);
@@ -578,7 +579,7 @@ const BASH_PREFIX_ARITY: Record<string, number> = {
  *  grant narrow: `rm -rf x` suggests "rm*", never "*". An empty command has no safe prefix to persist —
  *  a bare `*` would be allow-all — so it returns null and the approval prompt omits "Always allow". */
 export function bashAlwaysPattern(command: string): string | null {
-  const tokens = command.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  const tokens = collapseWhitespace(command).split(' ').filter(Boolean);
   if (tokens.length === 0) return null;
   let take = 1;
   for (let len = Math.min(tokens.length, 3); len > 0; len--) {
@@ -663,7 +664,7 @@ export const APPROVAL_LABELS = { once: 'Allow once', always: 'Always allow', den
 /** Build the AskQuestion an approval rides the elicitation pipeline with (`ask` event, kind
  *  'approval'). Single-select, no free-text Other — the three options are the whole contract. */
 export function approvalQuestion(req: ApprovalRequest): AskQuestion {
-  const cmd = req.command ? req.command.replace(/\s+/g, ' ').trim() : '';
+  const cmd = req.command ? collapseWhitespace(req.command) : '';
   const shownCmd = cmd.length > 200 ? `${cmd.slice(0, 199)}…` : cmd;
   // "Always allow" is offered only when there IS a safe pattern to persist — never for an empty command
   // (its pattern would be an allow-all `*`).

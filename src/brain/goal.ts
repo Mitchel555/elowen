@@ -1,5 +1,6 @@
 import type { BrainGoalRow, BrainStore } from '../store/brainStore.js';
 import { lastAssistantTextIn } from './messageView.js';
+import { collapseWhitespace } from '../shared/text.js';
 
 export interface StoredSubgoal { text: string; done?: boolean }
 
@@ -83,7 +84,7 @@ const isPlaceholderEcho = (s: string): boolean => /^<[^>]*>/.test(s.trim());
  *  can't trip a sentinel with an example line inside ```…```. An UNCLOSED opening fence (a truncated turn)
  *  swallows the rest of the text — a sentinel inside it is still example code, not a declaration. */
 const stripFences = (text: string): string => text.replace(/```[\s\S]*?```/g, '').replace(/```[\s\S]*$/, '');
-const cleanCapture = (s: string): string => s.replace(/[`*_~]+\s*$/, '').replace(/\s+/g, ' ').trim();
+const cleanCapture = (s: string): string => collapseWhitespace(s.replace(/[`*_~]+\s*$/, ''));
 /** Markdown wrapping allowed before a sentinel: backtick/bold/italic glyphs DIRECTLY attached to it
  *  (`` `GOAL_DONE:` ``, `**GOAL_DONE:**`). A glyph followed by whitespace is a BULLET (`* GOAL_DONE: …`),
  *  i.e. the model recapping the protocol in a list — that must not trip the sentinel. */

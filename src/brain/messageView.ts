@@ -12,6 +12,7 @@ import { parseDbTs } from '../shared/time.js';
 import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 import { parseStoredChatImages, stripAttachmentMarker, toMessageImages } from './chatImages.js';
+import { collapseWhitespace } from '../shared/text.js';
 // Only these two have daemon consumers that import them from here; BrainSubagentView/BrainWorkflowView/
 // BrainSegment are used internally by the shaping code below, and anything else that needs them imports
 // straight from wireContract.
@@ -45,7 +46,7 @@ export function toolDetail(args: unknown, toolName?: string): string | undefined
   const a = args as Record<string, unknown>;
   const raw = a.path ?? a.file_path ?? a.filename ?? a.command ?? a.pattern ?? a.query ?? a.url ?? a.name ?? a.text;
   if (typeof raw !== 'string' || !raw.trim()) return undefined;
-  const s = raw.replace(/\s+/g, ' ').trim();
+  const s = collapseWhitespace(raw);
   const range = toolName === 'Read' ? readRange(a) : undefined;
   if (!range) return truncateToolDetail(s);
   const suffix = ` · ${range}`;
@@ -243,7 +244,7 @@ function resultNotes(details: Record<string, unknown> | undefined): string[] | u
     .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
     .slice(0, 5)
     .map((n) => {
-      const s = n.replace(/\s+/g, ' ').trim();
+      const s = collapseWhitespace(n);
       return s.length > 200 ? `${s.slice(0, 199)}…` : s;
     });
   return notes.length > 0 ? notes : undefined;
@@ -335,7 +336,7 @@ export function toolOutputView(toolName: string, args: unknown, result: unknown,
 export function toolCommand(args: unknown): string | undefined {
   const raw = (args && typeof args === 'object') ? (args as { command?: unknown }).command : undefined;
   if (typeof raw !== 'string' || !raw.trim()) return undefined;
-  const s = raw.replace(/\s+/g, ' ').trim();
+  const s = collapseWhitespace(raw);
   return s.length > 400 ? `${s.slice(0, 399)}…` : s;
 }
 

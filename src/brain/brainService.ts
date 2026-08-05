@@ -46,6 +46,7 @@ import type { BrainStreamSnapshot } from './session/liveEventReplay.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 import type { Model, Api } from '@earendil-works/pi-ai';
 import { CANONICAL_THINKING_LEVELS, canonicalThinkingLevel } from './modelCapabilities.js';
+import { collapseWhitespace } from '../shared/text.js';
 
 export type { BrainDeps } from './brainDeps.js';
 
@@ -658,7 +659,7 @@ export class BrainService {
 
   renameSession(userId: number, sessionId: string, title: string): { id: string; title: string } {
     const row = this.d.store.getSession(sessionId);
-    const clean = title.trim().replace(/\s+/g, ' ').slice(0, 120);
+    const clean = collapseWhitespace(title).slice(0, 120);
     if (!isOwnedUserSession(row, userId, sessionId)) throw new Error('unknown session');
     if (!clean) throw new Error('title cannot be empty');
     const changed = row.title !== clean;

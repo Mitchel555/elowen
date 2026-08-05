@@ -3,6 +3,7 @@ import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { currentToolPolicy, toolPermitted } from '../../plugins/policyContext.js';
 import { logger } from '../../shared/logger.js';
+import { collapseWhitespace, escapeRegExp } from '../../shared/text.js';
 
 const log = logger('tool-search');
 
@@ -117,11 +118,6 @@ function nameParts(name: string): string[] {
 
 interface Candidate { name: string; description: string }
 
-/** Escape a model-supplied term so it can be embedded in a RegExp literal (an unescaped `c++` would throw). */
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 /** Pre-compile a word-boundary matcher (`\bterm\b`) per term, once per search. Word boundaries — not raw
  *  substring — for the DESCRIPTION channel: MCP descriptions are long prose, and a short query term as a
  *  substring produces false positives (`read`→"already"/"thread", `git`→"digit", `list`→"playlist") that,
@@ -214,7 +210,7 @@ export function formatDeferredToolsBlock(
   if (deferredTools.length === 0) return '';
   const shown = deferredTools.slice(0, MAX_AWARENESS_LINES);
   const lines = shown.map((t) => {
-    const desc = clampCodePoints((t.description ?? '').replace(/\s+/g, ' ').trim(), MAX_DESC_CHARS);
+    const desc = clampCodePoints(collapseWhitespace(t.description ?? ''), MAX_DESC_CHARS);
     return `- ${t.name}${desc ? `: ${desc}` : ''}`;
   });
   const overflow = deferredTools.length - shown.length;

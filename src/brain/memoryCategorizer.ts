@@ -3,6 +3,7 @@ import { ICON_ALLOWLIST, DEFAULT_ICON } from '../store/memoryCategoryStore.js';
 import type { MemoryStore } from '../store/memoryStore.js';
 import type { InferenceClient } from '../inference/types.js';
 import type { Logger } from '../shared/logger.js';
+import { containsWholeToken } from '../shared/text.js';
 
 /** Hard cap on how many memories one manual reclassify pass touches — bounds the relay round-trips a
  *  single owner-triggered pass can fan out. */
@@ -160,7 +161,7 @@ function coerceIcon(reply: string): string {
     if (icon.toLowerCase() === cleaned) return icon;
   }
   for (const icon of ICON_ALLOWLIST) {
-    if (new RegExp(`(?:^|\\W)${icon.toLowerCase()}(?:\\W|$)`).test(cleaned)) return icon;
+    if (containsWholeToken(cleaned, icon.toLowerCase())) return icon;
   }
   return DEFAULT_ICON;
 }
@@ -179,11 +180,6 @@ function buildClassifyPrompt(body: string, cats: MemoryCategoryRow[]): string {
     '',
     `Memory: ${body}`,
   ].join('\n');
-}
-
-/** Escape a string for safe interpolation into a RegExp source (category names are user-supplied). */
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** Coerce the model's reply to a KNOWN category id, or null. Strips a ```fence / surrounding quotes,
@@ -207,7 +203,7 @@ function coerceCategory(reply: string, cats: MemoryCategoryRow[]): number | null
   for (const c of cats) {
     const name = c.name.trim().toLowerCase();
     if (name === '') continue;
-    if (new RegExp(`(?:^|\\W)${escapeRegExp(name)}(?:\\W|$)`).test(cleaned)) return c.id;
+    if (containsWholeToken(cleaned, name)) return c.id;
   }
   return null;
 }

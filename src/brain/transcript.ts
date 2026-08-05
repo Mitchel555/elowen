@@ -2,6 +2,7 @@ import type { BrainCard, WorkflowUpdate } from './events.js';
 import { isEmptyCard } from './cards.js';
 import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import type { ToolOutputView } from './messageView.js';
+import { collapseWhitespace } from '../shared/text.js';
 
 /** The CLI/web projection of a live `workflow` snapshot — structurally the event payload itself (a
  *  workflow event carries the WHOLE DAG each time), so it aliases WorkflowUpdate to stay single-source
@@ -102,7 +103,7 @@ export function failureSignature(item: ToolItem): string | undefined {
   if (!output || output.kind !== 'result') return undefined;
   if (output.tone !== 'warning' && output.tone !== 'danger') return undefined;
   const firstLine = (output.text ?? '').split('\n').find((line) => line.trim()) ?? '';
-  const shape = firstLine.replace(/\S*\/\S+/g, '§').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const shape = collapseWhitespace(firstLine.replace(/\S*\/\S+/g, '§').replace(/\d+/g, '#')).slice(0, 160);
   return `${item.name}|${shape}`;
 }
 
