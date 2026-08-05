@@ -70,10 +70,12 @@ describe('MemoryService.retrieve', () => {
   });
 
   it('ranks by combined score — importance lifts a slightly-less-semantic hit above a bare one', async () => {
+    // The two candidates must differ on a DIFFERENT axis each, or their mutual cosine lands in the
+    // paraphrase range and packing drops the second before importance can reorder anything.
     const table = {
-      query: [1, 0, 0],
-      A: [1, 0, 0],                 // semantic 1.0, importance 1
-      B: [0.9, 0.4359, 0],          // semantic 0.9, importance 5
+      query: [1, 0, 0, 0],
+      A: [0.8, 0.6, 0, 0],          // semantic 0.80, importance 1
+      B: [0.75, 0, 0.6614, 0],      // semantic 0.75, importance 5 — mutual cosine with A is 0.60
     };
     const idA = addWithVec(store, 1, 'A', table, 1);
     const idB = addWithVec(store, 1, 'B', table, 5);
@@ -90,6 +92,35 @@ describe('MemoryService.retrieve', () => {
     expect(res.debug.scores[0]!.picked).toBe(true);
   });
 
+  // Packing used to drop a result only at cosine 0.97, which no two real memories ever reach, so two
+  // write-ups of one fact could take two of the six slots. The cut-off now sits at the measured
+  // duplicate range: 0.765 (the real duplicate pair) collapses, 0.659 (distinct facts) does not.
+  it('drops a paraphrase of an already-picked memory, but keeps a merely related one', async () => {
+    const table = {
+      query: [1, 0, 0],
+      original: [1, 0, 0],
+      paraphrase: [0.765, Math.sqrt(1 - 0.765 ** 2), 0],
+    };
+    const kept = addWithVec(store, 1, 'original', table, 5);
+    addWithVec(store, 1, 'paraphrase', table, 1);
+    const dropped = await makeService(store, table).retrieve(1, 'query');
+    expect(dropped.memories.map((m) => m.id)).toEqual([kept]);
+
+    const db2 = openDb(':memory:');
+    const store2 = new MemoryStore(db2);
+    categories = new MemoryCategoryStore(db2);
+    globalCategoryId = categories.create(1, { name: 'Global' }).id;
+    const related = {
+      query: [1, 0, 0],
+      first: [1, 0, 0],
+      second: [0.659, Math.sqrt(1 - 0.659 ** 2), 0],
+    };
+    addWithVec(store2, 1, 'first', related, 5);
+    addWithVec(store2, 1, 'second', related, 1);
+    const both = await makeService(store2, related).retrieve(1, 'query');
+    expect(both.memories).toHaveLength(2);
+  });
+
   it('dedupes near-identical vectors', async () => {
     const table = { query: [1, 0, 0], dup1: [1, 0, 0], dup2: [1, 0, 0] };
     addWithVec(store, 1, 'dup1', table, 5);
@@ -102,8 +133,14 @@ describe('MemoryService.retrieve', () => {
   });
 
   it('honors maxCount', async () => {
-    // All three above the relevance floor (cos ≥ 0.3) so maxCount — not the floor — does the capping.
-    const table = { query: [1, 0, 0], one: [1, 0, 0], two: [0.9, 0.436, 0], three: [0.8, 0.6, 0] };
+    // All three above the relevance floor (cos ≥ 0.3), and mutually distinct enough that packing keeps
+    // them, so maxCount — not the floor and not paraphrase-dropping — is what does the capping.
+    const table = {
+      query: [1, 0, 0, 0],
+      one: [1, 0, 0, 0],
+      two: [0.5, 0.866, 0, 0],
+      three: [0.5, 0, 0.866, 0],
+    };
     addWithVec(store, 1, 'one', table);
     addWithVec(store, 1, 'two', table);
     addWithVec(store, 1, 'three', table);
@@ -280,6 +317,33 @@ describe('MemoryService.findSimilar', () => {
     expect(hits).toHaveLength(1);
     expect(hits[0]!.memory.id).toBe(near);
     expect(hits[0]!.similarity).toBeGreaterThan(0.85);
+  });
+
+  // The threshold used to be 0.85, which is ABOVE the highest cosine any two memories in the real store
+  // reach (measured: 4005 pairs, p99 0.539, max 0.765) — so this never fired and every add became a new
+  // row. These two cases pin it to the measured geometry: 0.765 is the real duplicate pair (two write-ups
+  // of one incident), 0.719 is the closest NON-duplicate pair (two related but distinct supplier facts).
+  it('flags the real store\'s duplicate pair at 0.765', async () => {
+    const table = {
+      'the incident write-up': [1, 0, 0],
+      probe: [0.765, Math.sqrt(1 - 0.765 ** 2), 0],
+    };
+    const dup = addWithVec(store, 1, 'the incident write-up', table);
+    const svc = makeService(store, table);
+
+    const hits = await svc.findSimilar(1, 'probe');
+    expect(hits.map((h) => h.memory.id)).toEqual([dup]);
+  });
+
+  it('leaves the closest NON-duplicate pair at 0.719 alone', async () => {
+    const table = {
+      'a related but distinct fact': [1, 0, 0],
+      probe: [0.719, Math.sqrt(1 - 0.719 ** 2), 0],
+    };
+    addWithVec(store, 1, 'a related but distinct fact', table);
+    const svc = makeService(store, table);
+
+    expect(await svc.findSimilar(1, 'probe')).toEqual([]);
   });
 
   it('returns empty when embeddings are not configured', async () => {

@@ -29,8 +29,9 @@ const TABLE: Record<string, number[]> = {
   query: [1, 0, 0],
   near: [1, 0, 0],
   far: [0.4, 0.9165, 0],
-  // 0.70: above a 0.50 floor, below the 1.0 that rounding would turn that floor into.
-  mid: [0.7, 0.7141, 0],
+  // 0.60: above a 0.50 floor, below the 1.0 that rounding would turn that floor into — and far enough
+  // from `near` (which is the query itself) that packing does not read it as a paraphrase and drop it.
+  mid: [0.6, 0.8, 0],
 };
 
 let categories: MemoryCategoryStore;
@@ -103,10 +104,10 @@ describe('MemoryService — operator-tunable semantic floor', () => {
 
   // The conversion has to keep the FRACTION, not just the unit. Every other case here uses cosines
   // (0.40 and 1.0) that sit either side of both 0.50 and a rounded 1.0, so they cannot tell an exact
-  // divide from one that rounds the floor to a whole number — a 0.70 hit against a 0.50 floor can:
+  // divide from one that rounds the floor to a whole number — a 0.60 hit against a 0.50 floor can:
   // rounding turns that floor into 1.0 and swallows a memory the operator asked to keep.
   it('divides exactly, so a fractional floor keeps a hit that a rounded one would swallow', async () => {
-    addWithVec(store, 'mid'); // cosines the query at 0.70
+    addWithVec(store, 'mid'); // cosines the query at 0.60
     const res = await serviceWith(store, () => 500).retrieve(1, 'query');
     expect(res.memories.map((m) => m.body).sort()).toEqual(['mid', 'near']);
   });

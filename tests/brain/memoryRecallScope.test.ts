@@ -16,9 +16,12 @@ import type { Policy } from '../../src/plugins/policy.js';
 const POLICY: Policy = { allowedProjectIds: 'all', allowedPaths: () => [] };
 const CONFIG: EmbeddingConfig = { providerId: 'test', model: 'test' };
 
+/** Three dimensions, not two: on two axes any pair of memories that both score highly against the query
+ *  is necessarily similar to EACH OTHER too, so packing drops one as a paraphrase and a scope test ends
+ *  up measuring deduplication instead. A third axis lets each memory be on-topic independently. */
 class Embeddings {
-  async embed(): Promise<Float32Array> { return Float32Array.from([1, 0]); }
-  async embedBatch(texts: string[]): Promise<Float32Array[]> { return texts.map(() => Float32Array.from([1, 0])); }
+  async embed(): Promise<Float32Array> { return Float32Array.from([1, 0, 0]); }
+  async embedBatch(texts: string[]): Promise<Float32Array[]> { return texts.map(() => Float32Array.from([1, 0, 0])); }
 }
 
 function scoped<T>(scope: ReturnType<typeof memoryRecallScope>, operation: () => Promise<T>): Promise<T> {
@@ -62,10 +65,12 @@ describe('memory recall scope', () => {
       store.setCategory(1, memory.id, categoryId, 'test', '');
       store.setEmbedding(1, memory.id, { provider: 'test', model: 'test', dimensions: vector.length, vector, contentHash: hashBody(body) });
     };
-    add('global vector keyword', global.id, Float32Array.from([0.8, 0.6]));
-    add('current vector keyword', current.id, Float32Array.from([1, 0]));
-    add('other vector keyword', other.id, Float32Array.from([0.6, 0.8]));
-    add('uncategorized vector keyword', null, Float32Array.from([0.4, 0.9]));
+    // Each on-topic against the query ([1,0,0]) on its own axis, so the two in scope are 0.6 apart from
+    // one another — related enough to both be recalled, distinct enough not to read as paraphrases.
+    add('global vector keyword', global.id, Float32Array.from([0.6, 0.8, 0]));
+    add('current vector keyword', current.id, Float32Array.from([1, 0, 0]));
+    add('other vector keyword', other.id, Float32Array.from([0.6, 0, 0.8]));
+    add('uncategorized vector keyword', null, Float32Array.from([0.5, 0.6, 0.6245]));
 
     const vectorService = new MemoryService({
       store, embeddings: new Embeddings() as EmbeddingService, embeddingConfig: () => CONFIG,

@@ -9,17 +9,31 @@ import type { MemoryRetentionConfig } from './memoryVitality.js';
 import type { MemoryRecallScope } from './memoryRecallScope.js';
 
 /** Weight of each signal in the combined retrieval score. Semantic similarity dominates; importance
- *  and vitality break ties. Sums to 1.0. */
-const W_SEMANTIC = 0.65;
-const W_IMPORTANCE = 0.15;
-const W_VITALITY = 0.2;
+ *  and vitality break ties. Sums to 1.0.
+ *
+ *  Vitality is deliberately a SMALL share. It is driven by `use_count`, which recall itself increments
+ *  through markRecalled → markUsed, so any large weight here is a feedback loop: recalled memories become
+ *  more recallable regardless of the query. Measured on the live store before this was cut from 0.20 to
+ *  0.10 (90 active memories, 14 days): the top 5 memories took 31% of 272 recalls while 12 had never been
+ *  recalled once. Keep the query-independent share (importance + vitality) at or below 0.20 — above that
+ *  the ranking stops being about the question. */
+const W_SEMANTIC = 0.8;
+const W_IMPORTANCE = 0.1;
+const W_VITALITY = 0.1;
 
 /** Recency decay half-life (days): a memory this old contributes ~0.5 to recencyWeight. */
 const RECENCY_HALF_LIFE_DAYS = 30;
 
 /** Two retrieved results whose vectors cosine at or above this are treated as the same memory — the
- *  lower-ranked one is dropped so the set isn't padded with paraphrases of one fact. */
-const DEDUPE_COSINE = 0.97;
+ *  lower-ranked one is dropped so the set isn't padded with paraphrases of one fact.
+ *
+ *  CALIBRATED AGAINST THE REAL STORE, not guessed: over all 4005 pairs of the 90 embedded memories the
+ *  distribution is p50 0.216, p90 0.383, p99 0.539, max 0.765. The previous 0.97 sat above every pair
+ *  that exists, so this check never once fired. Everything at or above 0.65 is a same-category pair, and
+ *  the two clear duplicate pairs (two write-ups of one prompt-cache incident; two of one recall rule)
+ *  sit at 0.765 and 0.756. This is a per-embedding-model constant: after changing the embedding model,
+ *  re-measure the pair distribution before trusting it. */
+const DEDUPE_COSINE = 0.7;
 
 /** Defaults for retrieve(). ~6 memories capped at ~1500 chars keeps the injected context tight. */
 const DEFAULT_MAX_COUNT = 6;
@@ -37,8 +51,13 @@ const MIN_SEMANTIC = 0.3;
  *  rounded to a whole number on save — a cosine float would round to 0 and floor nothing. */
 const PER_MILLE = 1000;
 
-/** Defaults for findSimilar(): at 0.85 cosine two bodies are near-duplicates for the curator/tool. */
-const DEFAULT_SIMILAR_THRESHOLD = 0.85;
+/** Default for findSimilar(): the cosine at which two bodies count as near-duplicates for the curator
+ *  and the MemoryAdd tool. Set slightly ABOVE {@link DEDUPE_COSINE} because the consequences differ — a
+ *  false positive here makes the curator UPDATE one memory with another's content (data loss), whereas
+ *  in packing it only drops a result. Same measured distribution: 0.72 catches both genuine duplicate
+ *  pairs (0.765, 0.756) and stops short of the next pair down (0.719), which is two related but distinct
+ *  facts. Re-measure after an embedding-model change. */
+const DEFAULT_SIMILAR_THRESHOLD = 0.72;
 const DEFAULT_SIMILAR_LIMIT = 5;
 
 export interface RetrieveOpts {

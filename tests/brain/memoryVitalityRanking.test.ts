@@ -85,6 +85,34 @@ describe('MemoryService vitality ranking', () => {
     expect(result.memories.map((memory) => memory.id)).toEqual([freshId, staleId]);
   });
 
+  // Vitality feeds on use_count, which recall itself increments — so a heavy weight on it is a feedback
+  // loop where recalled memories keep winning regardless of the question. Measured on the live store
+  // while vitality carried 0.20: 5 of 90 memories took 31% of all recalls and 12 were never recalled.
+  // A clearly more relevant memory must beat a heavily-used off-topic one on the query alone.
+  it('does not let a heavily-used memory outrank a clearly more relevant one', async () => {
+    const db = openDb(':memory:');
+    const store = new MemoryStore(db);
+    const categories = new MemoryCategoryStore(db);
+    const categoryId = categories.create(1, { name: 'Global' }).id;
+    // The margin is deliberately narrow (0.75 vs 0.65). A wide semantic gap would pass under any
+    // weighting and prove nothing; at this gap the old 0.20 vitality weight was enough to put the
+    // heavily-used memory first, and the current 0.10 is not.
+    const vectors = {
+      query: [1, 0, 0],
+      onTopic: [0.75, 0.6614, 0],
+      popular: [0.65, 0, 0.7599],
+    };
+    const onTopicId = addEmbedded(store, categoryId, 'onTopic', vectors.onTopic);
+    const popularId = addEmbedded(store, categoryId, 'popular', vectors.popular);
+    db.prepare("UPDATE memories SET use_count = 109, last_used_at = datetime('now') WHERE id = ?").run(popularId);
+    db.prepare('UPDATE memories SET use_count = 0 WHERE id = ?').run(onTopicId);
+
+    const service = createService(store, categories, vectors);
+    const result = await service.retrieve(1, 'query', { maxCount: 2, markUsed: false });
+
+    expect(result.memories[0]!.id).toBe(onTopicId);
+  });
+
   it('keeps a memory below the semantic floor out of vector recall', async () => {
     const db = openDb(':memory:');
     const store = new MemoryStore(db);

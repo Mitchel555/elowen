@@ -5,11 +5,24 @@ import type { InferenceClient } from '../inference/types.js';
 import type { Logger } from '../shared/logger.js';
 
 /** Upper bound on how many memory mutations one turn's curation may apply. Keeps a single exchange from
- *  rewriting the whole store if the model over-produces. */
-const MAX_OPS_PER_TURN = 4;
+ *  rewriting the whole store if the model over-produces. Measured before this was cut from 4: the curator
+ *  wrote 480 memories in 14 days while the user manually deleted 690 — over-capture, not under-capture,
+ *  is the failure mode this store actually has. */
+const MAX_OPS_PER_TURN = 2;
 /** How much of each side of the exchange the extraction prompt sees — a durable fact never needs the
  *  full transcript, and this bounds the relay round-trip. */
 const MAX_TEXT_CHARS = 2000;
+
+/** A near-duplicate refresh REPLACES the matched memory's body. That is right when the new text restates
+ *  the same fact, and destructive when the match is merely closely related and the existing memory holds
+ *  detail the new one does not — the matched memory's content is simply gone, with no way to recover it
+ *  from the audit trail's body-less diff. Length is the one signal available before the write: a
+ *  replacement under half the length of what it overwrites is dropping content, so the curator adds a
+ *  separate memory instead and leaves the original intact. It can still shorten a memory deliberately by
+ *  addressing it with an explicit `update` op. */
+function overwritesRicherMemory(existing: string, replacement: string): boolean {
+  return replacement.trim().length * 2 < existing.trim().length;
+}
 
 /** One curator operation as returned by the cheap extraction model. `add` stores a new durable fact
  *  (deduped against near-identical existing memories → update instead); `update`/`delete` address an
@@ -100,10 +113,13 @@ export class MemoryCurator {
       case 'add': {
         const body = (op.body ?? '').trim();
         if (body === '') return;
-        // Prefer updating a near-duplicate over piling on a paraphrase.
+        // Prefer updating a near-duplicate over piling on a paraphrase. This branch REPLACES the matched
+        // memory's body, so it is only safe while the match is genuinely the same fact — see
+        // `overwritesRicherMemory` for the one case where that assumption breaks.
         const near = await this.service.findSimilar(userId, body);
-        if (near.length > 0) {
-          this.store.update(userId, near[0]!.memory.id, { body, kind: op.kind, importance: op.importance },
+        const match = near[0];
+        if (match && !overwritesRicherMemory(match.memory.body, body)) {
+          this.store.update(userId, match.memory.id, { body, kind: op.kind, importance: op.importance },
             'agent', 'curator: refreshed near-duplicate', model);
           return;
         }
@@ -165,9 +181,11 @@ function buildPrompt(userText: string, assistantText: string, existing: { id: nu
     '- Decisions the user made or approved ("User decided to use pnpm for project X")',
     '- Personal/professional details the user shared (name, role, people, recurring commitments)',
     '- Plans, goals and intentions the user stated',
-    '- The user\'s project architecture and infrastructure AS THE USER HAS IT (exact paths, endpoints,',
-    '  ports, hostnames, commands — verbatim)',
-    '- Non-obvious gotchas discovered in the user\'s environment that will bite again',
+    '- Infrastructure and external systems the assistant CANNOT simply read: deployment topology, service',
+    '  ports and hostnames, third-party API behaviour and quirks, credentials location (never the secret',
+    '  itself) — keep paths, ports, versions and commands verbatim',
+    '- Non-obvious gotchas discovered in the user\'s environment that will bite again — but only where the',
+    '  code alone would not reveal them',
     '- Feedback on how the assistant should work — BOTH corrections ("no, not that", "don\'t do X",',
     '  "stop doing that") AND confirmations that a non-obvious approach worked ("yes, exactly",',
     '  "perfect, keep doing that", an unusual choice accepted without pushback). Confirmations are',
@@ -191,9 +209,19 @@ function buildPrompt(userText: string, assistantText: string, existing: { id: nu
     '  store the resulting durable fact or decision itself, or nothing',
     '- General world/technical knowledge that is not specific to this user',
     '- Anything that reads as a negative judgement of the user, or that is not relevant to their work',
+    '- ANYTHING THE ASSISTANT COULD LOOK UP INSTEAD: the structure, file paths, module layout, naming',
+    '  conventions or internals of a repository it can open; what a function or config key does; git',
+    '  history, commit hashes and who-changed-what. Reading the code is authoritative and never goes',
+    '  stale — a memory about it is a snapshot that quietly rots. This does NOT cover the external',
+    '  systems above: a supplier API\'s behaviour cannot be read from the repo, so it stays worth saving.',
+    '- The story of a debugging session or an incident: what broke, how it was traced, what fixed it. The',
+    '  fix lives in the code and the commit message. If the incident left a durable RULE, save that rule',
+    '  alone as "feedback" with its Why and How to apply — one sentence, not the narrative.',
     'These exclusions apply even when the user explicitly asks you to save something.',
     '',
     'EACH `body` MUST BE:',
+    '- ONE fact. Aim for under 400 characters; 800 is the hard ceiling. If it does not fit, it is not one',
+    '  fact — keep the part that will still be true next month and drop the rest.',
     '- Self-contained and understandable alone: name the subject ("User …", "Project <name> …"),',
     '  no bare pronouns',
     '- In the USER\'S OWN language (match the language of the exchange)',
@@ -220,6 +248,9 @@ function buildPrompt(userText: string, assistantText: string, existing: { id: nu
     '-> [{"action":"add","body":"Read the real callers before changing a shared type. Why: user explicitly validated this approach. How to apply: any change to a type used from more than one module.","kind":"feedback","importance":4}]   (a quiet confirmation is as durable as a correction)',
     '',
     'An empty array [] is the EXPECTED output for most exchanges. When in doubt, return [].',
+    'Judge yourself by this: a memory earns its place only if a future session would get the answer WRONG',
+    'without it. If most turns you work on produce one, you are writing far too much — a store full of',
+    'near-misses buries the few facts that matter and the user ends up deleting them by hand.',
     '',
     `Return ONLY a JSON array, at most ${MAX_OPS_PER_TURN} operations, with no other text. Format per operation:`,
     '{"action":"add","body":"<self-contained fact, in the user\'s language>","kind":"fact|preference|decision|feedback","importance":1-5}',
