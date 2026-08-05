@@ -7,6 +7,7 @@ import { isErroredContextOverflow, sessionUsageSnapshot, toBrainEvent } from '..
 import { extractText, lastAssistant } from '../messageView.js';
 import { abortSessionWork } from '../session/abortSessionWork.js';
 import { LiveEventReplay } from '../session/liveEventReplay.js';
+import { markImagesRejected } from '../session/imageRejection.js';
 import type { LiveBrain, QueuedMsg } from '../session/liveBrain.js';
 import {
   clearDeliveredUserEchoes,
@@ -17,6 +18,16 @@ import {
 } from '../session/queueMirror.js';
 import type { ToolIconResolver } from '../toolIcons.js';
 
+/** A PERMANENT provider rejection of an attached image (Anthropic answers `400 invalid_request_error`
+ * with "Could not process image" for an undecodable one, and similarly for an oversized one). Anchored on
+ * both halves on purpose: `invalid_request_error` keeps transient failures out, and the word `image`
+ * keeps every other permanent rejection out. A false positive costs only the images in one conversation's
+ * egress context — recoverable, and they can be re-read with a tool — while a false negative leaves that
+ * conversation failing every turn forever, so the balance deliberately favours acting. */
+function isImageRejection(message: string): boolean {
+  return /invalid_request_error/.test(message) && /\bimage\b/i.test(message);
+}
+
 /** PI already classifies and retries transient provider failures. Reuse that same classifier after its
  * retry budget is exhausted so the final transcript never leaks a provider-specific transport or stream
  * error that PI itself treated as temporary.
@@ -24,9 +35,19 @@ import type { ToolIconResolver } from '../toolIcons.js';
  * The raw message is logged BEFORE the classifier, unconditionally: a retryable one is about to be masked
  * out of the transcript, so the log is the only place its cause survives. That cause is the point — an
  * aborted outbound request reaches nginx as a bare 499 with no reason attached, and the SDK's own
- * `Request timed out.` is what distinguishes a transport deadline from every other provider failure. */
+ * `Request timed out.` is what distinguishes a transport deadline from every other provider failure.
+ *
+ * A refused IMAGE is handled before that classifier because it is not just this turn's failure: the image
+ * sits in the live session's history and goes out again with every later request, so without the mark the
+ * conversation answers the same 400 forever. Marking it makes the egress stripper drop it on the next
+ * request, which is why the text tells the user to simply send again. */
 function publicProviderError(message: string, sessionId: string, provider: string, model: string): string {
   logger('brain-provider').warn(`provider error on ${provider}/${model} (${sessionId}): ${message}`);
+  if (isImageRejection(message)) {
+    markImagesRejected(sessionId);
+    logger('brain-provider').warn(`image refused by ${provider}/${model} (${sessionId}) — dropping this conversation's historical images from the next request`);
+    return 'The provider could not process an attached image. It has been dropped from this conversation\'s context — send your message again to continue.';
+  }
   if (!isRetryableAssistantError({ role: 'assistant', stopReason: 'error', errorMessage: message } as never)) return message;
   logger('brain-provider').warn(`provider retries exhausted for ${provider}/${model} (${sessionId})`);
   return 'Provider request failed after automatic retries. Please retry the turn.';

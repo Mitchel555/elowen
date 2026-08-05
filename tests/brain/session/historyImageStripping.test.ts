@@ -161,6 +161,41 @@ describe('installHistoryImageStripping', () => {
     expect(second[3]).toBe(cold[3]);
   });
 
+  // A provider that refuses an image poisons the conversation: the image sits in the live history and
+  // goes out with EVERY later request, so the turn fails forever. Waiting for the cold-cache gate means
+  // waiting 61 minutes on the daemon's default long retention — an actively used conversation never gets
+  // there. The rejection mark opens the gate on a warm turn instead, at the cost of one cache break.
+  it('strips a refused image on a WARM turn once the provider has rejected one', async () => {
+    const session: { agent: { transformContext?: (m: PiAgentMessage[]) => Promise<PiAgentMessage[]> } } = { agent: {} };
+    installHistoryImageStripping(session, { idleMs: 60_000, now: () => 5_000, rejected: () => true });
+    // Identical warm history to the test above (gap 1_000 ms ≪ idleMs), which is left untouched there.
+    const input: PiAgentMessage[] = [
+      user('look', 1_000),
+      toolResult('Read', [image], 2_000),
+      user('next', 3_000),
+    ];
+
+    const result = session.agent.transformContext ? await session.agent.transformContext(input) : [];
+    expect(result[1]).toEqual({ ...input[1], content: [placeholder] });
+  });
+
+  // The mark must not make the conversation permanently image-blind: a NEW image attached after the
+  // failure belongs to the current run and still has to reach the model.
+  it('still delivers the current turn\'s fresh image after a rejection', async () => {
+    const session: { agent: { transformContext?: (m: PiAgentMessage[]) => Promise<PiAgentMessage[]> } } = { agent: {} };
+    installHistoryImageStripping(session, { idleMs: 60_000, now: () => 5_000, rejected: () => true });
+    const fresh = { type: 'image', data: 'CCCC', mimeType: 'image/png' } as const;
+    const input: PiAgentMessage[] = [
+      user('look', 1_000),
+      toolResult('Read', [image], 2_000),
+      { role: 'user', content: [{ type: 'text', text: 'here is a good one' }, fresh], timestamp: 3_000 },
+    ];
+
+    const result = session.agent.transformContext ? await session.agent.transformContext(input) : [];
+    expect(result[1]).toEqual({ ...input[1], content: [placeholder] }); // the poisoned one is gone
+    expect(result[2]).toBe(input[2]);                                   // the fresh one still ships
+  });
+
   it('composes with a pre-existing transformContext: previous hook runs first, then stripping', async () => {
     const calls: string[] = [];
     const injected = user('injected-by-previous-hook', 100);

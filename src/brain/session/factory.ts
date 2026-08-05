@@ -13,6 +13,7 @@ import {
   type PendingCompactionMessage,
 } from './turnBoundaryCompaction.js';
 import { installHistoryImageStripping } from './historyImageStripping.js';
+import { imagesRejected } from './imageRejection.js';
 import { installToolResultClearing } from './toolResultClearing.js';
 import { createCachePayloadMonitor, installCacheWatch, type CachePayloadMonitor } from './cacheWatch.js';
 import { seedActivatedFromHistory, type ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
@@ -367,8 +368,10 @@ export class BrainSessionFactory {
     }
     // Egress-only: once the prompt cache is definitely cold, historical image blocks become latched text
     // placeholders for ANY source — Read images, MCP screenshots, future plugins. Warm history and the
-    // current run's fresh images stay intact; persisted history is untouched.
-    installHistoryImageStripping(session);
+    // current run's fresh images stay intact; persisted history is untouched. An image the provider has
+    // already REFUSED opens that gate immediately (imageRejection.ts): it fails every later request until
+    // it is gone, so leaving it in until the cache goes cold would brick the conversation for an hour.
+    installHistoryImageStripping(session, { rejected: () => imagesRejected(spec.sessionId) });
     // Same egress seam: large tool results that have scrolled two user turns back are swapped for a
     // placeholder + spill-file path, but only once the prompt cache has provably expired (idle gate) —
     // history is never rewritten while a request could still cache-hit, and the per-session latch keeps

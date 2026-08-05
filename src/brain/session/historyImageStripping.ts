@@ -75,13 +75,19 @@ export interface HistoryImageStrippingOptions {
   idleMs?: number;
   /** Clock injection for tests. */
   now?: () => number;
+  /** Has the provider already REFUSED an image in this conversation? Such an image is re-sent with every
+   *  later request and fails the turn every time, so it must be stripped whether or not the cache is
+   *  cold — waiting for the idle gate would leave the conversation permanently broken. See
+   *  imageRejection.ts. */
+  rejected?: () => boolean;
 }
 
 /** Compose the stripper onto the session's `transformContext` — the hook PI runs before every provider
  * request, applied to a local copy only (persisted history is untouched). Historical images may first be
- * stripped only on a definitely-cold turn. Each replacement is then latched to its original message hash:
- * old placeholders remain byte-stable, while images first seen after that cold turn stay intact until a
- * later cold turn makes them eligible. */
+ * stripped on a definitely-cold turn, or as soon as the provider has refused an image in this
+ * conversation (that one poisons every later request, so its cost outweighs the cache break). Each
+ * replacement is then latched to its original message hash: old placeholders remain byte-stable, while
+ * images first seen after that point stay intact until a later cold turn makes them eligible. */
 export function installHistoryImageStripping(
   session: { agent?: { transformContext?: AgentTransformContext } },
   options: HistoryImageStrippingOptions = {},
@@ -92,11 +98,12 @@ export function installHistoryImageStripping(
   if (!agent) return;
   const idleMs = options.idleMs ?? idleThresholdMs(process.env);
   const now = options.now ?? Date.now;
+  const rejected = options.rejected ?? ((): boolean => false);
   const latched = new Map<number, LatchedImageMessage>();
   const previous = agent.transformContext;
   agent.transformContext = async (messages, signal) => {
     const base = previous ? await previous(messages, signal) : messages;
-    if (cacheColdAtTurnStart(base, idleMs, now())) {
+    if (rejected() || cacheColdAtTurnStart(base, idleMs, now())) {
       const stripped = stripHistoricalImages(base);
       for (let index = 0; index < base.length; index += 1) {
         const original = base[index];

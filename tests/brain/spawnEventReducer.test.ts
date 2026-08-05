@@ -5,6 +5,7 @@ import { openDb } from '../../src/store/db.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { inMemoryModelRuntime } from '../../src/brain/providers.js';
 import type { BrainEvent } from '../../src/brain/events.js';
+import { imagesRejected, resetImageRejections } from '../../src/brain/session/imageRejection.js';
 
 /** Characterization safety net for the spawner's `session.subscribe` reducer (spawner.ts): the stateful
  *  event projector that folds raw PI `AgentSessionEvent`s into published BrainEvents and store writes.
@@ -197,5 +198,51 @@ describe('spawn event reducer (characterization)', () => {
     expect(events.map((e) => e.type)).toEqual(['step', 'error', 'idle']);
     expect(events[1]).toEqual({ type: 'error', message: 'the model produced malformed output' });
     expect((events[2] as Extract<BrainEvent, { type: 'idle' }>).model).toBe('m');
+  });
+
+  // A refused image is not just this turn's failure: it stays in the live history and goes out with every
+  // later request, so the conversation answers the same 400 forever unless the egress stripper is told to
+  // drop it. Marking the conversation is what makes the NEXT turn work.
+  it('marks the conversation when the provider refuses an image, and says so in plain words', async () => {
+    resetImageRejections();
+    const { d, events } = await startWithRecorder();
+
+    d.emit({ type: 'agent_start' });
+    d.emit({ type: 'turn_start' });
+    d.emit({
+      type: 'agent_end', willRetry: false,
+      messages: [{
+        role: 'assistant', stopReason: 'error', content: [], usage: {},
+        errorMessage: '400 {"type":"error","error":{"type":"invalid_request_error","message":"Could not process image"},"request_id":"req_x"}',
+      }],
+    });
+    d.emit({ type: 'agent_settled' });
+
+    expect(imagesRejected('brain-1')).toBe(true);
+    // The raw provider JSON never reaches the transcript — the user is told what to do instead.
+    expect(events[1]).toEqual({
+      type: 'error',
+      message: 'The provider could not process an attached image. It has been dropped from this conversation\'s context — send your message again to continue.',
+    });
+  });
+
+  it('leaves an unrelated invalid_request_error alone (no image, no mark)', async () => {
+    resetImageRejections();
+    const { d, events } = await startWithRecorder();
+
+    d.emit({ type: 'agent_start' });
+    d.emit({ type: 'turn_start' });
+    d.emit({
+      type: 'agent_end', willRetry: false,
+      messages: [{
+        role: 'assistant', stopReason: 'error', content: [], usage: {},
+        errorMessage: '400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens is too large"}}',
+      }],
+    });
+    d.emit({ type: 'agent_settled' });
+
+    expect(imagesRejected('brain-1')).toBe(false);
+    expect(events[1]).toMatchObject({ type: 'error' });
+    expect((events[1] as Extract<BrainEvent, { type: 'error' }>).message).toContain('max_tokens is too large');
   });
 });
