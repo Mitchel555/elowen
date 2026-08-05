@@ -82,11 +82,34 @@ const MAX_TEXT_BYTES = 256 * 1024;
  *  other "image/*" types (heic, bmp, avif, svg…) that pass this prefix but that the provider cannot
  *  decode — forwarding one gets an opaque "Could not process image" 400 instead of a clear local error. */
 const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+/** The same four types keyed by extension. A browser does NOT always report a type: a file dragged from
+ *  certain apps, or one the OS has no association for, arrives with `type: ''`. Without this it fell
+ *  through to the text branch, was read as text, hit a NUL byte and was rejected as "binary" — a perfectly
+ *  ordinary PNG refused with a message about the wrong thing entirely. */
+const IMAGE_TYPE_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+};
 
-async function readAttachment(file: File): Promise<Attachment | null | 'unsupported'> {
-  if (file.type.startsWith('image/')) {
-    if (!SUPPORTED_IMAGE_TYPES.has(file.type)) return 'unsupported';
-    if (file.size > MAX_IMAGE_BYTES) return null;
+/** Why an attachment was refused. Distinct values because the two need different messages: one is fixed
+ *  by sending a smaller file, the other by converting it — and a single message for both told the user
+ *  neither. */
+type AttachRefusal = 'too-large' | 'unsupported';
+
+/** The image type to send this file as, or null when it is not an image we can forward. */
+function imageTypeOf(file: File): string | null {
+  if (file.type.startsWith('image/')) return SUPPORTED_IMAGE_TYPES.has(file.type) ? file.type : null;
+  if (file.type) return null; // a declared non-image type — text branch
+  const ext = file.name.slice(file.name.lastIndexOf('.') + 1).toLowerCase();
+  return IMAGE_TYPE_BY_EXTENSION[ext] ?? null;
+}
+
+async function readAttachment(file: File): Promise<Attachment | AttachRefusal> {
+  const imageType = imageTypeOf(file);
+  // Anything the browser calls an image is judged as one even when we cannot forward it, so an unusable
+  // type (heic, avif, svg…) is named as such instead of being read as text and reported as binary.
+  if (imageType || file.type.startsWith('image/')) {
+    if (!imageType) return 'unsupported';
+    if (file.size > MAX_IMAGE_BYTES) return 'too-large';
     const dataUrl = await new Promise<string>((res, rej) => {
       const r = new FileReader();
       r.onload = () => res(String(r.result));
@@ -94,11 +117,11 @@ async function readAttachment(file: File): Promise<Attachment | null | 'unsuppor
       r.readAsDataURL(file);
     });
     const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    return { name: file.name || 'obrazek.png', kind: 'image', mimeType: file.type, data: base64, preview: dataUrl };
+    return { name: file.name || 'obrazek.png', kind: 'image', mimeType: imageType, data: base64, preview: dataUrl };
   }
-  if (file.size > MAX_TEXT_BYTES) return null;
+  if (file.size > MAX_TEXT_BYTES) return 'too-large';
   const text = await file.text();
-  if (text.includes('\u0000')) return null; // binary — not inlinable
+  if (text.includes('\u0000')) return 'unsupported'; // binary — not inlinable
   return { name: file.name, kind: 'text', mimeType: file.type || 'text/plain', data: text };
 }
 
@@ -854,9 +877,9 @@ function useBrainChatController(): BrainChatValue {
 
   const addFiles = async (files: Iterable<File>): Promise<void> => {
     for (const f of files) {
-      const a = await readAttachment(f).catch(() => null);
+      const a = await readAttachment(f).catch((): AttachRefusal => 'unsupported');
       if (a === 'unsupported') { toast(t.brainChat.attachUnsupportedType, 'error'); continue; }
-      if (!a) { toast(t.brainChat.attachTooBig, 'error'); continue; }
+      if (a === 'too-large') { toast(t.brainChat.attachTooBig, 'error'); continue; }
       setAttachments((cur) => {
         if (a.kind === 'image' && cur.filter((x) => x.kind === 'image').length >= MAX_IMAGES) return cur;
         return [...cur, a];
