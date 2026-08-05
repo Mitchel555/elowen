@@ -100,6 +100,19 @@ describe('proxy helpers', () => {
     expect(tokenFromCookie(new Request('https://web.example/api/x', { headers: { cookie: 'other=1' } }))).toBeNull();
   });
 
+  // A cookie whose name merely ENDS with ours must not win the match. Anyone able to set a cookie on the
+  // domain — a sibling subdomain, say — could otherwise substitute the session the app then acts as.
+  it('tokenFromCookie ignores a cookie whose name only ends with the session name', () => {
+    const shadowed = new Request('https://web.example/api/x', {
+      headers: { cookie: `x${COOKIE_NAME}=ATTACKER; ${COOKIE_NAME}=REAL` },
+    });
+    expect(tokenFromCookie(shadowed)).toBe('REAL');
+
+    // Present ONLY under a suffixed name → no session at all, rather than the attacker's value.
+    const onlyShadow = new Request('https://web.example/api/x', { headers: { cookie: `x${COOKIE_NAME}=ATTACKER` } });
+    expect(tokenFromCookie(onlyShadow)).toBeNull();
+  });
+
   it('jsonError returns a JSON { error } body with the given status', async () => {
     const res = jsonError('forbidden', 403);
     expect(res.status).toBe(403);

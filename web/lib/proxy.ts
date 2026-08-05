@@ -71,10 +71,12 @@ export function isSameOrigin(req: Request): boolean {
 }
 
 /** Read the session token from the httpOnly cookie header, or null when absent. The single place
- *  the cookie is parsed, so every route handler reads it the same way. */
+ *  the cookie is parsed, so every route handler reads it the same way — through `readCookie`, whose
+ *  pattern is ANCHORED. Matching unanchored made a cookie whose name merely ENDS with this one
+ *  (`xelowen_session`) win the match, so anyone able to set a cookie on the domain — a sibling
+ *  subdomain, say — could substitute the session the app then acts as. */
 export function tokenFromCookie(req: Request): string | null {
-  const m = (req.headers.get('cookie') ?? '').match(new RegExp(`${COOKIE_NAME}=([^;]+)`));
-  return m ? m[1] : null;
+  return readCookie(req, COOKIE_NAME);
 }
 
 /** A JSON `{ error }` Response with the given status. The uniform error shape every BFF route
