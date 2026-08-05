@@ -19,7 +19,9 @@ type Parsed =
 
 /** Parse ONE cron field into the set of values it matches — mirror of `parseCronField` in
  *  plugins/cronjob/index.mjs (kept in lockstep; a conformance test asserts they accept/reject the same
- *  corpus). Null on anything malformed so the caller rejects the whole expression. */
+ *  corpus). Null on anything malformed so the caller rejects the whole expression. The web's second
+ *  hand-synced grammar copy (`web/lib/cronSchedule.ts`) was merged into this file: its `isValidSchedule`
+ *  is now the validity view exported below. */
 function parseCronField(spec: string, min: number, max: number, names?: string[], wrapValue?: number): Set<number> | null {
   const text = String(spec ?? '').trim().toLowerCase();
   if (!text) return null;
@@ -152,8 +154,10 @@ export function nextCronRun(job: CronJob, now: number): number | null {
   return at.getTime();
 }
 
-/** Whether `spec` is a valid schedule the dashboard can compute a next-run for. Exposed for the
- *  cross-tree cron conformance test (the parser must accept/reject the same corpus as the daemon). */
-export function isParseableSchedule(spec: string): boolean {
+/** Whether `spec` is a valid schedule the scheduler will run — the validation-only view of
+ *  `parseSchedule`, under the same name the daemon's API validator `src/shared/cronSchedule.ts` exports
+ *  (that file remains a separate mirror of the same grammar, as does the plugin's `parseSchedule`). */
+export function isValidSchedule(spec: string): boolean {
   return parseSchedule(spec) !== null;
 }
+

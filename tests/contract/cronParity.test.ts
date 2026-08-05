@@ -3,7 +3,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isValidSchedule as sharedValid } from '../../src/shared/cronSchedule.js';
 import { isValidSchedule as webValid } from '../../web/lib/cronSchedule';
-import { isParseableSchedule as webRunValid, nextCronRun } from '../../web/lib/cron';
+import { isValidSchedule as webRunValid, nextCronRun } from '../../web/lib/cron';
 import type { CronJob } from '../../web/lib/types';
 
 // The cron/schedule grammar is hand-mirrored in FOUR places because neither the untyped `.mjs` plugin
