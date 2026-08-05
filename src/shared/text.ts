@@ -23,3 +23,10 @@ export function containsWholeToken(haystack: string, needle: string): boolean {
   const boundary = '[^\\p{L}\\p{N}_]';
   return new RegExp(`(?:^|${boundary})${escapeRegExp(needle)}(?:${boundary}|$)`, 'u').test(haystack);
 }
+
+/** Remove a literal `prefix` from the start of `value`, if present; otherwise return `value` unchanged.
+ *  The anchored `^` + escapeRegExp spelling keeps the prefix literal — e.g. session ids `elowen-…` —
+ *  and a prefix appearing mid-string is deliberately left alone. */
+export function stripPrefix(value: string, prefix: string): string {
+  return value.replace(new RegExp(`^${escapeRegExp(prefix)}`), '');
+}

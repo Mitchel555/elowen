@@ -2,6 +2,7 @@ import type { Db } from './db.js';
 import type { Task, CreateTaskInput, TaskStatus } from './types.js';
 import type { CommitFileChange } from '../integrations/projectFiles.js';
 import { deleteTasksAndDeps } from './cascade.js';
+import { isGitSha } from '../shared/gitSha.js';
 
 type Row = Omit<Task, 'labels' | 'changed_files'> & { labels: string; changed_files: string | null };
 
@@ -303,7 +304,7 @@ export class TaskStore {
    *  per spawn; re-stamping (a relaunch) refreshes the baseline to the current HEAD. */
   markBase(id: string, sha: string): void {
     const t = this.get(id);
-    if (!t || !/^[0-9a-f]{4,40}$/i.test(sha)) return;
+    if (!t || !isGitSha(sha)) return;
     const labels = t.labels.filter((l) => !l.startsWith('base:'));
     labels.push(`base:${sha}`);
     this.db.prepare('UPDATE tasks SET labels = ? WHERE id = ?').run(labels.join(','), id);

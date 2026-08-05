@@ -40,6 +40,7 @@ import { UserStore } from '../store/userStore.js';
 import { EventStore } from '../store/eventStore.js';
 import { NoteStore } from '../store/noteStore.js';
 import { KeyedMutex } from '../shared/keyedMutex.js';
+import { stripPrefix } from '../shared/text.js';
 import { ProjectStore } from '../store/projectStore.js';
 import { UserProjectStore } from '../store/userProjectStore.js';
 import { PushSubscriptionStore } from '../store/pushSubscriptionStore.js';
@@ -403,7 +404,7 @@ function runLivenessSweep(d: LivenessDeps): void {
     tmux: d.tmux, queue: d.decisionQueue, tracker: d.paneTracker, now: d.clock.now(),
     deadSince: d.decisionDeadSince, inflightChecks: d.inflightChecks, lastProgressAt: d.progressLastAt,
     sessionTaskId: (s) => d.taskForSession(s)?.id ?? null,
-    programFor: (s) => d.agents.programFor(s.replace(/^elowen-/, '')),
+    programFor: (s) => d.agents.programFor(stripPrefix(s, 'elowen-')),
     hasPrompt: (content, program) => detectAgentPrompt(content, program) !== null,
     checkWorker: (session, taskId, snapshot, idleMin, reason) => checkWorker(session, taskId, snapshot, idleMin, reason, d),
     workerIdleMs: WORKER_IDLE_MS, overseerIdleMs: OVERSEER_IDLE_MS, graceMs: DECISION_GRACE_MS, hardMs: DECISION_HARD_MS,
@@ -580,7 +581,7 @@ export async function buildApp(opts: BuildOpts) {
   // so pick the MOST RECENT match (list is created_at ASC) — never an old same-named task,
   // which would make the janitor reap a live agent or skip a real zombie.
   const taskForSession = (session: string) => {
-    const name = session.replace(/^elowen-/, '');
+    const name = stripPrefix(session, 'elowen-');
     const matches = tasks.list().filter((t) => t.labels.includes(`agent:${name}`));
     return matches[matches.length - 1] ?? null;
   };

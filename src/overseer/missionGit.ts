@@ -43,19 +43,24 @@ export type IngestResult =
 export class MissionGit {
   constructor(private d: MissionGitDeps) {}
 
+  /** The epic id behind a mission id (`m-<epicId>`), stripped of its prefix. */
+  private missionEpicId(missionId: string): string {
+    return missionId.replace(/^m-/, '');
+  }
+
   /** Whether the PR-native workflow is on for this mission. Resolution order, most specific first: the
    *  epic's own `pr:on`/`pr:off` label (the per-task choice from the task form), then the project's
    *  `pr_enabled` override, then the global autopilot default. Lets one task opt in/out independently.
    *  Shares the resolution algorithm with planning time via resolvePrEnabled (single source of truth). */
   private prEnabled(missionId: string): boolean {
-    const epic = this.d.tasks.get(missionId.replace(/^m-/, ''));
+    const epic = this.d.tasks.get(this.missionEpicId(missionId));
     const override = epic?.labels.includes('pr:on') ? true : epic?.labels.includes('pr:off') ? false : null;
     return resolvePrEnabled(override, this.projectFor(missionId)?.pr_enabled ?? null, this.d.config.get().autopilot.prEnabled);
   }
 
   /** The project a mission belongs to, resolved via its epic (mission id is `m-<epicId>`). */
   private projectFor(missionId: string): { id: number; slug: string; path: string; pr_enabled?: boolean | null } | null {
-    const epicId = missionId.replace(/^m-/, '');
+    const epicId = this.missionEpicId(missionId);
     const epic = this.d.tasks.get(epicId);
     return epic ? this.d.projects.get(epic.project_id) : null;
   }
@@ -197,7 +202,7 @@ export class MissionGit {
     catch (e) { log.error(`PR mode: push failed for ${branch}`, e); return { state: 'no-remote' }; }
     if (!pushed) return { state: 'no-remote' };
     const base = await detectBaseBranch(repoPath, configuredBase);
-    const epic = this.d.tasks.get(missionId.replace(/^m-/, ''));
+    const epic = this.d.tasks.get(this.missionEpicId(missionId));
     const title = epic?.title ?? branch;
     const body = epic?.result_summary?.trim() || 'Opened by Elowen autopilot.';
     const pr = await createPR({ dir: worktree, base, head: branch, title, body, token });
@@ -257,7 +262,7 @@ export class MissionGit {
       ...freshLines.map((c) => `- ${c.author || 'reviewer'} @ ${c.path}:${c.line ?? '?'}: ${c.body.trim()}`),
       ...freshComments.map((c) => `- ${c.author || 'reviewer'}: ${c.body.trim()}`),
     ].join('\n');
-    const exec = this.missionExec(project.id, missionId.replace(/^m-/, ''));
+    const exec = this.missionExec(project.id, this.missionEpicId(missionId));
     this.d.prs.setLastReviewTs(missionId, new Date(newestMs).toISOString());
     this.d.prs.setLastFeedback(missionId, feedback); // surfaced in the UI so the fix round is explained
 

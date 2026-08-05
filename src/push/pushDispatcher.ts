@@ -6,6 +6,7 @@ import type { PushSender } from './pushSender.js';
 import { recipientsForMission } from './recipients.js';
 import { buildReview, buildNeedsInput, buildStalled, buildBlocked, buildDone, type PushPayload } from './messages.js';
 import { logger } from '../shared/logger.js';
+import { stripPrefix } from '../shared/text.js';
 
 const log = logger('push-dispatch');
 
@@ -83,7 +84,7 @@ export class PushDispatcher {
 
   /** Resolve a tmux session (`elowen-<agent>`) to its task via the agent:<name> label (latest match). */
   private taskForSession(session: string) {
-    const name = session.replace(/^elowen-/, '');
+    const name = stripPrefix(session, 'elowen-');
     return this.d.tasks.list().filter((t) => t.labels.includes(`agent:${name}`)).at(-1) ?? null;
   }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { collapseWhitespace, escapeRegExp, containsWholeToken } from '../../src/shared/text.js';
+import { collapseWhitespace, escapeRegExp, containsWholeToken, stripPrefix } from '../../src/shared/text.js';
 
 describe('collapseWhitespace', () => {
   it('folds every run of whitespace into single spaces and trims', () => {
@@ -52,5 +52,25 @@ describe('containsWholeToken', () => {
   it('takes the needle literally', () => {
     expect(containsWholeToken('a+b je tady', 'a+b')).toBe(true);
     expect(containsWholeToken('aab', 'a+')).toBe(false);
+  });
+});
+
+describe('stripPrefix', () => {
+  it('removes a literal prefix at the start', () => {
+    expect(stripPrefix('elowen-alice', 'elowen-')).toBe('alice');
+  });
+
+  it('returns the value unchanged when the prefix is missing or empty', () => {
+    expect(stripPrefix('alice', 'elowen-')).toBe('alice');
+    expect(stripPrefix('', 'elowen-')).toBe('');
+  });
+
+  it('leaves a prefix appearing mid-string alone', () => {
+    expect(stripPrefix('xelowen-alice', 'elowen-')).toBe('xelowen-alice');
+  });
+
+  it('treats the prefix as literal text, never a regex', () => {
+    expect(stripPrefix('a+b-c', 'a+b-')).toBe('c');
+    expect(stripPrefix('a(b)c', 'a(b)')).toBe('c');
   });
 });

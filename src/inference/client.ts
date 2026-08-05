@@ -1,8 +1,9 @@
 import type { InferenceClient, RelayConfig } from './types.js';
 import { APP_IDENTITY_HEADERS } from './appIdentity.js';
+import { stripTrailingV1 } from '../shared/url.js';
 
 /** Normalize the configured base (with or without a trailing `/v1`) to the chat-completions URL. */
-const chatUrl = (base: string) => `${base.replace(/\/v1$/, '')}/v1/chat/completions`;
+const chatUrl = (base: string) => `${stripTrailingV1(base)}/v1/chat/completions`;
 /** Hard cap on a single relay round-trip. A hung relay must not stall a mission tick / deriver
  *  decision / plan job — there is no other timeout on this path. */
 const RELAY_TIMEOUT_MS = 60_000;

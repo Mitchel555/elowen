@@ -9,6 +9,7 @@ import { openKeybindsEditor } from './keybindsEditor.js';
 import { openStatuslineEditor } from './statuslineEditor.js';
 import { openStatsOverlay } from './statsOverlay.js';
 import { API_KEY_PROVIDERS } from '../setup/constants.js';
+import { trimTrailingSlash } from '../../shared/url.js';
 import { formatK } from '../ui/text.js';
 import { WORK_MODE_LABEL, type BrainProviderView } from './brainClient.js';
 import type { ChatState } from './chatState.js';
@@ -169,7 +170,7 @@ export function createPickers(
                   openTextInput({
                     tui, editor, title: 'Custom endpoint · base URL (…/v1)',
                     onSubmit: (url) => {
-                      const baseUrl = url.trim().replace(/\/$/, '');
+                      const baseUrl = trimTrailingSlash(url.trim());
                       if (!/^https?:\/\//.test(baseUrl)) { rt.notice = color.error('a base URL must start with http(s)://'); render(); return; }
                       addEntry(new URL(baseUrl).hostname, 'openai', baseUrl);
                     },

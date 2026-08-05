@@ -1,4 +1,5 @@
 import { APP_IDENTITY_HEADERS } from '../inference/appIdentity.js';
+import { trimTrailingSlash } from '../shared/url.js';
 import type { BrainProviderEntry, BrainRuntimeConfig } from './providers.js';
 import { buildBrainRegistry, inMemoryModelRuntime, registryProviderName, resolveBrainModel, OAUTH_BUILTIN, DEFAULT_CONTEXT_WINDOW } from './providers.js';
 import { inferredModelCapabilities, modelCapabilities } from './modelCapabilities.js';
@@ -44,7 +45,7 @@ function reportedContextWindow(m: Record<string, unknown>): number | undefined {
  *  provider-reported context window when present. Cached briefly so the account page doesn't hammer the
  *  upstream. Failures degrade to an empty list (→ the manually configured models). */
 async function fetchOpenAiModelEntries(p: BrainProviderEntry, fetchImpl: typeof fetch): Promise<FetchedModel[]> {
-  const base = (p.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
+  const base = trimTrailingSlash(p.baseUrl || 'https://api.openai.com/v1');
   // Key by endpoint AND credential — two providers sharing a baseUrl with different keys (or a key
   // change within the TTL) must not serve each other's cached catalog.
   const key = `${base}\u0000${p.apiKey ?? ''}`;

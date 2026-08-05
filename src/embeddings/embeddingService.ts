@@ -1,4 +1,5 @@
 import { APP_IDENTITY_HEADERS } from '../inference/appIdentity.js';
+import { stripTrailingV1, trimTrailingSlash } from '../shared/url.js';
 
 /** Resolves a configured brain provider to its credentials. Mirrors bootstrap.ts `resolveProvider`
  *  — injected via DI so this service never imports the config store directly. */
@@ -31,9 +32,10 @@ export function isEmbeddingConfigured(cfg: EmbeddingConfig | null | undefined): 
  *  (memory ingest / retrieval); there is no other timeout on this path. */
 const EMBEDDINGS_TIMEOUT_MS = 30_000;
 
-/** Normalize a configured base (with or without a trailing `/v1` or slash) to the embeddings URL.
- *  Mirrors src/brain/models.ts base handling + src/inference/client.ts chatUrl. */
-const embeddingsUrl = (base: string) => `${base.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/embeddings`;
+/** Normalize a configured base (with or without a trailing `/v1` or slash) to the embeddings URL —
+ *  composed from the shared url.ts primitives, the same ones client.ts chatUrl and models.ts use, so
+ *  the three endpoint URLs cannot drift. */
+const embeddingsUrl = (base: string) => `${stripTrailingV1(trimTrailingSlash(base))}/v1/embeddings`;
 
 interface EmbeddingsResponse {
   data?: { embedding?: unknown }[];

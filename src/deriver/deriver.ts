@@ -5,6 +5,7 @@ import type { Clock } from '../shared/clock.js';
 import { detectAgentPrompt } from './shellPatterns/index.js';
 import type { SignalSink, DerivedSignal } from './types.js';
 import { logger } from '../shared/logger.js';
+import { stripPrefix } from '../shared/text.js';
 import { textHash as hash } from '../shared/textHash.js';
 
 const log = logger('deriver');
@@ -59,7 +60,7 @@ export class Deriver {
   }
 
   private async tickSession(session: string): Promise<void> {
-    const program = this.d.agents.programFor(session.replace(/^elowen-/, ''));
+    const program = this.d.agents.programFor(stripPrefix(session, 'elowen-'));
     if (!program) return;
     const taskId = this.d.sessionTaskId(session); if (!taskId) return;
     const task = this.d.tasks.get(taskId); if (!task) return;

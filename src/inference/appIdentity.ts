@@ -1,3 +1,5 @@
+import { trimTrailingSlash } from '../shared/url.js';
+
 /** App-identity headers sent on every outbound provider request. OpenRouter (and compatible relays)
  *  surface these on their activity dashboards: `X-OpenRouter-Title`/`X-Title` names the app and
  *  `HTTP-Referer` links to it — so calls show up as "Elowen" instead of "unknown", and OpenRouter
@@ -13,7 +15,7 @@ const DEFAULT_APP_URL = 'https://elowen.run';
 const DEFAULT_APP_TITLE = 'Elowen';
 
 /** The configured public app URL (referer). Trailing slash trimmed so `${APP_URL}/favicon.ico` is clean. */
-export const APP_URL = ((process.env.ELOWEN_APP_URL)?.trim() || DEFAULT_APP_URL).replace(/\/$/, '');
+export const APP_URL = trimTrailingSlash((process.env.ELOWEN_APP_URL)?.trim() || DEFAULT_APP_URL);
 /** The configured app title shown on provider dashboards / ranking pages. */
 export const APP_TITLE = (process.env.ELOWEN_APP_TITLE)?.trim() || DEFAULT_APP_TITLE;
 

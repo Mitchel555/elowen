@@ -3,6 +3,7 @@ import { resolve, join, relative, sep, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { CommitFileChange, CommitLogEntry } from '../shared/wireContract.js';
+import { isGitSha } from '../shared/gitSha.js';
 
 // The commit-row shapes are the daemon↔web wire contract (git log / task change-list endpoints) —
 // defined once in src/shared and re-exported here, so the two can never drift.
@@ -245,7 +246,7 @@ export async function projectReviewDiff(root: string): Promise<{ changedFiles: s
 /** Full diff of a single commit (`git show <hash>`). The hash is validated to be a plain
  *  hex object id so it can never be a git flag/option. Empty string on any error. */
 export async function projectCommitDiff(root: string, hash: string): Promise<string> {
-  if (!/^[0-9a-f]{4,40}$/i.test(hash)) return '';
+  if (!isGitSha(hash)) return '';
   try {
     const { stdout } = await run('git', ['-C', realpathSync(resolve(root)), 'show', '--stat', '--patch', hash], { maxBuffer: 8 * 1024 * 1024 });
     return stdout;
@@ -272,7 +273,7 @@ export async function projectFileAtHead(root: string, rel: string): Promise<stri
  *  highlight them in the tree when browsing that commit. The hash is validated to be a plain hex
  *  object id so it can never be a git flag. Empty list on any error / merge commit. */
 export async function projectCommitFiles(root: string, hash: string): Promise<string[]> {
-  if (!/^[0-9a-f]{4,40}$/i.test(hash)) return [];
+  if (!isGitSha(hash)) return [];
   try {
     const { stdout } = await run('git', ['-C', realpathSync(resolve(root)), 'show', '--name-only', '--pretty=format:', hash], { maxBuffer: 4 * 1024 * 1024 });
     return stdout.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -333,7 +334,7 @@ export async function projectCommitLog(root: string, limit: number): Promise<Com
  *  history behind a task's frozen change list. `base`/`head` are the SHAs stamped at spawn/snapshot.
  *  Newest first; empty list on a bad range, a non-repo, or any git error. */
 export async function projectRangeLog(root: string, base: string, head: string): Promise<CommitLogEntry[]> {
-  if (!/^[0-9a-f]{4,40}$/i.test(base) || !/^[0-9a-f]{4,40}$/i.test(head)) return [];
+  if (!isGitSha(base) || !isGitSha(head)) return [];
   try {
     const { stdout } = await run(
       'git',
@@ -350,7 +351,7 @@ export async function projectRangeLog(root: string, base: string, head: string):
  *  validated as a hex object id; the path is validated to stay inside the project and handed to git
  *  as a clean repo-relative pathspec after `--`. Empty string on any error. */
 export async function projectCommitFileDiff(root: string, hash: string, rel: string): Promise<string> {
-  if (!/^[0-9a-f]{4,40}$/i.test(hash)) return '';
+  if (!isGitSha(hash)) return '';
   const r = realpathSync(resolve(root));
   const cleanRel = relative(r, safe(root, rel));
   try {
@@ -391,7 +392,7 @@ export async function projectHead(root: string): Promise<string> {
  *  git flag. Newly-committed files appear in the range (no `--no-index` needed). Empty list outside a
  *  repo, on any error, or when the range is empty (base === head). */
 export async function projectRangeDiff(root: string, base: string, head: string): Promise<CommitFileChange[]> {
-  if (!/^[0-9a-f]{4,40}$/i.test(base) || !/^[0-9a-f]{4,40}$/i.test(head)) return [];
+  if (!isGitSha(base) || !isGitSha(head)) return [];
   try {
     const { stdout } = await run('git', ['-C', realpathSync(resolve(root)), 'diff', '--numstat', base, head], { maxBuffer: 8 * 1024 * 1024 });
     const files: CommitFileChange[] = [];
@@ -410,7 +411,7 @@ export async function projectRangeDiff(root: string, base: string, head: string)
  *  validated to stay inside the project and handed to git as a clean pathspec after `--`. Empty string
  *  on a non-hex ref or any error (e.g. a ref GC'd after a later squash) — the list still renders. */
 export async function projectRangeFileDiff(root: string, base: string, head: string, rel: string): Promise<string> {
-  if (!/^[0-9a-f]{4,40}$/i.test(base) || !/^[0-9a-f]{4,40}$/i.test(head)) return '';
+  if (!isGitSha(base) || !isGitSha(head)) return '';
   const r = realpathSync(resolve(root));
   const cleanRel = relative(r, safe(root, rel));
   try {

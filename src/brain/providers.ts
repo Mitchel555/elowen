@@ -2,6 +2,7 @@ import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { Model, Api } from '@earendil-works/pi-ai';
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { APP_IDENTITY_HEADERS } from '../inference/appIdentity.js';
+import { trimTrailingSlash } from '../shared/url.js';
 import { installOpenRouterMeter } from './openrouterMeter.js';
 import type { BrainProviderType, BrainProviderApi } from '../store/configStore.js';
 import { catalogModelCost, catalogModelVision, descriptorCapabilities } from './modelCapabilities.js';
@@ -134,7 +135,7 @@ function extendAnthropicCatalog(registry: ModelRegistry): void {
 /** pi-ai's openai-completions client appends `/chat/completions` to the model's baseUrl, so the base
  *  must already include the API version segment (e.g. `.../v1`). We only trim a trailing slash — we do
  *  NOT strip `/v1` (doing so 404s against proxies whose route is `/v1/chat/completions`). */
-const normOpenAiBase = (base: string) => base.replace(/\/$/, '');
+const normOpenAiBase = (base: string) => trimTrailingSlash(base);
 
 /** The wire API an `openai`-type entry registers with: an explicit per-provider choice wins, else the
  *  OFFICIAL OpenAI endpoint defaults to the Responses API (server-side prompt caching, reasoning
