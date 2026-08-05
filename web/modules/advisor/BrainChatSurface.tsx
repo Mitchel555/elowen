@@ -153,7 +153,7 @@ function CardBlock({ card }: { card: BrainCard }) {
   const previewable = items.length > CARD_PREVIEW_ITEMS;
   const shown = collapsed ? [] : previewable && !expanded ? items.slice(0, CARD_PREVIEW_ITEMS) : items;
   return (
-    <div data-testid="chat-card" className="flex flex-col pl-4 font-mono text-tiny leading-relaxed">
+    <div data-testid="chat-card" className="flex flex-col leading-relaxed">
       {(card.title || items.length > 0) ? (
         <button
           type="button"
@@ -959,8 +959,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
         })}
         {/* Out-of-band extras (cards, processes, agents, questions). In the full page they get their own
             spacing group under the flush transcript; in the dock `contents` keeps them in the parent's
-            gap flow exactly as before. `empty:hidden` drops the group when everything in it is null. */}
-        <div className={variant === 'full' ? 'mt-4 flex flex-col gap-3 empty:hidden' : 'contents'}>
+            gap flow exactly as before. `empty:hidden` drops the group when everything in it is null.
+            The monospace type is set ONCE here and inherited by every extra, so the todo card, the
+            process list and the agents chip end up the exact size the statusline and the tool rows use
+            for the same variant instead of each hardcoding `text-tiny` and reading smaller than the
+            column they sit in. `display:contents` keeps inheriting, it only removes the box. */}
+        <div className={`font-mono ${variant === 'full' ? 'mt-4 flex flex-col gap-3 text-[0.6875rem] empty:hidden' : 'contents text-tiny'}`}>
         {transcriptExtras ? todoCards.map((card) => <CardBlock key={card.id} card={card} />) : null}
         {transcriptExtras && !railOwnsLiveWork ? <ProcessPanel owned={ownedProcessSessions} /> : null}
         {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). The
@@ -970,7 +974,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           <button
             type="button"
             onClick={() => setAgentsOpen(true)}
-            className="flex items-center gap-1.5 self-start pl-4 font-mono text-tiny leading-relaxed text-text-muted transition-colors hover:text-text"
+            className="flex items-center gap-1.5 self-start leading-relaxed text-text-muted transition-colors hover:text-text"
           >
             <Users size={11} aria-hidden />
             {/* Never fall back to the transcript's total when nothing runs: that is what let a finished
@@ -994,7 +998,9 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
         {todosOpen ? (
           <Modal title={t.chat.todos} onClose={() => setTodosOpen(false)} size="md" icon={ListChecks}>
             <ModalBody>
-              <div className="flex flex-col gap-3">
+              {/* Outside the transcript there is no wrapper to inherit from, so the modal states the
+                  same monospace type itself. */}
+              <div className="flex flex-col gap-3 font-mono text-tiny">
                 {todoCards.map((card) => <CardBlock key={card.id} card={card} />)}
               </div>
             </ModalBody>

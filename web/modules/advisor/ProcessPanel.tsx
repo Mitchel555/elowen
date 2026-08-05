@@ -60,7 +60,7 @@ export function ProcessPanel({ owned }: { owned: ReadonlySet<string> }) {
   const runningCount = procs.filter((p) => p.running).length;
 
   return (
-    <div className="flex flex-col pl-4 font-mono text-tiny leading-relaxed">
+    <div className="flex flex-col leading-relaxed">
       <div className="flex items-center gap-1.5 text-text-muted">
         <TerminalSquare size={11} aria-hidden /> {t.processes.title}
         <span className="tabular-nums opacity-70">{runningCount}</span>
