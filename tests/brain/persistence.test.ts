@@ -243,6 +243,24 @@ describe('brain persistence', () => {
     expect(messages.every((m) => m !== null && typeof m === 'object')).toBe(true);
   });
 
+  // A compaction cut can land between an assistant's tool call and that call's result: the summary
+  // swallows the call, the result survives as the first kept row. Replaying it verbatim hands the provider
+  // a tool_result with no matching tool_use — a hard 400 that kills the conversation on every respawn.
+  it('rehydrate drops a toolResult whose tool call no longer exists, keeping properly paired ones', () => {
+    const raw = (id: string, role: string, content: string) =>
+      db.prepare('INSERT INTO brain_messages (id, session_id, parent_id, role, content) VALUES (?, ?, NULL, ?, ?)')
+        .run(id, 's1', role, content);
+    raw('divider', 'compaction', JSON.stringify({ role: 'compactionSummary', summary: 'earlier work' }));
+    raw('orphan', 'toolResult', JSON.stringify({ role: 'toolResult', toolCallId: 'call-gone', toolName: 'ExitPlanMode', content: [{ type: 'text', text: 'plan accepted' }] }));
+    raw('caller', 'assistant', JSON.stringify({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-live', name: 'Bash', arguments: {} }] }));
+    raw('answer', 'toolResult', JSON.stringify({ role: 'toolResult', toolCallId: 'call-live', toolName: 'Bash', content: [{ type: 'text', text: 'ok' }] }));
+
+    const messages = rehydrate(store, 's1', process.cwd()).buildSessionContext().messages as { role: string; toolCallId?: string }[];
+    const answered = messages.filter((m) => m.role === 'toolResult').map((m) => m.toolCallId);
+    expect(answered).toEqual(['call-live']);
+    expect(messages.some((m) => m.role === 'assistant')).toBe(true);
+  });
+
   it('persistCompaction keeps the CLEAN store tail (never the live prompted text) + a divider, and rehydrate replays the shrunk context', () => {
     // A full pre-compaction log in the store — the CLEAN rows projectUserTurn/projectEvent wrote.
     projectUserTurn(store, 's1', 'q1');

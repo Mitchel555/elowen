@@ -361,15 +361,37 @@ function alignedKeepCount(storeRoles: string[], keptRoles: string[]): number {
  *  Parsing successfully is NOT enough to hand a row to `appendMessage`: `null` and bare scalars are valid
  *  JSON and would enter the live session as messages with no `role`, where every later reader of
  *  `session.messages` (persistCompaction, PI's own request building) throws on them. A message is
- *  therefore only yielded when it is an object carrying a string `role`. */
+ *  therefore only yielded when it is an object carrying a string `role`.
+ *
+ *  A `toolResult` row is additionally dropped when nothing earlier in the replay introduced its
+ *  `toolCallId`. `settlePartialTurn` covers the opposite half of the same invariant (a tool call left
+ *  unanswered by a crash); this covers a result left un-called, which a compaction cut can produce: the
+ *  divider lands between an assistant's tool call and that call's result, so the summary swallows the call
+ *  while the result survives as the first kept row. Nothing detects it until the next rehydrate, because a
+ *  live session keeps its own correct in-memory context — the conversation then dies on the first respawn
+ *  (daemon restart, model switch, LRU revival) with a provider 400 (`unexpected tool_use_id found in
+ *  tool_result blocks`) and every retry rebuilds the same broken context. Filtering here rather than
+ *  deleting the row keeps the result visible in the stored transcript while making the replayed context
+ *  valid, and heals conversations already carrying an orphan. */
 function* parsedRows(store: BrainStore, sessionId: string): Generator<{ msg: { role: string; content: unknown }; createdAt: string }> {
+  const introduced = new Set<string>();
   for (const row of store.getMessages(sessionId)) {
     let parsed: unknown;
     try { parsed = JSON.parse(row.content); }
     catch { continue; } // corrupt row — skip it, keep the rest of the history intact
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
     if (typeof (parsed as { role?: unknown }).role !== 'string') continue;
-    yield { msg: parsed as { role: string; content: unknown }, createdAt: row.created_at };
+    const msg = parsed as { role: string; content: unknown; toolCallId?: unknown };
+    if (msg.role === 'toolResult') {
+      const toolCallId = msg.toolCallId;
+      if (typeof toolCallId === 'string' && toolCallId && !introduced.has(toolCallId)) continue;
+    } else {
+      for (const part of Array.isArray(msg.content) ? msg.content : []) {
+        const call = part as { type?: string; id?: string };
+        if (call?.type === 'toolCall' && call.id) introduced.add(call.id);
+      }
+    }
+    yield { msg, createdAt: row.created_at };
   }
 }
 
