@@ -123,6 +123,33 @@ function gateToolAccess(
 /** A model-readable refusal result (the tool "ran" but reports why it did not act). */
 const refused = (text: string) => ({ content: [{ type: 'text' as const, text }], details: {} });
 
+/** Enforce the turn's `deny` list at EXECUTE time, for EVERY tool rather than only plugin ones.
+ *
+ *  gateToolAccess covers the plugin tools, so before this the built-ins — `Elowen*`, `Memory*`,
+ *  `ToolSearch` — were protected by VISIBILITY alone: a name a turn's policy denied was withheld from the
+ *  advertised set and nothing checked it again if a call arrived anyway. That is a thin basis for a
+ *  security boundary, and it is what forced plan mode to narrow the advertised set (a narrowing the
+ *  provider bills for, since the tool block sits at the front of the cached prefix).
+ *
+ *  Only `deny` is generalized. `allow` keeps its documented asymmetry — it narrows plugin tools only, so
+ *  a role's narrow grant never strips a session of its core abilities (see visibleToolNames). */
+function gateDeniedTools(tool: ToolDefinition): ToolDefinition {
+  if (typeof tool.execute !== 'function') return tool; // defensive (test stubs) — nothing to gate
+  const run = tool.execute.bind(tool);
+  const execute = (async (...args: Parameters<ToolDefinition['execute']>) => {
+    if (currentToolPolicy()?.deny?.has(tool.name)) {
+      // Name the mode when there is one: a model that reaches for a writing tool while planning needs to
+      // know the refusal is the MODE, not a missing capability, or it will keep retrying.
+      const mode = currentTurnMode();
+      return refused(mode === 'plan'
+        ? `The tool "${tool.name}" is not available in plan mode, which may not change anything. Finish the plan and call ExitPlanMode first.`
+        : `The tool "${tool.name}" is not available to you in this conversation.`);
+    }
+    return run(...args);
+  }) as ToolDefinition['execute'];
+  return { ...tool, execute };
+}
+
 /** Writing tools that plan mode must clamp to the session's plan file. BOTH are admitted to plan mode
  *  (PLAN_MODE_CLAMPED_TOOLS) — `Write` to author the plan, `Edit` to revise it incrementally — so this
  *  clamp is the only thing standing between a planning turn and arbitrary write access. Nothing here is
@@ -241,7 +268,7 @@ export function composeSessionTools(spec: CapabilitySpec): ToolDefinition[] {
   // — ToolSearch, mcp__* — pass through), then the whole set takes the permission gate, then stripReason
   // wraps OUTERMOST so `_reason` is removed from the arguments before any inner wrapper or handler sees it.
   return [...elowenTools, ...memoryTools, ...toolSearchTools, ...pluginTools, ...planTools]
-    .map(withReason).map(gatePermissions).map(stripReason);
+    .map(withReason).map(gateDeniedTools).map(gatePermissions).map(stripReason);
 }
 
 /** The names a turn's ToolPolicy is allowed to HIDE from the model, given the full tool set and which of

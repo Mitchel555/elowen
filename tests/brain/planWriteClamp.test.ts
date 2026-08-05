@@ -63,6 +63,35 @@ describe('plan-mode write clamp', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  // The boundary this rests on: a denied tool must be stopped when it is CALLED, not merely hidden from
+  // the advertised set. Hiding is a cache cost (the tool block sits at the front of the cached prefix),
+  // so it must never be the only thing standing between plan mode and a mutation.
+  it('stops a denied BUILT-IN from running, not just from being advertised', async () => {
+    const { tool, ran } = fakeTool('MemoryAdd');
+    // Composed as a built-in would be: NOT through the plugin path, which was already gated.
+    const gated = composeSessionTools({ kind: 'owner-chat', pluginTools: [], memoryTools: () => [tool] })
+      .find((t) => t.name === 'MemoryAdd')!;
+    const res = await runWithPolicy(
+      POLICY,
+      () => gated.execute('call-1', {} as never, undefined, undefined, {} as never) as Promise<ToolResult>,
+      { sessionId: SESSION, mode: 'plan', permissions: perms(), toolPolicy: { deny: new Set(['MemoryAdd']) } },
+    );
+    expect(ran()).toBe(0);
+    expect(res.content[0]!.text).toContain('not available in plan mode');
+  });
+
+  it('still runs a built-in the policy does not deny', async () => {
+    const { tool, ran } = fakeTool('MemorySearch');
+    const gated = composeSessionTools({ kind: 'owner-chat', pluginTools: [], memoryTools: () => [tool] })
+      .find((t) => t.name === 'MemorySearch')!;
+    const res = await runWithPolicy(
+      POLICY,
+      () => gated.execute('call-1', {} as never, undefined, undefined, {} as never) as Promise<ToolResult>,
+      { sessionId: SESSION, mode: 'plan', permissions: perms(), toolPolicy: { deny: new Set(['MemoryAdd']) } },
+    );
+    expect(ran()).toBe(1);
+  });
+
   it('lets a planning turn write its own plan file', async () => {
     const { gated, ran } = composed('Write');
     const res = await call(gated, { path: join(home, planPath) }, { mode: 'plan', permissions: perms() });
