@@ -6,6 +6,7 @@ import { dbTsToIso } from '../shared/time.js';
 import { planFilePath, toolResultSpillDir } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
 import { CHANNEL_PREFIX, TASK_PREFIX } from '../brain/sessionId.js';
+import { rollupActivatedTools } from '../brain/continuity/activatedTools.js';
 import { rollupWorkingSet } from '../brain/continuity/workingSet.js';
 import {
   normalizeDelegatedExecutionScope,
@@ -800,12 +801,18 @@ export class BrainStore {
       // that the conversation was ever working in them, and the model would resume from a summary with
       // no idea which files it had open.
       const workingSet = rollupWorkingSet(dropped);
+      // And the deferred tools the model had already fetched (under `$.activatedTools`). Same last-chance
+      // timing: the ToolSearch results that recorded them are among the rows about to be deleted, and
+      // without this a later respawn re-seeds an empty set and the model calls a tool that is no longer
+      // advertised. See rollupActivatedTools.
+      const activatedTools = rollupActivatedTools(dropped);
       const carriable = typeof summary.content === 'object' && summary.content !== null && !Array.isArray(summary.content);
-      const summaryContent = carriable && (rollup || workingSet)
+      const summaryContent = carriable && (rollup || workingSet || activatedTools)
         ? {
             ...(summary.content as Record<string, unknown>),
             ...(rollup ? { usageRollup: rollup } : {}),
             ...(workingSet ? { workingSet } : {}),
+            ...(activatedTools ? { activatedTools } : {}),
           }
         : summary.content;
       this.db.prepare('DELETE FROM brain_messages WHERE session_id = ?').run(sessionId);

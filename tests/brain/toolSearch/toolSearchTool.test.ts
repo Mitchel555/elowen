@@ -169,6 +169,26 @@ describe('seedActivatedFromHistory', () => {
     seedActivatedFromHistory(handle, [{ role: 'toolResult', toolName: 'ToolSearch', isError: false, details: { matched: ['x'] } }]);
     expect(handle.activated.size).toBe(0);
   });
+
+  // The post-compaction shape: the ToolSearch result that activated the tool has been deleted, and the
+  // divider is the only surviving record. Without this the model keeps calling a tool that the respawned
+  // session no longer advertises.
+  it('re-seeds from a compaction summary once the original results are gone', () => {
+    const handle = handleFor();
+    seedActivatedFromHistory(handle, [
+      { role: 'compactionSummary', content: 'earlier work', activatedTools: ['mcp__gh__a', 'mcp__gh__b'] },
+      { role: 'user', content: 'carry on' },
+    ]);
+    expect([...handle.activated].sort()).toEqual(['mcp__gh__a', 'mcp__gh__b']);
+  });
+
+  it('drops a rolled-up name that is no longer deferred in this session', () => {
+    const handle = handleFor();
+    seedActivatedFromHistory(handle, [
+      { role: 'compactionSummary', content: 's', activatedTools: ['mcp__gone__x', 'mcp__gh__c'] },
+    ]);
+    expect([...handle.activated]).toEqual(['mcp__gh__c']);
+  });
 });
 
 /** A fake activation target recording setActiveToolsByName calls. */

@@ -34,26 +34,35 @@ export function createToolSearchHandle(deferred: Set<string>): ToolSearchHandle 
   return { deferred, activated: new Set(), session: undefined };
 }
 
-/** The subset of a rehydrated `ToolResultMessage` this module reads. Kept structural (not the PI import)
- *  so the seed logic is unit-testable with plain objects. */
-interface ToolResultLike { role?: string; toolName?: string; isError?: boolean; details?: unknown }
+/** The subset of a rehydrated message this module reads. Kept structural (not the PI import) so the seed
+ *  logic is unit-testable with plain objects. `activatedTools` appears on a compaction summary: the names
+ *  rolled onto the divider by the compaction that deleted the ToolSearch results themselves. */
+interface ToolResultLike { role?: string; toolName?: string; isError?: boolean; details?: unknown; activatedTools?: unknown }
 
 /** Re-seed `handle.activated` from rehydrated history so a RESPAWN (model switch, LRU revival, daemon
  *  restart) does not silently forget which deferred tools the model already fetched — otherwise the model,
  *  seeing its own past "Activated …" result, would call a tool that is back in the withheld state and get an
  *  unknown-tool error. Scans past ToolSearch results for their recorded `details.matched`, re-adding only
  *  names that are still deferred in THIS session (a tool no longer registered/deferred is simply dropped).
- *  Idempotent; the next visibility pass turns the re-seeded names back on. */
+ *  Idempotent; the next visibility pass turns the re-seeded names back on.
+ *
+ *  Also reads the compaction summary's `activatedTools`. A compaction deletes the rows before its kept
+ *  tail, so the ToolSearch result that activated a tool early in a long conversation is simply GONE from
+ *  history — scanning only tool results would re-seed an empty set and un-advertise a tool the model is
+ *  still using. The compaction rolls those names onto the divider for exactly this read. */
 export function seedActivatedFromHistory(handle: ToolSearchHandle, messages: readonly unknown[]): void {
   if (handle.deferred.size === 0) return;
-  for (const raw of messages) {
-    const m = raw as ToolResultLike;
-    if (m?.role !== 'toolResult' || m.toolName !== 'ToolSearch' || m.isError) continue;
-    const matched = (m.details as { matched?: unknown } | undefined)?.matched;
-    if (!Array.isArray(matched)) continue;
-    for (const name of matched) {
+  const activate = (names: readonly unknown[]): void => {
+    for (const name of names) {
       if (typeof name === 'string' && handle.deferred.has(name)) handle.activated.add(name);
     }
+  };
+  for (const raw of messages) {
+    const m = raw as ToolResultLike;
+    if (Array.isArray(m?.activatedTools)) { activate(m.activatedTools); continue; }
+    if (m?.role !== 'toolResult' || m.toolName !== 'ToolSearch' || m.isError) continue;
+    const matched = (m.details as { matched?: unknown } | undefined)?.matched;
+    if (Array.isArray(matched)) activate(matched);
   }
 }
 
