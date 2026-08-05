@@ -110,6 +110,46 @@ describe('queueMirror.enqueueMirrored', () => {
     expect(published).toEqual([expect.objectContaining({ type: 'user', text: 'clean display' })]);
   });
 
+  // A message sent WHILE a turn streams is queued, and its durable row is written here, at delivery —
+  // long after the base64 is gone. Unless the references written at enqueue time ride along, the row
+  // keeps only its `[📎 …]` marker and the attachment vanishes on reload, unlike an idle-sent one.
+  it('carries a queued message\'s attachments into both the durable row and the echo', () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 's1', userId: 1, model: 'm' });
+    const published: unknown[] = [];
+    const images = [{ file: '1e2d3c4b-5a69-4788-9aab-bbccddeeff00.png', mimeType: 'image/png' }];
+    const echo = { persistText: 'text\n[📎 1× image]', displayText: 'text', publish: true, images };
+    const live = {
+      sessionId: 's1',
+      replay: { publish: (event: unknown) => published.push(event), journal: (event: unknown) => published.push(event) },
+    } as unknown as LiveBrain;
+
+    stageDeliveredUserEchoes(live, [{ text: 'text', queuedText: 'q', echo }]);
+    expect(deliverQueuedUserEcho(store, live, 'q')).toBe(true);
+
+    expect(JSON.parse(store.getMessages('s1')[0]!.content).images).toEqual(images);
+    expect(published).toEqual([expect.objectContaining({
+      type: 'user',
+      images: [{ url: '/brain/chat-images/1e2d3c4b-5a69-4788-9aab-bbccddeeff00.png', mimeType: 'image/png' }],
+    })]);
+  });
+
+  it('leaves a queued message without attachments free of the field', () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 's1', userId: 1, model: 'm' });
+    const published: unknown[] = [];
+    const live = {
+      sessionId: 's1',
+      replay: { publish: (e: unknown) => published.push(e), journal: (e: unknown) => published.push(e) },
+    } as unknown as LiveBrain;
+
+    stageDeliveredUserEchoes(live, [{ text: 'plain', queuedText: 'q', echo: { persistText: 'plain', displayText: 'plain', publish: true } }]);
+    deliverQueuedUserEcho(store, live, 'q');
+
+    expect(JSON.parse(store.getMessages('s1')[0]!.content).images).toBeUndefined();
+    expect((published[0] as { images?: unknown }).images).toBeUndefined();
+  });
+
   // Esc-discard deletes from the admitted user row to the END of the session, so a second user row landing
   // inside the same turn would be deleted along with it — while only the first is handed back to the
   // composer. Delivering a queued message therefore drops the discard claim: the turn stops being

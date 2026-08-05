@@ -2,6 +2,7 @@ import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { BrainStore } from '../../store/brainStore.js';
 import { queueItems } from '../events.js';
 import { projectUserTurn } from '../persistence.js';
+import { toMessageImages } from '../chatImages.js';
 import type { LiveBrain, QueuedMsg, QueuedImage, QueuedUserEcho } from './liveBrain.js';
 
 /** Project the pending mid-turn backlog into the positional `{ id, text }` chips clients render. Prefers
@@ -108,13 +109,18 @@ export function deliverQueuedUserEcho(store: BrainStore, live: LiveBrain, delive
   const [item] = pending.splice(index, 1);
   const echo = item?.echo;
   if (!echo) return false;
-  const durableId = projectUserTurn(store, live.sessionId, echo.persistText);
+  const durableId = projectUserTurn(store, live.sessionId, echo.persistText, echo.images);
   // A second user message now sits AFTER the admitted one, and Esc-discard deletes from the admitted row to
   // the end of the session. Leaving the discard claim armed would take this message with it while restoring
   // only the first — a silent loss of text the user typed. Once the turn has grown a second user row, the
   // turn is no longer discardable as a unit; Esc still aborts, it just stops rewriting history.
   live.lastAdmitted = undefined;
-  const event = { type: 'user' as const, text: echo.displayText, durableId };
+  const event = {
+    type: 'user' as const,
+    text: echo.displayText,
+    durableId,
+    ...(echo.images?.length ? { images: toMessageImages(echo.images) } : {}),
+  };
   if (echo.publish) live.replay.publish(event);
   else live.replay.journal(event);
   return true;

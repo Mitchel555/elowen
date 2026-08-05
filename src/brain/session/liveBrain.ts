@@ -7,6 +7,7 @@ import type { DelegatedExecutionScope } from '../delegatedScope.js';
 import type { TurnMode } from '../service/turnRequest.js';
 import type { ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 import type { ApplyCompaction } from './factory.js';
+import type { StoredChatImage } from '../chatImages.js';
 
 /** A queued mid-turn message's image attachments, in PI's ImageContent shape. */
 export type QueuedImage = { type: 'image'; data: string; mimeType: string };
@@ -20,6 +21,10 @@ export interface QueuedUserEcho {
    * this is what the new turn re-composes from — so the block is re-derived once from live state and the
    * marker is re-appended once, instead of the stale copies being duplicated. */
   sourceText?: string;
+  /** Attachments already written to disk when this message was queued. They ride here because the base64
+   * only exists while the message sits in PI's transient queue: the durable row is written later, at
+   * delivery, and would otherwise keep the `[📎 …]` marker with nothing left to render after a reload. */
+  images?: StoredChatImage[];
   /** Work mode selected when this owner message entered PI's queue; needed if Esc promotes it to a turn. */
   mode?: 'build' | 'plan' | 'workflow';
   /** Owner CLI/web messages broadcast their user row. Platform messages were already rendered by the

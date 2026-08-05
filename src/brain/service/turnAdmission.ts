@@ -67,6 +67,10 @@ export class TurnAdmission {
    * removes that item and emits the matching user message_start. */
   async steer(): Promise<void> {
     const persistText = this.durableText();
+    // Store the attachments HERE, not at delivery: the base64 only exists while the message waits in PI's
+    // transient queue, and the durable row is written later, by deliverQueuedUserEcho. A queue entry that
+    // never gets delivered leaves the files unreferenced, which the daily sweep reclaims.
+    this.stored = this.storeImages();
     await enqueueMirrored(
       this.input.live,
       'steer',
@@ -75,6 +79,7 @@ export class TurnAdmission {
       {
         persistText,
         displayText: this.input.display ?? this.input.persistText ?? this.input.text,
+        ...(this.stored.length ? { images: this.stored } : {}),
         // The clean model-facing text before the running-subagents block and the attachment marker: what a
         // later Esc-promotion re-composes from (`input.text` still carries the block; `persistText` the marker).
         sourceText: this.input.persistText ?? this.input.text,

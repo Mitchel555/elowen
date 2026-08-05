@@ -73,6 +73,30 @@ describe('an attachment survives a reload', () => {
   });
 });
 
+describe('an attachment is as private as its conversation', () => {
+  it('is readable by the owner of the message that references it', () => {
+    const [file] = sendWithImage('moje faktura');
+    expect(store.chatImageBelongsTo(1, file)).toBe(true);
+  });
+
+  it('is NOT readable by another account that knows the name', () => {
+    const [file] = sendWithImage('moje faktura');
+    store.createSession({ id: 'brain-2', userId: 2, model: 'm' });
+    expect(store.chatImageBelongsTo(2, file)).toBe(false);
+  });
+
+  it('is not granted by a message that merely quotes the name in its prose', () => {
+    const [file] = sendWithImage('moje faktura');
+    store.createSession({ id: 'brain-2', userId: 2, model: 'm' });
+    projectUserTurn(store, 'brain-2', `podívej na /brain/chat-images/${file}`);
+    expect(store.chatImageBelongsTo(2, file)).toBe(false);
+  });
+
+  it('refuses a name nobody ever stored', () => {
+    expect(store.chatImageBelongsTo(1, '00000000-0000-4000-8000-000000000000.png')).toBe(false);
+  });
+});
+
 describe('the sweep and the store agree on what is still in use', () => {
   it('reports a live attachment as referenced, so the sweep spares it', () => {
     const [file] = sendWithImage('drž si mě');

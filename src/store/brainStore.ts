@@ -909,6 +909,27 @@ export class BrainStore {
     this.db.prepare('DELETE FROM brain_goals WHERE session_id = ?').run(sessionId);
   }
 
+  /** Whether this user owns a conversation whose message references this chat image. The read route asks
+   *  before serving: the file name is unguessable, but that is secrecy, not authorization — an attachment
+   *  is as private as the conversation it was sent in, and a photo of an invoice must not be readable by
+   *  another account that comes by the name. The LIKE only narrows the scan; the match itself is decided
+   *  by parsing the row, so a name appearing in unrelated prose cannot grant access. */
+  chatImageBelongsTo(userId: number, file: string): boolean {
+    const rows = this.db.prepare(
+      `SELECT m.content FROM brain_messages m
+         JOIN brain_sessions s ON s.id = m.session_id
+        WHERE s.user_id = ? AND m.role = 'user' AND m.content LIKE ?`,
+    ).all(userId, `%${file}%`) as { content: string }[];
+    for (const row of rows) {
+      try {
+        const images = (JSON.parse(row.content) as { images?: unknown }).images;
+        if (!Array.isArray(images)) continue;
+        if (images.some((image) => (image as { file?: unknown })?.file === file)) return true;
+      } catch { /* a malformed row references nothing */ }
+    }
+    return false;
+  }
+
   /** Every chat-image file still referenced by a stored user message. The sweep deletes what this does
    *  NOT return, so it has to stay complete: the LIKE only narrows the scan, the names themselves come
    *  from parsing each candidate row. */

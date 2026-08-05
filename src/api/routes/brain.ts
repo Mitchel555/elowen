@@ -218,8 +218,13 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
   // proxy turns into a daemon bearer, so this needs no signed link — it is a normal authenticated GET.
   app.get('/brain/chat-images/:file', async c => {
     if (forbidden(c)) return c.json({ error: 'forbidden' }, 403);
-    if (!d.chatImagesDir) return c.json({ error: 'not found' }, 404);
-    const image = readChatImage(d.chatImagesDir, c.req.param('file'));
+    if (!d.chatImagesDir || !d.brainStore) return c.json({ error: 'not found' }, 404);
+    const file = c.req.param('file');
+    // An unguessable name is secrecy, not authorization: the attachment is exactly as private as the
+    // conversation it was sent in, so serve it only to an owner of a message that references it. Answered
+    // as 404, not 403 — telling a stranger the file exists is itself a leak.
+    if (!d.brainStore.chatImageBelongsTo(c.get('user').id, file)) return c.json({ error: 'not found' }, 404);
+    const image = readChatImage(d.chatImagesDir, file);
     if (!image) return c.json({ error: 'not found' }, 404);
     // Immutable bytes under a random name, so it caches hard and privately.
     return c.body(new Uint8Array(image.body), 200, { 'content-type': image.mimeType, 'cache-control': 'private, max-age=31536000' });

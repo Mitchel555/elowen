@@ -100,7 +100,7 @@ export class MemoryCurator {
       } catch { /* retrieval is best-effort — fall back to a blind curation pass */ }
       const budget = this.opBudget();
       if (budget === 0) return; // automatic writing switched off — do not even ask the model
-      const { text } = await inf.decide(buildPrompt(user, assistantText, existing));
+      const { text } = await inf.decide(buildPrompt(user, assistantText, existing, budget));
       const ops = parseOps(text);
       if (ops.length === 0) return; // model ran but distilled nothing durable this turn — expected + quiet
       // Record WHICH model distilled these facts on every add/update audit row.
@@ -173,7 +173,7 @@ export class MemoryCurator {
  *  strict source rules (the assistant's reply is NOT a knowledge source), few-shot calibration with
  *  empty-output examples, date grounding — the cheap model otherwise "helps" by saving trivia from the
  *  assistant's explanations. Output contract unchanged (JSON array of ops, parseOps). */
-function buildPrompt(userText: string, assistantText: string, existing: { id: number; body: string }[] = []): string {
+function buildPrompt(userText: string, assistantText: string, existing: { id: number; body: string }[] = [], maxOps: number = MAX_OPS_PER_TURN): string {
   const u = userText.slice(0, MAX_TEXT_CHARS);
   const a = assistantText.slice(0, MAX_TEXT_CHARS);
   const knownBlock = existing.length
@@ -268,7 +268,9 @@ function buildPrompt(userText: string, assistantText: string, existing: { id: nu
     'without it. If most turns you work on produce one, you are writing far too much — a store full of',
     'near-misses buries the few facts that matter and the user ends up deleting them by hand.',
     '',
-    `Return ONLY a JSON array, at most ${MAX_OPS_PER_TURN} operations, with no other text. Format per operation:`,
+    // The operator's configured budget, not the built-in default: the caller slices to it either way, so
+    // a prompt naming a smaller number would quietly cap a raised limit at two.
+    `Return ONLY a JSON array, at most ${maxOps} operations, with no other text. Format per operation:`,
     '{"action":"add","body":"<self-contained fact, in the user\'s language>","kind":"fact|preference|decision|feedback","importance":1-5}',
     '{"action":"update","id":<id>,"body":"<new text>"}',
     '{"action":"delete","id":<id>}',

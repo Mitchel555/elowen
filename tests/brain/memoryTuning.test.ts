@@ -147,6 +147,20 @@ describe('MemoryCurator — operator-tunable write cap', () => {
     expect(raised.memStore.add).toHaveBeenCalledTimes(3);
   });
 
+  // Slicing the result to the budget is only half of it: the model has to be ASKED for that many. With the
+  // built-in 2 baked into the prompt, a raised cap changed nothing — the model kept returning two.
+  it('asks the model for the configured number of operations, not the built-in one', async () => {
+    const raised = curatorWith(() => 5);
+    await raised.curator.run(1, 'user text', 'assistant text');
+    expect(raised.decide.mock.calls[0]![0]).toContain('at most 5 operations');
+  });
+
+  it('still asks for the built-in number when the operator has not set one', async () => {
+    const builtIn = curatorWith();
+    await builtIn.curator.run(1, 'user text', 'assistant text');
+    expect(builtIn.decide.mock.calls[0]![0]).toContain('at most 2 operations');
+  });
+
   it('writes nothing at a cap of 0, and does not spend a model call to find that out', async () => {
     const off = curatorWith(() => 0);
     await off.curator.run(1, 'user text', 'assistant text');
