@@ -109,14 +109,20 @@ async function readAttachment(file: File): Promise<Attachment | AttachRefusal> {
   // Anything the browser calls an image is judged as one even when we cannot forward it, so an unusable
   // type (heic, avif, svg…) is named as such instead of being read as text and reported as binary.
   if (imageType || file.type.startsWith('image/')) {
-    if (!imageType) return 'unsupported';
     // A phone photo is routinely bigger than the provider accepts, and always has more pixels than it
-    // keeps. Shrink it here rather than refusing it — from a phone there is no other way to send it.
-    // Null means shrinking was not possible or not needed; the original is then judged as before.
-    const smaller = await downscaleImage(file, { maxBytes: MAX_IMAGE_BYTES, sourceType: imageType })
-      .catch(() => null);
+    // keeps; a phone photo may also be in a format the provider cannot read at all (heic). Both are
+    // handled by re-encoding here rather than refusing, because on a phone the user cannot convert or
+    // resize anything by hand. Null means it was not needed, or the engine could not decode it either —
+    // then the original is judged exactly as before.
+    const smaller = await downscaleImage(file, {
+      maxBytes: MAX_IMAGE_BYTES,
+      sourceType: imageType ?? file.type,
+      mustConvert: !imageType,
+    }).catch(() => null);
+    if (!imageType && !smaller) return 'unsupported';
     const source: Blob = smaller?.blob ?? file;
     const mimeType = smaller?.mimeType ?? imageType;
+    if (!mimeType) return 'unsupported';
     if (source.size > MAX_IMAGE_BYTES) return 'too-large';
     const dataUrl = await new Promise<string>((res, rej) => {
       const r = new FileReader();

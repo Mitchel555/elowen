@@ -95,6 +95,23 @@ describe('downscaleImage', () => {
     expect(await downscaleImage(fileOf(9_000_000, 'image/png'), { maxBytes: 5_242_880, sourceType: 'image/png' })).toBeNull();
   });
 
+  it('converts a type the providers cannot read but the engine can — an iPhone heic', async () => {
+    stubBrowser({ width: 4032, height: 3024, encoded: (type) => blobOf(700_000, type) });
+    const out = await downscaleImage(fileOf(3_000_000, 'image/heic'), {
+      maxBytes: 5_242_880, sourceType: 'image/heic', mustConvert: true,
+    });
+    expect(out?.mimeType).toBe('image/webp');
+  });
+
+  it('converts such a file even when it is small — leaving it alone would mean refusing it', async () => {
+    const stub = stubBrowser({ width: 600, height: 400, encoded: (type) => blobOf(50_000, type) });
+    const out = await downscaleImage(fileOf(80_000, 'image/heic'), {
+      maxBytes: 5_242_880, sourceType: 'image/heic', mustConvert: true,
+    });
+    expect(out?.mimeType).toBe('image/webp');
+    expect(stub.drawn).toEqual([{ width: 600, height: 400 }]); // converted, not resized
+  });
+
   it('leaves an animated gif alone — a canvas would keep only its first frame', async () => {
     stubBrowser({ width: 4000, height: 3000, encoded: (type) => blobOf(100_000, type) });
     expect(await downscaleImage(fileOf(9_000_000, 'image/gif'), { maxBytes: 5_242_880, sourceType: 'image/gif' })).toBeNull();

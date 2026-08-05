@@ -64,6 +64,20 @@ function fileOf(name: string, type: string, bytes: Uint8Array): File {
 
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]);
 
+/** Stand in for the decode + encode APIs jsdom lacks, so the re-encode path can run. Only `canvas` is
+ *  faked — React renders real elements through the very same call. */
+function stubCanvas(width: number, height: number) {
+  vi.stubGlobal('createImageBitmap', async () => ({ width, height, close: () => {} }));
+  const realCreate = document.createElement.bind(document);
+  vi.spyOn(document, 'createElement').mockImplementation((tag: string) => (tag === 'canvas'
+    ? ({
+        width: 0, height: 0,
+        getContext: () => ({ drawImage: () => {} }),
+        toBlob: (cb: (b: Blob) => void, type: string) => cb(new Blob([new Uint8Array([1, 2, 3])], { type })),
+      } as unknown as HTMLElement)
+    : realCreate(tag)));
+}
+
 describe('attaching a file the browser reports no type for', () => {
   it('still recognises a png by its extension instead of calling it binary', async () => {
     await mount();
@@ -91,11 +105,21 @@ describe('attaching a file the browser reports no type for', () => {
 });
 
 describe('a refusal names its own reason', () => {
-  it('says the format is unusable for an image type the providers cannot decode', async () => {
+  it('says the format is unusable when the engine cannot decode it either', async () => {
+    // No createImageBitmap here: jsdom cannot decode, which is the same position an engine without heic
+    // support is in. The refusal is then the honest answer.
     await mount();
     await act(async () => { await addFiles([fileOf('photo.heic', 'image/heic', PNG_BYTES)]); });
     expect(staged).toEqual([]);
     expect(await screen.findByText(/nepodporovaný formát|unsupported format/i)).toBeTruthy();
+  });
+
+  it('converts an iPhone heic when the engine can decode it, rather than refusing it', async () => {
+    stubCanvas(4032, 3024);
+    await mount();
+    await act(async () => { await addFiles([fileOf('IMG_4821.heic', 'image/heic', PNG_BYTES)]); });
+    expect(staged).toEqual([{ name: 'IMG_4821.heic', kind: 'image', mimeType: 'image/webp' }]);
+    expect(screen.queryByText(/nepodporovaný formát|unsupported format/i)).toBeNull();
   });
 
   it('says too large — and does not blame the format — for an oversized image', async () => {
@@ -110,16 +134,7 @@ describe('a refusal names its own reason', () => {
 
   it('shrinks an oversized photo instead of refusing it, which is all a phone can send', async () => {
     // Stand in for the browser APIs jsdom lacks; the shrink itself is covered in tests/lib/imageDownscale.
-    vi.stubGlobal('createImageBitmap', async () => ({ width: 4032, height: 3024, close: () => {} }));
-    // Only the canvas is faked; React is rendering real elements through this same call.
-    const realCreate = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => (tag === 'canvas'
-      ? ({
-          width: 0, height: 0,
-          getContext: () => ({ drawImage: () => {} }),
-          toBlob: (cb: (b: Blob) => void, type: string) => cb(new Blob([new Uint8Array([1, 2, 3])], { type })),
-        } as unknown as HTMLElement)
-      : realCreate(tag)));
+    stubCanvas(4032, 3024);
     await mount();
     const photo = fileOf('IMG_4821.jpg', 'image/jpeg', PNG_BYTES);
     Object.defineProperty(photo, 'size', { value: 9 * 1024 * 1024 });

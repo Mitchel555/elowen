@@ -26,14 +26,21 @@ export function fitWithin(width: number, height: number, maxEdge: number): { wid
   return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
 
-/** What the shrunk copy should be encoded as. A JPEG source is a photo and stays a JPEG; anything else
- *  may carry transparency, which JPEG would flatten to black, so it becomes WEBP — both are types the
- *  providers decode. An animated GIF is deliberately absent: a canvas keeps only its first frame, so
- *  shrinking one would silently throw the animation away. */
+/** What the copy should be encoded as. A JPEG source is a photo and stays a JPEG; anything else may
+ *  carry transparency, which JPEG would flatten to black, so it becomes WEBP — both are types the
+ *  providers decode.
+ *
+ *  A type the providers do NOT decode (heic from an iPhone, avif, bmp) is converted rather than refused:
+ *  the engine that took the photo can generally decode it even though the provider cannot, and on a phone
+ *  converting it by hand is not something a user can do. When the engine cannot decode it either, the
+ *  decode below fails and the caller refuses it exactly as before.
+ *
+ *  An animated GIF is the one deliberate exception: a canvas keeps only its first frame, so shrinking one
+ *  would silently throw the animation away. */
 function targetType(sourceType: string): string | null {
+  if (sourceType === 'image/gif') return null;
   if (sourceType === 'image/jpeg') return 'image/jpeg';
-  if (sourceType === 'image/png' || sourceType === 'image/webp') return 'image/webp';
-  return null;
+  return 'image/webp';
 }
 
 /** True when this image is worth shrinking: too many bytes for the provider, or more pixels than it
@@ -56,7 +63,7 @@ function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number):
  *  possible or not needed. Null is not a failure — the caller falls back to its previous behaviour. */
 export async function downscaleImage(
   file: File,
-  opts: { maxBytes: number; sourceType: string; maxEdge?: number },
+  opts: { maxBytes: number; sourceType: string; maxEdge?: number; mustConvert?: boolean },
 ): Promise<{ blob: Blob; mimeType: string } | null> {
   const maxEdge = opts.maxEdge ?? MAX_IMAGE_EDGE;
   // The caller's resolved type, not `file.type`: a browser that reported no type at all still has its
@@ -72,7 +79,9 @@ export async function downscaleImage(
     return null; // undecodable here — let the caller refuse it with its own message
   }
   try {
-    if (!shouldDownscale(file.size, opts.maxBytes, bitmap.width, bitmap.height, maxEdge)) return null;
+    // `mustConvert` is set for a type the providers cannot decode: it has to be re-encoded whatever its
+    // size, because leaving it alone means refusing it.
+    if (!opts.mustConvert && !shouldDownscale(file.size, opts.maxBytes, bitmap.width, bitmap.height, maxEdge)) return null;
     const size = fitWithin(bitmap.width, bitmap.height, maxEdge);
     const canvas = document.createElement('canvas');
     canvas.width = size.width;
