@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promptsPath } from '../../prompts/index.js';
+import { splitFrontmatter } from '../../shared/frontmatter.js';
 import { logger } from '../../shared/logger.js';
 
 const log = logger('skills');
@@ -66,9 +67,9 @@ interface SkillServiceOptions {
  *  when the file has no frontmatter. The master file is the single source of truth for the version;
  *  both the bundled master and an installed copy are parsed the same way. */
 function parseVersion(text: string): number | null {
-  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-  if (!fm) return null;
-  const m = /version:\s*(\d+)/.exec(fm[1]!);
+  const { frontmatter } = splitFrontmatter(text);
+  if (!frontmatter) return null;
+  const m = /version:\s*(\d+)/.exec(frontmatter);
   return m ? Number(m[1]) : null;
 }
 

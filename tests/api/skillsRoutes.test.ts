@@ -212,4 +212,24 @@ describe('skills routes', () => {
     expect((await app.request('/plugins/skills/x', patch(amyTok, { content: 'y' }))).status).toBe(403);
     expect((await app.request('/plugins/skills/x', del(amyTok))).status).toBe(403);
   });
+
+  it('keeps a --- line in the body as body, not a second frontmatter delimiter', async () => {
+    const { app, userDir, adminTok } = setup();
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'rules.md'), '---\nname: rules\ndescription: R.\n---\nPart one.\n\n---\n\nPart two.\n');
+    const list = (await (await app.request('/plugins/skills/list', auth(adminTok))).json()) as { name: string; description: string; content?: string }[];
+    expect(list.find((s) => s.name === 'rules'))
+      .toMatchObject({ description: 'R.', content: 'Part one.\n\n---\n\nPart two.' });
+  });
+
+  it('parses a BOM-prefixed user skill and keeps its frontmatter through an edit', async () => {
+    const { app, userDir, adminTok } = setup();
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'bom-skill.md'), '\uFEFF---\nname: bom-skill\ndescription: B.\nlicense: MIT\n---\nBody.\n');
+    const list = (await (await app.request('/plugins/skills/list', auth(adminTok))).json()) as { name: string; description: string; content?: string }[];
+    expect(list.find((s) => s.name === 'bom-skill')).toMatchObject({ description: 'B.', content: 'Body.' });
+    // PATCH keeps the unknown license field — the frontmatter was actually parsed, not treated as body.
+    expect((await app.request('/plugins/skills/bom-skill', patch(adminTok, { content: 'v2' }))).status).toBe(200);
+    expect(readFileSync(join(userDir, 'bom-skill.md'), 'utf-8')).toContain('license: MIT\n');
+  });
 });

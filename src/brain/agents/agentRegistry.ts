@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { splitFrontmatter } from '../../shared/frontmatter.js';
 import type { PluginLogger } from '../../plugins/api.js';
 
 /**
@@ -60,12 +61,28 @@ export interface AgentDef {
  *  API and the loader agree on exactly what a legal name is. */
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
-/** Split the leading `---\n…\n---` YAML frontmatter from the markdown body. Returns null when there is no
- *  frontmatter block (an agent file must have one — it carries name + description). */
-function splitFrontmatter(text: string): { frontmatter: string; body: string } | null {
-  const m = /^﻿?---\s*\n([\s\S]*?)\n---[ \t]*(?:\n([\s\S]*))?$/.exec(text);
-  if (!m) return null;
-  return { frontmatter: m[1] ?? '', body: (m[2] ?? '').trim() };
+/** Parse one agent `.md` file into an AgentDef, or null when it is not a valid agent definition (no
+ *  frontmatter, bad name, missing description, malformed tools). Never throws on a bad file — the caller
+ *  logs and skips it. */
+export function parseAgentFile(text: string, source: 'builtin' | 'user', filePath: string): AgentDef | null {
+  const split = splitFrontmatter(text);
+  // An agent file must carry frontmatter — it holds the name and description.
+  if (!split.frontmatter) return null;
+  let fm: unknown;
+  try { fm = parseYaml(split.frontmatter); } catch { return null; }
+  if (!fm || typeof fm !== 'object' || Array.isArray(fm)) return null;
+  const meta = fm as Record<string, unknown>;
+
+  const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+  if (!NAME_RE.test(name)) return null;
+  const description = typeof meta.description === 'string' ? meta.description.trim() : '';
+  if (!description) return null;
+  const toolsSpec = parseToolsSpec(meta.tools);
+  if (toolsSpec === null) return null;
+  const body = split.body.trim();
+  if (!body) return null;
+
+  return { name, description, body, toolsSpec, source, filePath };
 }
 
 /** Normalize the `tools:` frontmatter value into an AgentToolsSpec. A missing value inherits (today's
@@ -84,28 +101,6 @@ function parseToolsSpec(raw: unknown): AgentToolsSpec | null {
     return names.length ? names : null;
   }
   return null;
-}
-
-/** Parse one agent `.md` file into an AgentDef, or null when it is not a valid agent definition (no
- *  frontmatter, bad name, missing description, malformed tools). Never throws on a bad file — the caller
- *  logs and skips it. */
-export function parseAgentFile(text: string, source: 'builtin' | 'user', filePath: string): AgentDef | null {
-  const split = splitFrontmatter(text);
-  if (!split) return null;
-  let fm: unknown;
-  try { fm = parseYaml(split.frontmatter); } catch { return null; }
-  if (!fm || typeof fm !== 'object' || Array.isArray(fm)) return null;
-  const meta = fm as Record<string, unknown>;
-
-  const name = typeof meta.name === 'string' ? meta.name.trim() : '';
-  if (!NAME_RE.test(name)) return null;
-  const description = typeof meta.description === 'string' ? meta.description.trim() : '';
-  if (!description) return null;
-  const toolsSpec = parseToolsSpec(meta.tools);
-  if (toolsSpec === null) return null;
-  if (!split.body) return null;
-
-  return { name, description, body: split.body, toolsSpec, source, filePath };
 }
 
 /** Load and merge agent definitions from the built-in dir first, then the user dir — a user file

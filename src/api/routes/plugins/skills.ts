@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { splitFrontmatter } from '../../../shared/frontmatter.js';
 import { logger } from '../../../shared/logger.js';
 import type { ElowenApp, RouteContext } from '../../context.js';
 import type { PluginRoutesShared } from './shared.js';
@@ -45,16 +46,18 @@ export function registerSkillRoutes(app: ElowenApp, ctx: RouteContext, shared: P
   // Split a skill file into its YAML frontmatter (as an object) and its markdown body. Unknown
   // frontmatter fields (license, allowed-tools, compatibility, metadata…) stay in the object so a write
   // preserves them verbatim instead of silently dropping them — the old regex builder rebuilt the whole
-  // block from name+description and erased everything else.
-  const splitFrontmatter = (raw: string): { front: Record<string, unknown>; body: string } => {
-    const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
-    if (!m) return { front: {}, body: raw.replace(/^\n+/, '').replace(/\n+$/, '') };
+  // block from name+description and erased everything else. The block split itself is shared
+  // (src/shared/frontmatter.ts); this wrapper adds the object form and trims the body for the editor.
+  const splitSkillFile = (raw: string): { front: Record<string, unknown>; body: string } => {
+    const { frontmatter, body } = splitFrontmatter(raw);
     let front: Record<string, unknown> = {};
-    try {
-      const parsed = parseYaml(m[1] ?? '');
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) front = parsed as Record<string, unknown>;
-    } catch { /* malformed frontmatter → treat as absent; the body stays editable */ }
-    return { front, body: raw.slice(m[0].length).replace(/^\n+/, '').replace(/\n+$/, '') };
+    if (frontmatter) {
+      try {
+        const parsed = parseYaml(frontmatter);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) front = parsed as Record<string, unknown>;
+      } catch { /* malformed frontmatter → treat as absent; the body stays editable */ }
+    }
+    return { front, body: body.replace(/^\n+/, '').replace(/\n+$/, '') };
   };
   const skillVersion = (front: Record<string, unknown>): number | null => {
     const meta = front.metadata;
@@ -65,7 +68,7 @@ export function registerSkillRoutes(app: ElowenApp, ctx: RouteContext, shared: P
     return null;
   };
   const readSkillFile = (file: string): { front: Record<string, unknown>; description: string; content: string; disableModelInvocation: boolean; version: number | null } => {
-    const { front, body } = splitFrontmatter(readFileSync(file, 'utf-8'));
+    const { front, body } = splitSkillFile(readFileSync(file, 'utf-8'));
     return {
       front,
       description: typeof front.description === 'string' ? front.description : '',

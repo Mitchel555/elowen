@@ -99,4 +99,12 @@ describe('skillService', () => {
     expect(results.every((r) => !r.installed)).toBe(true);
     expect(existsSync(target(home, '.claude'))).toBe(false);
   });
+
+  it('parses the version from a CRLF master and a CRLF installed copy', () => {
+    const CRLF_MASTER = '---\r\nname: elowen-workflow\r\ndescription: test\r\nmetadata:\r\n  version: 3\r\n---\r\n\r\nbody\r\n';
+    const crlf = () => createSkillService({ home, env: {}, readMaster: () => CRLF_MASTER });
+    crlf().installAll();
+    const byId = Object.fromEntries(crlf().status().map((s) => [s.provider, s]));
+    expect(byId['claude-code']).toMatchObject({ installed: true, version: 3, upToDate: true });
+  });
 });

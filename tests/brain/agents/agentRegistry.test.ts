@@ -47,6 +47,31 @@ describe('parseAgentFile', () => {
   it('never throws on malformed YAML — returns null', () => {
     expect(parseAgentFile(md('name: [unterminated', 'b'), 'user', '/x')).toBeNull();
   });
+
+  it('keeps a --- horizontal rule in the body as body (frontmatter ends at the first --- line)', () => {
+    const def = parseAgentFile(
+      md('name: explore\ndescription: Search stuff\ntools: read-only', 'Part one.\n\n---\n\nPart two.'),
+      'builtin', '/x/explore.md',
+    );
+    expect(def).not.toBeNull();
+    expect(def!.body).toBe('Part one.\n\n---\n\nPart two.');
+  });
+
+  it('parses a CRLF agent file (was rejected before the shared frontmatter split)', () => {
+    const def = parseAgentFile(
+      '---\r\nname: explore\r\ndescription: Search stuff\r\ntools: read-only\r\n---\r\nBody.\r\n',
+      'builtin', '/x/explore.md',
+    );
+    expect(def).toMatchObject({ name: 'explore', description: 'Search stuff', body: 'Body.' });
+  });
+
+  it('parses a BOM-prefixed agent file', () => {
+    const def = parseAgentFile(
+      '\uFEFF---\nname: explore\ndescription: Search stuff\ntools: read-only\n---\nBody.\n',
+      'builtin', '/x/explore.md',
+    );
+    expect(def).toMatchObject({ name: 'explore', description: 'Search stuff', body: 'Body.' });
+  });
 });
 
 describe('resolveAgentTools', () => {
