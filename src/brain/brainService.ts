@@ -218,24 +218,23 @@ export class BrainService {
       sendDelegatedCustom: async (userId, sessionId, customType, content, resultId) => {
         await this.delegated.sendDelegated(userId, sessionId, content, { internalSystem: { customType, resultId } });
       },
-      afterTurnSettled: (userId, sessionId, fromWeb) => {
+      afterTurnSettled: (userId, sessionId, userInitiated) => {
         this.drainDeferredPluginReload();
-        // A web-started turn just finished with nobody WATCHING it — tell the user's phone. `fromWeb`
-        // alone only means the send did not come from a bound CLI, which is also true of the web tab the
-        // user is reading right now: notifying then buzzes someone watching the answer arrive.
-        // Attachment cannot stand in for that, though — a browser holds its SSE stream open behind a
-        // locked screen or a backgrounded tab, so requiring zero attachments meant the push never fired
-        // for the case it exists to serve. Clients report whether they are on screen; one that never
-        // reports counts as watching, so a surface that has not been taught this stays silent as before.
+        // A turn a person asked for just finished with nobody WATCHING it — tell the user's phone.
+        // Attachment cannot stand in for watching: a browser holds its SSE stream open behind a locked
+        // screen or a backgrounded tab, so requiring zero attachments would silence the push for the very
+        // case it exists to serve. Clients report whether they are on screen; one that never reports
+        // counts as watching, which is what keeps a CLI session — it holds a stream too — from buzzing the
+        // phone of someone sitting at the terminal.
         // Enablement is implicit: no push subscription means the notifier sends nothing.
         const watching = this.attachments.watchingCount(sessionId);
-        if (fromWeb && watching === 0 && d.notifyTurnComplete) {
+        if (userInitiated && watching === 0 && d.notifyTurnComplete) {
           d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
         } else if (d.notifyTurnComplete) {
           // Both reasons for staying quiet look identical from outside — the user just does not get a
-          // notification — and the two need opposite fixes. `fromWeb` false means the turn came from a
-          // bound CLI or an internal nudge; a non-zero count means a tab reported itself on screen.
-          logger('brain').info(`no phone push for ${sessionId}: fromWeb=${fromWeb} watching=${watching}`);
+          // notification — and the two need opposite fixes. Not user-initiated means an internal goal or
+          // nudge; a non-zero count means some client reported itself on screen.
+          logger('brain').info(`no phone push for ${sessionId}: userInitiated=${userInitiated} watching=${watching}`);
         }
       },
     });

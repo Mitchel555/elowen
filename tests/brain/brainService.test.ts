@@ -3901,24 +3901,36 @@ describe('sub-agent session tap + owner steering', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  // A web send has no bound client, so the user may have left the browser — notify their phone. A bound CLI
-  // send is watched live in the terminal, so it must NOT notify. `notifyTurnComplete` is the daemon's push
-  // seam; enablement is implicit (no subscription ⇒ the notifier sends nothing).
-  it('notifies the phone only for a web-started owner turn, never a bound CLI one', async () => {
+  // What decides the push is whether anyone is WATCHING, not where the message came from. The web binds its
+  // sends with a client id exactly like the CLI does, so a rule of "notify only a send without a bound
+  // client" excluded every real chat message and the push could never fire at all. A terminal the user is
+  // sitting at holds a stream of its own, which is what keeps it quiet. `notifyTurnComplete` is the daemon's
+  // push seam; enablement is implicit (no subscription ⇒ the notifier sends nothing).
+  it('stays quiet for a bound CLI turn the terminal is streaming', async () => {
     const notified: { userId: number; title: string }[] = [];
     const d = fakeDeps();
     (d as unknown as { notifyTurnComplete?: (u: number, t: string) => void }).notifyTurnComplete =
       (userId, title) => notified.push({ userId, title });
     const svc = new BrainService(d as never);
 
-    await svc.start(1);
-    await svc.send({ userId: 1, text: 'ship it from the web' });
-    expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
-
-    notified.length = 0;
     const cli = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
+    const off = svc.tapSession(1, cli.sessionId, () => {});
     await svc.send({ userId: 1, text: 'from the cli', session: cli.sessionId, client: { id: 'cli-a', generation: 1 } });
     expect(notified).toEqual([]);
+    off();
+  });
+
+  it('notifies a bound turn nobody is streaming — a phone that went off screen', async () => {
+    const notified: { userId: number; title: string }[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string) => void }).notifyTurnComplete =
+      (userId, title) => notified.push({ userId, title });
+    const svc = new BrainService(d as never);
+
+    // Bound exactly as the web binds it: session + client + generation.
+    const web = await svc.start(1, { clientId: 'web-a', clientGeneration: 1 });
+    await svc.send({ userId: 1, text: 'ship it', session: web.sessionId, client: { id: 'web-a', generation: 1 } });
+    expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
   });
 
   // `fromWeb` only means "not from a bound CLI", which is equally true of the browser tab the user is
