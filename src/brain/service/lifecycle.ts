@@ -8,6 +8,7 @@ import { DEFAULT_AUTO_COMPACT_PCT } from '../session/liveBrain.js';
 import type { LiveBrain, SpawnOpts } from '../session/liveBrain.js';
 import { rolloverDue } from '../session/idleRollover.js';
 import { decideVisionHop } from '../visionFallback.js';
+import { catalogModelVision } from '../modelCapabilities.js';
 import { defaultUserSessionId, freshUserSessionId, isNonUserSession, isOwnedUserSession, isChannelSession, channelIdOf } from '../sessionId.js';
 import type { BrainDeps } from '../brainDeps.js';
 import type { ClientAttachments } from './attachments.js';
@@ -487,6 +488,9 @@ export class ConversationLifecycle {
     const hop = decideVisionHop({
       hasImages, onFallback: !!b.visionFallback,
       currentModel: b.model, currentProvider: b.providerId,
+      // Same source of truth the model descriptor uses to decide whether to strip images
+      // (providers.ts modelEntry): a model the catalog knows reads images keeps its turn.
+      currentModelHasVision: !!b.providerId && !!b.model && catalogModelVision(b.providerId, b.model) === true,
       visionModel: settings?.visionModel, visionModelProvider: settings?.visionModelProvider,
     });
     if (hop.action === 'none') return b;

@@ -29,6 +29,30 @@ describe('decideVisionHop — the vision-fallback decision, isolated from sessio
     })).toEqual({ action: 'hop', provider: 'vision-provider', model: 'shared' });
   });
 
+  // The fallback is a safety net for a model that cannot read images at all. Hopping off one that CAN
+  // answers the user on a model they did not choose — and usually a weaker one — while throwing away the
+  // conversation's warm cache to do it.
+  it('stays on a model the catalog knows reads images, even with a fallback configured', () => {
+    expect(decideVisionHop({
+      hasImages: true, onFallback: false, currentModel: 'claude-opus-5', currentProvider: 'anthropic',
+      currentModelHasVision: true, visionModel: 'qwen3.8-max', visionModelProvider: 'alibaba',
+    })).toEqual({ action: 'none' });
+  });
+
+  it('still hops for a model not known to read images — that is what the net is for', () => {
+    expect(decideVisionHop({
+      hasImages: true, onFallback: false, currentModel: 'text-only', currentProvider: 'p',
+      currentModelHasVision: false, visionModel: 'v', visionModelProvider: 'vp',
+    })).toEqual({ action: 'hop', provider: 'vp', model: 'v' });
+  });
+
+  it('hops when capability is simply unknown, rather than gambling on an opaque provider 400', () => {
+    expect(decideVisionHop({
+      hasImages: true, onFallback: false, currentModel: 'relay-model', currentProvider: 'relay',
+      visionModel: 'v', visionModelProvider: 'vp',
+    })).toEqual({ action: 'hop', provider: 'vp', model: 'v' });
+  });
+
   it('a text-only turn while parked on the fallback hops back to the normal model', () => {
     expect(decideVisionHop({ hasImages: false, onFallback: true }))
       .toEqual({ action: 'hop-back' });

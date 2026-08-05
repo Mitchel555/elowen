@@ -17,17 +17,22 @@ export function decideVisionHop(i: {
   /** Config provider entry of the current session. The same model id can exist under multiple
    *  providers, so provider identity participates whenever the fallback explicitly names one. */
   currentProvider?: string;
+  /** Whether the catalog KNOWS the current model reads images. True → no hop: the fallback exists for
+   *  models that cannot do this, and sending the turn elsewhere would answer with a weaker model than
+   *  the one the user chose. False/undefined keeps the previous behaviour, so an unprobeable relay still
+   *  gets the safety net rather than an opaque provider 400. */
+  currentModelHasVision?: boolean;
   visionModel?: string;
   visionModelProvider?: string;
 }): VisionHop {
-  // Route an image turn to the operator's configured vision model whenever one is set AND its configured
-  // provider/model pair differs from the current session. We can't probe per-model vision capability
-  // for inline providers, so rather than
-  // guess from the (now always-multimodal) descriptor, we honour the explicit visionModel choice: if it's
-  // configured, images go there. When the current provider/model already IS the vision target, there's nothing to
-  // hop to — the image passes straight through, no churn.
+  // Route an image turn to the operator's configured vision model when one is set, its provider/model
+  // pair differs from the current session, AND the current model is not already known to read images.
+  // That last condition is the point of the fallback: it is a safety net for a text-only model, not a
+  // redirect away from a capable one — hopping off a vision-capable model answers the user on something
+  // they did not pick, and throws away the conversation's warm cache to do it.
   const providerDiffers = !!i.visionModelProvider && i.visionModelProvider !== i.currentProvider;
-  if (i.hasImages && i.visionModel && (i.visionModel !== i.currentModel || providerDiffers)) {
+  if (i.hasImages && i.visionModel && !i.currentModelHasVision
+      && (i.visionModel !== i.currentModel || providerDiffers)) {
     return { action: 'hop', provider: i.visionModelProvider || undefined, model: i.visionModel };
   }
   if (!i.hasImages && i.onFallback) return { action: 'hop-back' };

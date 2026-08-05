@@ -79,6 +79,31 @@ describe('ConversationLifecycle vision fallback', () => {
     expect(restored.listeners.has(listener)).toBe(true);
   });
 
+  // Real report: a photo sent while the conversation ran on claude-opus-5 was answered by the configured
+  // qwen fallback. The catalog knows opus reads images, so there was nothing to fall back FROM — the turn
+  // was handed to a weaker model, and the respawn dropped the conversation's warm cache with it.
+  it('leaves a vision-capable model alone instead of handing its image turn to the fallback', async () => {
+    const sessions = new LiveSessionRegistry<LiveBrain>();
+    const original = live({ provider: 'anthropic', model: 'claude-opus-5' });
+    sessions.set('brain-1', original);
+    const spawn = vi.fn(async () => live({ provider: 'alibaba', model: 'qwen3.8-max' }));
+    const lifecycle = new ConversationLifecycle({
+      store: { getSession: () => ({ id: 'brain-1', user_id: 1, work_dir: '' }) },
+      sessions,
+      attachments: new ClientAttachments(),
+      elicitation: { cancelForSession: vi.fn() },
+      goals: { cancelGoalContinuation: vi.fn(), resumeAfterRespawn: vi.fn(), pauseForRespawnFailure: vi.fn() },
+      spawn,
+      policy: () => ({ allowedProjectIds: 'all', allowedPaths: () => [] }),
+      userSettings: () => ({ visionModelProvider: 'alibaba', visionModel: 'qwen3.8-max' }),
+      selectionAllowed: () => true,
+    } as never);
+
+    const result = await lifecycle.maybeVisionHop(1, original, true);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(result).toBe(original);
+  });
+
   it('does not mark fallback active when provider resolution lands on another provider with the same model id', async () => {
     const sessions = new LiveSessionRegistry<LiveBrain>();
     const original = live({ provider: 'main', model: 'text' });
