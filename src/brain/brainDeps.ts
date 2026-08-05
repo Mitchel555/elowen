@@ -109,6 +109,9 @@ export interface BrainDeps {
   /** Auto-categorizer handed to the curator so a newly-added durable memory is classified into one of
    *  the owner's categories (fire-and-forget). Absent → new memories are left uncategorized. */
   memoryCategorizer?: MemoryCategorizer;
+  /** Operator cap on how many memories the post-turn curator may write from one exchange, read per run
+   *  so a change applies without a restart. 0 switches automatic writing off. */
+  memoryCuratorMaxOps?: () => number;
   /** Per-user memory category store — powers the owner's memory_category_* tools. */
   memoryCategoryStore?: MemoryCategoryStore;
   /** Injected for tests; defaults to PI's createAgentSession. */

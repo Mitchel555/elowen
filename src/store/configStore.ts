@@ -316,6 +316,15 @@ const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   localShellTimeoutMs: 30_000,
   // 0.30 cosine, carried in per mille because the clamp rounds to a whole number — see RuntimeLimits.
   memorySemanticFloorPerMille: 300,
+  // Both calibrated against the measured pair distribution of the live store rather than picked by feel
+  // (p50 0.216, p90 0.383, p99 0.539, max 0.765): the previous hard-coded 0.85/0.97 sat above every pair
+  // that exists, so neither check had ever fired once. Re-measure after changing the embedding model.
+  memoryDuplicatePerMille: 720,
+  memoryParaphrasePerMille: 700,
+  // 0.10 each, leaving 0.80 for semantic similarity.
+  memoryImportanceWeightPerMille: 100,
+  memoryVitalityWeightPerMille: 100,
+  memoryCuratorMaxOps: 2,
   toolDeferThreshold: 10,
   eventRetentionDays: 30,
   // Two and a half missed heartbeats on a watched page…
@@ -344,6 +353,17 @@ const DEFAULT_TOOL_DEFERRAL_ENABLED = true;
 const RUNTIME_LIMIT_BOUNDS: Record<keyof RuntimeLimits, [min: number, max: number]> = {
   localShellTimeoutMs: [10_000, 300_000],
   memorySemanticFloorPerMille: [100, 800],
+  // Both floored at 0.50: below that, memories that merely share a topic start counting as the same fact,
+  // and for the duplicate threshold that means overwriting one memory with another. The 0.98 ceiling is
+  // where a threshold stops firing at all — which is exactly the defect these two replaced.
+  memoryDuplicatePerMille: [500, 980],
+  memoryParaphrasePerMille: [500, 980],
+  // Capped at 0.30 each, so semantic similarity can never fall below 0.40 of the score no matter how both
+  // are set. Past that the ranking stops answering the question that was asked.
+  memoryImportanceWeightPerMille: [0, 300],
+  memoryVitalityWeightPerMille: [0, 300],
+  // 0 disables automatic writing; past a handful per exchange the curator is transcribing, not curating.
+  memoryCuratorMaxOps: [0, 6],
   // Below 1 the threshold would defer a session holding a single MCP tool, which costs a prompt-cache
   // break for nothing; past 100 no realistic MCP surface would ever engage it.
   toolDeferThreshold: [1, 100],

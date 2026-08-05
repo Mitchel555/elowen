@@ -136,6 +136,7 @@ export class BrainService {
       this.curator = new MemoryCurator({
         store: d.memoryStore, service: d.memoryService,
         inference: d.inference ?? (() => null), categorizer: d.memoryCategorizer,
+        ...(d.memoryCuratorMaxOps ? { maxOps: d.memoryCuratorMaxOps } : {}),
         logger: logger('memory-curator'),
       });
     }

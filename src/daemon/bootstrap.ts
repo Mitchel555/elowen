@@ -771,6 +771,18 @@ export async function buildApp(opts: BuildOpts) {
     // Relevance floor below which a memory counts as unrelated to the query (Elowen AI → Runtime), carried
     // in per mille of cosine similarity. Read live, like the recall size above.
     semanticFloorPerMille: () => config.get().runtime.limits.memorySemanticFloorPerMille,
+    // How much of the score is NOT the query — semantic similarity takes whatever these two leave. Same
+    // live read as the floor above.
+    scoreWeightsPerMille: () => ({
+      importance: config.get().runtime.limits.memoryImportanceWeightPerMille,
+      vitality: config.get().runtime.limits.memoryVitalityWeightPerMille,
+    }),
+    // The two cosine thresholds deciding when two memories are the same fact: on write (update instead
+    // of add) and on recall (skip the redundant one).
+    dedupePerMille: () => ({
+      duplicate: config.get().runtime.limits.memoryDuplicatePerMille,
+      paraphrase: config.get().runtime.limits.memoryParaphrasePerMille,
+    }),
     retention: () => config.get().runtime.memoryRetention,
     // A recall moves usage and vitality with no user action behind it, so the open memory view would sit
     // on stale numbers until it remounted (queries are SSE-driven, refetchOnWindowFocus is off).
@@ -938,6 +950,8 @@ export async function buildApp(opts: BuildOpts) {
         // Auto-categorize newly-added durable memories (fire-and-forget from the curator) + the owner's
         // memory_category_* tools (create/delete/recategorize).
         memoryCategorizer, memoryCategoryStore,
+        // Cap on curator writes per exchange (Elowen AI → Runtime), read live like the budgets above.
+        memoryCuratorMaxOps: () => config.get().runtime.limits.memoryCuratorMaxOps,
       })
     : undefined;
   // Admin-only interactive `elowen chat` terminals bound to existing brain conversations. Its cwd is a

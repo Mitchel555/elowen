@@ -53,6 +53,11 @@ export const brainLimitsPatchSchema = z.object({
 export const runtimeLimitsPatchSchema = z.object({
   localShellTimeoutMs: z.number().optional(),
   memorySemanticFloorPerMille: z.number().optional(),
+  memoryDuplicatePerMille: z.number().optional(),
+  memoryParaphrasePerMille: z.number().optional(),
+  memoryImportanceWeightPerMille: z.number().optional(),
+  memoryVitalityWeightPerMille: z.number().optional(),
+  memoryCuratorMaxOps: z.number().optional(),
   toolDeferThreshold: z.number().optional(),
   eventRetentionDays: z.number().optional(),
   streamSilenceLimitMs: z.number().optional(),

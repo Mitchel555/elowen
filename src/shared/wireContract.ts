@@ -278,6 +278,23 @@ export interface BrainLimits {
 export interface RuntimeLimits {
   localShellTimeoutMs: number;
   memorySemanticFloorPerMille: number;
+  /** Cosine (per mille, same reason as the floor above) at which a NEW memory counts as a near-duplicate
+   *  of an existing one, so the curator and MemoryAdd update that one instead of adding a paraphrase.
+   *  Deliberately separate from the recall-side threshold below: a false positive here REWRITES a stored
+   *  memory, whereas there it only drops a search result, so this one is set the more cautious of the two. */
+  memoryDuplicatePerMille: number;
+  /** Cosine (per mille) at which an already-picked memory makes a lower-ranked one redundant, so recall
+   *  does not spend two of its slots on two write-ups of the same fact. */
+  memoryParaphrasePerMille: number;
+  /** How much of the recall score is importance, and how much is vitality, in per mille. Semantic
+   *  similarity takes whatever is left (1000 − the two), so raising either lowers the weight of the
+   *  question itself. Vitality especially: it grows from use_count, which recall increments on its own,
+   *  so a high value here feeds a loop where recalled memories keep being recalled. */
+  memoryImportanceWeightPerMille: number;
+  memoryVitalityWeightPerMille: number;
+  /** Upper bound on how many memory writes the post-turn curator may apply from one exchange. 0 turns
+   *  automatic memory writing off entirely; the explicit Memory* tools keep working. */
+  memoryCuratorMaxOps: number;
   toolDeferThreshold: number;
   eventRetentionDays: number;
   /** The two below are a PAIR — both answer "how long may a chat stream go without a sign of life before

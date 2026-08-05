@@ -91,11 +91,35 @@ describe('runtime limits — web editor against the daemon clamp', () => {
   // Guards the parsing itself: were a regex to stop matching, every table above would silently be empty
   // and all three assertions would pass on nothing.
   it('actually read both tables', () => {
-    expect(Object.keys(daemonBounds())).toHaveLength(7);
-    expect(Object.keys(webBounds())).toHaveLength(7);
+    expect(Object.keys(daemonBounds())).toHaveLength(12);
+    expect(Object.keys(webBounds())).toHaveLength(12);
     expect(daemonBounds().localShellTimeoutMs).toEqual([10000, 300000]);
     expect(daemonBounds().memorySemanticFloorPerMille).toEqual([100, 800]);
     expect(webBounds().eventRetentionDays).toEqual([1, 365]);
     expect(webDefaults.memorySemanticFloorPerMille).toBe(300);
+  });
+
+  // The two score weights are the one group where a bound is a CORRECTNESS limit, not taste: semantic
+  // similarity takes whatever they leave, so a pair that could sum past 1000 would drive it negative.
+  it('caps the score weights so semantic similarity keeps at least 40% of the ranking', () => {
+    const bounds = daemonBounds();
+    const maxImportance = bounds.memoryImportanceWeightPerMille[1];
+    const maxVitality = bounds.memoryVitalityWeightPerMille[1];
+    expect(maxImportance + maxVitality).toBeLessThanOrEqual(600);
+    expect(bounds.memoryImportanceWeightPerMille[0]).toBe(0);
+    expect(bounds.memoryVitalityWeightPerMille[0]).toBe(0);
+    expect(webDefaults.memoryImportanceWeightPerMille + webDefaults.memoryVitalityWeightPerMille).toBe(200);
+  });
+
+  // Both dedup thresholds were once set above every cosine the store can produce, so neither ever fired.
+  // A ceiling at or above 1.0 would allow exactly that state again through the UI.
+  it('keeps both dedup thresholds inside a range where they can actually fire', () => {
+    const bounds = daemonBounds();
+    for (const key of ['memoryDuplicatePerMille', 'memoryParaphrasePerMille'] as const) {
+      expect(bounds[key][0]).toBeGreaterThanOrEqual(500);
+      expect(bounds[key][1]).toBeLessThan(1000);
+    }
+    // Saving is the destructive side (it overwrites a stored memory), so it stays the stricter of the two.
+    expect(webDefaults.memoryDuplicatePerMille).toBeGreaterThan(webDefaults.memoryParaphrasePerMille);
   });
 });

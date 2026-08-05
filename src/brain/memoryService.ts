@@ -155,6 +155,13 @@ export class MemoryService {
   /** Operator-tuned semantic relevance floor, in per mille of cosine similarity. Absent (or non-finite)
    *  → {@link MIN_SEMANTIC}. Read per call so a Settings change applies without a restart. */
   private readonly semanticFloorPerMille?: () => number;
+  /** Operator-tuned share of the score that is NOT the query, in per mille; semantic takes the rest.
+   *  Absent (or non-finite) → the built-in weights. Read per call, like the floor above. */
+  private readonly scoreWeightsPerMille?: () => { importance: number; vitality: number };
+  /** Operator-tuned cosine thresholds, in per mille: `duplicate` decides when a new body updates an
+   *  existing memory instead of adding one, `paraphrase` when a recalled memory is redundant with one
+   *  already picked. Absent (or non-finite) → the built-in constants. */
+  private readonly dedupePerMille?: () => { duplicate: number; paraphrase: number };
   /** Active memory-retention policy. Absent → the built-in vitality defaults. */
   private readonly retention?: () => MemoryRetentionConfig;
   /** Nudged after a delivered recall so live views can refresh. Absent → nobody is listening. */
@@ -167,6 +174,8 @@ export class MemoryService {
     embeddingConfig: () => EmbeddingConfig | null;
     recallDefaults?: () => { count: number; chars: number };
     semanticFloorPerMille?: () => number;
+    scoreWeightsPerMille?: () => { importance: number; vitality: number };
+    dedupePerMille?: () => { duplicate: number; paraphrase: number };
     retention?: () => MemoryRetentionConfig;
     /** Called after a delivered recall bumped the counters, so live views can refresh themselves. A
      *  recall changes memory state without any user action, and nothing else would tell the UI. */
@@ -178,6 +187,8 @@ export class MemoryService {
     this.embeddingConfig = deps.embeddingConfig;
     this.recallDefaults = deps.recallDefaults;
     this.semanticFloorPerMille = deps.semanticFloorPerMille;
+    this.scoreWeightsPerMille = deps.scoreWeightsPerMille;
+    this.dedupePerMille = deps.dedupePerMille;
     this.retention = deps.retention;
     this.onRecalled = deps.onRecalled;
   }
@@ -186,6 +197,31 @@ export class MemoryService {
   private minSemantic(): number {
     const configured = this.semanticFloorPerMille?.();
     return typeof configured === 'number' && Number.isFinite(configured) ? configured / PER_MILLE : MIN_SEMANTIC;
+  }
+
+  /** The three score weights on the 0–1 scale, always summing to 1. Only importance and vitality are
+   *  configured; semantic takes the remainder, so the operator cannot produce a set that sums to
+   *  something else. A non-finite or out-of-range pair falls back to the built-in weights whole rather
+   *  than mixing one configured value with two defaults, which would silently break that sum. */
+  private weights(): { semantic: number; importance: number; vitality: number } {
+    const configured = this.scoreWeightsPerMille?.();
+    const importance = configured?.importance;
+    const vitality = configured?.vitality;
+    const usable = typeof importance === 'number' && Number.isFinite(importance) && importance >= 0
+      && typeof vitality === 'number' && Number.isFinite(vitality) && vitality >= 0
+      && importance + vitality <= PER_MILLE;
+    if (!usable) return { semantic: W_SEMANTIC, importance: W_IMPORTANCE, vitality: W_VITALITY };
+    return {
+      semantic: (PER_MILLE - importance - vitality) / PER_MILLE,
+      importance: importance / PER_MILLE,
+      vitality: vitality / PER_MILLE,
+    };
+  }
+
+  /** A configured cosine threshold on the 0–1 scale, or the built-in constant when unset/non-finite. */
+  private threshold(which: 'duplicate' | 'paraphrase', fallback: number): number {
+    const configured = this.dedupePerMille?.()[which];
+    return typeof configured === 'number' && Number.isFinite(configured) ? configured / PER_MILLE : fallback;
   }
 
   /** Current vitality for a memory under the active retention policy. */
@@ -259,7 +295,7 @@ export class MemoryService {
     if (text === '') return [];
     const cfg = this.activeConfig();
     if (!cfg) return [];
-    const threshold = opts.threshold ?? DEFAULT_SIMILAR_THRESHOLD;
+    const threshold = opts.threshold ?? this.threshold('duplicate', DEFAULT_SIMILAR_THRESHOLD);
     const limit = opts.limit ?? DEFAULT_SIMILAR_LIMIT;
 
     let vec: Float32Array;
@@ -324,14 +360,15 @@ export class MemoryService {
   ): RetrieveResult {
     const now = Date.now();
     const retention = this.retention?.() ?? DEFAULT_MEMORY_RETENTION;
+    const w = this.weights();
     const ranked: Candidate[] = this.recallable(this.store.listActiveWithEmbeddings(userId), ({ memory }) => memory, scope)
       .map(({ memory, vector }) => {
         const semantic = cosine(queryVec, vector);
         const importanceWeight = importanceWeightOf(memory);
         const recencyWeight = recencyWeightOf(memory, now);
         const usageWeight = usageWeightOf(memory);
-        const score = semantic * W_SEMANTIC + importanceWeight * W_IMPORTANCE
-          + (vitality(memory, retention, now) / 100) * W_VITALITY;
+        const score = semantic * w.semantic + importanceWeight * w.importance
+          + (vitality(memory, retention, now) / 100) * w.vitality;
         return { memory, vector, score, semantic, importanceWeight, recencyWeight, usageWeight };
       })
       .sort((a, b) => b.score - a.score);
@@ -398,11 +435,12 @@ export class MemoryService {
    *  otherwise dedupe falls back to exact-body equality. */
   private pack(ranked: Candidate[], maxCount: number, charBudget: number, dedupe: boolean): Candidate[] {
     const picked: Candidate[] = [];
+    const paraphrase = this.threshold('paraphrase', DEDUPE_COSINE);
     let chars = 0;
     for (const cand of ranked) {
       if (picked.length >= maxCount) break;
       const isDup = dedupe && cand.vector
-        ? picked.some((p) => p.vector && cosine(p.vector, cand.vector!) >= DEDUPE_COSINE)
+        ? picked.some((p) => p.vector && cosine(p.vector, cand.vector!) >= paraphrase)
         : picked.some((p) => p.memory.body === cand.memory.body);
       if (isDup) continue;
       const len = cand.memory.body.length;

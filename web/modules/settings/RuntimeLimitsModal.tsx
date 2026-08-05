@@ -1,5 +1,5 @@
 'use client';
-import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, MessageSquare, type LucideIcon } from 'lucide-react';
+import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, MessageSquare, Copy, CopyCheck, Star, HeartPulse, PenLine, type LucideIcon } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { HelpTip } from '../../components/ui/HelpTip';
@@ -11,16 +11,21 @@ import type { RuntimeConfig, RuntimeLimits } from '../../lib/types';
 
 /** Fallback for seeding the Runtime form before the daemon's config arrives (it always sends real values). */
 export const RUNTIME_LIMIT_DEFAULTS: RuntimeLimits = {
-  localShellTimeoutMs: 30000, memorySemanticFloorPerMille: 300, toolDeferThreshold: 10, eventRetentionDays: 30,
+  localShellTimeoutMs: 30000, memorySemanticFloorPerMille: 300,
+  memoryDuplicatePerMille: 720, memoryParaphrasePerMille: 700,
+  memoryImportanceWeightPerMille: 100, memoryVitalityWeightPerMille: 100, memoryCuratorMaxOps: 2,
+  toolDeferThreshold: 10, eventRetentionDays: 30,
   streamSilenceLimitMs: 75000, streamReviveSilenceLimitMs: 45000, toastDurationMs: 4500,
 };
 
 const MILLISECONDS_PER_SECOND = 1_000;
-/** The semantic floor travels as an integer per mille so the daemon's whole-number clamp cannot round a
- *  cosine threshold away to zero; the slider shows the cosine value the operator reasons about. */
+/** The cosine thresholds travel as integer per mille so the daemon's whole-number clamp cannot round a
+ *  threshold away to zero; the slider shows the cosine value the operator reasons about. */
 const PER_MILLE = 1_000;
+/** Score weights travel in the same per-mille unit but read as a percentage of the score. */
+const PER_MILLE_PER_PERCENT = 10;
 
-type RuntimeLimitKind = 'seconds' | 'cosine' | 'count' | 'days';
+type RuntimeLimitKind = 'seconds' | 'cosine' | 'count' | 'days' | 'share';
 type RuntimeLimitField = {
   key: keyof RuntimeLimits;
   kind: RuntimeLimitKind;
@@ -38,6 +43,14 @@ type RuntimeLimitField = {
 const RUNTIME_LIMIT_FIELDS: RuntimeLimitField[] = [
   { key: 'localShellTimeoutMs', kind: 'seconds', min: 10000, max: 300000, step: 5000, icon: TerminalSquare },
   { key: 'memorySemanticFloorPerMille', kind: 'cosine', min: 100, max: 800, step: 10, icon: Radar },
+  // The memory group stays together and in the order a memory travels: which ones count as related, when
+  // two are the same fact on write, when they are on recall, what else besides the question decides the
+  // ranking, and how much may be written at all.
+  { key: 'memoryDuplicatePerMille', kind: 'cosine', min: 500, max: 980, step: 10, icon: CopyCheck },
+  { key: 'memoryParaphrasePerMille', kind: 'cosine', min: 500, max: 980, step: 10, icon: Copy },
+  { key: 'memoryImportanceWeightPerMille', kind: 'share', min: 0, max: 300, step: 10, icon: Star },
+  { key: 'memoryVitalityWeightPerMille', kind: 'share', min: 0, max: 300, step: 10, icon: HeartPulse },
+  { key: 'memoryCuratorMaxOps', kind: 'count', min: 0, max: 6, step: 1, icon: PenLine },
   { key: 'toolDeferThreshold', kind: 'count', min: 1, max: 100, step: 1, icon: Layers },
   { key: 'eventRetentionDays', kind: 'days', min: 1, max: 365, step: 1, icon: History },
   // Adjacent on purpose: the two are one setting asked at two moments (a watched page, and a wake-up where
@@ -53,6 +66,7 @@ const DISPLAY_DIVISORS: Record<RuntimeLimitKind, number> = {
   cosine: PER_MILLE,
   count: 1,
   days: 1,
+  share: PER_MILLE_PER_PERCENT,
 };
 
 function toCanonicalValue(field: RuntimeLimitField, displayValue: number): number {
@@ -78,6 +92,7 @@ export function RuntimeLimitsModal({ runtime, applied, onChange, onClose, presen
     const value = canonical / DISPLAY_DIVISORS[field.kind];
     if (field.kind === 'seconds') return `${Number(value.toFixed(1))} ${t.brain.runtime.secondUnit}`;
     if (field.kind === 'cosine') return value.toFixed(2);
+    if (field.kind === 'share') return `${value} %`;
     if (field.kind === 'days') return `${value} ${plural(t.brain.runtime.dayUnit, value)}`;
     return String(value);
   };

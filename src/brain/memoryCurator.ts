@@ -47,6 +47,10 @@ export class MemoryCurator {
   private readonly inference: () => InferenceClient | null;
   private readonly categorizer?: MemoryCategorizer;
   private readonly logger?: Logger;
+  /** Operator-tuned cap on writes per exchange (Settings → Elowen AI → Runtime). Absent or non-finite →
+   *  {@link MAX_OPS_PER_TURN}. Read per run so a change applies without a restart; 0 is a legitimate
+   *  value and means the curator distills but writes nothing. */
+  private readonly maxOps?: () => number;
 
   constructor(deps: {
     store: MemoryStore;
@@ -55,13 +59,23 @@ export class MemoryCurator {
     /** Optional auto-categorizer: after a genuinely NEW add, best-effort classifies the memory into one
      *  of the owner's categories (fire-and-forget). Absent → new memories are simply left uncategorized. */
     categorizer?: MemoryCategorizer;
+    maxOps?: () => number;
     logger?: Logger;
   }) {
     this.store = deps.store;
     this.service = deps.service;
     this.inference = deps.inference;
     this.categorizer = deps.categorizer;
+    this.maxOps = deps.maxOps;
     this.logger = deps.logger;
+  }
+
+  /** How many operations this run may apply. */
+  private opBudget(): number {
+    const configured = this.maxOps?.();
+    return typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
+      ? Math.floor(configured)
+      : MAX_OPS_PER_TURN;
   }
 
   /** Distill + persist durable facts from one exchange. Resolves quietly on ANY failure (this is
@@ -84,12 +98,14 @@ export class MemoryCurator {
         const rows = await this.service.searchSemantic(userId, `${user}\n${assistantText}`, 8);
         existing = rows.map((m) => ({ id: m.id, body: m.body }));
       } catch { /* retrieval is best-effort — fall back to a blind curation pass */ }
+      const budget = this.opBudget();
+      if (budget === 0) return; // automatic writing switched off — do not even ask the model
       const { text } = await inf.decide(buildPrompt(user, assistantText, existing));
       const ops = parseOps(text);
       if (ops.length === 0) return; // model ran but distilled nothing durable this turn — expected + quiet
       // Record WHICH model distilled these facts on every add/update audit row.
-      await this.apply(userId, ops.slice(0, MAX_OPS_PER_TURN), inf.model);
-      this.logger?.info('memory curator applied memory op(s)', { userId, ops: Math.min(ops.length, MAX_OPS_PER_TURN), model: inf.model });
+      await this.apply(userId, ops.slice(0, budget), inf.model);
+      this.logger?.info('memory curator applied memory op(s)', { userId, ops: Math.min(ops.length, budget), model: inf.model });
     } catch (err) {
       this.logger?.warn('memory curator failed', { userId, error: String(err) });
     }
