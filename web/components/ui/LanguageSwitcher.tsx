@@ -12,12 +12,17 @@ const LANGS: { value: Locale; name: string }[] = [
 ];
 
 /**
- * Accessible language dropdown for the sidebar footer — replaces the old inline en/cs toggle.
- * Opens on click, closes on outside click or Esc, and is keyboard-navigable (Arrow/Home/End move
- * the active option, Enter selects). Selection persists via the i18n store. The menu opens upward
- * (footer sits at the bottom) and sideways in the collapsed rail so it never clips off-screen.
+ * Accessible language dropdown. Opens on click, closes on outside click or Esc, and is
+ * keyboard-navigable (Arrow/Home/End move the active option, Enter selects). Selection persists via
+ * the i18n store.
+ *
+ * `collapsed` narrows the BUTTON to a bare icon (the top bar drops the locale label on small
+ * screens); it deliberately does not move the menu. The menu always drops below the button and is
+ * right-aligned to it, because the only mount point is the top bar — an earlier variant opened the
+ * collapsed menu sideways and bottom-aligned, which put it off-screen on a phone and made the
+ * language unreachable there.
  */
-export function LanguageSwitcher({ collapsed = false, side = 'left' }: { collapsed?: boolean; side?: 'left' | 'right' }) {
+export function LanguageSwitcher({ collapsed = false }: { collapsed?: boolean }) {
   const { locale, setLocale, t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -78,7 +83,7 @@ export function LanguageSwitcher({ collapsed = false, side = 'left' }: { collaps
           role="menu"
           aria-label={t.common.language}
           onKeyDown={onMenuKey}
-          className={`absolute z-50 min-w-[9rem] overflow-hidden rounded-lg border border-border bg-surface py-1 ${collapsed ? (side === 'right' ? 'bottom-0 right-full mr-2' : 'bottom-0 left-full ml-2') : 'top-full right-0 mt-2'}`}
+          className="absolute right-0 top-full z-50 mt-2 min-w-[9rem] overflow-hidden rounded-lg border border-border bg-surface py-1"
           style={{ boxShadow: 'var(--shadow-raised)' }}
         >
           {LANGS.map((l, i) => {

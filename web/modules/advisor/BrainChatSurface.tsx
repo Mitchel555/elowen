@@ -153,13 +153,13 @@ function CardBlock({ card }: { card: BrainCard }) {
   const previewable = items.length > CARD_PREVIEW_ITEMS;
   const shown = collapsed ? [] : previewable && !expanded ? items.slice(0, CARD_PREVIEW_ITEMS) : items;
   return (
-    <div data-testid="chat-card" className="rounded-md border border-border bg-elevated p-2 text-tiny">
+    <div data-testid="chat-card" className="flex flex-col pl-4 font-mono text-tiny leading-relaxed">
       {(card.title || items.length > 0) ? (
         <button
           type="button"
           onClick={() => setCollapsed((v) => !v)}
           aria-expanded={!collapsed}
-          className="mb-1 flex w-full items-center gap-1.5 text-left font-medium text-text-muted transition-colors hover:text-text"
+          className="flex w-full items-center gap-1.5 text-left text-text-muted transition-colors hover:text-text"
         >
           <ChevronRight size={11} aria-hidden className={`shrink-0 opacity-60 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
           <span className="truncate">{card.title ?? t.brainChat.cardFallback}</span>
@@ -970,7 +970,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           <button
             type="button"
             onClick={() => setAgentsOpen(true)}
-            className="flex items-center gap-1.5 self-start rounded-md border border-border bg-elevated px-2 py-1 text-tiny text-text-muted transition-colors hover:text-text"
+            className="flex items-center gap-1.5 self-start pl-4 font-mono text-tiny leading-relaxed text-text-muted transition-colors hover:text-text"
           >
             <Users size={11} aria-hidden />
             {/* Never fall back to the transcript's total when nothing runs: that is what let a finished

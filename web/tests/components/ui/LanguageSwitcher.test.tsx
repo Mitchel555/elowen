@@ -58,14 +58,30 @@ describe('LanguageSwitcher', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
-  it('opens the collapsed menu inward (right-full) when side is right', () => {
+  // The collapsed button is what the top bar renders on a phone. It used to also move the menu
+  // sideways and bottom-align it (a leftover from a sidebar-footer mount that no longer exists),
+  // which pushed the menu off the right edge of a phone screen — the language became unreachable.
+  it('drops the menu below the button even when collapsed, never sideways', () => {
     const { wrapper: Wrapper } = createWrapper();
-    render(<Wrapper><LanguageSwitcher collapsed side="right" /></Wrapper>);
+    render(<Wrapper><LanguageSwitcher collapsed /></Wrapper>);
 
     fireEvent.click(screen.getByRole('button'));
 
     const menu = screen.getByRole('menu');
-    expect(menu.className).toContain('right-full');
+    expect(menu.className).toContain('top-full');
+    expect(menu.className).toContain('right-0');
     expect(menu.className).not.toContain('left-full');
+    expect(menu.className).not.toContain('right-full');
+  });
+
+  it('positions the menu the same way when not collapsed', () => {
+    const { wrapper: Wrapper } = createWrapper();
+    render(<Wrapper><LanguageSwitcher /></Wrapper>);
+
+    fireEvent.click(screen.getByRole('button'));
+
+    const menu = screen.getByRole('menu');
+    expect(menu.className).toContain('top-full');
+    expect(menu.className).toContain('right-0');
   });
 });
