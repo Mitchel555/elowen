@@ -77,9 +77,15 @@ const SNAPSHOT_TIMEOUT_MS = 15_000;
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_TEXT_BYTES = 256 * 1024;
+/** What the vision providers actually decode (Anthropic: png/jpeg/gif/webp) — mirrors imageSchema in
+ *  src/api/schemas/brain.ts and cli/chat/mentions.ts' IMAGE_MIME_BY_EXT. A browser reports plenty of
+ *  other "image/*" types (heic, bmp, avif, svg…) that pass this prefix but that the provider cannot
+ *  decode — forwarding one gets an opaque "Could not process image" 400 instead of a clear local error. */
+const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-async function readAttachment(file: File): Promise<Attachment | null> {
+async function readAttachment(file: File): Promise<Attachment | null | 'unsupported'> {
   if (file.type.startsWith('image/')) {
+    if (!SUPPORTED_IMAGE_TYPES.has(file.type)) return 'unsupported';
     if (file.size > MAX_IMAGE_BYTES) return null;
     const dataUrl = await new Promise<string>((res, rej) => {
       const r = new FileReader();
@@ -849,6 +855,7 @@ function useBrainChatController(): BrainChatValue {
   const addFiles = async (files: Iterable<File>): Promise<void> => {
     for (const f of files) {
       const a = await readAttachment(f).catch(() => null);
+      if (a === 'unsupported') { toast(t.brainChat.attachUnsupportedType, 'error'); continue; }
       if (!a) { toast(t.brainChat.attachTooBig, 'error'); continue; }
       setAttachments((cur) => {
         if (a.kind === 'image' && cur.filter((x) => x.kind === 'image').length >= MAX_IMAGES) return cur;

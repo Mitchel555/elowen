@@ -1638,6 +1638,7 @@ export const sk = {
     attach: 'Priložiť súbor',
     attachRemove: 'Odobrať prílohu',
     attachTooBig: 'Súbor je príliš veľký alebo binárny',
+    attachUnsupportedType: 'Nepodporovaný formát obrázka — použite PNG, JPEG, GIF alebo WEBP',
     attachOnly: '(príloha)',
     deleteChat: 'Vymazať konverzáciu',
     context: 'kontext',

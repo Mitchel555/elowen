@@ -405,6 +405,17 @@ describe('brain routes', () => {
     });
   });
 
+  it('rejects an image mimeType the vision providers cannot decode (never reaches the turn)', async () => {
+    const { app, amyTok, brain } = setup();
+    await app.request('/brain/start', post(amyTok, {}));
+    const response = await app.request('/brain/send', post(amyTok, {
+      text: 'what is this photo',
+      images: [{ data: 'aGVsbG8=', mimeType: 'image/heic' }],
+    }));
+    expect(response.status).toBe(400);
+    expect(brain.turnRequests).toEqual([]);
+  });
+
   it('messages returns the display history', async () => {
     const { app, amyTok } = setup();
     const res = await app.request('/brain/messages', auth(amyTok));

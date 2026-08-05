@@ -1638,6 +1638,7 @@ export const en = {
     attach: 'Attach a file',
     attachRemove: 'Remove attachment',
     attachTooBig: 'File is too large or binary',
+    attachUnsupportedType: 'Unsupported image format — use PNG, JPEG, GIF or WEBP',
     attachOnly: '(attachment)',
     deleteChat: 'Delete conversation',
     context: 'context',

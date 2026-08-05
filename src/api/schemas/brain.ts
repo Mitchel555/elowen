@@ -51,10 +51,13 @@ export const brainModelSchema = z.object({
 });
 
 /** One attached image: base64 payload + its mime type. ~7 MB of base64 ≈ 5 MB binary — enough for
- *  screenshots and photos while keeping a request bounded. */
+ *  screenshots and photos while keeping a request bounded. mimeType is restricted to what the vision
+ *  providers actually decode (Anthropic: png/jpeg/gif/webp) — mirrors cli/chat/mentions.ts'
+ *  IMAGE_MIME_BY_EXT. Anything else (heic, bmp, svg, avif…) must be rejected here, not forwarded to the
+ *  provider: a mismatched/unsupported type there comes back as an opaque "Could not process image" 400. */
 const imageSchema = z.object({
   data: z.string().min(1).max(7_000_000),
-  mimeType: z.string().regex(/^image\//),
+  mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']),
 });
 
 /** A single user message sent into the brain conversation, optionally with image attachments. `cwd` is
