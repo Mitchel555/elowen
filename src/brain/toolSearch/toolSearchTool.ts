@@ -2,6 +2,9 @@ import { defineTool } from '@earendil-works/pi-coding-agent';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { currentToolPolicy, toolPermitted } from '../../plugins/policyContext.js';
+import { logger } from '../../shared/logger.js';
+
+const log = logger('tool-search');
 
 /** The minimal live-session surface the tool needs to read the registry and change the active slice —
  *  typed structurally (a subset of both PI's `AgentSession` and `ExtensionAPI`) so the search/activation
@@ -51,6 +54,39 @@ export function seedActivatedFromHistory(handle: ToolSearchHandle, messages: rea
       if (typeof name === 'string' && handle.deferred.has(name)) handle.activated.add(name);
     }
   }
+}
+
+/** Read the active set back after activating, and report anything PI silently refused. Two reasons this
+ *  cannot be assumed to have worked: `setActiveToolsByName` keeps only names it finds in its tool REGISTRY
+ *  and ignores the rest without erroring, and it replaces the whole set — so a name already active but no
+ *  longer registered disappears in the same call. Both matter beyond the tool being uncallable, because
+ *  PI records `addedToolNames` (the input to Anthropic's native deferred-tool loading) only when the set
+ *  after the call is a strict superset of the set before it. A silent drop therefore also costs a full
+ *  prompt-cache rewrite on the next request. Returns the names that failed to stick, for tests. */
+export function verifyActivation(
+  session: ToolActivationTarget,
+  requested: ReadonlySet<string>,
+  matched: readonly string[],
+  activeBefore?: ReadonlySet<string>,
+): string[] {
+  const actual = new Set(session.getActiveToolNames());
+  // A match that was ALREADY active adds nothing to the set, which is the other condition under which PI
+  // records no `addedToolNames` — deferred loading is skipped and the result carries no tool_reference.
+  // Worth its own line: it means the deferred set and the active set disagreed before the call.
+  if (activeBefore && matched.length > 0 && matched.every((name) => activeBefore.has(name))) {
+    log.warn(`activation was a no-op — ${matched.join(', ')} already active; deferred-tool loading will be skipped for this result`);
+  }
+  const missing = [...requested].filter((name) => !actual.has(name));
+  if (missing.length === 0) return [];
+  const wanted = missing.filter((name) => matched.includes(name));
+  const lost = missing.filter((name) => !matched.includes(name));
+  if (wanted.length > 0) {
+    log.warn(`activation did not stick for ${wanted.length} tool(s): ${wanted.join(', ')} — not in PI's tool registry`);
+  }
+  if (lost.length > 0) {
+    log.warn(`activating dropped ${lost.length} already-active tool(s): ${lost.join(', ')} — deferred-tool loading will be skipped for this result`);
+  }
+  return missing;
 }
 
 const DEFAULT_MAX_RESULTS = 5;
@@ -275,9 +311,11 @@ export function toolSearchTool(handle: ToolSearchHandle): ToolDefinition {
       // each turn); the setActiveToolsByName here makes the tool self-contained — it takes effect on the
       // next agent turn (PI rebuilds the prompt on the boundary), which is why the result says so.
       for (const name of matched) handle.activated.add(name);
-      const active = new Set(session.getActiveToolNames());
+      const before = new Set(session.getActiveToolNames());
+      const active = new Set(before);
       for (const name of matched) active.add(name);
       session.setActiveToolsByName([...active]);
+      verifyActivation(session, active, matched, before);
       return ok(`Activated ${matched.length} tool(s): ${matched.join(', ')}. They are callable on your next turn.`, { matched });
     },
   });

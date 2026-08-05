@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   resolveToolSearch,
   requestedExactNames,
@@ -6,9 +6,11 @@ import {
   createToolSearchHandle,
   seedActivatedFromHistory,
   toolSearchTool,
+  verifyActivation,
   type ToolActivationTarget,
 } from '../../../src/brain/toolSearch/toolSearchTool.js';
 import { runWithPolicy } from '../../../src/plugins/policyContext.js';
+import { setLogSink } from '../../../src/shared/logger.js';
 
 const POLICY = { allowedProjectIds: 'all' as const, allowedPaths: () => [] };
 
@@ -249,5 +251,79 @@ describe('toolSearchTool.execute', () => {
     const target = handle.session as ReturnType<typeof fakeSession>;
     expect(target.getActiveToolNames()).not.toContain('mcp__github__create_issue');
     expect((res.details as { matched: string[] }).matched).toEqual(['mcp__github__list_issues']);
+  });
+});
+
+describe('verifyActivation', () => {
+  interface Captured { level: string; scope: string; message: string }
+  let captured: Captured[] = [];
+  beforeEach(() => {
+    captured = [];
+    setLogSink({ push: (e) => { captured.push(e); } });
+  });
+  afterEach(() => setLogSink(undefined));
+  const warnings = (): Captured[] => captured.filter((c) => c.level === 'warn' && c.scope === 'tool-search');
+
+  /** PI's setActiveToolsByName keeps only names present in its tool registry and silently ignores the
+   *  rest, so a target that refuses a name models the real failure this check exists to catch. */
+  function registryBoundSession(registry: string[], active: string[]): ToolActivationTarget {
+    const state = { active: [...active] };
+    return {
+      getAllTools: () => CANDIDATES,
+      getActiveToolNames: () => state.active,
+      setActiveToolsByName: (names) => { state.active = names.filter((n) => registry.includes(n)); },
+    };
+  }
+
+  it('stays silent when every requested tool actually became active', () => {
+    const session = registryBoundSession(['Read', 'mcp__github__list_issues'], ['Read']);
+    const requested = new Set(['Read', 'mcp__github__list_issues']);
+    session.setActiveToolsByName([...requested]);
+    expect(verifyActivation(session, requested, ['mcp__github__list_issues'])).toEqual([]);
+    expect(warnings()).toHaveLength(0);
+  });
+
+  // The other way PI ends up recording no addedToolNames: the match was already active, so the set does
+  // not grow. Same cost as a silent drop — no tool_reference, and a rewritten tools block next request.
+  it('reports an activation that changed nothing because the match was already active', () => {
+    const session = registryBoundSession(['Read', 'mcp__github__list_issues'], ['Read', 'mcp__github__list_issues']);
+    const before = new Set(['Read', 'mcp__github__list_issues']);
+    expect(verifyActivation(session, before, ['mcp__github__list_issues'], before)).toEqual([]);
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('no-op');
+    expect(warnings()[0]?.message).toContain('deferred-tool loading will be skipped');
+  });
+
+  it('stays silent when the match genuinely joined the active set', () => {
+    const session = registryBoundSession(['Read', 'mcp__github__list_issues'], ['Read']);
+    const before = new Set(['Read']);
+    const requested = new Set(['Read', 'mcp__github__list_issues']);
+    session.setActiveToolsByName([...requested]);
+    expect(verifyActivation(session, requested, ['mcp__github__list_issues'], before)).toEqual([]);
+    expect(warnings()).toHaveLength(0);
+  });
+
+  it('reports a matched tool PI refused to register', () => {
+    const session = registryBoundSession(['Read'], ['Read']);
+    const requested = new Set(['Read', 'mcp__github__list_issues']);
+    session.setActiveToolsByName([...requested]);
+    expect(verifyActivation(session, requested, ['mcp__github__list_issues'])).toEqual(['mcp__github__list_issues']);
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('activation did not stick');
+    expect(warnings()[0]?.message).toContain('mcp__github__list_issues');
+  });
+
+  // The expensive case: an ALREADY-ACTIVE tool disappearing makes the post-call set stop being a superset
+  // of the pre-call one, which is exactly the condition under which PI skips recording addedToolNames —
+  // so deferred loading is skipped and the next request pays a full prompt-cache rewrite.
+  it('reports an already-active tool lost by the same call, and says deferral is skipped', () => {
+    const session = registryBoundSession(['mcp__github__list_issues'], ['Read']);
+    const requested = new Set(['Read', 'mcp__github__list_issues']);
+    session.setActiveToolsByName([...requested]);
+    expect(verifyActivation(session, requested, ['mcp__github__list_issues'])).toEqual(['Read']);
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('already-active');
+    expect(warnings()[0]?.message).toContain('Read');
+    expect(warnings()[0]?.message).toContain('deferred-tool loading will be skipped');
   });
 });
