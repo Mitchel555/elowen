@@ -224,9 +224,12 @@ describe('BrainChat session-bound controller', () => {
     act(() => FakeES.instances[0]!.emitTransportError());
     expect(beacon).not.toHaveBeenCalled();
 
+    // Closing also reports the tab as off screen, so match the stop by endpoint rather than by being the
+    // only beacon — it must be sent exactly once either way.
     act(() => { window.dispatchEvent(new Event('pagehide')); });
-    expect(beacon).toHaveBeenCalledTimes(1);
-    const [url, blob] = beacon.mock.calls[0] as unknown as [string, Blob];
+    const stops = (beacon.mock.calls as unknown as [string, Blob][]).filter(([u]) => u.includes('/brain/session/stop'));
+    expect(stops).toHaveLength(1);
+    const [url, blob] = stops[0]!;
     expect(url).toContain('/brain/session/stop');
     const raw = await new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.readAsText(blob); });
     const payload = JSON.parse(raw) as Record<string, unknown>;

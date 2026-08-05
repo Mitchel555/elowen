@@ -83,15 +83,19 @@ function firePageHide(persisted: boolean): void {
 
 describe('BrainChat wake-up handling', () => {
   it('sends NO stop beacon when the page is only frozen into the bfcache', async () => {
-    const beacon = vi.fn(() => true);
+    const beacon = vi.fn((_url: string, _body?: BodyInit | null) => true);
     Object.defineProperty(navigator, 'sendBeacon', { configurable: true, value: beacon });
     renderChat();
     await waitFor(() => expect(FakeES.instances.length).toBe(1));
 
     firePageHide(true);
 
-    expect(beacon).not.toHaveBeenCalled();
+    // Nothing may STOP the conversation — that is what used to kill the running agent. Reporting the tab
+    // as off screen is the opposite and must still happen: a frozen page is a phone whose owner is not
+    // reading, which is exactly the case the "turn finished" push exists to serve.
+    expect(beacon.mock.calls.some(([url]) => String(url).includes('/brain/session/stop'))).toBe(false);
     expect(stopBodies).toEqual([]);
+    expect(beacon.mock.calls.some(([url]) => String(url).includes('/brain/visibility'))).toBe(true);
   });
 
   it('sends a detachOnly stop exactly once on a real unload', async () => {

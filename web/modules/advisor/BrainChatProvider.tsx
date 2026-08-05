@@ -1150,9 +1150,20 @@ function useBrainChatController(): BrainChatValue {
       if (!attachedRef.current) return;
       elowenClient.brainVisibility({ client: clientId(), hidden: document.hidden });
     };
+    // `pagehide` is the one event iOS fires reliably when an installed PWA goes to the background or the
+    // phone locks; `visibilitychange` alone can be skipped there, which left the daemon believing the
+    // conversation was still being read. `pageshow` is its counterpart on the way back, because a page
+    // restored from the bfcache does not re-run this effect.
+    const hide = (): void => { if (attachedRef.current) elowenClient.brainVisibility({ client: clientId(), hidden: true }); };
     report();
     document.addEventListener('visibilitychange', report);
-    return () => document.removeEventListener('visibilitychange', report);
+    window.addEventListener('pagehide', hide);
+    window.addEventListener('pageshow', report);
+    return () => {
+      document.removeEventListener('visibilitychange', report);
+      window.removeEventListener('pagehide', hide);
+      window.removeEventListener('pageshow', report);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -53,6 +53,18 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 const json = (body: unknown, method = 'POST'): RequestInit => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
+/** Fire-and-forget POST that has to survive the page going away. `sendBeacon` hands the request to the
+ *  browser itself, so it still goes out once the document is frozen or unloaded; a `keepalive` fetch is
+ *  the fallback for the rare engine without it, and is NOT equivalent — WebKit drops one issued while
+ *  backgrounding, which is precisely the moment these reports exist for. */
+function beacon(url: string, payload: unknown): void {
+  const body = JSON.stringify(payload);
+  if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+    try { if (navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))) return; } catch { /* fall through to fetch */ }
+  }
+  void fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, credentials: 'same-origin', keepalive: true }).catch(() => undefined);
+}
+
 export const elowenClient = {
   tasks: (projectId?: number) => req<Task[]>(projectId != null ? `/tasks?project_id=${projectId}` : '/tasks'),
   sessions: () => req<SessionInfo[]>('/sessions'),
@@ -240,18 +252,17 @@ export const elowenClient = {
    *  session with work in flight — a closing tab must never kill a running agent. Fire-and-forget via
    *  sendBeacon (keepalive fetch fallback) so it survives unload. */
   brainSessionStop: (payload: { session?: string; client: string; generation?: number; detachOnly?: boolean }): void => {
-    const url = `${BASE}/brain/session/stop`;
-    const body = JSON.stringify(payload);
-    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-      try { if (navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))) return; } catch { /* fall through to fetch */ }
-    }
-    void fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, credentials: 'same-origin', keepalive: true }).catch(() => undefined);
+    beacon(`${BASE}/brain/session/stop`, payload);
   },
   /** Tell the daemon whether this tab is on screen, so a turn that finishes while the phone is locked can
-   *  notify instead of assuming the answer is being read. Fire-and-forget with `keepalive`: the report
-   *  that matters most is the one sent as the page is being backgrounded. */
+   *  notify instead of assuming the answer is being read. Going off screen is reported by beacon, because
+   *  that report is issued as the page is being frozen and a plain fetch is dropped there — losing it is
+   *  what left the daemon believing the answer was being read. Coming back is reported by a live page, so
+   *  a normal request carries it and the beacon stays reserved for departures. */
   brainVisibility: (payload: { client: string; hidden: boolean }): void => {
-    void fetch(`${BASE}/brain/visibility`, {
+    const url = `${BASE}/brain/visibility`;
+    if (payload.hidden) { beacon(url, payload); return; }
+    void fetch(url, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload), credentials: 'same-origin', keepalive: true,
     }).catch(() => undefined);
