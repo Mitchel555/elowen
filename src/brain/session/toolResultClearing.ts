@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import { fsSafeSegment, toolResultSpillDir } from '../../shared/paths.js';
@@ -105,8 +105,35 @@ const KEEP_USER_TURNS = 2;
  *  The id is fs-encoded like the session id: a provider/plugin-minted toolCallId containing `/` or
  *  `..` must not escape the spill dir (pathGuard would refuse the escaped path and the cleared
  *  content would be unreadable). */
-export function toolResultSpillPath(spillDir: string, toolCallId: string): string {
-  return join(spillDir, `${fsSafeSegment(toolCallId)}.txt`);
+export function toolResultSpillPath(spillDir: string, toolCallId: string, descriptor: SpillDescriptor): string {
+  return join(spillDir, `${fsSafeSegment(toolCallId)}.${SPILL_NAME_VERSION}-${descriptor.mode}-${descriptor.bytes}.txt`);
+}
+
+/** What a restored latch needs that the spill CONTENT cannot supply. `bytes` is the sum of the individual
+ *  text blocks' byte lengths, while the file holds those blocks joined by '\n' — so for an n-block result
+ *  the file is n-1 bytes larger and the number cannot be recovered by measuring it. `mode` decides which
+ *  placeholder wording was used. Both are therefore carried in the FILE NAME, which makes the spill write
+ *  a single atomic operation that persists content and metadata together: there is no window in which one
+ *  exists without the other, and no second store to keep in sync.
+ *
+ *  Version prefix on purpose: the v1 rules include the preview length and the placeholder wording. A future
+ *  change to either must mint v2 rather than reinterpret v1 names, because a restored latch has to rebuild
+ *  the placeholder BYTE-IDENTICALLY or it defeats its own purpose. */
+export interface SpillDescriptor { mode: 'time' | 'preview'; bytes: number }
+
+const SPILL_NAME_VERSION = 'v1';
+
+/** Match the descriptor a spill name carries AFTER its (already known) encoded id. The id is never decoded
+ *  back out of a file name: `fsSafeSegment` is injective but not cleanly reversible at its '%' edge cases,
+ *  so restoration works FORWARD — encode the id from the live message, then look for that exact prefix. */
+export function parseSpillDescriptor(fileName: string, encodedId: string): SpillDescriptor | null {
+  const prefix = `${encodedId}.${SPILL_NAME_VERSION}-`;
+  if (!fileName.startsWith(prefix)) return null;
+  const match = /^(time|preview)-(\d+)\.txt$/.exec(fileName.slice(prefix.length));
+  if (!match) return null;
+  const bytes = Number(match[2]);
+  if (!Number.isSafeInteger(bytes)) return null;
+  return { mode: match[1] as SpillDescriptor['mode'], bytes };
 }
 
 /** The one placeholder shape both triggers use. With a preview the wording says the result was never
@@ -125,6 +152,15 @@ export function clearedToolResultPlaceholder(
 
 type ToolResultMessage = Extract<PiAgentMessage, { role: 'toolResult' }>;
 type ContentBlock = ToolResultMessage['content'][number];
+
+/** The exact text a spill file holds for a result: its text blocks joined by '\n'. Single source of truth
+ *  for the write and the restore comparison — if these two ever disagreed, no latch would ever restore. */
+function toolResultText(message: ToolResultMessage): string {
+  return (Array.isArray(message.content) ? message.content : [])
+    .filter((block: ContentBlock): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
+}
 
 function textBytes(message: ToolResultMessage): number {
   if (!Array.isArray(message.content)) return 0;
@@ -302,6 +338,8 @@ export interface ToolResultClearingOptions {
   writeSpill?: (path: string, text: string) => Promise<void>;
   /** Spill reader injection for tests; null = unreadable/missing. Used to verify an EEXIST survivor. */
   readSpill?: (path: string) => Promise<string | null>;
+  /** Spill directory listing injection for tests. Missing directory = empty list, never a throw. */
+  listSpill?: (dir: string) => Promise<string[]>;
 }
 
 async function defaultWriteSpill(path: string, text: string): Promise<void> {
@@ -312,6 +350,11 @@ async function defaultWriteSpill(path: string, text: string): Promise<void> {
 async function defaultReadSpill(path: string): Promise<string | null> {
   try { return await readFile(path, 'utf8'); }
   catch { return null; }
+}
+
+async function defaultListSpill(dir: string): Promise<string[]> {
+  try { return await readdir(dir); }
+  catch { return []; } // no spill dir yet is the normal case for a fresh session
 }
 
 /** Compose the clearing pass onto the session's `transformContext`, after (inside) any previous hook —
@@ -329,11 +372,20 @@ export function installToolResultClearing(
   const now = options.now ?? Date.now;
   const writeSpill = options.writeSpill ?? defaultWriteSpill;
   const readSpill = options.readSpill ?? defaultReadSpill;
-  /** Cleared toolCallId → its original text size in bytes, plus the preview a size-spilled result
-   *  keeps in its placeholder. The latch is what makes the egress prefix byte-stable across requests:
-   *  once inside, the placeholder never reverts to full content — and rebuilding it from the same
-   *  entry every pass is what keeps those bytes identical. */
-  const latched = new Map<string, { bytes: number; preview?: string }>();
+  const listSpill = options.listSpill ?? defaultListSpill;
+  /** Cleared toolCallId → its original text size in bytes, the preview a size-spilled result keeps in
+   *  its placeholder, and the spill path that placeholder names. The latch is what makes the egress
+   *  prefix byte-stable across requests: once inside, the placeholder never reverts to full content —
+   *  and rebuilding it from the same entry every pass is what keeps those bytes identical. The path is
+   *  stored rather than recomputed because it now encodes the descriptor, and a restored entry must
+   *  reproduce the name that is already written on disk. */
+  const latched = new Map<string, { bytes: number; preview?: string; path: string }>();
+  /** Restoration runs once, on the first pass, and only matters after a RESPAWN: the latch lives in this
+   *  closure, so a restart leaves it empty while the persisted history still holds the results in full.
+   *  Sending them whole again is what makes the first request of a warm conversation pay a full re-cache
+   *  ($3.04 measured, against ~$0.12 for a normal turn). Doing it here rather than at construction time
+   *  is deliberate — this is the first moment the post-hook message text exists to verify against. */
+  let restored = false;
   /** toolCallIds whose spill failed during THIS idle epoch. The gate stays open for a whole turn, so
    *  retrying on the next pass would clear right after THIS pass paid a full re-cache — a warm-prefix
    *  rewrite, the one thing this module must never do. Retries wait for the next gate OPENING. */
@@ -349,8 +401,59 @@ export function installToolResultClearing(
   const budgetDecided = new Set<string>();
   let gateWasOpen = false;
   const previous = agent.transformContext;
+  /** Rebuild the latch from the spill files a previous process left behind, so a respawned session keeps
+   *  sending the placeholders it was already sending instead of the full results.
+   *
+   *  The verification is an ANTI-SPOOF check, not part of building the placeholder: a session may write
+   *  into its own spill dir (pathGuard allows it), so a file could hold text that was never this tool's
+   *  output. A time-mode placeholder needs only the path and the byte count, both of which come from the
+   *  file NAME. Consequently a failed comparison costs one re-cache — the result simply is not latched —
+   *  and can never produce a placeholder that misdescribes the output. */
+  const restoreLatch = async (base: readonly PiAgentMessage[]): Promise<void> => {
+    const names = await listSpill(spillDir);
+    if (names.length === 0) return;
+    for (const message of base) {
+      if (message?.role !== 'toolResult') continue;
+      const toolCallId = (message as ToolResultMessage).toolCallId;
+      if (latched.has(toolCallId)) continue;
+      const encoded = fsSafeSegment(toolCallId);
+      let found: { descriptor: SpillDescriptor; name: string } | undefined;
+      for (const name of names) {
+        const descriptor = parseSpillDescriptor(name, encoded);
+        if (!descriptor) continue; // legacy `<id>.txt` spills and other sessions' names land here
+        // Both a time and a preview spill can exist for one result: a restart whose restoration failed
+        // leaves the preview file behind and the cold gate then time-clears the same result. Prefer time,
+        // because that is what the live placeholder became — refusing to choose would mean paying a full
+        // re-cache on every restart from then on, forever.
+        if (!found || (found.descriptor.mode === 'preview' && descriptor.mode === 'time')) {
+          found = { descriptor, name };
+        }
+      }
+      if (!found) continue;
+      const text = toolResultText(message as ToolResultMessage);
+      const path = join(spillDir, found.name);
+      const onDisk = await readSpill(path);
+      if (onDisk !== text) {
+        // Worth a line: this is the difference between "restart was free" and "restart cost a full
+        // re-cache", and the usual cause is an earlier hook having rewritten the text since the spill.
+        log.warn(`spill for ${toolCallId} does not match the current message text — not restoring its latch`);
+        continue;
+      }
+      // The preview is re-derived from the FILE rather than persisted separately, and the equality above
+      // is what makes that exact: the spill holds the same joined text the preview was sliced from. It
+      // also removes the lone-surrogate hazard for free — a text whose UTF-16 was mangled by the write
+      // could not have compared equal, so anything that reaches this line round-trips faithfully.
+      latched.set(toolCallId, {
+        bytes: found.descriptor.bytes,
+        preview: found.descriptor.mode === 'preview' ? onDisk.slice(0, SPILL_PREVIEW_CHARS) : undefined,
+        path,
+      });
+      log.info(`restored latch for ${toolCallId} from ${found.name} (${found.descriptor.bytes} bytes)`);
+    }
+  };
   agent.transformContext = async (messages, signal) => {
     const base = previous ? await previous(messages, signal) : messages;
+    if (!restored) { restored = true; await restoreLatch(base); }
     const gateOpen = cacheColdAtTurnStart(base, idleMs, now());
     if (gateOpen && !gateWasOpen) failedSpills.clear();
     gateWasOpen = gateOpen;
@@ -362,12 +465,16 @@ export function installToolResultClearing(
       for (const item of items) {
         if (failedSpills.has(item.toolCallId) || foreignSpills.has(item.toolCallId)) continue;
         const message = base[item.index] as ToolResultMessage;
-        const text = (Array.isArray(message.content) ? message.content : [])
-          .filter((block: ContentBlock): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-          .map((block) => block.text)
-          .join('\n');
-        const entry = { bytes: item.bytes, preview: withPreview ? text.slice(0, SPILL_PREVIEW_CHARS) : undefined };
-        const spillPath = toolResultSpillPath(spillDir, item.toolCallId);
+        const text = toolResultText(message);
+        const spillPath = toolResultSpillPath(spillDir, item.toolCallId, {
+          mode: withPreview ? 'preview' : 'time',
+          bytes: item.bytes,
+        });
+        const entry = {
+          bytes: item.bytes,
+          preview: withPreview ? text.slice(0, SPILL_PREVIEW_CHARS) : undefined,
+          path: spillPath,
+        };
         try {
           await writeSpill(spillPath, text);
           latched.set(item.toolCallId, entry);
@@ -418,11 +525,7 @@ export function installToolResultClearing(
       if (entry === undefined) continue;
       cleared.set(message.toolCallId, {
         index,
-        placeholder: clearedToolResultPlaceholder(
-          toolResultSpillPath(spillDir, message.toolCallId),
-          entry.bytes,
-          entry.preview,
-        ),
+        placeholder: clearedToolResultPlaceholder(entry.path, entry.bytes, entry.preview),
       });
     }
     return applyToolResultClearing(base, cleared);

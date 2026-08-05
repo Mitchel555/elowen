@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BrainSessionFactory, compactionReserveTokens, resolveAutoCompactPct } from '../../src/brain/session/factory.js';
@@ -113,7 +113,12 @@ describe('BrainSessionFactory context-saving installers', () => {
       expect(out[5]).toBe(messages[5]);
       expect(out[8]).toBe(messages[8]);
       // The full text was spilled BEFORE the placeholder replaced it.
-      expect(readFileSync(join(home, '.config/elowen/tool-results/sess-anthropic/old-big.txt'), 'utf8')).toBe(big);
+      // Located by its stable prefix: the rest of the name carries the descriptor a restarted session
+      // needs to rebuild this exact placeholder.
+      const spillDir = join(home, '.config/elowen/tool-results/sess-anthropic');
+      const spillName = readdirSync(spillDir).find((n) => n.startsWith('old-big.v1-'));
+      expect(spillName).toBeDefined();
+      expect(readFileSync(join(spillDir, spillName!), 'utf8')).toBe(big);
 
       // cacheWatch + the persistence projector both subscribed at create time, and the exact provider
       // payload recorder was handed to the resource loader's before_provider_request extension path.

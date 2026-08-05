@@ -20,6 +20,7 @@ import {
   setSpillMaxResultBytes,
   setToolResultGroupBudget,
   toolResultSpillPath,
+  parseSpillDescriptor,
 } from '../../../src/brain/session/toolResultClearing.js';
 import { toolResultSpillDir } from '../../../src/shared/paths.js';
 import { openDb } from '../../../src/store/db.js';
@@ -76,6 +77,20 @@ function harness(options: {
     readSpill: options.readSpill ?? (async () => null),
   });
   return { session, writes, transform: (m) => session.agent.transformContext!(m) };
+}
+
+/** The spill path actually written for a toolCallId. Located by its stable `<id>.v1-` prefix rather than
+ *  rebuilt, so a test does not have to restate the byte count the module encodes into the name. */
+function spillPath(h: Harness, toolCallId: string): string {
+  const prefix = `/tmp/spill/sess-1/${toolCallId}.v1-`;
+  const found = [...h.writes.keys()].find((p) => p.startsWith(prefix));
+  if (!found) throw new Error(`no spill written for ${toolCallId}`);
+  return found;
+}
+
+/** Which results reached disk, by id — the behaviour these tests care about, independent of the file name. */
+function spilledIds(h: Harness): string[] {
+  return [...h.writes.keys()].map((p) => p.slice('/tmp/spill/sess-1/'.length).split('.v1-')[0]!).sort();
 }
 
 describe('selectClearableToolResults / clearingCutIndex', () => {
@@ -328,7 +343,7 @@ describe('applyToolResultClearing', () => {
       user('one', T0), toolResult('old-big', big, T0 + 1), user('two', T0 + 2), user('three', T0 + 3),
     ];
     const snapshot = structuredClone(messages);
-    const placeholder = clearedToolResultPlaceholder(toolResultSpillPath('/tmp/spill/sess-1', 'old-big'), big.length);
+    const placeholder = clearedToolResultPlaceholder('/tmp/spill/sess-1/old-big.v1-time-9.txt', big.length);
     const once = applyToolResultClearing(messages, new Map([['old-big', { index: 1, placeholder }]]));
     expect(messages).toEqual(snapshot);
     expect(once[1]).toEqual({ ...messages[1], content: [{ type: 'text', text: placeholder }] });
@@ -358,7 +373,7 @@ describe('installToolResultClearing', () => {
       user('three', T0 + IDLE + 5_000),
     ];
     const result = await h.transform(messages);
-    const path = toolResultSpillPath('/tmp/spill/sess-1', 'old-big');
+    const path = spillPath(h, 'old-big');
     expect(h.writes.get(path)).toBe(big);
     expect(result[1]).toEqual({
       ...messages[1],
@@ -515,7 +530,7 @@ describe('installToolResultClearing', () => {
     expect(content[0]?.text).toContain('Older tool result cleared');
     // The spill carries the text blocks; image bytes never hit the spill file (they were stripped
     // upstream in the real pipeline — the factory installs this hook after historyImageStripping).
-    expect(h.writes.get(toolResultSpillPath('/tmp/spill/sess-1', 'old-img'))).toBe(big);
+    expect(h.writes.get(spillPath(h, 'old-img'))).toBe(big);
   });
 
   it('composes with a pre-existing transformContext and survives a missing agent seam', async () => {
@@ -554,7 +569,7 @@ describe('installToolResultClearing', () => {
     ];
     // No idle gap anywhere: the size trigger fires regardless of the cache gate.
     const result = await h.transform(messages);
-    const path = toolResultSpillPath('/tmp/spill/sess-1', 'fresh');
+    const path = spillPath(h, 'fresh');
     expect(h.writes.get(path)).toBe(oversized); // the FULL text reaches disk, tail included
     const text = (result[2] as { content: { type: string; text?: string }[] }).content[0]?.text ?? '';
     expect(text).toBe(clearedToolResultPlaceholder(path, oversized.length, oversized.slice(0, SPILL_PREVIEW_CHARS)));
@@ -594,10 +609,10 @@ describe('installToolResultClearing', () => {
     const messages = overBudgetTurn();
     const result = await h.transform(messages);
 
-    const spilledIds = ['g-0', 'g-1'];
-    expect([...h.writes.keys()].sort()).toEqual(spilledIds.map((id) => toolResultSpillPath('/tmp/spill/sess-1', id)).sort());
-    for (const [offset, id] of spilledIds.entries()) {
-      const path = toolResultSpillPath('/tmp/spill/sess-1', id);
+    const expectedIds = ['g-0', 'g-1'];
+    expect(spilledIds(h)).toEqual(expectedIds);
+    for (const [offset, id] of expectedIds.entries()) {
+      const path = spillPath(h, id);
       const original = (messages[2 + offset] as { content: { text: string }[] }).content[0].text;
       expect(h.writes.get(path)).toBe(original); // the full text reaches disk, recoverable with Read
       const text = (result[2 + offset] as { content: { type: string; text?: string }[] }).content[0]?.text ?? '';
@@ -621,7 +636,7 @@ describe('installToolResultClearing', () => {
       toolResult('fresh', oversized, T0 + 2_000), groupResult(3, T0 + 3_000), groupResult(4, T0 + 4_000),
     ];
     const result = await h.transform(messages);
-    expect([...h.writes.keys()]).toEqual([toolResultSpillPath('/tmp/spill/sess-1', 'fresh')]);
+    expect([...h.writes.keys()]).toEqual([spillPath(h, 'fresh')]);
     expect(result[3]).toBe(messages[3]);
     expect(result[4]).toBe(messages[4]);
   });
@@ -657,19 +672,18 @@ describe('installToolResultClearing', () => {
 
     const second = await h.transform(full);
     expect(JSON.stringify(second.slice(0, partial.length))).toBe(JSON.stringify(partial));
-    expect([...h.writes.keys()]).toEqual(
-      ['g-3', 'g-4'].map((id) => toolResultSpillPath('/tmp/spill/sess-1', id)),
-    );
+    expect(spilledIds(h)).toEqual(['g-3', 'g-4']);
   });
 
   it('idempotence: a failed spill never cascades to a different member on a later pass', async () => {
     // Only the largest member fails to spill. Its group therefore stays over budget — but every member
     // of it has already gone to the provider whole, so a second pass must NOT pick a new victim.
-    const failing = toolResultSpillPath('/tmp/spill/sess-1', 'g-0');
     const writes = new Map<string, string>();
     const h = harness({
       writeSpill: async (path, text) => {
-        if (path === failing) throw Object.assign(new Error('readonly'), { code: 'EACCES' });
+        // Matched by prefix: the rest of the name carries the byte count, which this test has no reason
+        // to know.
+        if (path.startsWith('/tmp/spill/sess-1/g-0.v1-')) throw Object.assign(new Error('readonly'), { code: 'EACCES' });
         writes.set(path, text);
       },
     });
@@ -694,7 +708,7 @@ describe('installToolResultClearing', () => {
       const result = await session.agent.transformContext!(messages);
       const text = (result[1] as { content: { type: string; text?: string }[] }).content[0]?.text ?? '';
       const spilled = /Full output at: (\S+) — read it/.exec(text)?.[1];
-      expect(spilled).toBe(join(toolResultSpillDir(process.env, 'sess-fs'), 'fresh.txt'));
+      expect(spilled).toBe(join(toolResultSpillDir(process.env, 'sess-fs'), `fresh.v1-preview-${Buffer.byteLength(oversized, 'utf8')}.txt`));
       expect(readFileSync(spilled!, 'utf8')).toBe(oversized);
 
       // The spill lands inside the per-session directory the store already sweeps on delete.
@@ -708,11 +722,144 @@ describe('installToolResultClearing', () => {
   });
 });
 
+const TIME = { mode: 'time' as const, bytes: 42 };
+
+describe('latch restoration across a respawn', () => {
+  /** A whole daemon restart, modelled honestly: a NEW installation over the SAME disk, given the SAME
+   *  history the store would rehydrate (results still FULL — the module only ever edits the egress copy).
+   *  The latch lives in a closure, so the second install starts empty exactly as the real one does. */
+  const restartOver = (disk: Map<string, string>) => {
+    const session: Harness['session'] = { agent: {} };
+    installToolResultClearing(session, 'sess-1', {
+      idleMs: IDLE,
+      spillDir: '/tmp/spill/sess-1',
+      writeSpill: async (p, t) => {
+        if (disk.has(p)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+        disk.set(p, t);
+      },
+      readSpill: async (p) => disk.get(p) ?? null,
+      listSpill: async () => [...disk.keys()].map((p) => p.slice('/tmp/spill/sess-1/'.length)),
+    });
+    return (m: PiAgentMessage[]) => session.agent.transformContext!(m);
+  };
+
+  // Emoji straddling the preview boundary: slice() cuts by UTF-16 unit, so the preview can end on half a
+  // surrogate pair. If that string did not survive the write/read round-trip the restored placeholder
+  // would differ by bytes — which is the whole failure this feature exists to prevent.
+  const previewBoundaryText = `${'p'.repeat(SPILL_PREVIEW_CHARS - 1)}😀${'q'.repeat(SPILL_MAX_RESULT_BYTES)}`;
+
+  /** Three text blocks. `bytes` sums the BLOCKS while the spill file joins them with '\n', so the file is
+   *  2 bytes larger — the case that proves the byte count is read from the name and not measured off the
+   *  file. A single-block result would hide the difference. */
+  const multiBlock = (toolCallId: string, timestamp: number): PiAgentMessage => ({
+    role: 'toolResult', toolCallId, toolName: 'Bash', isError: false, timestamp,
+    content: [{ type: 'text', text: big }, { type: 'text', text: big }, { type: 'text', text: big }],
+  } as PiAgentMessage);
+
+  const history = (): PiAgentMessage[] => [
+    user('one', T0),
+    toolResult('old-big', big, T0 + 1_000),
+    multiBlock('old-multi', T0 + 1_500),
+    user('two', T0 + 2_000),
+    assistant('working', T0 + 3_000),
+    user('three', T0 + IDLE + 4_000),
+    toolResult('fresh-huge', previewBoundaryText, T0 + IDLE + 5_000),
+  ];
+
+  it('re-sends byte-identical placeholders after a restart, for both triggers', async () => {
+    const disk = new Map<string, string>();
+    const before = await restartOver(disk)(history());
+    const timeText = (before[1] as { content: { text: string }[] }).content[0]!.text;
+    const multiText = (before[2] as { content: { text: string }[] }).content[0]!.text;
+    const previewText = (before[6] as { content: { text: string }[] }).content[0]!.text;
+    expect(timeText).toContain('Older tool result cleared');
+    expect(previewText).toContain('saved to disk instead of the context');
+    // The multi-block result's own placeholder must quote the summed BLOCK bytes, not the file size.
+    expect(multiText).toContain(`${big.length * 3} bytes`);
+
+    const after = await restartOver(disk)(history());
+    // Exact string equality on purpose: "contains a placeholder" would pass even if the byte count or the
+    // path differed, and a single differing byte is a full re-cache of the whole conversation.
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toBe(timeText);
+    expect((after[2] as { content: { text: string }[] }).content[0]!.text).toBe(multiText);
+    expect((after[6] as { content: { text: string }[] }).content[0]!.text).toBe(previewText);
+  });
+
+  it('does not rewrite the spill files it restored from', async () => {
+    const disk = new Map<string, string>();
+    await restartOver(disk)(history());
+    const snapshot = new Map(disk);
+    await restartOver(disk)(history());
+    expect([...disk.entries()]).toEqual([...snapshot.entries()]);
+  });
+
+  it('leaves a result whole when the spill on disk is not what the message says', async () => {
+    const disk = new Map<string, string>();
+    await restartOver(disk)(history());
+    for (const key of disk.keys()) disk.set(key, 'tampered');
+    const after = await restartOver(disk)(history());
+    // Failing closed costs one re-cache; the alternative would be a placeholder describing text that was
+    // never the tool's output.
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toBe(big);
+  });
+
+  it('ignores legacy unversioned spills left by an older build', async () => {
+    const disk = new Map<string, string>([['/tmp/spill/sess-1/old-big.txt', big]]);
+    const after = await restartOver(disk)(history());
+    // The legacy name carries no byte count, so it cannot rebuild the placeholder; the result is cleared
+    // afresh under a v1 name instead.
+    expect(disk.has('/tmp/spill/sess-1/old-big.txt')).toBe(true);
+    expect([...disk.keys()].some((p) => p.startsWith('/tmp/spill/sess-1/old-big.v1-'))).toBe(true);
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toContain('Older tool result cleared');
+  });
+
+  it('prefers the time spill when both a time and a preview file exist for one result', async () => {
+    const disk = new Map<string, string>([
+      [`/tmp/spill/sess-1/old-big.v1-preview-${big.length}.txt`, big],
+      [`/tmp/spill/sess-1/old-big.v1-time-${big.length}.txt`, big],
+    ]);
+    const after = await restartOver(disk)(history());
+    // Refusing to choose would mean paying a full re-cache on every restart from then on, forever.
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toContain('Older tool result cleared');
+  });
+});
+
 describe('toolResultSpillPath', () => {
   it('fs-encodes the toolCallId so a hostile id cannot escape the spill dir', () => {
-    expect(toolResultSpillPath('/s', 'call-1')).toBe('/s/call-1.txt');
-    expect(toolResultSpillPath('/s', 'a/b')).toBe('/s/a%2Fb.txt');
-    expect(toolResultSpillPath('/s', '..')).toBe('/s/%...txt');
+    expect(toolResultSpillPath('/s', 'call-1', TIME)).toBe('/s/call-1.v1-time-42.txt');
+    expect(toolResultSpillPath('/s', 'a/b', TIME)).toBe('/s/a%2Fb.v1-time-42.txt');
+    expect(toolResultSpillPath('/s', '..', TIME)).toBe('/s/%...v1-time-42.txt');
+  });
+
+  // The byte count cannot be measured back off the file: it sums the individual text BLOCKS, while the
+  // file holds them joined by '\n'. Carrying it in the name is what lets a restarted session rebuild the
+  // placeholder byte-identically.
+  it('carries the mode and byte count needed to rebuild the placeholder', () => {
+    expect(toolResultSpillPath('/s', 'c', { mode: 'preview', bytes: 50003 })).toBe('/s/c.v1-preview-50003.txt');
+  });
+});
+
+describe('parseSpillDescriptor', () => {
+  it('reads back what toolResultSpillPath wrote, for the id it was given', () => {
+    expect(parseSpillDescriptor('c.v1-time-42.txt', 'c')).toEqual(TIME);
+    expect(parseSpillDescriptor('c.v1-preview-7.txt', 'c')).toEqual({ mode: 'preview', bytes: 7 });
+  });
+
+  it('ignores a name belonging to a different id, and legacy unversioned spills', () => {
+    expect(parseSpillDescriptor('other.v1-time-42.txt', 'c')).toBeNull();
+    expect(parseSpillDescriptor('c.txt', 'c')).toBeNull(); // 379 of these exist on disk from before v1
+  });
+
+  // A future change to the preview length or the placeholder wording must mint v2 rather than silently
+  // reinterpret v1 names, or a restored placeholder would differ from the one already in the cache.
+  it('refuses a version it does not know', () => {
+    expect(parseSpillDescriptor('c.v2-time-42.txt', 'c')).toBeNull();
+  });
+
+  it('refuses a malformed descriptor instead of guessing', () => {
+    expect(parseSpillDescriptor('c.v1-time-.txt', 'c')).toBeNull();
+    expect(parseSpillDescriptor('c.v1-other-42.txt', 'c')).toBeNull();
+    expect(parseSpillDescriptor('c.v1-time-4x2.txt', 'c')).toBeNull();
   });
 });
 
