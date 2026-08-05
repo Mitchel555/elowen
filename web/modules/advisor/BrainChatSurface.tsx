@@ -9,7 +9,7 @@ import { plural, useTranslation } from '../../lib/i18n';
 import type { LocaleDict } from '../../lib/i18n/types';
 import { useMobileViewport } from '../../lib/useMobile';
 import { useToast } from '../../components/ui/Toast';
-import type { BrainCard, BrainWorkMode } from '../../lib/types';
+import type { BrainCard, BrainMessageImage, BrainWorkMode } from '../../lib/types';
 import { groupToolItems, type ChatTurn, type SessionEventItem, type ToolItem } from '../../lib/transcript';
 import { MorePill } from '../../components/ui/MorePill';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
@@ -396,6 +396,30 @@ function SessionEvents({ events, tk }: { events: SessionEventItem[]; tk?: string
  *  they sit in one turn or across a turn boundary; only a speaker change opens a real block break. The
  *  compact dock keeps the tight look: a small accent bubble for the user, bubble-free markdown for the
  *  assistant. */
+/** A user turn's surviving attachments. The daemon kept the files next to its database, so these render
+ *  identically from the live stream and from reloaded history — the whole point of storing them. The
+ *  `<img>` hits the same-origin proxy, which turns the session cookie into the daemon bearer, so no
+ *  signed link is involved. Clicking opens the full-size file in a new tab. */
+function Attachments({ images, full }: { images: BrainMessageImage[]; full?: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className={`flex flex-wrap gap-2 ${full ? 'my-1.5' : 'mt-1.5'}`}>
+      {images.map((image) => (
+        <a
+          key={image.url}
+          href={`/api${image.url}`}
+          target="_blank"
+          rel="noreferrer"
+          title={t.brainChat.attachmentOpen}
+          className="block overflow-hidden rounded-lg border border-border transition-colors hover:border-accent"
+        >
+          <img src={`/api${image.url}`} alt={t.brainChat.attachmentAlt} className="max-h-48 max-w-[min(16rem,100%)] object-contain" />
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; full?: boolean; showRole?: boolean; showThoughts: boolean; tk?: string }) {
   const { t } = useTranslation();
   if (turn.role === 'divider') return <ContextDivider full={full} />;
@@ -404,7 +428,10 @@ function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; f
   const you = turn.role === 'you';
   const roleAttr = you ? 'you' : 'assistant';
   const body = turn.role === 'you'
-    ? <div className={`whitespace-pre-wrap text-sm leading-relaxed text-text ${full ? 'my-1.5' : ''}`}>{turn.text}</div>
+    ? <>
+        {turn.text.trim() ? <div className={`whitespace-pre-wrap text-sm leading-relaxed text-text ${full ? 'my-1.5' : ''}`}>{turn.text}</div> : null}
+        {turn.images?.length ? <Attachments images={turn.images} full={full} /> : null}
+      </>
     : <>{turn.segments.map((seg, i) => (seg.kind === 'text'
         ? <TextSegment key={i} text={seg.text} className={full ? 'my-1.5' : ''} />
         : seg.kind === 'reasoning'
@@ -429,6 +456,7 @@ function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; f
     return (
       <div data-tk={tk} data-testid="chat-turn" data-role={roleAttr} className="ml-8 self-end whitespace-pre-wrap rounded-lg rounded-br-sm border border-accent/30 bg-accent/10 px-3 py-2 text-sm text-text">
         {turn.role === 'you' ? turn.text : null}
+        {turn.role === 'you' && turn.images?.length ? <Attachments images={turn.images} /> : null}
       </div>
     );
   }

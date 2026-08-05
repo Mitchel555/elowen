@@ -205,6 +205,7 @@ export class BrainService {
       lifecycle: this.lifecycle, goals: this.goals, permissions: this.permissionSvc,
       elicitation: this.elicitation, cards: this.cards, identity: this.identity,
       titler: this.titler, curator: this.curator,
+      get chatImagesDir() { return d.chatImagesDir; },
       get prompts() { return d.prompts; },
       get users() { return d.users; },
       get userSettings() { return d.userSettings; },

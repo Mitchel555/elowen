@@ -1637,6 +1637,8 @@ export const sk = {
     loadingOlder: 'Načítavanie starších správ',
     attach: 'Priložiť súbor',
     attachRemove: 'Odobrať prílohu',
+    attachmentAlt: 'Priložený obrázok',
+    attachmentOpen: 'Otvoriť v plnej veľkosti',
     attachTooBig: 'Súbor je príliš veľký alebo binárny',
     attachUnsupportedType: 'Nepodporovaný formát obrázka — použite PNG, JPEG, GIF alebo WEBP',
     attachOnly: '(príloha)',

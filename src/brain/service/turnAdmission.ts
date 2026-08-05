@@ -1,5 +1,6 @@
 import type { BrainStore } from '../../store/brainStore.js';
 import type { ConversationTitler } from '../conversationTitler.js';
+import { attachmentMarker, storeChatImages, toMessageImages, type StoredChatImage } from '../chatImages.js';
 import { projectUserTurn } from '../persistence.js';
 import type { LiveBrain } from '../session/liveBrain.js';
 import { enqueueMirrored } from '../session/queueMirror.js';
@@ -8,6 +9,9 @@ import type { TurnImage, TurnMode } from './turnRequest.js';
 interface TurnAdmissionDeps {
   store: BrainStore;
   titler: ConversationTitler;
+  /** Where a turn's attachments are written so they outlive it. Absent (in-memory store, tests) → the
+   *  message keeps only its `[📎 N× image]` marker, exactly as before. */
+  chatImagesDir?: string;
 }
 
 interface AdmissionInput {
@@ -27,6 +31,7 @@ interface AdmissionInput {
 export class TurnAdmission {
   private durableId?: string;
   private persistText?: string;
+  private stored: StoredChatImage[] = [];
   private admitted = false;
   private rolledBack = false;
 
@@ -38,8 +43,16 @@ export class TurnAdmission {
       return { durableId: this.durableId, persistText: this.persistText };
     }
     this.persistText = this.durableText();
-    this.durableId = projectUserTurn(this.d.store, this.input.live.sessionId, this.persistText);
+    this.stored = this.storeImages();
+    this.durableId = projectUserTurn(this.d.store, this.input.live.sessionId, this.persistText, this.stored);
     return { durableId: this.durableId, persistText: this.persistText };
+  }
+
+  /** Write the attachments once per admission. The base64 is in memory only for this turn, so this is the
+   *  single moment it can be captured; the result is reused by both the durable row and the live echo. */
+  private storeImages(): StoredChatImage[] {
+    if (!this.d.chatImagesDir || !this.input.images?.length) return [];
+    return storeChatImages(this.d.chatImagesDir, this.input.images);
   }
 
   /** PI native preflight callback. False is deliberately a no-op; prompt() throws and the caller rolls
@@ -99,12 +112,13 @@ export class TurnAdmission {
       type: 'user',
       text: displayText,
       durableId,
+      ...(this.stored.length ? { images: toMessageImages(this.stored) } : {}),
     });
     this.markAdmitted();
   }
 
   private durableText(): string {
-    const marker = this.input.images?.length ? `\n[📎 ${this.input.images.length}× image]` : '';
+    const marker = this.input.images?.length ? attachmentMarker(this.input.images.length) : '';
     return (this.input.persistText ?? this.input.text) + marker;
   }
 

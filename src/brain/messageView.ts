@@ -11,6 +11,7 @@ import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment
 import { parseDbTs } from '../shared/time.js';
 import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
+import { parseStoredChatImages, stripAttachmentMarker, toMessageImages } from './chatImages.js';
 // Only these two have daemon consumers that import them from here; BrainSubagentView/BrainWorkflowView/
 // BrainSegment are used internally by the shaping code below, and anything else that needs them imports
 // straight from wireContract.
@@ -466,8 +467,17 @@ export function shapeBrainMessages(
       if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) msg = parsed;
     } catch { /* malformed row → skipped below */ }
     if (row.role === 'user') {
-      const text = extractText(msg);
-      if (text.trim()) stamped.push({ at: row.created_at ?? '', view: { ...(row.id ? { id: row.id } : {}), role: 'user', text } });
+      const images = parseStoredChatImages((msg as { images?: unknown }).images);
+      // The stored text keeps its `[📎 N× image]` marker — that is the only trace the MODEL has of the
+      // attachment once the bytes are gone. A client that can draw the thumbnails does not need the words
+      // too, so the marker is dropped from the view (and only there) when the files still exist.
+      const text = images.length ? stripAttachmentMarker(extractText(msg)) : extractText(msg);
+      if (text.trim() || images.length) {
+        stamped.push({
+          at: row.created_at ?? '',
+          view: { ...(row.id ? { id: row.id } : {}), role: 'user', text, ...(images.length ? { images: toMessageImages(images) } : {}) },
+        });
+      }
       continue;
     }
     // Assistant: the content array preserves the true order of text and tool calls.

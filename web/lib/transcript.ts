@@ -1,4 +1,4 @@
-import type { BrainCard, BrainMessage, BrainPendingPlan, BrainStreamTailEvent, BrainWorkflowView, ToolOutputView } from './types';
+import type { BrainCard, BrainMessage, BrainMessageImage, BrainPendingPlan, BrainStreamTailEvent, BrainWorkflowView, ToolOutputView } from './types';
 
 /** The workflow DAG a `WorkflowStart` call is running — the shared wire shape (BrainWorkflowView),
  *  attached to its tool item by call id exactly as `sub` is for a delegate call. */
@@ -35,7 +35,7 @@ export type TranscriptEvent =
   /** A server-delivered user message (a steered mid-turn message never optimistically echoed) — folded as
    *  a 'you' turn. `durableId` is the store row id, kept on the turn so a later `discard_user` can find it.
    *  The `queue` snapshot event (PI steering queue) is handled outside this fold. */
-  | { type: 'user'; text: string; durableId?: string }
+  | { type: 'user'; text: string; durableId?: string; images?: BrainMessageImage[] }
   /** The daemon discarded a just-sent user turn (Esc/Stop before any output): remove the matching 'you'
    *  bubble by `durableId`. Its `text` is restored to the composer by the provider, which owns input state. */
   | { type: 'discard_user'; durableId: string; text: string }
@@ -130,7 +130,7 @@ export function groupToolItems(items: ToolItem[]): ToolGroup[] {
  *  absent on turns synthesized live by `reduce` (a streaming reply, a steered user message). It is a
  *  STABLE React key (so a lazy-load prepend never remounts the live tail) and the identity `prependHistory`
  *  dedupes on — never a text fingerprint. */
-type YouTurn = { role: 'you'; text: string; id?: string };
+type YouTurn = { role: 'you'; text: string; id?: string; images?: BrainMessageImage[] };
 type ElowenTurn = { role: 'elowen'; segments: Segment[]; streaming: boolean; id?: string };
 /** A context-compaction boundary: everything before it was summarized away server-side, so the dock
  *  renders a subtle "context compacted" divider in its place, followed by the kept tail. */
@@ -164,7 +164,9 @@ export function fromHistory(msgs: BrainMessage[]): ChatView {
       continue;
     }
     if (m.role === 'user') {
-      if (m.text.trim()) turns.push({ role: 'you', text: m.text, id: m.id });
+      // An attachment-only message has no text left once the daemon drops the `[📎 …]` marker for a client
+      // that draws the thumbnails, so the images alone are enough to keep the bubble.
+      if (m.text.trim() || m.images?.length) turns.push({ role: 'you', text: m.text, id: m.id, ...(m.images?.length ? { images: m.images } : {}) });
       continue;
     }
     const segments: Segment[] = [];
@@ -314,7 +316,17 @@ export function reduce(view: ChatView, e: TranscriptEvent): ChatView {
       // The daemon's authoritative render of the user's turn (every real user send — normal or queued
       // delivery). The client no longer echoes optimistically, so this is what shows the 'you' bubble.
       // Keep the durable id on the turn so an Esc/Stop-before-output `discard_user` can pull this bubble.
-      return { turns: [...turns, { role: 'you', text: e.text, ...(e.durableId ? { id: e.durableId } : {}) }], thinking: true, notice: view.notice };
+      return {
+        turns: [...turns, {
+          role: 'you',
+          text: e.text,
+          ...(e.durableId ? { id: e.durableId } : {}),
+          // Same references the reload path will serve, so the bubble does not change on refresh.
+          ...(e.images?.length ? { images: e.images } : {}),
+        }],
+        thinking: true,
+        notice: view.notice,
+      };
     }
     case 'discard_user': {
       // The daemon cancelled this user turn before it produced output: drop the matching 'you' bubble and

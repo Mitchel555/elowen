@@ -80,11 +80,17 @@ export type BrainSegment =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: BrainSubagentView; wf?: BrainWorkflowView; plan?: string };
 
+/** An image a user attached to a turn, kept next to the database so the bubble still shows it after a
+ *  reload. `url` is a daemon path (`/brain/chat-images/<file>`) a browser loads directly: through the web
+ *  proxy it carries the session cookie, so no signed link is involved. */
+export interface BrainMessageImage { url: string; mimeType: string }
+
 /** A durable display row (the `GET /brain/messages` payload). `id` is the SQLite message UUID when the
  *  source is a real store row (the only case served over HTTP); structural callers may omit it. `text` is
  *  the flat reply; `segments` preserve the true order. `kind`/`detail` mark a non-message system row (a
- *  model/mode/rename/cwd event) rather than an assistant/user turn. */
-export interface BrainMessageView { id?: string; role: string; text: string; segments?: BrainSegment[]; kind?: string; detail?: string }
+ *  model/mode/rename/cwd event) rather than an assistant/user turn. `images` are a user row's surviving
+ *  attachments. */
+export interface BrainMessageView { id?: string; role: string; text: string; segments?: BrainSegment[]; kind?: string; detail?: string; images?: BrainMessageImage[] }
 
 /** The mode a turn runs in: `build` (the default), `plan` (planning only, tools clamped) or `workflow`.
  *  Part of the wire contract because a surface stamps it per send AND reads it back off the daemon: the

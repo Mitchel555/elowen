@@ -2,7 +2,7 @@ import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-
 import { isContextOverflow } from '@earendil-works/pi-ai';
 import { submittedPlan, toolCommand, toolDetail, toolDisplay, toolOutputView } from './messageView.js';
 import type { ToolOutputView } from './messageView.js';
-import type { AskQuestion, BrainUsage, BrainGoalState } from '../shared/wireContract.js';
+import type { AskQuestion, BrainUsage, BrainGoalState, BrainMessageImage } from '../shared/wireContract.js';
 import type { ProcessInfo } from './processRegistry.js';
 import { extractReason } from './toolReason.js';
 
@@ -137,7 +137,15 @@ export type BrainEvent =
    *  duplicate the turn). `text` is the client's clean rendering when it supplied one (before
    *  @mention/prompt expansion), else the persisted model-facing text. Internal goal kickoff/continuation
    *  turns are NOT user messages and emit nothing. Safe to ignore (the streamed reply still arrives). */
-  | { type: 'user'; text: string; /** Store row replaced by this ordered live marker in snapshots. */ durableId?: string }
+  | {
+      type: 'user';
+      text: string;
+      /** Store row replaced by this ordered live marker in snapshots. */
+      durableId?: string;
+      /** Attachments kept on disk for this turn. The sender's bubble draws them right away and the reload
+       *  path rebuilds the identical thing from the store, so a refresh changes nothing on screen. */
+      images?: BrainMessageImage[];
+    }
   /** The DAEMON discarded a just-sent user turn: the user hit Esc/Stop before the turn produced any output,
    *  so its durable row was deleted and clients must pull the matching `you` bubble (`durableId`) from the
    *  transcript and restore `text` to the composer for editing/resending. Authoritative — a client never

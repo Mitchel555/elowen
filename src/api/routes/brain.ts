@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { parseBody } from '../validation.js';
 import { brainStartSchema, brainStopSchema, brainVisibilitySchema, brainSendSchema, brainModelSchema, brainRenameSchema, brainToggleSchema, brainThinkSchema, brainCwdSchema, brainCompactSchema, brainContextSchema, brainTerminalSchema, brainGoalSchema, brainAnswerSchema, lspInstallSchema, subagentSendSchema } from '../schemas/brain.js';
 import { brainConfigFromElowen } from '../../brain/config.js';
+import { readChatImage } from '../../brain/chatImages.js';
 import { listBrainModels, fetchOpenAiModels } from '../../brain/models.js';
 import { elowenExec, isExecAllowedForUser } from '../../shared/execs.js';
 import type { BrainEvent } from '../../brain/events.js';
@@ -210,6 +211,18 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (!d.brain) return c.json([]);
     if (forbidden(c)) return c.json({ error: 'forbidden' }, 403);
     return c.json(d.brain.searchMessages(c.get('user').id, c.req.query('q') ?? ''));
+  });
+
+  // A user's own chat attachments, kept next to the database so a bubble still shows them after a reload.
+  // Loaded straight from an <img>: through the web proxy the request carries the session cookie, which the
+  // proxy turns into a daemon bearer, so this needs no signed link — it is a normal authenticated GET.
+  app.get('/brain/chat-images/:file', async c => {
+    if (forbidden(c)) return c.json({ error: 'forbidden' }, 403);
+    if (!d.chatImagesDir) return c.json({ error: 'not found' }, 404);
+    const image = readChatImage(d.chatImagesDir, c.req.param('file'));
+    if (!image) return c.json({ error: 'not found' }, 404);
+    // Immutable bytes under a random name, so it caches hard and privately.
+    return c.body(new Uint8Array(image.body), 200, { 'content-type': image.mimeType, 'cache-control': 'private, max-age=31536000' });
   });
 
   // Generated images (image-gen plugin) — name is strictly sanitized, path stays inside the data dir.

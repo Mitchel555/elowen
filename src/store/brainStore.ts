@@ -908,4 +908,26 @@ export class BrainStore {
   clearGoal(sessionId: string): void {
     this.db.prepare('DELETE FROM brain_goals WHERE session_id = ?').run(sessionId);
   }
+
+  /** Every chat-image file still referenced by a stored user message. The sweep deletes what this does
+   *  NOT return, so it has to stay complete: the LIKE only narrows the scan, the names themselves come
+   *  from parsing each candidate row. */
+  referencedChatImages(): Set<string> {
+    const rows = this.db.prepare(
+      `SELECT content FROM brain_messages WHERE role = 'user' AND content LIKE '%"images"%'`,
+    ).all() as { content: string }[];
+    const files = new Set<string>();
+    for (const row of rows) {
+      try {
+        const parsed: unknown = JSON.parse(row.content);
+        const images = (parsed as { images?: unknown })?.images;
+        if (!Array.isArray(images)) continue;
+        for (const image of images) {
+          const file = (image as { file?: unknown })?.file;
+          if (typeof file === 'string') files.add(file);
+        }
+      } catch { /* a malformed row references nothing */ }
+    }
+    return files;
+  }
 }

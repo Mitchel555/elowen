@@ -8,7 +8,7 @@ import { usePersistentState } from '../../lib/usePersistentState';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands, useConfig } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
-import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainModelOption, BrainPendingPlan, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
+import type { AskAnswer, AskQuestion, BrainCard, BrainGoal, BrainMessageImage, BrainModelOption, BrainPendingPlan, BrainProject, BrainStatus, BrainStreamSnapshotFrame, BrainUsage, BrainWorkMode, McpServerStatus, ProcessInfo, SlashCommandDef, StatuslineConfig, ToolOutputView } from '../../lib/types';
 import { collectSubagents, collectWorkflows, emptyView, fromHistory, fromSnapshot, prependHistory, reduce, submittedPlan, upsertCard, type ChatTurn, type ChatView, type SubagentState, type TranscriptEvent, type WorkflowState } from '../../lib/transcript';
 import { formatTokens, formatCost } from '../../lib/format';
 import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/brainSession';
@@ -682,8 +682,8 @@ function useBrainChatController(): BrainChatValue {
     // delivery). The composer never echoes optimistically, so THIS folds the 'you' bubble — and the fold
     // marks the turn in flight, which is what raises the thinking indicator.
     onFrame('user', (e) => {
-      const { text, durableId } = JSON.parse((e as MessageEvent).data) as { text: string; durableId?: string };
-      applyEvent({ type: 'user', text, ...(durableId ? { durableId } : {}) });
+      const { text, durableId, images } = JSON.parse((e as MessageEvent).data) as { text: string; durableId?: string; images?: BrainMessageImage[] };
+      applyEvent({ type: 'user', text, ...(durableId ? { durableId } : {}), ...(images?.length ? { images } : {}) });
     });
     // The daemon cancelled a just-sent user turn before it produced output (Esc/Stop): pull its 'you'
     // bubble (the fold, by durableId) and restore the text to the composer for editing/resending — but only

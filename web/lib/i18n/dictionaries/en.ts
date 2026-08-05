@@ -1637,6 +1637,8 @@ export const en = {
     loadingOlder: 'Loading older messages',
     attach: 'Attach a file',
     attachRemove: 'Remove attachment',
+    attachmentAlt: 'Attached image',
+    attachmentOpen: 'Open full size',
     attachTooBig: 'File is too large or binary',
     attachUnsupportedType: 'Unsupported image format — use PNG, JPEG, GIF or WEBP',
     attachOnly: '(attachment)',

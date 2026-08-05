@@ -4,14 +4,21 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import type { BrainRunMessage, BrainStore } from '../store/brainStore.js';
 import { extractText, NO_REPLY_NUDGE } from './messageView.js';
+import type { StoredChatImage } from './chatImages.js';
 
 import { currentMeter } from './openrouterMeter.js';
 import { isErroredContextOverflow } from './events.js';
 
 /** Append the user's clean prompt before session.prompt(), so pre-prompt compaction can see it. A later
- *  agent_end atomically reorders this row with the generated messages when mid-turn steering occurred. */
-export function projectUserTurn(store: BrainStore, sessionId: string, text: string): string {
-  const row = store.appendMessage({ id: randomUUID(), sessionId, parentId: null, role: 'user', content: { role: 'user', content: text } });
+ *  agent_end atomically reorders this row with the generated messages when mid-turn steering occurred.
+ *  `images` are REFERENCES to files already written next to the database — never the base64 itself, which
+ *  must stay out of `brain_messages` (see the note on persistAgentRun below). They are what lets the
+ *  attachment still render after a reload, since the bytes the model saw are gone with the turn. */
+export function projectUserTurn(store: BrainStore, sessionId: string, text: string, images?: readonly StoredChatImage[]): string {
+  const content = images?.length
+    ? { role: 'user' as const, content: text, images: [...images] }
+    : { role: 'user' as const, content: text };
+  const row = store.appendMessage({ id: randomUUID(), sessionId, parentId: null, role: 'user', content });
   store.touchSession(sessionId);
   return row.id;
 }

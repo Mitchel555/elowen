@@ -65,6 +65,9 @@ export interface ServerDeps {
   pluginDirs?: string[];
   /** Root of per-plugin writable data dirs (serves generated images from plugins-data/image-gen). */
   pluginDataRoot?: string;
+  /** Where a chat turn's own attachments are kept, so a bubble still shows them after a reload. Absent
+   *  (in-memory database) → the read route 404s and messages keep only their attachment marker. */
+  chatImagesDir?: string;
   /** Brain provider OAuth flows (connect Anthropic/Copilot/OpenAI accounts). Absent → routes degrade. */
   brainOauth?: BrainOAuthManager;
   /** The brain's credential access — lets /brain/models surface connected OAuth accounts' catalogs and

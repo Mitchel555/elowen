@@ -42,6 +42,10 @@ export interface BrainDeps {
   projectPath?: () => string | undefined;
   /** Registered projects resolve a canonical client cwd to the category scope used for recall. */
   projects?: ProjectStore;
+  /** Where a turn's image attachments are written so a bubble still shows them after a reload. Raw base64
+   *  never enters `brain_messages`; the row keeps a reference to a file here. Absent (in-memory database)
+   *  → attachments live only for their turn, exactly as before. */
+  chatImagesDir?: string;
   /** The daemon-wide shared plugin registry (lazy-loaded, memoized, invalidated on plugin toggles).
    *  Shared with the brain workers and platform adapters so ALL consumers reload together. Absent →
    *  brain runs exactly as before plugins existed. */

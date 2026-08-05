@@ -63,6 +63,8 @@ interface TurnRunnerDeps {
   identity: IdentityResolver;
   /** Names a brand-new conversation from its first message — see BrainService. */
   titler: ConversationTitler;
+  /** Where a turn's attachments are written so they outlive it (undefined for an in-memory database). */
+  chatImagesDir?: string;
   /** Post-turn memory curator — present only when the memory deps are wired. */
   curator?: MemoryCurator;
   prompts: BrainDeps['prompts'];
@@ -354,7 +356,7 @@ export class BrainTurnRunner {
     if (turnBusy && !internal) {
       const queuedText = this.contextBuilder.withRunningSubagents(text, active.sessionId);
       const admission = new TurnAdmission(
-        { store: this.d.store, titler: this.d.titler },
+        { store: this.d.store, titler: this.d.titler, chatImagesDir: this.d.chatImagesDir },
         { live: active, text: queuedText, persistText: text, images, display, mode, visible: true, titleOnAdmission: false, onAdmitted: request.onAdmitted },
       );
       await admission.steer();
@@ -393,7 +395,7 @@ export class BrainTurnRunner {
         display: echoDisplay,
       };
       const admission = new TurnAdmission(
-        { store: this.d.store, titler: this.d.titler },
+        { store: this.d.store, titler: this.d.titler, chatImagesDir: this.d.chatImagesDir },
         { live, text: turnText, images: turnImages, display: echoDisplay, mode: turnMode, visible: isUserTurn, titleOnAdmission: isUserTurn, onAdmitted: request.onAdmitted },
       );
       admission.prepare();

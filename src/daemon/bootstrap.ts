@@ -77,6 +77,7 @@ import { EmbeddingService } from '../embeddings/embeddingService.js';
 import { EmbeddingQueue } from '../embeddings/embedQueue.js';
 import { MemoryService } from '../brain/memoryService.js';
 import { isEvictable, vitality, type MemoryRetentionConfig } from '../brain/memoryVitality.js';
+import { sweepChatImages } from '../brain/chatImages.js';
 import { toEmbeddingConfig } from '../store/configStore.js';
 import { brainConfigFromElowen } from '../brain/config.js';
 import { loadAgentRegistry, agentCatalog, type AgentDef } from '../brain/agents/agentRegistry.js';
@@ -676,6 +677,9 @@ export async function buildApp(opts: BuildOpts) {
     log.warn('SETUP MODE — no users yet; the API is open until the first admin is created via onboarding');
   }
   const avatarsDir = opts.dbPath === ':memory:' ? undefined : join(dirname(opts.dbPath), 'avatars');
+  // A chat turn's image attachments, kept beside the database like avatars. They are read back through an
+  // authenticated route, so no signed link is needed — the web proxy supplies the bearer from the cookie.
+  const chatImagesDir = opts.dbPath === ':memory:' ? undefined : join(dirname(opts.dbPath), 'chat-images');
   // Per-process secret for short-lived signed avatar URLs (finding W2) — keeps the long-lived session
   // token out of <img> src query strings. Rotates on restart; links live ~5 min, so that's harmless.
   const avatarSecret = randomBytes(32).toString('hex');
@@ -889,6 +893,7 @@ export async function buildApp(opts: BuildOpts) {
         cwd: brainDir,
         projectPath: () => homeProject.path,
         projects,
+        chatImagesDir,
         // A web-started owner turn finished with no CLI watching it live → push it to the user's phone.
         // No subscription registered ⇒ sendToUsers is a no-op, so this needs no separate enable flag.
         notifyTurnComplete: (userId, title) => { void pushSender.sendToUsers([userId], buildTurnDone({ title })); },
@@ -1070,7 +1075,7 @@ export async function buildApp(opts: BuildOpts) {
   // same systemd path the web/CLI command uses. Built here (needs the units + marker), wired now.
   if (brain && restartDaemon) brain.restartHandler = restartDaemon;
 
-  const app = createServer({ tasks, readiness, missions, engine, missionGit, gitLock, spawn, tmux, bus, events, notes, agents, project: homeProject, fallback: { program: 'claude-code', model: 'sonnet' }, cli, clock: new SystemClock(), config, users, projects, userProjects, pushSubscriptions, userPrompts, userSettings, pluginDirs, pluginDataRoot, brainOauth, brainAuth: brainCreds, prompts, taskUsage, git, avatarsDir, avatarSecret, planJobs, decisionQueue, pilot, advisor, brain, brainTerminal, restartDaemon, brainWorkers, brainStore, memoryStore, memoryCategoryStore, memoryCategorizer, embeddings, plugins: pluginProvider, marketplace, pluginLogs, hookAudit, tickets });
+  const app = createServer({ tasks, readiness, missions, engine, missionGit, gitLock, spawn, tmux, bus, events, notes, agents, project: homeProject, fallback: { program: 'claude-code', model: 'sonnet' }, cli, clock: new SystemClock(), config, users, projects, userProjects, pushSubscriptions, userPrompts, userSettings, pluginDirs, pluginDataRoot, brainOauth, brainAuth: brainCreds, prompts, taskUsage, git, avatarsDir, avatarSecret, chatImagesDir, planJobs, decisionQueue, pilot, advisor, brain, brainTerminal, restartDaemon, brainWorkers, brainStore, memoryStore, memoryCategoryStore, memoryCategorizer, embeddings, plugins: pluginProvider, marketplace, pluginLogs, hookAudit, tickets });
 
   // Root-cause recovery: after a daemon crash/restart, tasks left 'in_progress' whose tmux
   // session is gone are zombies — revert them to 'open' so they can be picked up again. No grace
@@ -1214,6 +1219,19 @@ export async function buildApp(opts: BuildOpts) {
     };
     sweepMemoryRetention();
     const stopMemoryRetentionSweep = clock.setInterval(sweepMemoryRetention, 86_400_000);
+    // Chat attachments outlive their turn on purpose, but not their message: a turn discarded before it
+    // produced output, or a deleted conversation, leaves files nothing points at. Reclaim them daily,
+    // keeping anything written in the last hour — a turn writes its files before committing the row that
+    // references them, so a sweep landing in between must not delete a live attachment.
+    const sweepChatAttachments = () => {
+      if (!chatImagesDir) return;
+      try {
+        const removed = sweepChatImages(chatImagesDir, brainStore.referencedChatImages(), 3_600_000, clock.now());
+        if (removed > 0) log.info(`chat images: removed ${removed} unreferenced attachment(s)`);
+      } catch (e) { log.error('chat image sweep failed', e); }
+    };
+    sweepChatAttachments();
+    const stopChatImageSweep = clock.setInterval(sweepChatAttachments, 86_400_000);
     // Sweep expired terminal-WS tickets so a burst of unredeemed tickets can't grow the map unbounded.
     const stopTicketSweep = clock.setInterval(() => tickets.sweep(clock.now()), 60_000);
     // Reconcile chat terminals against live tmux: reap orphaned tokens/bindings and stray `elowen-chat-*`
@@ -1267,7 +1285,7 @@ export async function buildApp(opts: BuildOpts) {
     const stopEmbedQueue = clock.setInterval(() => {
       void embedQueue.drain().catch((e) => log.error('embed queue drain failed', e));
     }, 30_000);
-    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopMemoryRetentionSweep(); stopTicketSweep(); stopTerminalSweep(); stopIdleSessionReap(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
+    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopMemoryRetentionSweep(); stopChatImageSweep(); stopTicketSweep(); stopTerminalSweep(); stopIdleSessionReap(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
   };
   return { app, startLoops, tickets, tmux };
 }

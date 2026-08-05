@@ -1637,6 +1637,8 @@ export const cs = {
     loadingOlder: 'Načítání starších zpráv',
     attach: 'Přiložit soubor',
     attachRemove: 'Odebrat přílohu',
+    attachmentAlt: 'Přiložený obrázek',
+    attachmentOpen: 'Otevřít v plné velikosti',
     attachTooBig: 'Soubor je příliš velký nebo binární',
     attachUnsupportedType: 'Nepodporovaný formát obrázku — použijte PNG, JPEG, GIF nebo WEBP',
     attachOnly: '(příloha)',
