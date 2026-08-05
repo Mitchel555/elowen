@@ -12,7 +12,9 @@ import { Button } from '../../../components/ui/Button';
 import { LoadingState, EmptyState } from '../../../components/ui/states';
 import { useToast } from '../../../components/ui/Toast';
 import { useTranslation } from '../../../lib/i18n';
-import { buildTree, basename, parentDir, joinPath, copyName, isImage, isMarkdown, type TreeNode } from './helpers';
+import { baseName } from '../../../lib/filePath';
+import { copyText } from '../../../lib/clipboard';
+import { buildTree, parentDir, joinPath, copyName, isImage, isMarkdown, type TreeNode } from './helpers';
 import { FileTree } from './FileTree';
 import { ContextMenu, DIVIDER, type ContextMenuState, type MenuEntry } from '../../../components/ui/ContextMenu';
 import { PromptDialog, ConfirmDialog } from './dialogs';
@@ -192,7 +194,7 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
   };
 
   const err = (e: unknown) => toast(String(e), 'error');
-  const copyPath = (p: string) => { navigator.clipboard?.writeText(p).then(() => toast(t.projects.pathCopied)).catch(() => {}); };
+  const copyPath = (p: string) => { void copyText(p).then((ok) => { if (ok) toast(t.projects.pathCopied); else toast(t.projects.copyFailed, 'error'); }); };
 
   const submitDialog = (val: string) => {
     if (!dialog) return;
@@ -247,8 +249,8 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
     : dialog?.kind === 'newFolder' ? t.projects.dlgNewFolder
     : dialog?.kind === 'rename' ? t.projects.dlgRename
     : dialog?.kind === 'duplicate' ? t.projects.dlgDuplicate : '';
-  const dialogInitial = dialog?.kind === 'rename' ? basename(dialog.target)
-    : dialog?.kind === 'duplicate' ? basename(copyName(dialog.target)) : '';
+  const dialogInitial = dialog?.kind === 'rename' ? baseName(dialog.target)
+    : dialog?.kind === 'duplicate' ? baseName(copyName(dialog.target)) : '';
 
   return (
     <div
@@ -371,7 +373,7 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
 
       {menu ? <ContextMenu state={menu} onClose={() => setMenu(null)} /> : null}
       {dialog && dialog.kind === 'delete'
-        ? <ConfirmDialog title={t.projects.dlgDelete} message={t.projects.dlgDeleteMsg.replace('{name}', basename(dialog.target))} confirmLabel={t.projects.ctxDelete} danger icon={Trash2} onConfirm={confirmDelete} onCancel={() => setDialog(null)} />
+        ? <ConfirmDialog title={t.projects.dlgDelete} message={t.projects.dlgDeleteMsg.replace('{name}', baseName(dialog.target))} confirmLabel={t.projects.ctxDelete} danger icon={Trash2} onConfirm={confirmDelete} onCancel={() => setDialog(null)} />
         : dialog
         ? <PromptDialog title={dialogTitle} label={t.projects.dlgName} initialValue={dialogInitial} confirmLabel={t.common.save} onConfirm={submitDialog} onCancel={() => setDialog(null)} />
         : null}

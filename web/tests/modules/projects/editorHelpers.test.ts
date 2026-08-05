@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildTree, langOf, basename, parentDir, joinPath, copyName, isImage, isMarkdown } from '../../../modules/projects/editor/helpers';
+import { buildTree, langOf, parentDir, joinPath, copyName, isImage, isMarkdown } from '../../../modules/projects/editor/helpers';
+import { baseName, extOf } from '../../../lib/filePath';
 
 describe('editor helpers', () => {
   it('builds a nested tree with dirs before files, alpha within', () => {
@@ -22,7 +23,7 @@ describe('editor helpers', () => {
   });
 
   it('derives path parts', () => {
-    expect(basename('a/b/c.ts')).toBe('c.ts');
+    expect(baseName('a/b/c.ts')).toBe('c.ts');
     expect(parentDir('a/b/c.ts')).toBe('a/b');
     expect(parentDir('top.ts')).toBe('');
     expect(joinPath('a/b', 'c.ts')).toBe('a/b/c.ts');
@@ -41,5 +42,16 @@ describe('editor helpers', () => {
     expect(isMarkdown('README.md')).toBe(true);
     expect(isMarkdown('notes.markdown')).toBe(true);
     expect(isMarkdown('a.txt')).toBe(false);
+  });
+
+  it('reads the extension from the file name only, never from a dotted directory', () => {
+    // Regression: the old `p.split('.').pop()` took the segment after the LAST dot of the whole
+    // path, so a dot in a directory (`config.v2`) hijacked the extension and language/type
+    // detection fell back to plaintext/generic.
+    expect(extOf('src/config.v2/soubor')).toBe('soubor'); // not the nonsense 'v2/soubor'
+    expect(extOf('src/config.v2/app.ts')).toBe('ts');
+    expect(langOf('src/config.v2/ts')).toBe('typescript');
+    expect(isImage('assets.v1/png')).toBe(true);
+    expect(isMarkdown('docs.v2/md')).toBe(true);
   });
 });

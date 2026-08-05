@@ -1,4 +1,5 @@
 import { File, FileCode, FileJson, FileText, Image, Palette, FileCog, Terminal, Database, type LucideIcon } from 'lucide-react';
+import { extOf } from './filePath';
 
 /** Pick a lucide icon for a file path by extension, so changed-file lists read at a glance.
  *  Unknown extensions fall back to a generic file icon. */
@@ -13,8 +14,6 @@ const EXT_ICON: Record<string, LucideIcon> = {
   sql: Database,
   png: Image, jpg: Image, jpeg: Image, gif: Image, svg: Image, webp: Image,
 };
-
-const extOf = (p: string) => p.split('/').pop()?.split('.').pop()?.toLowerCase() ?? '';
 
 export function fileIcon(path: string): LucideIcon {
   return EXT_ICON[extOf(path)] ?? File;

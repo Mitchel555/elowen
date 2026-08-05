@@ -1,4 +1,5 @@
 import type { FileNode } from '../../../lib/types';
+import { baseName, extOf } from '../../../lib/filePath';
 
 export interface TreeNode { name: string; path: string; type: 'file' | 'dir'; children: TreeNode[] }
 
@@ -32,8 +33,8 @@ export function langOf(path: string): string {
   return map[ext] ?? 'plaintext';
 }
 
-const extOf = (p: string) => p.split('.').pop()?.toLowerCase() ?? '';
-export const basename = (p: string) => p.split('/').pop() ?? p;
+// The parent path WITHOUT a trailing slash, for joinPath composition — deliberately not `dirName`
+// from lib/filePath, which keeps its trailing slash for the muted-prefix display in change lists.
 export const parentDir = (p: string) => p.split('/').slice(0, -1).join('/');
 export const joinPath = (dir: string, name: string) => (dir ? `${dir}/${name}` : name);
 
@@ -43,7 +44,7 @@ export const isMarkdown = (p: string) => extOf(p) === 'md' || extOf(p) === 'mark
 
 /** Suggest a non-colliding "copy" name for duplication, e.g. `a.ts` → `a copy.ts`. */
 export function copyName(path: string): string {
-  const base = basename(path);
+  const base = baseName(path);
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;
   const ext = dot > 0 ? base.slice(dot) : '';

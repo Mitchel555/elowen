@@ -8,6 +8,7 @@ import { apiErrorMessage } from '../../lib/elowenClient';
 import { useTaskControls } from '../../lib/useTaskControls';
 import { taskExec } from '../../lib/agentUtils';
 import { taskSessionName, taskAgentName, taskElapsed, phaseDetails, agentDisplayName } from '../../lib/agentUtils';
+import { copyText } from '../../lib/clipboard';
 import { formatTaskTime } from '../../lib/format';
 import { Badge } from '../../components/ui/Badge';
 import { ModelIcon } from '../../components/ui/ModelIcon';
@@ -61,12 +62,9 @@ export function TaskDetailPane({ taskId, onEdit, onBack }: { taskId: string; onE
   const depTasks = (deps.data ?? []).filter((d) => d.task_id === taskId).map((d) => byId.get(d.depends_on_id)).filter((x): x is Task => !!x);
 
   const copyId = async () => {
-    try {
-      await navigator.clipboard.writeText(task.id);
-      toast(t.tasks.idCopied.replace('{id}', task.id));
-    } catch {
-      toast(t.tasks.idCopyFailed, 'error');
-    }
+    const ok = await copyText(task.id);
+    if (ok) toast(t.tasks.idCopied.replace('{id}', task.id));
+    else toast(t.tasks.idCopyFailed, 'error');
   };
 
   // Approve / re-run a mission phase after a review escalation: clear it back to open and nudge its

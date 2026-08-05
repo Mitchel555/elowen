@@ -930,6 +930,7 @@ export const sk = {
     duplicated: 'Skopírované do {path}',
     deleted: 'Vymazané {path}',
     pathCopied: 'Cesta skopírovaná',
+    copyFailed: 'Kopírovanie zlyhalo',
     ctxOpenEditor: 'Otvoriť editor',
     ctxEditProject: 'Upraviť projekt',
     ctxPathCopied: 'Cesta k priečinku skopírovaná',

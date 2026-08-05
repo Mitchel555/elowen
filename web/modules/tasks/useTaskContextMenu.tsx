@@ -9,6 +9,7 @@ import { useTranslation } from '../../lib/i18n';
 import { apiErrorMessage } from '../../lib/elowenClient';
 import { openTerminalWindow } from '../../lib/openTerminalWindow';
 import { taskExec, taskSessionName, agentDisplayName } from '../../lib/agentUtils';
+import { copyText } from '../../lib/clipboard';
 import { allModels } from '../../lib/execPresets';
 import { useSessions, useConfig } from '../../lib/queries';
 import {
@@ -86,7 +87,7 @@ export function useTaskContextMenu({ onSelect, onEdit, childMap, blockedBy }: In
     const stop = () => { if (session) kill.mutate(session); setStatus.mutate({ id: task.id, status: 'open' }, { onSuccess: () => toast(t.tasks.stopped.replace('{id}', task.id)), onError: fail }); };
     const pause = () => { if (session) send.mutate({ name: session, keys: ['C-c'] }, { onSuccess: () => toast(t.sessions.interrupted.replace('{name}', agentDisplayName(session))), onError: fail }); };
     const reopen = () => setStatus.mutate({ id: task.id, status: 'open' }, { onSuccess: () => toast(t.tasks.updated.replace('{id}', task.id)), onError: fail });
-    const copyId = () => navigator.clipboard.writeText(task.id).then(() => toast(t.tasks.idCopied.replace('{id}', task.id)), () => toast(t.tasks.idCopyFailed, 'error'));
+    const copyId = () => void copyText(task.id).then((ok) => { if (ok) toast(t.tasks.idCopied.replace('{id}', task.id)); else toast(t.tasks.idCopyFailed, 'error'); });
     const runReview = () => insert.mutate({ epicId: task.id, body: { phases: [{ title: t.tasks.reviewPhaseTitle.replace('{title}', task.title), type: 'chore' }] } }, { onSuccess: () => toast(t.tasks.reviewQueued), onError: fail });
     const approveGate = () => approve.mutate(task.id, { onSuccess: (r) => toast(t.tasks.gateApproved.replace('{n}', String(r.released.length))), onError: fail });
     const closeTask = () => close.mutate(task.id, { onSuccess: () => toast(t.tasks.closed.replace('{id}', task.id)), onError: fail });

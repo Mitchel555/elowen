@@ -930,6 +930,7 @@ export const en = {
     duplicated: 'Copied to {path}',
     deleted: 'Deleted {path}',
     pathCopied: 'Path copied',
+    copyFailed: 'Copy failed',
     ctxOpenEditor: 'Open editor',
     ctxEditProject: 'Edit project',
     ctxPathCopied: 'Project path copied',

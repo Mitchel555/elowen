@@ -26,6 +26,7 @@ import { DataTable, DataTableCell, DataTableRow } from '../../components/ui/Data
 import { WorkspaceDetailRail, WorkspaceMetric, SpatialWorkspaceLayout } from '../../components/ui/WorkspacePrimitives';
 import { ControlSurfaceDocument, ControlSurfaceRegister, ControlSurfaceState, ControlSurfaceToolbar } from '../../components/ui/ControlSurface';
 import { usePersistentState } from '../../lib/usePersistentState';
+import { copyText } from '../../lib/clipboard';
 
 type ProjectFilter = 'all' | 'inherit' | 'override';
 const PROJECT_FILTERS: readonly ProjectFilter[] = ['all', 'inherit', 'override'];
@@ -103,7 +104,7 @@ export function ProjectsView() {
       { label: t.projects.ctxOpenEditor, icon: Code2, onSelect: () => openProjectEditor(p.id, null) },
       { label: t.projects.ctxEditProject, icon: Pencil, onSelect: () => { setSelectedId(p.id); openEdit(p); } },
     ],
-    [{ label: t.projects.ctxCopyPath, icon: Copy, onSelect: () => { void navigator.clipboard.writeText(p.path); toast(t.projects.ctxPathCopied); } }],
+    [{ label: t.projects.ctxCopyPath, icon: Copy, onSelect: () => { void copyText(p.path).then((ok) => { if (ok) toast(t.projects.ctxPathCopied); else toast(t.projects.copyFailed, 'error'); }); } }],
     [{ label: t.projects.ctxRemove, icon: Trash2, tone: 'danger', onSelect: () => setRemoving(p) }],
   ];
   const projectActions = (p: Project): ActionMenuItem[] => projectActionGroups(p).flat();
