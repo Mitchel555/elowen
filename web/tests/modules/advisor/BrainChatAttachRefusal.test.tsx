@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
@@ -34,7 +34,7 @@ const server = setupServer(
 );
 
 beforeAll(() => { server.listen({ onUnhandledRequest }); });
-afterEach(() => { server.resetHandlers(); localStorage.clear(); });
+afterEach(() => { server.resetHandlers(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 afterAll(() => server.close());
 beforeEach(() => { (globalThis as unknown as { EventSource: unknown }).EventSource = FakeES; });
 
@@ -106,6 +106,26 @@ describe('a refusal names its own reason', () => {
     expect(staged).toEqual([]);
     expect(await screen.findByText(/příliš velký|too large|príliš veľký/i)).toBeTruthy();
     expect(screen.queryByText(/nepodporovaný formát|unsupported format/i)).toBeNull();
+  });
+
+  it('shrinks an oversized photo instead of refusing it, which is all a phone can send', async () => {
+    // Stand in for the browser APIs jsdom lacks; the shrink itself is covered in tests/lib/imageDownscale.
+    vi.stubGlobal('createImageBitmap', async () => ({ width: 4032, height: 3024, close: () => {} }));
+    // Only the canvas is faked; React is rendering real elements through this same call.
+    const realCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => (tag === 'canvas'
+      ? ({
+          width: 0, height: 0,
+          getContext: () => ({ drawImage: () => {} }),
+          toBlob: (cb: (b: Blob) => void, type: string) => cb(new Blob([new Uint8Array([1, 2, 3])], { type })),
+        } as unknown as HTMLElement)
+      : realCreate(tag)));
+    await mount();
+    const photo = fileOf('IMG_4821.jpg', 'image/jpeg', PNG_BYTES);
+    Object.defineProperty(photo, 'size', { value: 9 * 1024 * 1024 });
+    await act(async () => { await addFiles([photo]); });
+    expect(staged).toEqual([{ name: 'IMG_4821.jpg', kind: 'image', mimeType: 'image/jpeg' }]);
+    expect(screen.queryByText(/příliš velký|too large|príliš veľký/i)).toBeNull();
   });
 
   it('still refuses genuinely binary content that is not an image', async () => {

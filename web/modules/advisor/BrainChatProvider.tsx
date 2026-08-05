@@ -5,6 +5,7 @@ import { ArrowLeft, Loader } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
+import { downscaleImage } from '../../lib/imageDownscale';
 import { useToast } from '../../components/ui/Toast';
 import { useBrainSessions, useBrainCommands, useConfig } from '../../lib/queries';
 import { elowenClient, BASE } from '../../lib/elowenClient';
@@ -109,15 +110,22 @@ async function readAttachment(file: File): Promise<Attachment | AttachRefusal> {
   // type (heic, avif, svg…) is named as such instead of being read as text and reported as binary.
   if (imageType || file.type.startsWith('image/')) {
     if (!imageType) return 'unsupported';
-    if (file.size > MAX_IMAGE_BYTES) return 'too-large';
+    // A phone photo is routinely bigger than the provider accepts, and always has more pixels than it
+    // keeps. Shrink it here rather than refusing it — from a phone there is no other way to send it.
+    // Null means shrinking was not possible or not needed; the original is then judged as before.
+    const smaller = await downscaleImage(file, { maxBytes: MAX_IMAGE_BYTES, sourceType: imageType })
+      .catch(() => null);
+    const source: Blob = smaller?.blob ?? file;
+    const mimeType = smaller?.mimeType ?? imageType;
+    if (source.size > MAX_IMAGE_BYTES) return 'too-large';
     const dataUrl = await new Promise<string>((res, rej) => {
       const r = new FileReader();
       r.onload = () => res(String(r.result));
       r.onerror = () => rej(r.error);
-      r.readAsDataURL(file);
+      r.readAsDataURL(source);
     });
     const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    return { name: file.name || 'obrazek.png', kind: 'image', mimeType: imageType, data: base64, preview: dataUrl };
+    return { name: file.name || 'obrazek.png', kind: 'image', mimeType, data: base64, preview: dataUrl };
   }
   if (file.size > MAX_TEXT_BYTES) return 'too-large';
   const text = await file.text();
