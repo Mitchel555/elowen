@@ -129,6 +129,17 @@ export class ClientAttachments {
     return n;
   }
 
+  /** Whether the client that SENT a turn is still attached to it and on screen. This is the question the
+   *  phone push actually needs: the user is at the device they typed on, so another surface being open
+   *  elsewhere says nothing. A terminal left running on a desktop is attached all day and reports no
+   *  visibility, so counting it as a watcher suppressed the notification for a phone the user had already
+   *  put away. Unknown or detached client → false, which lets the push through. */
+  senderIsWatching(userId: number, clientId: string, sessionId: string): boolean {
+    const listener = this.stableClients.get(this.stableKey(userId, clientId))?.listener;
+    if (!listener || this.clientStreams.get(listener) !== sessionId) return false;
+    return !this.hiddenListeners.has(listener);
+  }
+
   /** Record whether one authenticated client is on screen. Returns false when the id matches no live
    *  transport — a stale tab reporting after its stream died must not leave an entry behind. */
   setClientVisibility(userId: number, clientId: string, hidden: boolean): boolean {

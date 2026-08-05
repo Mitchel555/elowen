@@ -3914,10 +3914,31 @@ describe('sub-agent session tap + owner steering', () => {
     const svc = new BrainService(d as never);
 
     const cli = await svc.start(1, { clientId: 'cli-a', clientGeneration: 1 });
-    const off = svc.tapSession(1, cli.sessionId, () => {});
+    // Attach under the same client id the send is bound to — a real terminal identifies its stream.
+    const off = svc.tapSession(1, cli.sessionId, () => {}, 'cli-a', 1);
     await svc.send({ userId: 1, text: 'from the cli', session: cli.sessionId, client: { id: 'cli-a', generation: 1 } });
     expect(notified).toEqual([]);
     off();
+  });
+
+  // The sender's own surface is what decides. A terminal left running on a desktop is attached all day and
+  // reports no visibility, so letting it speak for the conversation silenced the push for a phone the user
+  // had already put away — the exact case this feature exists for.
+  it('notifies a phone that went off screen even while another client stays attached', async () => {
+    const notified: { userId: number; title: string }[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string) => void }).notifyTurnComplete =
+      (userId, title) => notified.push({ userId, title });
+    const svc = new BrainService(d as never);
+
+    const s = await svc.start(1, { clientId: 'phone', clientGeneration: 1 });
+    const offDesktop = svc.tapSession(1, s.sessionId, () => {}, 'desktop-cli', 1);
+    const offPhone = svc.tapSession(1, s.sessionId, () => {}, 'phone', 1);
+    svc.setClientVisibility(1, 'phone', true);
+
+    await svc.send({ userId: 1, text: 'from the phone', session: s.sessionId, client: { id: 'phone', generation: 1 } });
+    expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
+    offPhone(); offDesktop();
   });
 
   it('notifies a bound turn nobody is streaming — a phone that went off screen', async () => {

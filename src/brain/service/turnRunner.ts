@@ -82,7 +82,7 @@ interface TurnRunnerDeps {
    *  deferred, session-disposing work a tool requested mid-turn (a pending plugin reload) and notify the
    *  user a web-started turn is done. `fromWeb` is true only for an owner turn that came from the web —
    *  not a bound CLI (it sees the turn live) and not an internal goal/nudge turn. */
-  afterTurnSettled?(userId: number, sessionId: string, userInitiated: boolean): void;
+  afterTurnSettled?(userId: number, sessionId: string, userInitiated: boolean, senderClientId?: string): void;
 }
 
 /** The owner-chat turn pipeline: mid-run steering, idle rollover + vision hop (delegated to the
@@ -510,7 +510,7 @@ export class BrainTurnRunner {
       // also require the absence of `client`: the web binds its sends exactly like the CLI does, so that
       // test excluded every real chat message and the push could never fire. Whether anyone is actually
       // reading is a separate question, answered by the watcher count — a CLI holds a stream of its own.
-      this.d.afterTurnSettled?.(userId, completedSessionId, !internal);
+      this.d.afterTurnSettled?.(userId, completedSessionId, !internal, client?.id);
     }
     if (internal?.kind !== 'systemNudge') this.d.goals.afterTurnGoalJudge(userId, completedSessionId, internal);
   }

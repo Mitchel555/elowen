@@ -218,23 +218,26 @@ export class BrainService {
       sendDelegatedCustom: async (userId, sessionId, customType, content, resultId) => {
         await this.delegated.sendDelegated(userId, sessionId, content, { internalSystem: { customType, resultId } });
       },
-      afterTurnSettled: (userId, sessionId, userInitiated) => {
+      afterTurnSettled: (userId, sessionId, userInitiated, senderClientId) => {
         this.drainDeferredPluginReload();
-        // A turn a person asked for just finished with nobody WATCHING it — tell the user's phone.
-        // Attachment cannot stand in for watching: a browser holds its SSE stream open behind a locked
-        // screen or a backgrounded tab, so requiring zero attachments would silence the push for the very
-        // case it exists to serve. Clients report whether they are on screen; one that never reports
-        // counts as watching, which is what keeps a CLI session — it holds a stream too — from buzzing the
-        // phone of someone sitting at the terminal.
+        // A turn a person asked for just finished and the surface they typed on is not showing it — tell
+        // their phone. The question is about the SENDER's device, not the conversation as a whole: the user
+        // is wherever they wrote from, so a terminal left running on a desktop must not speak for a phone
+        // that has since been locked. Attachment alone cannot answer it either, because a browser holds
+        // its SSE stream open behind a locked screen; clients report whether they are on screen, and one
+        // that never reports counts as watching, which is what keeps a terminal in active use quiet.
+        // A turn with no identified sender falls back to "is anyone at all watching".
         // Enablement is implicit: no push subscription means the notifier sends nothing.
-        const watching = this.attachments.watchingCount(sessionId);
-        if (userInitiated && watching === 0 && d.notifyTurnComplete) {
+        const watching = senderClientId
+          ? this.attachments.senderIsWatching(userId, senderClientId, sessionId)
+          : this.attachments.watchingCount(sessionId) > 0;
+        if (userInitiated && !watching && d.notifyTurnComplete) {
           d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
         } else if (d.notifyTurnComplete) {
           // Both reasons for staying quiet look identical from outside — the user just does not get a
           // notification — and the two need opposite fixes. Not user-initiated means an internal goal or
-          // nudge; a non-zero count means some client reported itself on screen.
-          logger('brain').info(`no phone push for ${sessionId}: userInitiated=${userInitiated} watching=${watching}`);
+          // nudge; watching means the surface that sent it is on screen.
+          logger('brain').info(`no phone push for ${sessionId}: userInitiated=${userInitiated} watching=${watching} sender=${senderClientId ?? 'none'}`);
         }
       },
     });
