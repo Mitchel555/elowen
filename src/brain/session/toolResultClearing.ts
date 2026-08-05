@@ -47,6 +47,10 @@ export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
 
 const log = logger('brain-tool-clearing');
 
+/** Which of the three triggers cleared a result. Only ever used to name the cause in the log — a
+ *  cacheWatch warning names the message index, and this names who rewrote it. */
+type SpillTrigger = 'time' | 'size' | 'group';
+
 /** Results smaller than this stay in context: clearing them saves a handful of tokens while costing a
  *  spill file and a placeholder. 4 KB ≈ 1k tokens. */
 export const CLEAR_MIN_BYTES = 4096;
@@ -354,7 +358,7 @@ export function installToolResultClearing(
      *  write-once semantics, the same EEXIST reconciliation and the same one-attempt-per-epoch retry
      *  rule. That rule matters just as much here: once a size spill has failed, the full result has
      *  gone out to the provider, so retrying it before the gate re-opens would rewrite a warm prefix. */
-    const spillSelected = async (items: ClearableResult[], withPreview: boolean): Promise<void> => {
+    const spillSelected = async (items: ClearableResult[], withPreview: boolean, trigger: SpillTrigger): Promise<void> => {
       for (const item of items) {
         if (failedSpills.has(item.toolCallId) || foreignSpills.has(item.toolCallId)) continue;
         const message = base[item.index] as ToolResultMessage;
@@ -367,6 +371,10 @@ export function installToolResultClearing(
         try {
           await writeSpill(spillPath, text);
           latched.set(item.toolCallId, entry);
+          // The one line that lets a cacheWatch "REWRITTEN IN PLACE at <index>" warning be attributed:
+          // without it, clearing a result and stripping an image are the same silence in the log, and the
+          // two have completely different fixes.
+          log.info(`cleared ${item.toolCallId} at message ${item.index} (${trigger} trigger, ${item.bytes} bytes)`);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
             // SOMETHING already sits at the path: a pre-respawn spill of this same output, or a file
@@ -378,6 +386,7 @@ export function installToolResultClearing(
             catch { onDisk = null; } // a throwing readSpill must not take the whole turn down
             if (onDisk === text) {
               latched.set(item.toolCallId, entry);
+              log.info(`re-latched ${item.toolCallId} at message ${item.index} from its existing spill (${trigger} trigger, ${item.bytes} bytes)`);
               continue;
             }
             foreignSpills.add(item.toolCallId);
@@ -390,15 +399,15 @@ export function installToolResultClearing(
       }
     };
     if (gateOpen) {
-      await spillSelected(selectClearableToolResults(base, new Set(latched.keys())), false);
+      await spillSelected(selectClearableToolResults(base, new Set(latched.keys())), false, 'time');
     }
     // Runs on every pass, gate or no gate: an oversized result of the current run has not reached the
     // provider yet, so this is the only chance to keep it out of the context entirely.
-    await spillSelected(selectOversizedToolResults(base, new Set(latched.keys())), true);
+    await spillSelected(selectOversizedToolResults(base, new Set(latched.keys())), true, 'size');
     // Then the aggregate layer, on what the per-result one left behind: many medium results in one
     // wire-level message are individually under the per-result threshold but together are not.
     const budgeted = selectBudgetedToolResults(base, new Set(latched.keys()), budgetDecided);
-    await spillSelected(budgeted.spill, true);
+    await spillSelected(budgeted.spill, true, 'group');
     for (const toolCallId of budgeted.decided) budgetDecided.add(toolCallId);
     if (latched.size === 0) return base;
     const cleared = new Map<string, { index: number; placeholder: string }>();

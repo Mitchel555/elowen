@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import { cacheColdAtTurnStart, idleThresholdMs } from './cacheTiming.js';
 import { isUserTurn } from './userTurn.js';
+import { logger } from '../../shared/logger.js';
+
+const log = logger('brain-image-strip');
 
 /** PI's `transformContext` hook signature and its message type, derived from the hook itself —
  *  `@earendil-works/pi-agent-core` (where AgentMessage lives) is not a direct dependency, so the
@@ -105,12 +108,21 @@ export function installHistoryImageStripping(
     const base = previous ? await previous(messages, signal) : messages;
     if (rejected() || cacheColdAtTurnStart(base, idleMs, now())) {
       const stripped = stripHistoricalImages(base);
+      // Indexes latched for the FIRST time in this pass. Reported because a cacheWatch "REWRITTEN IN
+      // PLACE at <index>" warning otherwise cannot be attributed: this module and tool-result clearing
+      // both rewrite historical messages, and telling them apart is the whole diagnosis.
+      const fresh: number[] = [];
       for (let index = 0; index < base.length; index += 1) {
         const original = base[index];
         const replacement = stripped[index];
         if (original && replacement && replacement !== original) {
+          if (!latched.has(index)) fresh.push(index);
           latched.set(index, { sourceHash: messageHash(original), stripped: replacement });
         }
+      }
+      if (fresh.length > 0) {
+        log.info(`stripped images from ${fresh.length} historical message(s) at ${fresh.join(', ')}`
+          + ` (${rejected() ? 'provider refused an image' : 'idle gate open'})`);
       }
     }
     if (latched.size === 0) return base;
@@ -124,6 +136,9 @@ export function installHistoryImageStripping(
       if (!entry) return message;
       if (messageHash(message) !== entry.sourceHash) {
         latched.delete(index);
+        // Something else rewrote this message under us, so the placeholder no longer belongs to it. Worth
+        // a line: it means two rewriters met on the same index, which is exactly how a warm prefix breaks.
+        log.info(`message at ${index} changed under the image latch — releasing it, its images go out again`);
         return message;
       }
       changed = true;
