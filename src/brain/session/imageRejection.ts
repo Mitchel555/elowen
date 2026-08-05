@@ -14,12 +14,25 @@
  *
  * The mark is intentionally sticky and needs no teardown: image bytes are never persisted (only the
  * `[📎 N× image]` marker text is), so a disposed-and-resumed conversation has no image blocks left for a
- * stale mark to act on. */
+ * stale mark to act on. It is NOT cleared on dispose for that reason — an in-place respawn (a vision hop,
+ * a model switch) is part of recovering from this very failure, and dropping the mark there could hand the
+ * conversation straight back into it. */
 const rejected = new Set<string>();
+
+/** How many marks to keep. Sticky is right, unbounded is not: the daemon runs for weeks and every
+ *  conversation that ever hit a refused image would stay in memory forever. Insertion-ordered, so the
+ *  entry evicted at the ceiling is the least recently marked — the one least likely to still be live. */
+const MAX_MARKS = 500;
 
 /** The provider refused an image in this conversation — open the egress strip gate for it. */
 export function markImagesRejected(sessionId: string): void {
+  // Re-mark moves it to the end, so an actively failing conversation is never the one evicted.
+  rejected.delete(sessionId);
   rejected.add(sessionId);
+  if (rejected.size > MAX_MARKS) {
+    const oldest = rejected.values().next();
+    if (!oldest.done) rejected.delete(oldest.value);
+  }
 }
 
 /** Whether this conversation is carrying an image the provider has already refused. */

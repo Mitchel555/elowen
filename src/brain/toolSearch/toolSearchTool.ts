@@ -310,13 +310,23 @@ export function toolSearchTool(handle: ToolSearchHandle): ToolDefinition {
       // applyToolVisibility reconciles against (it recomputes desired = visible ∩ (¬deferred ∪ activated)
       // each turn); the setActiveToolsByName here makes the tool self-contained — it takes effect on the
       // next agent turn (PI rebuilds the prompt on the boundary), which is why the result says so.
-      for (const name of matched) handle.activated.add(name);
       const before = new Set(session.getActiveToolNames());
       const active = new Set(before);
       for (const name of matched) active.add(name);
       session.setActiveToolsByName([...active]);
-      verifyActivation(session, active, matched, before);
-      return ok(`Activated ${matched.length} tool(s): ${matched.join(', ')}. They are callable on your next turn.`, { matched });
+      // Record only what ACTUALLY stuck. `activated` is the authoritative record applyToolVisibility
+      // reconciles against every turn and a respawn re-seeds from, so a name that silently failed to
+      // register would be re-asserted for the rest of the conversation while staying uncallable — and the
+      // model, told it succeeded, would keep calling a tool that is not there.
+      const missing = new Set(verifyActivation(session, active, matched, before));
+      const stuck = matched.filter((name) => !missing.has(name));
+      for (const name of stuck) handle.activated.add(name);
+      if (stuck.length === 0) {
+        return ok(`ToolSearch could not activate ${matched.join(', ')} — the tool(s) are not in this session's registry. Proceed without them.`, { matched: [] });
+      }
+      const failed = matched.filter((name) => missing.has(name));
+      const note = failed.length ? ` ${failed.join(', ')} could NOT be activated — proceed without ${failed.length === 1 ? 'it' : 'them'}.` : '';
+      return ok(`Activated ${stuck.length} tool(s): ${stuck.join(', ')}. They are callable on your next turn.${note}`, { matched: stuck });
     },
   });
 }

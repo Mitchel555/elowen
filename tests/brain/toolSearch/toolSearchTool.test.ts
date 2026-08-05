@@ -201,6 +201,49 @@ describe('toolSearchTool.execute', () => {
     expect((res.details as { matched: string[] }).matched).toHaveLength(2);
   });
 
+  // PI's setActiveToolsByName keeps only names in its registry and drops the rest without erroring. What
+  // the model is told, and what `activated` records, has to match what actually stuck — `activated` is
+  // re-seeded on respawn, so a name that silently failed would be re-asserted for the rest of the
+  // conversation while staying uncallable, and the model would keep calling a tool that is not there.
+  function registrySession(registry: string[], active: string[]): ToolActivationTarget & { calls: string[][] } {
+    const state = { active: [...active], calls: [] as string[][] };
+    return {
+      calls: state.calls,
+      getAllTools: () => CANDIDATES,
+      getActiveToolNames: () => state.active,
+      setActiveToolsByName: (names) => { state.active = names.filter((n) => registry.includes(n)); state.calls.push(names); },
+    };
+  }
+
+  it('records only the tools that actually stuck, not the ones it asked for', async () => {
+    const deferred = new Set(CANDIDATES.map((c) => c.name));
+    const handle = createToolSearchHandle(deferred);
+    // The registry knows list_issues but not create_issue — the latter is silently dropped.
+    handle.session = registrySession(['Read', 'mcp__github__list_issues'], ['Read']);
+    const res = await run(toolSearchTool(handle), 'github');
+    expect(handle.activated.has('mcp__github__list_issues')).toBe(true);
+    expect(handle.activated.has('mcp__github__create_issue')).toBe(false);
+    expect((res.details as { matched: string[] }).matched).toEqual(['mcp__github__list_issues']);
+  });
+
+  it('tells the model which tool it did NOT get, instead of claiming success', async () => {
+    const deferred = new Set(CANDIDATES.map((c) => c.name));
+    const handle = createToolSearchHandle(deferred);
+    handle.session = registrySession(['Read', 'mcp__github__list_issues'], ['Read']);
+    const res = await run(toolSearchTool(handle), 'github');
+    expect(res.content[0].text).toMatch(/mcp__github__create_issue could NOT be activated/);
+  });
+
+  it('reports a total failure as such, and records nothing', async () => {
+    const deferred = new Set(CANDIDATES.map((c) => c.name));
+    const handle = createToolSearchHandle(deferred);
+    handle.session = registrySession(['Read'], ['Read']); // knows neither github tool
+    const res = await run(toolSearchTool(handle), 'github');
+    expect(handle.activated.size).toBe(0);
+    expect((res.details as { matched: string[] }).matched).toEqual([]);
+    expect(res.content[0].text).toMatch(/could not activate/i);
+  });
+
   it('is a clear no-op when nothing is deferred', async () => {
     const handle = createToolSearchHandle(new Set());
     handle.session = fakeSession(['Read']);
