@@ -98,6 +98,9 @@ export function notificationPreview(text: string): string {
   return text
     .slice(0, PREVIEW_SCAN_LIMIT)
     .replace(/```[\s\S]*?```/g, ' ')
+    // An answer cut off mid-block (or one still streaming) leaves a fence with no partner. Everything from
+    // it on is code, so drop the remainder rather than let backticks and diff markers through as prose.
+    .replace(/```[\s\S]*$/, ' ')
     .replace(/`([^`]+)`/g, '$1')
     // The URL is bounded rather than "anything up to a bracket": an unclosed `](` would otherwise make the
     // engine rescan the rest of the text at every occurrence, which is quadratic on repeated ones.

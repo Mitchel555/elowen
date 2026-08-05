@@ -21,6 +21,10 @@ describe('turn-done preview', () => {
       .toBe('Opravil jsem to: Brány jsou zelené.');
   });
 
+  it('drops the tail of an answer cut off inside a code block', () => {
+    expect(notificationPreview('Hotovo:\n```diff\n+ a\n- b')).toBe('Hotovo:');
+  });
+
   it('strips markdown syntax rather than reading it aloud', () => {
     expect(notificationPreview('**Hotovo** — `npm test` prošel, viz [commit](http://x/y).'))
       .toBe('Hotovo — npm test prošel, viz commit.');
