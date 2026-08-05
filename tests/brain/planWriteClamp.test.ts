@@ -84,7 +84,7 @@ describe('plan-mode write clamp', () => {
     const { tool, ran } = fakeTool('MemorySearch');
     const gated = composeSessionTools({ kind: 'owner-chat', pluginTools: [], memoryTools: () => [tool] })
       .find((t) => t.name === 'MemorySearch')!;
-    const res = await runWithPolicy(
+    await runWithPolicy(
       POLICY,
       () => gated.execute('call-1', {} as never, undefined, undefined, {} as never) as Promise<ToolResult>,
       { sessionId: SESSION, mode: 'plan', permissions: perms(), toolPolicy: { deny: new Set(['MemoryAdd']) } },

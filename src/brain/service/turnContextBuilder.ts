@@ -429,14 +429,26 @@ export class TurnContextBuilder {
    *  as safe. Undeclared now means withheld, so an unknown tool costs the model some reach in plan mode
    *  rather than costing the user a mutation they were promised could not happen. */
   private applyOwnerToolPolicy(userId: number, live: LiveBrain, mode: TurnMode): ToolPolicy | undefined {
-    const denied = new Set(this.d.users.get(userId)?.disabled_tools ?? []);
+    // The user's own disabled tools are a STABLE property of the conversation, so hiding them costs
+    // nothing: the set is the same on every turn and the cached prefix holds.
+    const disabled = new Set(this.d.users.get(userId)?.disabled_tools ?? []);
+    const visibility = disabled.size ? { deny: disabled } : undefined;
+    // Plan mode's denials are ENFORCEMENT ONLY, deliberately kept out of the visible set. Tool schemas sit
+    // at the front of the prompt, so narrowing them on a mode switch rewrites the whole cached prefix —
+    // measured at ~$2.97 and 287,608 re-written tokens for a single switch, paid again on the way back.
+    // The boundary itself does not move: gateDeniedTools refuses every one of these names at execute time
+    // (built-ins included, since 471f1b1e), which is where a security rule belongs anyway. This mirrors
+    // the reference implementation, whose plan mode likewise leaves the tool set alone and refuses at the
+    // permission gate.
+    const enforced = new Set(disabled);
     if (mode === 'plan') {
       for (const tool of live.session.getAllTools?.() ?? []) {
-        if (!PLAN_MODE_CLAMPED_TOOLS.has(tool.name) && !live.planSafeToolNames.has(tool.name)) denied.add(tool.name);
+        if (!PLAN_MODE_CLAMPED_TOOLS.has(tool.name) && !live.planSafeToolNames.has(tool.name)) enforced.add(tool.name);
       }
     }
-    const policy = denied.size ? { deny: denied } : undefined;
-    applyToolVisibility(live.session, live.pluginToolNames, policy, live.toolSearch);
-    return policy;
+    // Visibility keeps its OTHER duties untouched — sender roles in a shared channel, delegated agents'
+    // allow-lists and deferred MCP tools all still flow through here; only the plan-mode part is withheld.
+    applyToolVisibility(live.session, live.pluginToolNames, visibility, live.toolSearch);
+    return enforced.size ? { deny: enforced } : undefined;
   }
 }

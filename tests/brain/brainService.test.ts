@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BrainService } from '../../src/brain/brainService.js';
 import type { SubagentProgressEvent } from '../../src/plugins/api.js';
-import { currentSubagentEmitter, currentTurnModel, currentWorkDir } from '../../src/plugins/policyContext.js';
+import { currentSubagentEmitter, currentToolPolicy, currentTurnModel, currentWorkDir } from '../../src/plugins/policyContext.js';
 import { personalityText } from '../../src/brain/personality.js';
 import { NO_REPLY_NUDGE } from '../../src/brain/messageView.js';
 import { openDb } from '../../src/store/db.js';
@@ -35,6 +35,10 @@ function fakeDeps() {
   const session = {
     sessionId: 'sess-1',
     prompt: vi.fn(async (t: string, options?: { preflightResult?: (success: boolean) => void }) => {
+      // The deny set actually in force for THIS turn, read from the ALS scope the prompt runs inside —
+      // which is exactly what gateDeniedTools consults when a tool is called. Plan mode enforces here
+      // rather than by narrowing the advertised set, so this is where its rules must be asserted.
+      session.__deniedInTurn = currentToolPolicy()?.deny;
       options?.preflightResult?.(true);
       messages.push({ role: 'user', content: t }, { role: 'assistant', content: `echo:${t}` });
       listeners.forEach((l) => l({ type: 'agent_end', willRetry: false, messages: [{ role: 'assistant', content: `echo:${t}` }] }));
@@ -75,6 +79,7 @@ function fakeDeps() {
     // can assert the per-turn slice.
     __tools: [] as { name: string }[],
     __active: [] as string[],
+    __deniedInTurn: undefined as Set<string> | undefined,
     getAllTools(this: { __tools: { name: string }[] }) { return this.__tools; },
     getActiveToolNames(this: { __active: string[] }) { return this.__active; },
     setActiveToolsByName: vi.fn(function (this: { __active: string[] }, names: string[]) { this.__active = names; }),
@@ -2234,21 +2239,41 @@ describe('BrainService', () => {
     expect(await variant('and continue')).toBe('cli/plan-mode-sparse');
   });
 
-  it('plan mode hides mutating tools from the model for that turn', async () => {
+  it('plan mode denies mutating tools for that turn', async () => {
     const d = fakeDeps();
     d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
       name === 'cli/plan-mode' ? 'PLAN MODE PROMPT' : `PERSONA:${name}:${vars.userName}`,
     );
     const svc = new BrainService(d as never);
     await svc.start(1);
-    d.session.setActiveToolsByName.mockClear();
 
     await svc.send({ userId: 1, text: 'plan it first', mode: 'plan' });
 
-    const activeTools = d.session.setActiveToolsByName.mock.calls.at(-1)?.[0] ?? d.session.__active;
-    expect(activeTools).toContain('ElowenListTasks');
-    expect(activeTools).not.toContain('ElowenCreateTask');
-    expect(activeTools).not.toContain('ElowenPlan');
+    const denied = d.session.__deniedInTurn;
+    expect(denied?.has('ElowenCreateTask')).toBe(true);
+    expect(denied?.has('ElowenPlan')).toBe(true);
+    expect(denied?.has('ElowenListTasks')).toBe(false); // declared read-only, so it stays usable
+  });
+
+  // The cache half of the same change: tool schemas open the prompt, so narrowing them on a mode switch
+  // rewrote the whole cached prefix — ~$2.97 and 287,608 re-written tokens per switch, paid again on the
+  // way back. Enforcement moved to execute time precisely so this set can stop moving.
+  it('plan mode leaves the ADVERTISED tool set untouched, so the cached prefix survives the switch', async () => {
+    const d = fakeDeps();
+    d.prompts.render.mockImplementation((name: string, vars: Record<string, string>) =>
+      name === 'cli/plan-mode' ? 'PLAN MODE PROMPT' : `PERSONA:${name}:${vars.userName}`,
+    );
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'build something', mode: 'build' });
+    const inBuild = [...d.session.__active];
+
+    d.session.setActiveToolsByName.mockClear();
+    await svc.send({ userId: 1, text: 'now plan it', mode: 'plan' });
+
+    expect(d.session.__active).toEqual(inBuild);
+    // Order matters as much as membership: a reshuffle invalidates the prefix just as thoroughly.
+    expect(d.session.setActiveToolsByName).not.toHaveBeenCalled();
   });
 
   // Bash is admitted in plan mode even though it is NOT declared plan-safe, because the same turn narrows
@@ -2274,14 +2299,14 @@ describe('BrainService', () => {
 
     await svc.send({ userId: 1, text: 'plan it first', mode: 'plan' });
 
-    const activeTools = d.session.setActiveToolsByName.mock.calls.at(-1)?.[0] ?? d.session.__active;
-    expect(activeTools).toContain('Bash');
+    const denied = d.session.__deniedInTurn;
+    expect(denied?.has('Bash')).toBe(false);
     // Delegating exploration is the other half of what plan mode's prompt asks for; the child is forced
     // read-only on the delegation path (tests/plugins/subagentTools.test.ts).
-    expect(activeTools).toContain('Delegate');
+    expect(denied?.has('Delegate')).toBe(false);
     // Each admission is deliberate and paired with a clamp — not a blanket pass for the owning plugin.
-    expect(activeTools).not.toContain('KillProcess');
-    expect(activeTools).not.toContain('WorkflowStart');
+    expect(denied?.has('KillProcess')).toBe(true);
+    expect(denied?.has('WorkflowStart')).toBe(true);
   });
 
   // Regression: buildScope hard-coded mode 'build'. Plan mode admits Delegate, so a background delegation
@@ -2317,12 +2342,12 @@ describe('BrainService', () => {
     }).turnRunner;
     await runner.sendCustomSystem(1, sessionId, 'subagent-result', 'the child reported back');
 
-    const activeTools = d.session.setActiveToolsByName.mock.calls.at(-1)?.[0] ?? d.session.__active;
-    expect(activeTools).toContain('Bash');
-    expect(activeTools).toContain('Delegate');
+    const denied = d.session.__deniedInTurn;
+    expect(denied?.has('Bash')).toBe(false);
+    expect(denied?.has('Delegate')).toBe(false);
     // The half that used to leak: delivering a result re-armed the mutating tools mid-plan.
-    expect(activeTools).not.toContain('KillProcess');
-    expect(activeTools).not.toContain('WorkflowStart');
+    expect(denied?.has('KillProcess')).toBe(true);
+    expect(denied?.has('WorkflowStart')).toBe(true);
   });
 
   it('plan mode composes only DECLARED read-only tools — a reader-sounding name earns nothing', async () => {
@@ -2346,18 +2371,20 @@ describe('BrainService', () => {
 
     await svc.send({ userId: 1, text: 'make a checklist', mode: 'plan' });
 
-    const activeTools = d.session.setActiveToolsByName.mock.calls.at(-1)?.[0] ?? d.session.__active;
-    expect(activeTools).toContain('ShowStatus');
-    expect(activeTools).toContain('ElowenListTasks'); // the core declares its own read-only built-ins
-    // Undeclared is withheld no matter how the tool is named. `get_and_purge` is the point: the name
+    const denied = d.session.__deniedInTurn;
+    expect(denied?.has('ShowStatus')).toBe(false);
+    expect(denied?.has('ElowenListTasks')).toBe(false); // the core declares its own read-only built-ins
+    // Undeclared is DENIED no matter how the tool is named. `get_and_purge` is the point: the name
     // heuristic this replaced read `get_`/`read_` as a promise and let both of these straight through.
-    expect(activeTools).not.toContain('get_and_purge');
-    expect(activeTools).not.toContain('read_thing');
-    expect(activeTools).not.toContain('send_message');
-    expect(activeTools).not.toContain('str_replace');
-    expect(activeTools).not.toContain('mcp__github__create_issue');
-    // A mutating built-in stays withheld too — the core's list is not "all built-ins".
-    expect(activeTools).not.toContain('ElowenCreateTask');
+    // Note this is now enforcement rather than concealment — the model can see these and will be refused,
+    // which is strictly the stronger guarantee: concealment never stopped a call that arrived anyway.
+    expect(denied?.has('get_and_purge')).toBe(true);
+    expect(denied?.has('read_thing')).toBe(true);
+    expect(denied?.has('send_message')).toBe(true);
+    expect(denied?.has('str_replace')).toBe(true);
+    expect(denied?.has('mcp__github__create_issue')).toBe(true);
+    // A mutating built-in stays denied too — the core's list is not "all built-ins".
+    expect(denied?.has('ElowenCreateTask')).toBe(true);
   });
 
   it('a mid-turn message is STEERED into the running turn WITHOUT re-slicing its tool visibility', async () => {
