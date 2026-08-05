@@ -1,5 +1,42 @@
 import { describe, it, expect } from 'vitest';
-import { buildReview, buildNeedsInput, buildStalled, buildBlocked, buildDone } from '../../src/push/messages.js';
+import { buildReview, buildNeedsInput, buildStalled, buildBlocked, buildDone, buildTurnDone, notificationPreview } from '../../src/push/messages.js';
+
+// A phone renders no markdown, so anything left in arrives as literal punctuation the reader has to look
+// past. The preview has to be the sentence the answer opens with, on one line.
+describe('turn-done preview', () => {
+  it('shows the answer, titled by the conversation it came from', () => {
+    const p = buildTurnDone({ title: 'Elowen', preview: 'Hotovo, nasadil jsem to.' });
+    expect(p.title).toBe('Elowen');
+    expect(p.body).toBe('Hotovo, nasadil jsem to.');
+    expect(p.url).toBe('/chat');
+  });
+
+  it('falls back to a fixed banner when the answer is empty', () => {
+    expect(buildTurnDone({ title: 'Elowen', preview: '' }).body).toBe('Vaše konverzace je hotová.');
+    expect(buildTurnDone({ title: '', preview: 'x' }).title).toBe('Elowen dokončil práci');
+  });
+
+  it('drops a code block instead of showing two lines of a diff', () => {
+    expect(notificationPreview('Opravil jsem to:\n\n```ts\nconst x = 1;\n```\n\nBrány jsou zelené.'))
+      .toBe('Opravil jsem to: Brány jsou zelené.');
+  });
+
+  it('strips markdown syntax rather than reading it aloud', () => {
+    expect(notificationPreview('**Hotovo** — `npm test` prošel, viz [commit](http://x/y).'))
+      .toBe('Hotovo — npm test prošel, viz commit.');
+    expect(notificationPreview('## Nadpis\n- první\n- druhý')).toBe('Nadpis • první • druhý');
+  });
+
+  it('collapses newlines so the notification stays one readable line', () => {
+    expect(notificationPreview('První věta.\n\nDruhá věta.')).toBe('První věta. Druhá věta.');
+  });
+
+  it('truncates a long answer with an ellipsis', () => {
+    const body = buildTurnDone({ title: 'x', preview: 'a'.repeat(400) }).body;
+    expect(body).toHaveLength(180);
+    expect(body.endsWith('…')).toBe(true);
+  });
+});
 
 describe('push message builders', () => {
   it('review carries approve/rerun actions and points at escalations', () => {

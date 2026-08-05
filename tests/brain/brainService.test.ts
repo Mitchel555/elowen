@@ -3921,6 +3921,24 @@ describe('sub-agent session tap + owner steering', () => {
     off();
   });
 
+  // The notification is read on a locked screen, so it has to carry what was actually said — a fixed
+  // "Elowen is done" banner made the user unlock to find out whether it even mattered.
+  it('carries the answer text to the phone, not just the conversation name', async () => {
+    const notified: { title: string; preview: string }[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string, p: string) => void }).notifyTurnComplete =
+      (_userId, title, preview) => notified.push({ title, preview });
+    const svc = new BrainService(d as never);
+
+    const s = await svc.start(1, { clientId: 'phone', clientGeneration: 1 });
+    await svc.send({ userId: 1, text: 'ship it', session: s.sessionId, client: { id: 'phone', generation: 1 } });
+
+    // The reply this turn actually persisted, not the conversation name and not a raw stored row.
+    expect(notified).toHaveLength(1);
+    expect(notified[0]!.preview).toBe('echo:ship it');
+    expect(notified[0]!.preview).not.toContain('"role"');
+  });
+
   // The sender's own surface is what decides. A terminal left running on a desktop is attached all day and
   // reports no visibility, so letting it speak for the conversation silenced the push for a phone the user
   // had already put away — the exact case this feature exists for.

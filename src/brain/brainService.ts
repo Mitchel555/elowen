@@ -232,7 +232,9 @@ export class BrainService {
           ? this.attachments.senderIsWatching(userId, senderClientId, sessionId)
           : this.attachments.watchingCount(sessionId) > 0;
         if (userInitiated && !watching && d.notifyTurnComplete) {
-          d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '');
+          // The stored answer, through the same expression the goal loop reads it with: the phone shows the
+          // message the conversation ends on, and reasoning blocks carry no `text` so they drop out.
+          d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '', lastAssistantText(d.store, sessionId));
         } else if (d.notifyTurnComplete) {
           // Both reasons for staying quiet look identical from outside — the user just does not get a
           // notification — and the two need opposite fixes. Not user-initiated means an internal goal or

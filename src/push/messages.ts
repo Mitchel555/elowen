@@ -80,13 +80,33 @@ export function buildBlocked(input: { missionId?: string; taskId: string; taskTi
   };
 }
 
-/** An owner-chat turn the user started from the WEB finished — a plain FYI so someone who walked away from
- *  the browser learns on their phone that Elowen is done. No action; a tap opens the conversation. */
-export function buildTurnDone(input: { title: string }): PushPayload {
+/** Flatten one answer into a single line a notification can show. A phone renders no markdown, so its
+ *  syntax would arrive as literal punctuation; code blocks are dropped outright because a fenced diff or
+ *  command says nothing useful in two lines and would crowd out the sentence that does. */
+export function notificationPreview(text: string): string {
+  const flat = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/^\s{0,3}[-*+]\s+/gm, '• ')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/(?<!\w)[*_]([^*_]+)[*_](?!\w)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return flat;
+}
+
+/** An owner-chat turn the user started finished while their device was off screen — a plain FYI, with the
+ *  opening of the answer so it can be read without unlocking. The conversation name is the title: it says
+ *  WHICH chat replied, which a fixed banner never did. No action; a tap opens the conversation. */
+export function buildTurnDone(input: { title: string; preview?: string }): PushPayload {
+  const preview = notificationPreview(input.preview ?? '');
   return {
     kind: 'turn_done',
-    title: 'Elowen dokončil práci',
-    body: input.title ? trim(input.title) : 'Vaše konverzace je hotová.',
+    title: input.title ? trim(input.title, 60) : 'Elowen dokončil práci',
+    body: preview ? trim(preview, 180) : 'Vaše konverzace je hotová.',
     actions: [],
     url: '/chat',
   };

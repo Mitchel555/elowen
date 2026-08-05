@@ -894,9 +894,9 @@ export async function buildApp(opts: BuildOpts) {
         projectPath: () => homeProject.path,
         projects,
         chatImagesDir,
-        // A web-started owner turn finished with no CLI watching it live → push it to the user's phone.
+        // An owner turn finished with the device it was sent from off screen → push it to the user's phone.
         // No subscription registered ⇒ sendToUsers is a no-op, so this needs no separate enable flag.
-        notifyTurnComplete: (userId, title) => { void pushSender.sendToUsers([userId], buildTurnDone({ title })); },
+        notifyTurnComplete: (userId, title, preview) => { void pushSender.sendToUsers([userId], buildTurnDone({ title, preview })); },
         plugins: pluginProvider,
         hookAudit,
         policy: (userId) => resolvePolicy({ userProjects, projects }, userId),
