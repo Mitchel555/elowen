@@ -1,5 +1,5 @@
 import type { BrainGoalRow, BrainStore } from '../store/brainStore.js';
-import { extractText, lastAssistant } from './messageView.js';
+import { lastAssistantTextIn } from './messageView.js';
 
 export interface StoredSubgoal { text: string; done?: boolean }
 
@@ -68,10 +68,7 @@ export function goalContinuePrompt(row: BrainGoalRow): string {
 }
 
 export function lastAssistantText(store: BrainStore, sessionId: string): string {
-  const row = lastAssistant(store.getMessages(sessionId));
-  if (!row) return '';
-  try { return extractText(JSON.parse(row.content)); }
-  catch { return ''; }
+  return lastAssistantTextIn(store.getMessages(sessionId));
 }
 
 /** Decide whether a goal turn declared completion. Matches ONLY an explicit, start-of-line `GOAL_DONE:`

@@ -3972,9 +3972,24 @@ describe('sub-agent session tap + owner steering', () => {
     expect(notified).toEqual([{ userId: 1, title: expect.any(String) }]);
   });
 
-  // `fromWeb` only means "not from a bound CLI", which is equally true of the browser tab the user is
-  // reading right now. Buzzing their phone about an answer they are watching arrive is pure noise, so an
-  // attached client stream — the web tab's own SSE — suppresses it.
+  // An internal goal or nudge turn is the one case the user never asked for. It runs on its own schedule,
+  // possibly for hours, and buzzing a phone for each one would make the notification worthless — this is
+  // the only thing standing between autonomous work and a night of alerts.
+  it('never notifies for an internal turn, however unwatched it is', async () => {
+    const notified: unknown[] = [];
+    const d = fakeDeps();
+    (d as unknown as { notifyTurnComplete?: (u: number, t: string, p: string) => void }).notifyTurnComplete =
+      () => notified.push(1);
+    const svc = new BrainService(d as never);
+
+    const s = await svc.start(1);
+    await svc.send({ userId: 1, text: 'autonomous continuation', mode: 'build', internal: { kind: 'goalContinue' }, session: s.sessionId });
+    await svc.send({ userId: 1, text: 'Background command finished.', mode: 'build', internal: { kind: 'systemNudge' }, session: s.sessionId });
+    expect(notified).toEqual([]);
+  });
+
+  // Buzzing the phone about an answer the user is watching arrive is pure noise, so an attached client
+  // stream that reports itself on screen suppresses it.
   it('stays quiet when a client stream is still watching the web turn', async () => {
     const notified: { userId: number; title: string }[] = [];
     const d = fakeDeps();

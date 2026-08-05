@@ -398,6 +398,16 @@ export function lastAssistant<T extends { role?: string }>(messages: readonly T[
   return undefined;
 }
 
+/** The last thing the agent said, as plain text, from STORED rows — whose `content` is still JSON. Takes
+ *  the rows rather than the store so a caller that only needs the newest turn can hand over just that
+ *  instead of the whole conversation. Unparseable content reads as no answer at all, never as raw JSON. */
+export function lastAssistantTextIn(rows: readonly { role?: string; content: string }[]): string {
+  const row = lastAssistant(rows);
+  if (!row) return '';
+  try { return extractText(JSON.parse(row.content)); }
+  catch { return ''; }
+}
+
 /** The ONE automatic recovery prompt for a thinking-only turn (see `isThinkingOnlyReply`). Sent straight
  *  to session.prompt — never persisted as a user message (only its assistant reply lands in history). */
 export const NO_REPLY_NUDGE = 'Your last turn produced no visible reply or tool call. Answer the user now, in plain text.';

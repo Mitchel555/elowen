@@ -24,7 +24,12 @@ export interface PushPayload {
   url: string;
 }
 
-const trim = (s: string, n = 140): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** Cut by CODE POINT, not by UTF-16 unit: slicing mid-surrogate ends the text in half an emoji, which a
+ *  phone renders as the replacement glyph. Czech diacritics are BMP and were never at risk. */
+const trim = (s: string, n = 140): string => {
+  const points = Array.from(s);
+  return points.length > n ? `${points.slice(0, n - 1).join('')}…` : s;
+};
 
 /** Overseer rejected/timed out a phase review — needs a human verdict. */
 export function buildReview(input: { missionId: string; taskId: string; phaseTitle: string; rationale: string }): PushPayload {
@@ -80,14 +85,23 @@ export function buildBlocked(input: { missionId?: string; taskId: string; taskTi
   };
 }
 
+/** How much of an answer is examined. The preview shown is two orders of magnitude shorter, so this only
+ *  has to be long enough that an answer opening with a code block still has prose left after flattening.
+ *  It also bounds the work: this runs synchronously on the daemon's event loop for every notified turn,
+ *  over text the model may have quoted from anywhere, and a scanner is not something to leave open-ended. */
+const PREVIEW_SCAN_LIMIT = 4_000;
+
 /** Flatten one answer into a single line a notification can show. A phone renders no markdown, so its
  *  syntax would arrive as literal punctuation; code blocks are dropped outright because a fenced diff or
  *  command says nothing useful in two lines and would crowd out the sentence that does. */
 export function notificationPreview(text: string): string {
-  const flat = text
+  return text
+    .slice(0, PREVIEW_SCAN_LIMIT)
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`([^`]+)`/g, '$1')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // The URL is bounded rather than "anything up to a bracket": an unclosed `](` would otherwise make the
+    // engine rescan the rest of the text at every occurrence, which is quadratic on repeated ones.
+    .replace(/!?\[([^\]]*)\]\([^)\s]{0,500}\)/g, '$1')
     .replace(/^\s{0,3}#{1,6}\s+/gm, '')
     .replace(/^\s{0,3}>\s?/gm, '')
     .replace(/^\s{0,3}[-*+]\s+/gm, '• ')
@@ -95,7 +109,6 @@ export function notificationPreview(text: string): string {
     .replace(/(?<!\w)[*_]([^*_]+)[*_](?!\w)/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
-  return flat;
 }
 
 /** An owner-chat turn the user started finished while their device was off screen — a plain FYI, with the

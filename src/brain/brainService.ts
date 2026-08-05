@@ -16,7 +16,7 @@ import { enqueueMirrored } from './session/queueMirror.js';
 import { ChannelSessionService } from './channels.js';
 import type { ChannelSendOpts } from './channels.js';
 import { PlatformOrchestrator } from './platforms.js';
-import type { BrainMessageView } from './messageView.js';
+import { lastAssistantTextIn, type BrainMessageView } from './messageView.js';
 import { runCompaction, withDescendantUsage } from './events.js';
 import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
 import { isNonUserSession, isOwnedUserSession, defaultUserSessionId, freshUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
@@ -232,9 +232,9 @@ export class BrainService {
           ? this.attachments.senderIsWatching(userId, senderClientId, sessionId)
           : this.attachments.watchingCount(sessionId) > 0;
         if (userInitiated && !watching && d.notifyTurnComplete) {
-          // The stored answer, through the same expression the goal loop reads it with: the phone shows the
-          // message the conversation ends on, and reasoning blocks carry no `text` so they drop out.
-          d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '', lastAssistantText(d.store, sessionId));
+          // Only the turn that just settled, not the whole conversation: the answer is by definition in it,
+          // and this runs on every notified turn. Reasoning blocks carry no `text`, so they drop out.
+          d.notifyTurnComplete(userId, d.store.getSession(sessionId)?.title ?? '', lastAssistantTextIn(d.store.getLatestTurn(sessionId)));
         } else if (d.notifyTurnComplete) {
           // Both reasons for staying quiet look identical from outside — the user just does not get a
           // notification — and the two need opposite fixes. Not user-initiated means an internal goal or

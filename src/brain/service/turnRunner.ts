@@ -80,8 +80,9 @@ interface TurnRunnerDeps {
   sendDelegatedCustom?(userId: number, sessionId: string, customType: string, content: string, resultId: string): Promise<void>;
   /** Fired once a turn has fully settled (outside the per-conversation send lock). Lets the brain drain
    *  deferred, session-disposing work a tool requested mid-turn (a pending plugin reload) and notify the
-   *  user a web-started turn is done. `fromWeb` is true only for an owner turn that came from the web —
-   *  not a bound CLI (it sees the turn live) and not an internal goal/nudge turn. */
+   *  user their turn is done. `userInitiated` is false only for an internal goal/nudge turn; whether the
+   *  answer is being READ is a separate question, answered from `senderClientId` — the surface it came
+   *  from — so a bound CLI qualifies here and is kept quiet by still being on screen. */
   afterTurnSettled?(userId: number, sessionId: string, userInitiated: boolean, senderClientId?: string): void;
 }
 
