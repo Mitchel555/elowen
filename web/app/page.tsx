@@ -2,12 +2,11 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useCliStatus } from '../lib/queries';
-import { useTranslation } from '../lib/i18n';
+import { LoadingLine } from '../components/ui/states';
 
 export default function Home() {
   const router = useRouter();
   const cliStatus = useCliStatus();
-  const { t } = useTranslation();
 
   useEffect(() => {
     if (cliStatus.isLoading) return;
@@ -19,8 +18,8 @@ export default function Home() {
   }, [cliStatus.data, cliStatus.isLoading, router]);
 
   return (
-    <main className="flex h-screen items-center justify-center text-text-muted">
-      <span className="animate-pulse text-xs">{t.common.loading}</span>
+    <main className="text-text-muted">
+      <LoadingLine layout="page" />
     </main>
   );
 }

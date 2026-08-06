@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Loader2, Brain, Activity, Pencil, MoreHorizontal, ListChecks } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Brain, Activity, Pencil, MoreHorizontal, ListChecks } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
@@ -23,6 +23,7 @@ import { ChatHistoryRail } from './ChatHistoryRail';
 import { ModelPicker } from './ModelPicker';
 import { useBrainChat } from './BrainChatProvider';
 import { formatTokens, formatCost, formatDuration } from '../../lib/format';
+import { Spinner } from '../../components/ui/states';
 
 const STATUSLINE_VALUES = ['shown', 'hidden'] as const;
 
@@ -210,7 +211,7 @@ function ToolPills({ tools, full, live }: { tools: ToolItem[]; full?: boolean; l
         const head = (
           <>
             {running
-              ? <Loader2 size={10} role="status" aria-label={t.brainChat.toolRunning} className="shrink-0 animate-spin text-warning" />
+              ? <Spinner size="xs" tone="text-warning" label={t.brainChat.toolRunning} />
               : <span aria-hidden className="shrink-0 select-none opacity-70">{toolGlyph(tool.name)}</span>}
             <span className="shrink-0 text-text-muted">{tool.name}</span>
             {tool.detail ? <span className="truncate opacity-60">{tool.detail}</span> : null}
@@ -883,7 +884,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
             the spinner doesn't shift the transcript; the spinner shows only while a page is loading. */}
         {hasMoreHistory ? (
           <div data-testid="chat-history-sentinel" className="flex h-8 shrink-0 items-center justify-center" aria-hidden={!loadingOlder}>
-            {loadingOlder ? <Loader2 size={16} className="animate-spin text-text-muted" aria-label={t.brainChat.loadingOlder} /> : null}
+            {loadingOlder ? <Spinner size="md" label={t.brainChat.loadingOlder} /> : null}
           </div>
         ) : null}
         {/* Stable keys: history turns key by their store id, so a prepend never re-keys the existing turns;

@@ -14,7 +14,7 @@ import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { ChoiceField } from '../../components/ui/ChoiceField';
 import { ProjectIcon } from '../../components/ui/ProjectIcon';
-import { ErrorState, LoadingState } from '../../components/ui/states';
+import { ErrorState, LoadingLine } from '../../components/ui/states';
 import { useToast } from '../../components/ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { categorySwatch, countByCategory, CATEGORY_COLORS } from './memoryMeta';
@@ -145,7 +145,7 @@ export function CategoryModal({ category, onClose }: { category?: MemoryCategory
           />
         </Field>
         <Field label={t.memory.categoryProject}>
-          {projects.isLoading ? <LoadingState label={t.memory.categoryProjectsLoading} /> : projects.isError ? (
+          {projects.isLoading ? <LoadingLine label={t.memory.categoryProjectsLoading} /> : projects.isError ? (
             <ErrorState message={t.memory.categoryProjectsError} onRetry={() => { void projects.refetch(); }} />
           ) : (
             <div className="flex items-center gap-2">

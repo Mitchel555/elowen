@@ -11,7 +11,7 @@ import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { IconButton } from '../../components/ui/IconButton';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
-import { EmptyState } from '../../components/ui/states';
+import { EmptyState, LoadingLine } from '../../components/ui/states';
 import { AutoSaveStatus } from '../../components/ui/AutoSaveStatus';
 import { useAutoSaveStatus } from '../../lib/useAutoSaveStatus';
 import { useTranslation } from '../../lib/i18n';
@@ -31,7 +31,7 @@ export function MemoryDetail({ memoryId }: { memoryId: number }) {
   const memory = query.data;
 
   if (query.isError) return <EmptyState title={t.common.daemonUnreachable} icon={Brain} />;
-  if (!memory) return <EmptyState title={t.memory.loading} icon={Brain} />;
+  if (!memory) return <LoadingLine />;
   return <MemoryDetailBody key={memory.id} memory={memory} t={t} locale={locale} />;
 }
 

@@ -51,7 +51,7 @@ export function LiveTail({ name, lines = 20, heightClass = 'max-h-80', onExpand 
           style={{ transform: fit.scale < 1 ? `scale(${fit.scale})` : undefined, transformOrigin: 'top left' }}
           className="w-max whitespace-pre font-mono text-xs leading-relaxed text-text-muted"
         >
-          {isLoading ? t.sessions.loading : tail
+          {isLoading ? t.common.loading : tail
             ? parseAnsi(tail).map((s, i) => <span key={i} style={s.color ? { color: s.color } : undefined}>{s.text}</span>)
             : t.sessions.noOutput}
         </pre>

@@ -25,7 +25,7 @@ function LiveTailLine({ name }: { name: string }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <ChevronRight size={12} className="shrink-0 text-success" aria-hidden />
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-muted">{line || (isLoading ? t.sessions.loading : t.sessions.noOutput)}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-muted">{line || (isLoading ? t.common.loading : t.sessions.noOutput)}</span>
       <Badge tone={activityTone(activity)}>{t.activity[activity]}</Badge>
     </div>
   );

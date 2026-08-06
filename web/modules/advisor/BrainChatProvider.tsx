@@ -1,7 +1,7 @@
 'use client';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Loader } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '../../lib/i18n';
 import { usePersistentState } from '../../lib/usePersistentState';
@@ -16,6 +16,7 @@ import { getBrainClientId, buildBinding, type BrainBinding } from '../../lib/bra
 import { subscribeRevive, STALE_HIDE_MS } from '../../lib/useRevive';
 import { createReconnectController, type ReconnectController } from '../../lib/reconnect';
 import { startStreamWatchdog, resolveStreamSilence } from '../../lib/streamWatchdog';
+import { Spinner } from '../../components/ui/states';
 import {
   BRAIN_COMPOSE_EVENT,
   BRAIN_OPEN_EVENT,
@@ -1264,7 +1265,7 @@ function ReconnectOverlay() {
       role="status"
       aria-live="polite"
     >
-      <Loader size={40} className="animate-spin text-text-muted" aria-hidden />
+      <Spinner size="lg" />
       <span className="text-base text-text-muted">{t.brainChat.reconnecting}</span>
       <Link
         href="/dash"

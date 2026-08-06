@@ -19,6 +19,7 @@ import { MotionLayoutItem, MotionPresence } from '../../components/ui/Motion';
 import { ActionMenu } from '../../components/ui/ActionMenu';
 import { ContextMenu, type ContextMenuState } from '../../components/ui/ContextMenu';
 import { ControlSurfaceRegister, ControlSurfaceToolbar } from '../../components/ui/ControlSurface';
+import { LoadingLine } from '../../components/ui/states';
 
 const PAGE_SIZE = 12;
 
@@ -124,7 +125,7 @@ export function BrainSessionsPanel() {
       </ControlSurfaceToolbar>
 
       <ControlSurfaceRegister>
-      {q.isLoading ? <p className="py-8 text-xs italic text-text-muted">{t.common.loading}</p>
+      {q.isLoading ? <LoadingLine />
         : q.isError ? <p className="py-8 text-xs italic text-text-muted">{t.common.daemonUnreachable}</p>
         : sessions.length === 0 ? <p className="py-8 text-xs italic text-text-muted">{t.sessionsPanel.empty}</p>
         : (

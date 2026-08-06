@@ -229,7 +229,7 @@ export function TaskConversation({ task }: { task: { id: string } }) {
         <Modal title={baseName(openFile.path)} description={openFile.path} icon={fileIcon(openFile.path)} size="lg" onClose={() => setOpenFile(null)}>
           <div className="flex h-full min-h-0 flex-col p-5">
             <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border">
-              <PatchView diff={fileDiff.data?.diff ?? ''} empty={fileDiff.isLoading ? t.common.loading : t.projects.noChanges} />
+              <PatchView diff={fileDiff.data?.diff ?? ''} loading={fileDiff.isLoading} empty={t.projects.noChanges} />
             </div>
           </div>
         </Modal>

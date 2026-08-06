@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { Play, Sparkles, ListChecks, Plus, X, AlertTriangle, Pencil, Loader2 } from 'lucide-react';
+import { Play, Sparkles, ListChecks, Plus, X, AlertTriangle, Pencil } from 'lucide-react';
 import type { Task, PlanResult } from '../../lib/types';
 import { useConfig, useTasks, usePlanJob, useProjects } from '../../lib/queries';
 import { useCreateTask, useUpdateTask, useSpawn, useSetTaskExec, usePlanTask } from '../../lib/mutations';
@@ -25,6 +25,7 @@ import { TerminalModal } from '../../components/terminal/TerminalModal';
 import { useTranslation } from '../../lib/i18n';
 import { taskTypeMeta, taskTypeLabel, TASK_TYPES, PRIORITIES } from './taskMeta';
 import { DepPicker } from './DepPicker';
+import { Spinner } from '../../components/ui/states';
 
 type Mode = 'single' | 'planning';
 interface ManualPhase { title: string; type: string }
@@ -383,7 +384,7 @@ export function TaskModal({ task, onClose, initialSchedule, initialMode, initial
             {planning && (
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2 rounded-md border border-border bg-elevated/40 px-3 py-2.5 text-sm text-text-muted">
-                  <Loader2 size={15} className="shrink-0 animate-spin text-accent" aria-hidden />
+                  <Spinner size="md" tone="text-accent" />
                   {t.tasks.planning}
                 </div>
                 {/* Agent-mode planning runs a repo-aware Pilot in a tmux pane — stream it live under the

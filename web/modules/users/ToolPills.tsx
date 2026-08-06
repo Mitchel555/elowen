@@ -9,6 +9,7 @@ import { ManageSelectionModal, type ManageSelectionItem } from '../../components
 import { SelectionSummary } from '../../components/ui/SelectionSummary';
 import { useTranslation } from '../../lib/i18n';
 import type { UserToolPill } from '../../lib/types';
+import { LoadingLine } from '../../components/ui/states';
 
 function Icon({ tool }: { tool: UserToolPill }) {
   return <span aria-hidden className="shrink-0 text-[13px] leading-none">{tool.icon ?? <Wrench size={12} className="inline" />}</span>;
@@ -26,7 +27,7 @@ export function ToolPills({ userId }: { userId: number }) {
   const [open, setOpen] = useState(false);
 
   const all = tools.data ?? [];
-  if (tools.isLoading) return <p className="text-xs text-text-muted">…</p>;
+  if (tools.isLoading) return <LoadingLine layout="inline" />;
   if (all.length === 0) return <p className="text-xs italic text-text-muted">{t.users.toolsEmpty}</p>;
 
   const enabled = all.filter((x) => x.state === 'allowed' || x.state === 'inherited');

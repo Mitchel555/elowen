@@ -12,7 +12,7 @@ import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Field } from '../../components/ui/Field';
 import { useToast } from '../../components/ui/Toast';
-import { LoadingState } from '../../components/ui/states';
+import { LoadingLine } from '../../components/ui/states';
 import { useTranslation } from '../../lib/i18n';
 import { useCliStatus, useConfig, useUsers } from '../../lib/queries';
 import { useUpdateConfig, useCreateUser } from '../../lib/mutations';
@@ -222,7 +222,7 @@ export default function OnboardingPage() {
 
         <div className="flex min-w-0 flex-col gap-4 py-1">
           {isLoading ? (
-            <ControlSurfaceDocument><ControlSurfaceState><LoadingState label={t.common.loading} /></ControlSurfaceState></ControlSurfaceDocument>
+            <ControlSurfaceDocument><ControlSurfaceState><LoadingLine /></ControlSurfaceState></ControlSurfaceDocument>
           ) : (
             <>
             {/* System Dependencies */}

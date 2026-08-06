@@ -13,7 +13,7 @@ import { Segmented } from '../../components/ui/Segmented';
 import { SelectMenu, type SelectMenuOption } from '../../components/ui/SelectMenu';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { ModuleHeader } from '../../components/ui/ModuleHeader';
-import { LoadingState, ErrorState, EmptyState } from '../../components/ui/states';
+import { EmptyState, ErrorState, LoadingLine, LoadingState } from '../../components/ui/states';
 import { useTranslation } from '../../lib/i18n';
 import { ContextMenu, DIVIDER, type ContextMenuState, type MenuEntry } from '../../components/ui/ContextMenu';
 import { ProjectEditor } from './editor/ProjectEditor';
@@ -302,7 +302,7 @@ export function ProjectsView() {
                       <button type="button" onClick={() => openEdit(selectedProject)} className="inline-flex items-center gap-1.5 text-xs text-text-muted hover:text-text"><Pencil size={13} aria-hidden />{t.projects.editProject}</button>
                     </div>
 
-                    {git.isLoading ? <span className="block py-4 font-mono text-xs text-text-muted animate-pulse">{t.common.loading}</span> : null}
+                    {git.isLoading ? <LoadingLine /> : null}
                     {git.data && !git.data.isRepo ? <div className="py-4"><Badge tone="muted">{t.projects.notGit}</Badge></div> : null}
                     {git.data?.status ? (
                       <section className="border-b border-border/70 py-4">

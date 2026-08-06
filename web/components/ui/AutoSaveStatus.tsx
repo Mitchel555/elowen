@@ -1,7 +1,8 @@
 'use client';
-import { Check, Loader2, TriangleAlert } from 'lucide-react';
+import { Check, TriangleAlert } from 'lucide-react';
 import { useTranslation } from '../../lib/i18n';
 import type { SaveStatus } from '../../lib/useAutoSaveStatus';
+import { Spinner } from '../ui/states';
 
 /** Subtle, unobtrusive auto-save indicator for a modal footer. Idle renders nothing; error offers a
  *  retry. Uses role="status" (aria-live polite) so a screen reader hears "Saving…/Saved" without
@@ -11,7 +12,7 @@ export function AutoSaveStatus({ status, onRetry }: { status: SaveStatus; onRetr
   if (status === 'idle') return <span className="text-xs text-text-muted" role="status" aria-live="polite" />;
   if (status === 'saving') return (
     <span className="inline-flex items-center gap-1.5 text-xs text-text-muted" role="status" aria-live="polite">
-      <Loader2 size={13} className="animate-spin" aria-hidden />{t.common.saving}
+      <Spinner size="sm" tone="" />{t.common.saving}
     </span>
   );
   if (status === 'saved') return (

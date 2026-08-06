@@ -61,6 +61,10 @@ html[data-effects='reduced'] .live-dot::after,
 html[data-effects='reduced'] .flow-active,
 html[data-effects='reduced'] .ambient-pulse { animation: none !important; }
 
+/* Slowed rather than stopped: a spinner is the only thing telling the user that work is still running, so
+   freezing it would read as "hung". Reduced effects asks for less motion, not for less information. */
+html[data-effects='reduced'] .animate-spin { animation-duration: 2.4s !important; }
+
 @media (prefers-reduced-motion: reduce) {
   html[data-effects-mode='auto'] .ambient-pulse { animation: none !important; }
 }

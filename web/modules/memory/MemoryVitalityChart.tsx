@@ -6,6 +6,7 @@ import { useTranslation } from '../../lib/i18n';
 import { parseTs } from '../../lib/format';
 import { vitalityPct, vitalityTone } from './memoryMeta';
 import { TONE_TEXT } from '../../components/ui/tone';
+import { LoadingState } from '../../components/ui/states';
 
 /** A memory's vitality over time: the reconstructed past as a solid line, the "if it is never recalled
  *  again" projection as a dashed one, and the threshold at which retention moves it to the trash.
@@ -62,7 +63,7 @@ export function MemoryVitalityChart({ memoryId, vitality }: { memoryId: number; 
   const scale = useMemo(() => (history ? buildScale(history) : null), [history]);
 
   if (query.isLoading) {
-    return <div className="h-28 w-full animate-pulse rounded-md border border-border/70 bg-elevated/40" aria-hidden />;
+    return <LoadingState variant="block" />;
   }
   // The curve elaborates on a number that is already shown next to it, so a failure here is not worth
   // an error state of its own — the drawer simply carries on without it.

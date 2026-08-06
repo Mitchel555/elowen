@@ -340,9 +340,9 @@ export function ProjectEditor({ projectId, onClose, initialCommit, initialWorkin
         <div className="flex min-w-0 flex-1 flex-col">
           {!commit && !working ? <Tabs tabs={openTabs} active={selected} dirty={dirtyPaths} onSelect={setSelected} onClose={closeTab} closeLabel={t.common.close} /> : null}
           <div className="min-h-0 flex-1">
-            {working ? <PatchView diff={changesData.data?.diff ?? ''} empty={changesData.isLoading ? t.common.loading : t.projects.noChanges} />
-              : commit && selected ? <PatchView diff={commitFileDiff.data?.diff ?? ''} empty={commitFileDiff.isLoading ? t.common.loading : t.projects.noChanges} />
-              : commit ? <PatchView diff={commitData.data?.diff ?? ''} empty={commitData.isLoading ? t.common.loading : t.projects.noChanges} />
+            {working ? <PatchView diff={changesData.data?.diff ?? ''} loading={changesData.isLoading} empty={t.projects.noChanges} />
+              : commit && selected ? <PatchView diff={commitFileDiff.data?.diff ?? ''} loading={commitFileDiff.isLoading} empty={t.projects.noChanges} />
+              : commit ? <PatchView diff={commitData.data?.diff ?? ''} loading={commitData.isLoading} empty={t.projects.noChanges} />
               : !selected ? <EmptyState title={t.projects.selectFile} icon={FileIcon} />
               : img ? <ImagePreview projectId={projectId} path={selected} />
               : fileData.data?.truncated ? <p className="p-4 text-center text-sm text-text-muted">{t.projects.fileTooBig}</p>

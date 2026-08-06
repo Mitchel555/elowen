@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { LucideIcon } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { Button } from './Button';
 import { useTranslation } from '../../lib/i18n';
 
@@ -16,12 +17,47 @@ export function EmptyState({ title, description, icon: Icon, action }: { title: 
   );
 }
 
-type SkeletonVariant = 'list' | 'cards' | 'kanban';
+const SPINNER_PX = { xs: 10, sm: 13, md: 16, lg: 40 } as const;
+
+/** The turning-circle indicator, in the four sizes the app actually uses. Fixed sizes rather than a free
+ *  number, because every one of them is a deliberate fit for its surroundings — a tool pill, a button, a
+ *  full-screen overlay — and a free prop is how four sizes quietly become eight.
+ *
+ *  Without `label` it is `aria-hidden`: a spinner next to its own visible text would be announced twice. */
+export function Spinner({ size = 'sm', tone = 'text-text-muted', label }: { size?: keyof typeof SPINNER_PX; tone?: string; label?: string }) {
+  return (
+    <Loader2
+      size={SPINNER_PX[size]}
+      className={`shrink-0 animate-spin ${tone}`}
+      {...(label ? { role: 'status' as const, 'aria-label': label } : { 'aria-hidden': true })}
+    />
+  );
+}
+
+/** Loading as a LINE OF TEXT, for the places a skeleton would be wrong: inside a dropdown, a monospace
+ *  log tail, a single field. `inline` deliberately inherits the parent's typography — those sit among
+ *  sibling rows and should match them rather than the rest of the app. */
+export function LoadingLine({ label, layout = 'block', spinner = false }: { label?: string; layout?: 'inline' | 'block' | 'page'; spinner?: boolean }) {
+  const { t } = useTranslation();
+  const box = layout === 'page'
+    ? 'flex h-screen items-center justify-center gap-2'
+    : layout === 'block' ? 'flex items-center justify-center gap-2 py-8' : 'inline-flex items-center gap-1.5';
+  return (
+    <span className={box} role="status" aria-live="polite">
+      {spinner ? <Spinner size={layout === 'inline' ? 'xs' : 'md'} /> : null}
+      <span className={`text-text-muted ${spinner ? '' : 'animate-pulse'} ${layout === 'inline' ? '' : 'font-mono text-xs'}`}>{label ?? t.common.loading}</span>
+    </span>
+  );
+}
+
+type SkeletonVariant = 'list' | 'cards' | 'kanban' | 'block';
 
 /** Skeleton placeholder shaped like the real content so the layout doesn't pop in. */
-export function LoadingState({ label, variant = 'list' }: { label?: string; variant?: SkeletonVariant }) {
+export function LoadingState({ variant = 'list', height = 'h-28' }: { variant?: SkeletonVariant; height?: string }) {
   const { t } = useTranslation();
-  if (label) return <div className="flex items-center justify-center py-12 font-mono text-xs text-text-muted animate-pulse">{label}</div>;
+  // One plain block, for a chart or panel whose shape says nothing useful while it is empty. Goes through
+  // `.skeleton` like every other variant, so it obeys the reduced-effects setting for free.
+  if (variant === 'block') return <div className={`skeleton w-full rounded-md ${height}`} aria-busy="true" aria-label={t.common.loading} />;
 
   if (variant === 'cards') {
     return (
