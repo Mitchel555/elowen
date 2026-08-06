@@ -1022,6 +1022,26 @@ describe('BrainStore', () => {
         expect(row!.usage.costUsd).toBeCloseTo(0.3);
       });
 
+      /** The read side of this is unit-tested on its own, but nothing proved the divider ever RECEIVES the
+       *  names: drop the rollup call from compaction and every other test still passes while activated
+       *  deferred tools silently go back to being lost on the next respawn. */
+      it('carries the names of tools activated by a dropped ToolSearch onto the divider', () => {
+        store.createSession({ id: 'brain-a', userId: 1, model: 'm' });
+        store.appendMessage({
+          id: 'search', sessionId: 'brain-a', parentId: null, role: 'toolResult',
+          content: {
+            role: 'toolResult', toolCallId: 't1', toolName: 'ToolSearch', isError: false,
+            content: [{ type: 'text', text: 'activated' }],
+            details: { matched: ['mcp__github__create_issue', 'mcp__github__list_issues'] },
+          },
+        });
+        store.appendMessage({ id: 'k', sessionId: 'brain-a', parentId: null, role: 'user', content: { role: 'user', content: 'next' } });
+        store.compactSessionMessages('brain-a', { id: 'sum', role: 'compaction', content: { role: 'compactionSummary', summary: 's' } }, 1);
+
+        const divider = JSON.parse(store.getMessages('brain-a')[0]!.content);
+        expect(divider.activatedTools).toEqual(['mcp__github__create_issue', 'mcp__github__list_issues']);
+      });
+
       it('leaves the divider clean when nothing dropped carried usage', () => {
         store.createSession({ id: 'brain-a', userId: 1, model: 'm' });
         store.appendMessage({ id: 'u', sessionId: 'brain-a', parentId: null, role: 'user', content: { role: 'user', content: 'hi' } });

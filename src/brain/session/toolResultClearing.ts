@@ -20,13 +20,13 @@ export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
  *     re-cache either way. Clearing here SHRINKS that rewrite instead of costing anything.
  *  2. A per-session latch (Map of cleared toolCallIds → original bytes) guarantees a result once
  *     cleared stays cleared on every later request, so the prefix is byte-stable from then on. The
- *     latch lives in this closure; a respawn loses it. The cache is server-side, so a respawn WITHIN
- *     the TTL is NOT cold — the first request then re-sends the full results and pays one full
- *     re-cache of the restored (larger) prefix. Correct, just expensive; the gate re-clears on the
- *     next idle turn. Rebuilding the latch from disk would also need the original byte counts
- *     persisted (the placeholder embeds them), so we accept the one-off cost instead.
+ *     latch lives in this closure, so a respawn starts empty — and the cache is server-side, so a
+ *     respawn WITHIN the TTL is NOT cold: re-sending the full results would rewrite a warm prefix and
+ *     pay a full re-cache. `restoreLatch` therefore rebuilds it from the spill dir on the first pass.
+ *     That needs the original byte counts, which is why they live in the file NAME — the placeholder
+ *     embeds them and they cannot be measured back off the file (see `toolResultSpillPath`).
  *
- *  The full text is spilled to `<dataDir>/tool-results/<sessionId>/<toolCallId>.txt` BEFORE the
+ *  The full text is spilled to `<dataDir>/tool-results/<sessionId>/<toolCallId>.v1-<mode>-<bytes>.txt` BEFORE the
  *  placeholder replaces it (write-once, `wx`), so clearing loses nothing the model could not re-read
  *  with the Read tool — pathGuard lets every session read its OWN spill dir. Persisted history in
  *  the store is untouched — this runs on PI's egress copy.
@@ -417,43 +417,55 @@ export function installToolResultClearing(
       const toolCallId = (message as ToolResultMessage).toolCallId;
       if (latched.has(toolCallId)) continue;
       const encoded = fsSafeSegment(toolCallId);
-      let found: { descriptor: SpillDescriptor; name: string } | undefined;
-      for (const name of names) {
-        const descriptor = parseSpillDescriptor(name, encoded);
-        if (!descriptor) continue; // legacy `<id>.txt` spills and other sessions' names land here
-        // Both a time and a preview spill can exist for one result: a restart whose restoration failed
-        // leaves the preview file behind and the cold gate then time-clears the same result. Prefer time,
-        // because that is what the live placeholder became — refusing to choose would mean paying a full
-        // re-cache on every restart from then on, forever.
-        if (!found || (found.descriptor.mode === 'preview' && descriptor.mode === 'time')) {
-          found = { descriptor, name };
-        }
-      }
-      if (!found) continue;
+      // Several spills can exist for one result: a restart whose restoration failed leaves the old file
+      // behind and the cold gate then clears the same result again under a new name. Try them ALL rather
+      // than picking one up front — a single guess that happens to land on the stale file would forfeit
+      // the restoration even though a matching file sits right beside it.
+      // Ordered so `time` is tried first: after such a cycle the live placeholder IS the time-mode one,
+      // and both files hold identical content, so content equality alone cannot tell them apart.
+      const candidates = names
+        .map((name) => ({ name, descriptor: parseSpillDescriptor(name, encoded) }))
+        .filter((c): c is { name: string; descriptor: SpillDescriptor } => c.descriptor !== null)
+        .sort((a, b) => (a.descriptor.mode === b.descriptor.mode ? 0 : a.descriptor.mode === 'time' ? -1 : 1));
+      if (candidates.length === 0) continue; // legacy `<id>.txt` spills land here and are left alone
       const text = toolResultText(message as ToolResultMessage);
-      const path = join(spillDir, found.name);
-      const onDisk = await readSpill(path);
-      if (onDisk !== text) {
+      let restoredFrom: string | undefined;
+      for (const candidate of candidates) {
+        const path = join(spillDir, candidate.name);
+        const onDisk = await readSpill(path);
+        if (onDisk !== text) continue;
+        // The preview is re-derived from the FILE rather than persisted separately, and this equality is
+        // what makes that exact: the spill holds the same joined text the preview was sliced from. It also
+        // removes the lone-surrogate hazard for free — a text whose UTF-16 was mangled by the write could
+        // not have compared equal, so anything reaching this line round-trips faithfully.
+        latched.set(toolCallId, {
+          bytes: candidate.descriptor.bytes,
+          preview: candidate.descriptor.mode === 'preview' ? onDisk.slice(0, SPILL_PREVIEW_CHARS) : undefined,
+          path,
+        });
+        restoredFrom = candidate.name;
+        break;
+      }
+      if (restoredFrom === undefined) {
         // Worth a line: this is the difference between "restart was free" and "restart cost a full
-        // re-cache", and the usual cause is an earlier hook having rewritten the text since the spill.
-        log.warn(`spill for ${toolCallId} does not match the current message text — not restoring its latch`);
+        // re-cache". The usual cause is an earlier hook having rewritten the text since the spill — most
+        // often historyImageStripping, whose own latch also dies with the process, so a result carrying an
+        // image reads differently on a warm first pass than it did when it was spilled cold.
+        log.warn(`no spill matches the current text of ${toolCallId} (${candidates.length} candidate(s)) — not restoring its latch`);
         continue;
       }
-      // The preview is re-derived from the FILE rather than persisted separately, and the equality above
-      // is what makes that exact: the spill holds the same joined text the preview was sliced from. It
-      // also removes the lone-surrogate hazard for free — a text whose UTF-16 was mangled by the write
-      // could not have compared equal, so anything that reaches this line round-trips faithfully.
-      latched.set(toolCallId, {
-        bytes: found.descriptor.bytes,
-        preview: found.descriptor.mode === 'preview' ? onDisk.slice(0, SPILL_PREVIEW_CHARS) : undefined,
-        path,
-      });
-      log.info(`restored latch for ${toolCallId} from ${found.name} (${found.descriptor.bytes} bytes)`);
+      log.info(`restored latch for ${toolCallId} from ${restoredFrom}`);
     }
   };
   agent.transformContext = async (messages, signal) => {
     const base = previous ? await previous(messages, signal) : messages;
-    if (!restored) { restored = true; await restoreLatch(base); }
+    if (!restored) {
+      // Restoration is an optimisation, never a precondition for answering: a failure here must cost a
+      // re-cache, not the turn. Retried on the next pass, since a transient read failure that latched
+      // nothing would otherwise leave the session paying full price for its whole life.
+      try { await restoreLatch(base); restored = true; }
+      catch (error) { log.warn('tool result latch restoration failed — results stay full for now', error); }
+    }
     const gateOpen = cacheColdAtTurnStart(base, idleMs, now());
     if (gateOpen && !gateWasOpen) failedSpills.clear();
     gateWasOpen = gateOpen;

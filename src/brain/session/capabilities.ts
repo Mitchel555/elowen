@@ -158,9 +158,11 @@ export const PLAN_MODE_WRITE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edi
 
 /** Why a writing tool may not run on this path during a planning turn, or undefined when it may.
  *
- *  Plan mode is read-only by WITHHOLDING every writing tool. Letting the model author its own plan file
- *  means admitting one back, so this is the clamp that keeps the mode's promise: during a plan turn a
- *  write may land on the session's plan file and nowhere else.
+ *  Plan mode is read-only by REFUSING every mutating tool at execute time (`gateDeniedTools`) — the tools
+ *  stay advertised so the cached prompt prefix survives a mode switch. Write and Edit are the exception:
+ *  the model authors its own plan file, so they are not denied outright, and this clamp is what keeps the
+ *  mode's promise for them — during a plan turn a write may land on the session's plan file and nowhere
+ *  else.
  *
  *  Deliberately checked BEFORE gatePermissions' `!perms` early return. The permission gate goes inert on
  *  a turn that carries no TurnPermissions scope (task workers, tests); this clamp must not, or "plan mode

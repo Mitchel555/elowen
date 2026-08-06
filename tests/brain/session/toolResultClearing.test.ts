@@ -728,10 +728,11 @@ describe('latch restoration across a respawn', () => {
   /** A whole daemon restart, modelled honestly: a NEW installation over the SAME disk, given the SAME
    *  history the store would rehydrate (results still FULL — the module only ever edits the egress copy).
    *  The latch lives in a closure, so the second install starts empty exactly as the real one does. */
-  const restartOver = (disk: Map<string, string>) => {
+  const restartOver = (disk: Map<string, string>, now?: () => number) => {
     const session: Harness['session'] = { agent: {} };
     installToolResultClearing(session, 'sess-1', {
       idleMs: IDLE,
+      ...(now ? { now } : {}),
       spillDir: '/tmp/spill/sess-1',
       writeSpill: async (p, t) => {
         if (disk.has(p)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
@@ -811,6 +812,39 @@ describe('latch restoration across a respawn', () => {
     expect(disk.has('/tmp/spill/sess-1/old-big.txt')).toBe(true);
     expect([...disk.keys()].some((p) => p.startsWith('/tmp/spill/sess-1/old-big.v1-'))).toBe(true);
     expect((after[1] as { content: { text: string }[] }).content[0]!.text).toContain('Older tool result cleared');
+  });
+
+  /** The restart that actually matters: the user comes back and types IMMEDIATELY, so the cache is still
+   *  warm and the time gate stays SHUT. Clearing afresh is not an option then — rewriting a warm prefix is
+   *  the one thing this module must never do — which makes restoration the only path to a placeholder.
+   *  Any test run with the gate open proves nothing about restoration: the result would be re-cleared
+   *  anyway and the placeholder would appear either way. */
+  const warmNow = () => T0 + IDLE + 6_000;
+
+  it('restores with the time gate SHUT, where re-clearing is not an option', async () => {
+    const disk = new Map<string, string>();
+    const before = await restartOver(disk)(history());
+    const timeText = (before[1] as { content: { text: string }[] }).content[0]!.text;
+    const filesAfterFirst = new Map(disk);
+
+    const after = await restartOver(disk, warmNow)(history());
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toBe(timeText);
+    // Nothing was re-spilled: the placeholder came from the latch, not from a fresh clearing pass.
+    expect([...disk.entries()]).toEqual([...filesAfterFirst.entries()]);
+  });
+
+  // A stale spill sits beside a matching one when an earlier restoration failed and the cold gate then
+  // cleared the same result again. Picking one candidate up front would forfeit the restoration whenever
+  // the guess landed on the stale file — and forfeit it on every restart from then on.
+  it('keeps looking past a stale spill to the one that matches', async () => {
+    const disk = new Map<string, string>([
+      [`/tmp/spill/sess-1/old-big.v1-time-${big.length + 999}.txt`, 'stale content from an older run'],
+    ]);
+    await restartOver(disk)(history());
+    const after = await restartOver(disk, warmNow)(history());
+    const text = (after[1] as { content: { text: string }[] }).content[0]!.text;
+    expect(text).toContain('Older tool result cleared');
+    expect(text).toContain(`${big.length} bytes`); // the real spill's count, not the stale name's
   });
 
   it('prefers the time spill when both a time and a preview file exist for one result', async () => {

@@ -86,8 +86,9 @@ export interface LiveBrain {
   toolSearch?: ToolSearchHandle;
   /** Names of the tools composed into this session that only READ. Assembled at spawn from the same two
    *  declarations icons come from — the core's `BUILTIN_TOOL_PLAN_SAFE` and each plugin manifest's
-   *  `planSafe` — so a tool's plan-safety is stated once, by whoever owns the tool. Plan mode composes
-   *  exactly this set; anything absent is treated as mutating and withheld. */
+   *  `planSafe` — so a tool's plan-safety is stated once, by whoever owns the tool. Plan mode still
+   *  ADVERTISES every tool (the cached prefix must not change with the mode); anything absent from this
+   *  set is treated as mutating and refused when the model tries to call it. */
   planSafeToolNames: Set<string>;
   /** True while the session runs on the user's vision-fallback model (an image turn hopped onto it). */
   visionFallback?: boolean;

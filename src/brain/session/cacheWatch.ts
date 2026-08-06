@@ -258,12 +258,12 @@ function attributePayloadChange(
   if (!previous || !current) return 'payload snapshot unavailable';
   const changes: string[] = [];
   const notes: string[] = [];
-  // A mode switch narrows the tool set (plan exposes a fraction of the build tools), which rehashes the
-  // whole cached prefix — an expected break that the tool/history deltas below would otherwise pin on the
-  // wrong culprit.
-  if (previous.turnMode && current.turnMode && previous.turnMode !== current.turnMode) {
-    changes.push(`turn mode changed ${previous.turnMode}→${current.turnMode}`);
-  }
+  // Worth reporting as CONTEXT, never as the cause. Plan mode used to narrow the tool set, which rehashed
+  // the prefix and made a switch an expected break — but enforcement moved to execute time, so the mode no
+  // longer touches system or tools at all. A drop that coincides with a switch is therefore a REAL break,
+  // and calling the mode the culprit would suppress the eviction hint below and send the next
+  // investigation somewhere there is nothing to find.
+  const modeSwitched = previous.turnMode && current.turnMode && previous.turnMode !== current.turnMode;
   if (previous.systemHash !== current.systemHash) changes.push('system prompt changed');
   if (previous.toolsHash !== current.toolsHash) {
     const delta = classifySegments(previous.tools, current.tools);
@@ -281,6 +281,7 @@ function attributePayloadChange(
   if (current.historyCount < previous.historyCount) {
     changes.push(`history truncated ${previous.historyCount}→${current.historyCount}`);
   }
+  if (modeSwitched) notes.push(`turn mode changed ${previous.turnMode}→${current.turnMode}`);
   const suffix = notes.length > 0 ? ` [${notes.join('; ')}]` : '';
   if (changes.length > 0) return `${changes.join('; ')}${suffix}`;
   const tracked = Math.min(previous.history.length, current.history.length);

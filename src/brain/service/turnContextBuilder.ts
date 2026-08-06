@@ -422,11 +422,11 @@ export class TurnContextBuilder {
     }
   }
 
-  /** Plan mode withholds every tool that is not DECLARED plan-safe — by the core for its own built-ins
+  /** Plan mode refuses every tool that is not DECLARED plan-safe — by the core for its own built-ins
    *  (BUILTIN_TOOL_PLAN_SAFE) or by a plugin in its manifest (`planSafe`), assembled onto the live at
    *  spawn. Declaration, not inference: this is a policy boundary, and the name heuristic this replaced
    *  ("starts with read_/list_/get_…") both guessed and failed OPEN — a third-party `get_and_purge` read
-   *  as safe. Undeclared now means withheld, so an unknown tool costs the model some reach in plan mode
+   *  as safe. Undeclared means refused, so an unknown tool costs the model some reach in plan mode
    *  rather than costing the user a mutation they were promised could not happen. */
   private applyOwnerToolPolicy(userId: number, live: LiveBrain, mode: TurnMode): ToolPolicy | undefined {
     // The user's own disabled tools are a STABLE property of the conversation, so hiding them costs

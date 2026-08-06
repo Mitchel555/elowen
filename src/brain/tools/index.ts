@@ -44,9 +44,9 @@ export const BUILTIN_TOOL_PLAN_SAFE: string[] = [
   'MemorySearch', 'MemoryListRecent', 'MemoryCategories',
   'LspDiagnostics', 'LspGoToDefinition', 'LspFindReferences', 'LspHover', 'LspDocumentSymbol', 'LspWorkspaceSymbol',
   // NOTE: ToolSearch is deliberately NOT plan-safe. In plan mode the deferred tools it would fetch are
-  // external MCP tools — presumed mutating and already withheld by the plan-safe boundary — so activating
-  // them buys nothing, and withholding ToolSearch itself keeps plan mode's tool surface minimal. Deferred
-  // MCP tools being unreachable while planning is the correct, safe behaviour.
+  // external MCP tools — presumed mutating and refused by the plan-safe boundary anyway — so activating
+  // them buys nothing and would only spend tokens on schemas the turn cannot call. Deferred MCP tools
+  // being unreachable while planning is the correct, safe behaviour.
 ];
 
 /** The brain's Elowen capability toolset. Every tool wraps callElowenApi (single source of truth), so a

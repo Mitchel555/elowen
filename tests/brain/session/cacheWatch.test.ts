@@ -355,9 +355,12 @@ describe('installCacheWatch — warning context', () => {
     expect(warnings()[0]?.message).toContain('brain-session-42');
   });
 
-  // Switching to plan mode narrows the tool set, rehashing the cached prefix by design. The mode is only
-  // readable while the request's prompt scope is live, so it is latched into the snapshot, not the log.
-  it('attributes a drop to the turn mode changing between requests', () => {
+  // The mode is only readable while the request's prompt scope is live, so it is latched into the snapshot
+  // rather than read at logging time. It is reported as CONTEXT and must never be dressed up as the cause:
+  // plan mode no longer narrows the tool set, so a switch leaves the cached prefix untouched, and a drop
+  // across one is a REAL break. Blaming the mode would swallow the eviction hint below and aim the next
+  // investigation at a change that cannot break a cache.
+  it('reports a turn mode change as context while still calling the drop unexplained', () => {
     const monitor = createCachePayloadMonitor();
     const capture = payloadCapture(monitor);
     const { fire } = harness({ ttlMs: TTL, monitor });
@@ -368,6 +371,7 @@ describe('installCacheWatch — warning context', () => {
 
     expect(warnings()).toHaveLength(1);
     expect(warnings()[0]?.message).toContain('turn mode changed build→plan');
+    expect(warnings()[0]?.message).toContain('likely provider eviction or routing');
   });
 
   // A snapshot taken by a request BEFORE the compaction describes a payload that no longer exists. If it
