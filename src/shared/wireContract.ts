@@ -78,11 +78,15 @@ export interface BrainWorkflowView {
  *  while merely discussing plan mode is indistinguishable from one proposing a plan. */
 export type BrainSegment =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: BrainSubagentView; wf?: BrainWorkflowView; plan?: string };
+  | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: BrainSubagentView; wf?: BrainWorkflowView; plan?: string }
+  /** An image the agent shared on purpose (`ShareImage`). Its own segment rather than a field on the tool
+   *  row, because the picture IS the message here — a reader wants to see it, not a pill saying a tool
+   *  ran. A failed share stays an ordinary tool row so the error is still visible. */
+  | { kind: 'image'; image: BrainMessageImage; caption?: string };
 
-/** An image a user attached to a turn, kept next to the database so the bubble still shows it after a
- *  reload. `url` is a daemon path (`/brain/chat-images/<file>`) a browser loads directly: through the web
- *  proxy it carries the session cookie, so no signed link is involved. */
+/** An image in a conversation, kept next to the database so it still shows after a reload — a user's
+ *  attachment or one the agent shared. `url` is a daemon path (`/brain/chat-images/<file>`) a browser
+ *  loads directly: through the web proxy it carries the session cookie, so no signed link is involved. */
 export interface BrainMessageImage { url: string; mimeType: string }
 
 /** A durable display row (the `GET /brain/messages` payload). `id` is the SQLite message UUID when the

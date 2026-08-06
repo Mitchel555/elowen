@@ -4,6 +4,8 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import type { BrainRunMessage, BrainStore } from '../store/brainStore.js';
 import { extractText, NO_REPLY_NUDGE } from './messageView.js';
+import { HISTORY_IMAGE_PLACEHOLDER } from './session/historyImageStripping.js';
+import { externalizeImageBlocks } from './chatImages.js';
 import type { StoredChatImage } from './chatImages.js';
 
 import { currentMeter } from './openrouterMeter.js';
@@ -30,7 +32,7 @@ export function projectUserTurn(store: BrainStore, sessionId: string, text: stri
  *  this their chat/channel spend persists as $0 and never reaches usageByModel/usageByDay. Only stamps
  *  when a meter is ambient (the turn ran under runWithMeter) AND it saw a provider-reported cost; stamps
  *  the per-`agent_end` DELTA so a thinking-only nudge (a second agent_end under one meter) can't double it. */
-export function projectEvent(store: BrainStore, sessionId: string, event: AgentSessionEvent): void {
+export function projectEvent(store: BrainStore, sessionId: string, event: AgentSessionEvent, imagesDir?: string): void {
   if (event.type !== 'agent_end') return;
   const meter = currentMeter();
   const costDelta = meter?.reported ? meter.costUsd - meter.stampedUsd : 0;
@@ -50,7 +52,9 @@ export function projectEvent(store: BrainStore, sessionId: string, event: AgentS
       return;
     }
     if (i === lastAssistant && costDelta > 0) stampCost(m, costDelta);
-    run.push({ id: randomUUID(), role, content: m });
+    // Only the STORED copy loses its image bytes. `m` itself stays untouched, because PI keeps handing
+    // that same object to the provider and rewriting an already-sent message is what breaks a warm cache.
+    run.push({ id: randomUUID(), role, content: imagesDir ? externalizeImageBlocks(m, imagesDir) : m });
   });
   const reordered = store.persistAgentRun(sessionId, run);
   if (!reordered) {
@@ -78,10 +82,13 @@ export function projectEvent(store: BrainStore, sessionId: string, event: AgentS
  *  image bytes, NO_REPLY_NUDGE) that must never become durable history. Every other role PI routes to a
  *  different entry type or does not store at all, and `agent_end` never reports it as run output — so
  *  mirroring one would strand a row that no settled turn would ever reconcile. */
-function projectPendingMessage(store: BrainStore, sessionId: string, message: unknown): void {
+function projectPendingMessage(store: BrainStore, sessionId: string, message: unknown, imagesDir?: string): void {
   const role = (message as { role?: string }).role ?? 'assistant';
   if (role !== 'assistant' && role !== 'toolResult') return;
-  store.appendPendingMessage({ id: randomUUID(), sessionId, role, content: message });
+  // This row and the one `agent_end` writes later hold the same message, so both externalize it. Naming
+  // the file after its own bytes is what keeps that from doubling: the second write finds the file there.
+  const content = imagesDir ? externalizeImageBlocks(message, imagesDir) : message;
+  store.appendPendingMessage({ id: randomUUID(), sessionId, role, content });
 }
 
 /** Rows still marked pending when a session is (re)spawned belong to a turn that never settled — the
@@ -151,6 +158,9 @@ export function createSessionPersistenceProjector(
   session: AgentSession,
   sessionId: string,
   contextWindow: number,
+  /** Where externalized tool images go. Omitted (`:memory:` stores, tests) the bytes simply stay inline —
+   *  the row is fatter, nothing else changes. */
+  imagesDir?: string,
 ): (event: AgentSessionEvent) => void {
   let deferredOverflow: AgentSessionEvent | null = null;
   let agentRunOpen = false;
@@ -183,7 +193,7 @@ export function createSessionPersistenceProjector(
         (event.message as { durationMs?: number }).durationMs = Date.now() - assistantStartedAt;
         assistantStartedAt = 0;
       }
-      projectPendingMessage(store, sessionId, event.message);
+      projectPendingMessage(store, sessionId, event.message, imagesDir);
       return;
     }
     if (event.type === 'agent_end') {
@@ -197,7 +207,7 @@ export function createSessionPersistenceProjector(
       deferredOverflow = null;
       // Generic retry errors remain in PI's SessionManager branch even when removed from live agent
       // state. Persist them too so a later compaction can align the same clean row sequence.
-      projectEvent(store, sessionId, event);
+      projectEvent(store, sessionId, event, imagesDir);
       // A threshold compaction can run between an assistant/tool batch and the next provider step. Its
       // kept PI tail contains rows that BrainStore receives only here at terminal agent_end. Rewriting the
       // store earlier aligns against unrelated old rows; rewrite now, after the complete run is durable.
@@ -207,7 +217,7 @@ export function createSessionPersistenceProjector(
 
     if ((event as { type?: string }).type === 'agent_settled') {
       if (deferredOverflow) {
-        projectEvent(store, sessionId, deferredOverflow);
+        projectEvent(store, sessionId, deferredOverflow, imagesDir);
         persistPendingRunCompaction();
       }
       deferredOverflow = null;
@@ -228,7 +238,7 @@ export function createSessionPersistenceProjector(
       // assistant/tool prefix. Persist that clean prefix now, then apply the NEW overflow summary over
       // the aligned store. PI's transient overflow assistant is omitted from both operations.
       if (overflow && compact.willRetry === true && deferredOverflow && pendingRunCompaction && !agentRunOpen) {
-        projectEvent(store, sessionId, withoutTrailingOverflowAssistant(deferredOverflow, contextWindow));
+        projectEvent(store, sessionId, withoutTrailingOverflowAssistant(deferredOverflow, contextWindow), imagesDir);
         pendingRunCompaction = false;
         persistCompaction(store, session, sessionId, { omitTrailingOverflowError: true });
         deferredOverflow = null;
@@ -245,7 +255,7 @@ export function createSessionPersistenceProjector(
       return;
     }
     if (overflow && deferredOverflow) {
-      projectEvent(store, sessionId, deferredOverflow);
+      projectEvent(store, sessionId, deferredOverflow, imagesDir);
       deferredOverflow = null;
       persistPendingRunCompaction();
     }
@@ -391,8 +401,25 @@ function* parsedRows(store: BrainStore, sessionId: string): Generator<{ msg: { r
         if (call?.type === 'toolCall' && call.id) introduced.add(call.id);
       }
     }
-    yield { msg, createdAt: row.created_at };
+    yield { msg: withoutExternalizedImages(msg), createdAt: row.created_at };
   }
+}
+
+/** Replay a row whose image bytes moved to disk. The bytes are deliberately NOT read back: a rehydrated
+ *  history is old by definition, and `historyImageStripping` would collapse those blocks to this very
+ *  placeholder on the first cold turn anyway — so restoring them would buy one turn of vision at the price
+ *  of re-sending megabytes and making the replayed prefix depend on a file still being there. Uses the
+ *  same wording as that stripper, so a message reads identically whichever path removed its image. */
+function withoutExternalizedImages(msg: { role: string; content: unknown }): { role: string; content: unknown } {
+  if (!Array.isArray(msg.content)) return msg;
+  let changed = false;
+  const content = msg.content.map((part) => {
+    const block = part as { type?: unknown; ref?: unknown };
+    if (block?.type !== 'image' || typeof block.ref !== 'object' || block.ref === null) return part;
+    changed = true;
+    return { type: 'text', text: HISTORY_IMAGE_PLACEHOLDER };
+  });
+  return changed ? { ...msg, content } : msg;
 }
 
 /** Rebuild an in-memory PI session manager pre-seeded with the stored history (D1). Spike-proven:

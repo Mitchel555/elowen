@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { StateStore } from './lib/state.mjs';
 import { MsTeamsAdapter } from './lib/adapter.mjs';
 import { registerTools } from './lib/tools.mjs';
+import { platformImageDirs } from '../_shared/images.mjs';
 
 export { matchesId, senderIds, senderIsAdmin, displayNameOf } from './lib/ids.mjs';
 export { splitContent, footerLine, CHUNK } from './lib/format.mjs';
@@ -23,8 +24,7 @@ export function register(ctx) {
   }
   const dataDir = ctx.dataDir();
   const state = new StateStore(join(dataDir, 'channel-state.json'));
-  // The image-gen/image-edit plugins are data-dir siblings — their generated PNGs upload from there.
-  const imageDirs = [join(dataDir, '..', 'image-gen'), join(dataDir, '..', 'image-edit')];
+  const imageDirs = platformImageDirs(dataDir);
   // chatCommands passes LAZILY (a function) so a plugin registered after msteams — or a live reload —
   // is always reflected in /help and dispatch.
   const adapter = new MsTeamsAdapter(

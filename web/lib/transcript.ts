@@ -25,6 +25,11 @@ export type TranscriptEvent =
   /** A tool that settled with nothing to display. Carried for its `plan`: ExitPlanMode's result text is
    *  addressed to the model and withheld from the transcript, so this is the only live event it has. */
   | { type: 'tool_end'; id?: string; plan?: string }
+  /** An image the agent put in front of the user (`ShareImage`, or an image tool's output its reply forgot
+   *  to link). The wire carries a `ref` that ALREADY has the `/api` prefix, while the stored segment the
+   *  reload rebuilds carries the bare daemon path — {@link imageFromRef} is the single place that
+   *  reconciles the two, so live and reloaded produce byte-identical segments. */
+  | { type: 'image'; ref: string; id?: string; caption?: string }
   | { type: 'notice'; kind: 'retry' | 'compaction'; message: string; done?: boolean }
   | { type: 'session'; sessionId: string }
   | { type: 'subagent'; id: string; sessionId: string; status: 'running' | 'done' | 'error'; task: string; detail?: string; tools: number; tokens?: number; seconds: number; model?: string; background?: boolean; autoDeliver?: boolean; resultDelivery?: 'pending' | 'acknowledged' }
@@ -75,6 +80,9 @@ export interface SubagentState {
 type Segment =
   | { kind: 'text'; text: string }
   | { kind: 'reasoning'; text: string }
+  /** An image the agent shared on purpose. Its own segment rather than a tool row, because the picture IS
+   *  the message — mirror of the wire's `BrainSegment` image variant. */
+  | { kind: 'image'; image: BrainMessageImage; caption?: string }
   | { kind: 'tools'; items: ToolItem[] };
 /** A rendered tool group: consecutive items of the SAME tool with no diff and no output block fold into
  *  ONE pill showing the LAST item's detail plus a `×count` when >1 (mirror of the CLI's
@@ -126,6 +134,22 @@ export function groupToolItems(items: ToolItem[]): ToolGroup[] {
   return groups;
 }
 
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+};
+
+/** Turn the wire `image` event's `ref` into the SAME {@link BrainMessageImage} a stored image segment
+ *  carries, so the renderer has one shape to draw and one prefix rule to apply. The event's ref is a
+ *  browser-facing path (`/api/brain/chat-images/x.png`, or the older `/api/brain/images/x.png`) while a
+ *  stored segment holds the bare daemon path — strip the prefix here rather than teaching the renderer
+ *  that a live image is addressed differently from a reloaded one. The mime type is not on the wire, so
+ *  it is read off the extension the daemon constrains to png/jpg/gif/webp. */
+export function imageFromRef(ref: string): BrainMessageImage {
+  const url = ref.startsWith('/api/') ? ref.slice('/api'.length) : ref;
+  const extension = url.slice(url.lastIndexOf('.') + 1).toLowerCase();
+  return { url, mimeType: IMAGE_MIME_BY_EXTENSION[extension] ?? 'application/octet-stream' };
+}
+
 /** `id` is the source store row's UUID — present on every turn built from stored history (`fromHistory`),
  *  absent on turns synthesized live by `reduce` (a streaming reply, a steered user message). It is a
  *  STABLE React key (so a lazy-load prepend never remounts the live tail) and the identity `prependHistory`
@@ -173,6 +197,8 @@ export function fromHistory(msgs: BrainMessage[]): ChatView {
     for (const seg of m.segments ?? (m.text.trim() ? [{ kind: 'text' as const, text: m.text }] : [])) {
       if (seg.kind === 'text') {
         segments.push({ kind: 'text', text: seg.text });
+      } else if (seg.kind === 'image') {
+        segments.push({ kind: 'image', image: seg.image, ...(seg.caption ? { caption: seg.caption } : {}) });
       } else {
         const item: ToolItem = { name: seg.name, id: seg.id, detail: seg.detail, diff: seg.diff, output: seg.output, command: seg.command, sub: seg.sub, wf: seg.wf, plan: seg.plan };
         const tail = segments[segments.length - 1];
@@ -201,7 +227,7 @@ export function prependHistory(view: ChatView, older: BrainMessage[]): ChatView 
  *  out-of-band frames (card / ask / queue / step) the transcript fold has no case for — this narrows the
  *  wire events down to the ones it understands instead of casting the rest through it. */
 const TRANSCRIPT_EVENT_TYPES = new Set<TranscriptEvent['type']>([
-  'text', 'reasoning', 'tool', 'tool_progress', 'diff', 'tool_output', 'tool_end',
+  'text', 'reasoning', 'tool', 'tool_progress', 'diff', 'tool_output', 'tool_end', 'image',
   'notice', 'session', 'subagent', 'workflow', 'user', 'discard_user', 'idle', 'error',
 ]);
 
@@ -285,6 +311,13 @@ export function reduce(view: ChatView, e: TranscriptEvent): ChatView {
     case 'tool_end': {
       if (!e.plan) return view;
       attachToTool(ensureElowen(), e.id, (item) => ({ ...item, plan: e.plan }));
+      return { turns, thinking: true, notice: view.notice };
+    }
+    case 'image': {
+      // A shared image is its own segment, never merged into a neighbour: two pictures in a row are two
+      // pictures, and a caption belongs to exactly one of them.
+      const t = ensureElowen();
+      t.segments.push({ kind: 'image', image: imageFromRef(e.ref), ...(e.caption ? { caption: e.caption } : {}) });
       return { turns, thinking: true, notice: view.notice };
     }
     case 'subagent': {

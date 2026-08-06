@@ -7,7 +7,7 @@ type StoredTurnRow = { id?: string; role: string; content: string; created_at?: 
 // The display-transcript shapes are the daemon↔web wire contract — defined once in src/shared and
 // re-exported here for daemon callers (BrainStore passes its validated rows straight through). See
 // wireContract.ts for why they live outside src/brain.
-import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView, BrainPendingPlan } from '../shared/wireContract.js';
+import type { ToolOutputView, BrainSubagentView, BrainWorkflowView, BrainSegment, BrainMessageView, BrainMessageImage, BrainPendingPlan } from '../shared/wireContract.js';
 import { parseDbTs } from '../shared/time.js';
 import { EXIT_PLAN_MODE_TOOL } from '../shared/planTool.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
@@ -232,6 +232,19 @@ function expandedOutput(text: string): string {
   if (omitted) shown.unshift(`… ${omitted} earlier lines hidden`);
   const clipped = shown.join('\n').trim();
   return clipped.length > maxChars ? `${clipped.slice(0, maxChars - 1)}…` : clipped;
+}
+
+/** The image segment a stored `ShareImage` result rebuilds into, or undefined when the result is not one.
+ *  Read from `details` (client-bound metadata) rather than the text, exactly like the plan and diff fields
+ *  beside it — the text is addressed to the model and is free to change wording. */
+function sharedImageOf(result: unknown): { kind: 'image'; image: BrainMessageImage; caption?: string } | undefined {
+  const shared = (result as { details?: { sharedImage?: unknown } } | null | undefined)?.details?.sharedImage;
+  if (typeof shared !== 'object' || shared === null) return undefined;
+  const { file, mimeType, caption } = shared as { file?: unknown; mimeType?: unknown; caption?: unknown };
+  if (typeof file !== 'string' || typeof mimeType !== 'string') return undefined;
+  const [image] = toMessageImages([{ file, mimeType }]);
+  if (!image) return undefined;
+  return { kind: 'image', image, ...(typeof caption === 'string' && caption ? { caption } : {}) };
 }
 
 /** Hook-appended annotations riding a tool result (`details.notes` — the `tools.call.after` contract),
@@ -505,6 +518,11 @@ export function shapeBrainMessages(
         // Build the output preview here (not in the toolResult loop) so the toolCall's `arguments` — the
         // only place the verbatim shell command survives — reaches the console renderer.
         const res = p.id ? results.get(p.id) : undefined;
+        // A successful share becomes the picture itself — the "ShareImage" pill next to it would say
+        // nothing the image does not. A FAILED one falls through to the normal tool row, so the reason it
+        // did not appear stays readable.
+        const shared = sharedImageOf(res?.result);
+        if (shared && res?.isError !== true) { segments.push(shared); continue; }
         const output = res ? toolOutputView(p.name, p.arguments, res.result, res.isError) : undefined;
         const display = toolDisplay(p.name, p.arguments);
         const diff = p.id ? diffs.get(p.id) : undefined;

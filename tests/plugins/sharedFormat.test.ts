@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error — plain .mjs plugin module, no types
-import { splitContent, extractImageRefs, stripThinking, parseModelExec, stripForSpeech, runtimeFooter, stripRuntimeFooter } from '../../plugins/_shared/format.mjs';
+import { splitContent, extractImageRefs, imageRefName, stripThinking, parseModelExec, stripForSpeech, runtimeFooter, stripRuntimeFooter } from '../../plugins/_shared/format.mjs';
 
 describe('shared plugin format helpers', () => {
   it('splitContent / extractImageRefs / stripThinking never throw on a null or undefined body (the shipped Discord/WhatsApp TypeError)', () => {
@@ -27,6 +27,43 @@ describe('shared plugin format helpers', () => {
     expect(cleaned).not.toContain('brain/images');
     // A non-matching name (uppercase / path segment) is left untouched.
     expect(extractImageRefs('![x](/brain/images/../evil.png)').files).toEqual([]);
+  });
+
+  const UUID = '3f2b7c14-9a8d-4e6f-b0c1-2d3e4f5a6b7c';
+  const SHA = 'a'.repeat(64);
+
+  it('extractImageRefs also pulls a shared chat image, in every type the daemon serves', () => {
+    const r = extractImageRefs(`hle ![p](/api/brain/chat-images/${UUID}.png) a ![q](https://x/api/brain/chat-images/${SHA}.webp)`);
+    expect(r.files).toEqual([`${UUID}.png`, `${SHA}.webp`]);
+    expect(r.cleaned).not.toContain('chat-images');
+    // The generated-image form the image plugins produce keeps working alongside it.
+    expect(extractImageRefs(`![a](/api/brain/images/abc123.png) ![b](/api/brain/chat-images/${UUID}.jpg)`).files)
+      .toEqual(['abc123.png', `${UUID}.jpg`]);
+  });
+
+  it('extractImageRefs refuses a chat-image name that is not exactly a stored name (it reaches the filesystem)', () => {
+    for (const link of [
+      '![x](/api/brain/chat-images/../../secret.png)',
+      '![x](/api/brain/chat-images/%2e%2e%2fsecret.png)',
+      '![x](/api/brain/chat-images//etc/passwd.png)',
+      `![x](/api/brain/chat-images/${UUID}.svg)`,
+      `![x](/api/brain/chat-images/${UUID}.exe)`,
+      `![x](/api/brain/chat-images/${UUID.toUpperCase()}.png)`,
+      '![x](/api/brain/chat-images/abc123.png)', // neither a uuid nor a sha256
+    ]) {
+      expect(extractImageRefs(link).files).toEqual([]);
+      expect(extractImageRefs(link).cleaned).toBe(link); // left as inert text, never a file name
+    }
+  });
+
+  it('imageRefName validates an image event ref down to the stored file name', () => {
+    expect(imageRefName(`/api/brain/chat-images/${UUID}.png`)).toBe(`${UUID}.png`);
+    expect(imageRefName(`/api/brain/chat-images/${SHA}.gif`)).toBe(`${SHA}.gif`);
+    expect(imageRefName('/api/brain/images/abc123.png')).toBe('abc123.png'); // the older generated form
+    expect(imageRefName('/api/brain/chat-images/../../../etc/passwd')).toBeNull();
+    expect(imageRefName(`/api/brain/chat-images/${UUID}.svg`)).toBeNull();
+    expect(imageRefName('/etc/passwd')).toBeNull();
+    expect(imageRefName(undefined)).toBeNull();
   });
 
   it('stripThinking removes inline chain-of-thought; parseModelExec parses the three exec shapes', () => {

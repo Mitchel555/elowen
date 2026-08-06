@@ -1004,7 +1004,7 @@ export async function buildApp(opts: BuildOpts) {
   // The elowen exec engine: tasks with an `elowen:` exec run on an embedded PI session instead of a
   // spawned CLI. Shares the brain's providers/auth/plugins; closes tasks through the same REST route.
   const brainWorkers = new BrainWorkerService({
-    store: brainStore, tasks, bus, taskUsage,
+    store: brainStore, tasks, bus, taskUsage, chatImagesDir,
     config: brainConfig, runtime: brainRuntime, prompts,
     url: elowenCli.url, token: elowenCli.token,
     plugins: pluginProvider, // the SAME shared registry — a plugin toggle reaches workers too

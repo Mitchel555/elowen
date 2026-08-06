@@ -15,7 +15,7 @@
 //   - postWithImages      the final-answer image strategy — genuinely different per surface (Discord
 //                 uploads ride the first text chunk; Telegram photos precede the text) → stays per-plugin.
 //   - footerLine          the runtime footer (Discord subtext `-# …` vs Telegram `— …`) → stays per-plugin.
-import { extractImageRefs, stripThinking } from './format.mjs';
+import { extractImageRefs, imageRefName, stripThinking } from './format.mjs';
 import { resolveDisplaySettings } from './display.mjs';
 import { makeTextHelpers, outputFailed, makeOutputSummary, diffSummary, makeFoldedCalls, makeToolLinesFor, makeCardLines } from './liveTrace.mjs';
 
@@ -185,7 +185,8 @@ export function createLiveMessage({ transport, style, CHUNK, splitContent, postW
       this.answerStranded = false; // set when the tool bubble is posted BELOW an already-started answer draft →
                                    // the answer is stranded ABOVE the trace and must be re-anchored at finalize
       this.text = '';       // accumulated assistant text — streamed into `answer` and the finalize fallback
-      this.imageRefs = [];  // generated-image refs from tool results — attached even if the reply omits them
+      this.imageRefs = [];  // image refs from tool results (generated or shared) — attached even if the reply omits them
+      this.imageCaptions = []; // captions the agent gave those images (ShareImage) — the image message's own text
       this.idle = null;     // the turn's settle event (model + context usage) → runtime footer
       this.reasoning = '';  // reasoning stream, only rendered when cfg.showReasoning (off by default)
       this.cards = new Map(); // latest display cards (ctx.emitCard) by id — the todo checklist is the canonical one
@@ -337,6 +338,7 @@ export function createLiveMessage({ transport, style, CHUNK, splitContent, postW
         }
       } else if (e.type === 'image' && e.ref) {
         this.imageRefs.push(e.ref);
+        if (typeof e.caption === 'string' && e.caption.trim()) this.imageCaptions.push(e.caption.trim());
         this.settleTool(e.id, 'done', 'image ready');
       } else if (e.type === 'card' && e.card?.id) {
         // Upsert the card by id; an empty card (no items/body) removes it. Then re-render the bubble.
@@ -409,14 +411,22 @@ export function createLiveMessage({ transport, style, CHUNK, splitContent, postW
       // already streamed into its own bubble, the image message follows it (send-time order).
       const { cleaned, files } = extractImageRefs(full);
       const names = new Set(files);
-      for (const ref of this.imageRefs) names.add(ref.slice(ref.lastIndexOf('/') + 1));
+      // A ref is validated the same way a markdown link is (imageRefName), not trusted for its origin: the
+      // name it yields is joined onto an image directory and read off disk.
+      for (const ref of this.imageRefs) {
+        const name = imageRefName(ref);
+        if (name) names.add(name);
+      }
       let posted = false;
       if (names.size && transport.hasImages(this.a)) {
         const data = this.a.resolveImageFiles([...names]);
         // Forward the trigger quote, exactly like the text path on line 428 does: an image answer that
-        // loses its link to the question reads as unprompted in a busy chat. Transports that declare only
-        // three parameters ignore the extra argument, so this stays safe on every surface.
-        if (data.length) { await transport.postImages(this.a, this.channelId, data, this.replyToId).catch(() => {}); posted = true; }
+        // loses its link to the question reads as unprompted in a busy chat. The caption follows it — the
+        // agent's own words about what it is sharing, which read as the image message's text where a
+        // surface has one. Transports that declare fewer parameters ignore the extra arguments, so this
+        // stays safe on every surface.
+        const caption = this.imageCaptions.join('\n');
+        if (data.length) { await transport.postImages(this.a, this.channelId, data, this.replyToId, caption).catch(() => {}); posted = true; }
       }
       // Runtime footer (model · context %) rides the text message only, opt-out via config.
       const footer = this.a.cfg?.runtimeFooter !== false ? footerLine(this.idle) : '';

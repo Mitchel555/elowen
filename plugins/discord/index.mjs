@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { StateStore } from './lib/state.mjs';
 import { DiscordAdapter } from './lib/adapter.mjs';
 import { registerTools } from './lib/tools.mjs';
+import { platformImageDirs } from '../_shared/images.mjs';
 
 export { stripForSpeech, extractImageRefs, stripThinking, parseModelExec, memberIsAdmin, displayNameOf, resolveMentions, buildReplyContext, splitContent, footerLine, withoutFooter } from './lib/format.mjs';
 export { buildAskComponents } from './lib/ask.mjs';
@@ -22,8 +23,7 @@ export function register(ctx) {
   if (!token) { ctx.logger.warn('enabled but no botToken configured — not connecting'); return; }
   const dataDir = ctx.dataDir();
   const state = new StateStore(join(dataDir, 'channel-state.json'));
-  // The image-gen/image-edit plugins are data-dir siblings — their generated PNGs upload from there.
-  const imageDirs = [join(dataDir, '..', 'image-gen'), join(dataDir, '..', 'image-edit')];
+  const imageDirs = platformImageDirs(dataDir);
   // Pass chatCommands LAZILY (a function, not a snapshot) so a plugin registered after Discord — or a live
   // plugin reload — is always reflected in the registered slash set, /help and dispatch.
   const adapter = new DiscordAdapter({ ...ctx.config, botToken: token }, ctx.logger, state, ctx.listModels, imageDirs, ctx.resolveProvider, ctx.answerQuestion, () => ctx.chatCommands('discord'));

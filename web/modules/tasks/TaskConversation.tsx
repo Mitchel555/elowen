@@ -1,6 +1,6 @@
 'use client';
 import { useMemo, useState } from 'react';
-import { Bot, GitCommit, Check, TriangleAlert, User, Wrench } from 'lucide-react';
+import { Bot, GitCommit, Check, TriangleAlert, User, Wrench, Image as ImageIcon } from 'lucide-react';
 import type { CommitLogEntry } from '../../lib/types';
 import { useTaskConversation, useTaskBrainConversation, useTaskCommits, useTaskCommitFileDiff, useTasks, useConfig } from '../../lib/queries';
 import { taskExec } from '../../lib/agentUtils';
@@ -124,6 +124,15 @@ export function TaskConversation({ task }: { task: { id: string } }) {
                   <div className="flex min-w-0 flex-1 flex-col gap-1.5">
                     {(m.segments ?? [{ kind: 'text' as const, text: m.text }]).map((seg, j) => seg.kind === 'text'
                       ? <p key={j} className="whitespace-pre-wrap break-words leading-relaxed text-text">{seg.text}</p>
+                      : seg.kind === 'image'
+                      ? (
+                        // This panel is a dense activity log, not the chat surface — a shared image reads
+                        // as one line naming it, the same way the CLI transcript renders it.
+                        <span key={j} className="inline-flex max-w-full items-center gap-1.5 self-start rounded-md border border-border bg-elevated/60 px-2 py-0.5 text-[11px] text-text-muted">
+                          <ImageIcon size={10} aria-hidden />
+                          <span className="truncate">{seg.caption?.trim() || baseName(seg.image.url)}</span>
+                        </span>
+                      )
                       : (
                         <span key={j} className="inline-flex max-w-full items-center gap-1.5 self-start rounded-md border border-border bg-elevated/60 px-2 py-0.5 font-mono text-[11px] text-text-muted">
                           <Wrench size={10} aria-hidden />

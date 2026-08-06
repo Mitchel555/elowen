@@ -3564,8 +3564,10 @@ describe('channel tool composition + per-turn gate', () => {
     expect(reg.toolOwner.get('demo_echo')).toBe('demo');
     // ...and the per-turn slice hid the non-allowed plugin tool from the MODEL (not just the executor):
     // applyToolVisibility narrowed the active set to the role's allow-list before prompting.
-    expect(d.session.setActiveToolsByName).toHaveBeenCalledWith(['demo_echo']);
-    expect(d.session.getActiveToolNames()).toEqual(['demo_echo']);
+    // A role allow-list names PLUGIN tools, so it narrows those only — built-ins are not something a
+    // channel role opts into, and dropping them would silently take away e.g. ShareImage.
+    expect(d.session.setActiveToolsByName).toHaveBeenCalledWith(['ShareImage', 'demo_echo']);
+    expect(d.session.getActiveToolNames()).toEqual(['ShareImage', 'demo_echo']);
   });
 });
 

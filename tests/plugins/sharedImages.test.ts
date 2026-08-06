@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // @ts-expect-error — plain .mjs plugin module, no types
-import { resolveImageFiles } from '../../plugins/_shared/images.mjs';
+import { resolveImageFiles, platformImageDirs, imageMimeType } from '../../plugins/_shared/images.mjs';
 
 describe('shared plugin image resolution', () => {
   let root: string;
@@ -50,6 +50,16 @@ describe('shared plugin image resolution', () => {
     expect(resolveImageFiles([], ['there.png'], 10)).toEqual([]);
   });
 
+  it('loads a shared chat image, whatever type it is stored as', () => {
+    const chatImages = join(root, 'chat-images');
+    mkdirSync(chatImages);
+    const name = `${'b'.repeat(64)}.webp`;
+    writeFileSync(join(chatImages, name), 'WEBPBYTES');
+    const files = resolveImageFiles([genDir, editDir, chatImages], [name], 10);
+    expect(files.map((f: { name: string }) => f.name)).toEqual([name]);
+    expect(files[0].data.toString()).toBe('WEBPBYTES');
+  });
+
   it('skips an unreadable name rather than throwing mid-send, and does not fall through to the next dir', () => {
     // A directory under the name exists but cannot be read as a file (EISDIR).
     mkdirSync(join(genDir, 'odd.png'));
@@ -58,5 +68,36 @@ describe('shared plugin image resolution', () => {
     expect(() => { files = resolveImageFiles([genDir, editDir], ['odd.png'], 10); }).not.toThrow();
     // The first directory holding the name wins even when reading it fails — no silent second-dir fallback.
     expect(files).toEqual([]);
+  });
+});
+
+/** Every platform adapter derives its image sources from its own plugin data dir. The two generated-image
+ *  dirs are data-dir siblings, but the shared chat images live beside the DATABASE — one level above the
+ *  plugin data root — so a wrong derivation silently drops every image the agent shares. */
+describe('platform image directories', () => {
+  let config: string;
+
+  beforeEach(() => { config = mkdtempSync(join(tmpdir(), 'elowen-config-')); });
+  afterEach(() => rmSync(config, { recursive: true, force: true }));
+
+  it('reaches a generated image AND a shared chat image from the real on-disk layout', () => {
+    const dataDir = join(config, 'plugins-data', 'discord');
+    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(join(config, 'plugins-data', 'image-gen'));
+    mkdirSync(join(config, 'chat-images'));
+    const shared = `${'c'.repeat(64)}.jpg`;
+    writeFileSync(join(config, 'plugins-data', 'image-gen', 'gen1.png'), 'GEN');
+    writeFileSync(join(config, 'chat-images', shared), 'SHARED');
+
+    const files = resolveImageFiles(platformImageDirs(dataDir), ['gen1.png', shared], 10);
+    expect(files.map((f: { name: string }) => f.name)).toEqual(['gen1.png', shared]);
+    expect(files[1].data.toString()).toBe('SHARED');
+  });
+
+  it('declares the upload type from the stored name, not PNG for everything', () => {
+    expect(imageMimeType('gen1.png')).toBe('image/png');
+    expect(imageMimeType(`${'d'.repeat(64)}.jpg`)).toBe('image/jpeg');
+    expect(imageMimeType(`${'d'.repeat(64)}.gif`)).toBe('image/gif');
+    expect(imageMimeType(`${'d'.repeat(64)}.webp`)).toBe('image/webp');
   });
 });

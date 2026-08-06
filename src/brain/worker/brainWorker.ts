@@ -36,6 +36,9 @@ export interface BrainWorkerDeps {
   tasks: TaskStore;
   bus: EventBus;
   taskUsage?: TaskUsageStore;
+  /** Where a tool result's image bytes are externalized when a worker turn is persisted — a task worker
+   *  reads screenshots too, and its rows must not carry base64 either. */
+  chatImagesDir?: string;
   /** Live provider config resolver (null → nothing configured, launch fails clearly). */
   config: () => BrainRuntimeConfig | null;
   runtime: ModelRuntime;
@@ -135,7 +138,7 @@ export class BrainWorkerService {
   private factory: BrainSessionFactory;
 
   constructor(private d: BrainWorkerDeps) {
-    this.factory = new BrainSessionFactory({ store: d.store, createSession: d.createSession, resourceLoaderFactory: d.resourceLoaderFactory });
+    this.factory = new BrainSessionFactory({ store: d.store, chatImagesDir: d.chatImagesDir, createSession: d.createSession, resourceLoaderFactory: d.resourceLoaderFactory });
   }
 
   /** tmux-style session names (`elowen-<agentName>`) for the stuck detector's composite lister. */

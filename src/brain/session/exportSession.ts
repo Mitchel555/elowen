@@ -51,7 +51,13 @@ function renderSessionHtml(views: BrainMessageView[], title: string, generatedAt
     if (v.role === 'compaction') return '<div class="divider"><span>context compacted</span></div>';
     const label = v.role === 'user' ? 'You' : 'Elowen';
     const inner = v.segments
-      ? v.segments.map((s) => (s.kind === 'text' ? `<div class="text">${esc(s.text)}</div>` : renderTool(s))).join('')
+      ? v.segments.map((s) => {
+        if (s.kind === 'text') return `<div class="text">${esc(s.text)}</div>`;
+        // An export is a single self-contained file that outlives the daemon, so a `/brain/chat-images/`
+        // URL in it would be a broken image the moment it is opened anywhere else. Name what was shared.
+        if (s.kind === 'image') return `<div class="text">🖼 ${esc(s.caption?.trim() || 'shared image')}</div>`;
+        return renderTool(s);
+      }).join('')
       : `<div class="text">${esc(v.text)}</div>`;
     return `<div class="msg ${esc(v.role)}"><div class="role">${label}</div>${inner}</div>`;
   }).join('\n');

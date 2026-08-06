@@ -416,6 +416,18 @@ function Attachments({ images, full }: { images: BrainMessageImage[]; full?: boo
   );
 }
 
+/** An image the agent shared on purpose (`ShareImage`). It is the same picture-in-the-conversation the
+ *  user's own attachments are — same proxy path, same click-through to full size — so it reuses
+ *  {@link Attachments} rather than growing a second thumbnail. Only the caption underneath is its own. */
+function SharedImage({ image, caption, full }: { image: BrainMessageImage; caption?: string; full?: boolean }) {
+  return (
+    <div className="flex min-w-0 flex-col">
+      <Attachments images={[image]} full={full} />
+      {caption ? <div className="mt-1 text-xs leading-relaxed text-text-muted">{caption}</div> : null}
+    </div>
+  );
+}
+
 function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; full?: boolean; showRole?: boolean; showThoughts: boolean; tk?: string }) {
   const { t } = useTranslation();
   if (turn.role === 'divider') return <ContextDivider full={full} />;
@@ -432,6 +444,8 @@ function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; f
         ? <TextSegment key={i} text={seg.text} className={full ? 'my-1.5' : ''} />
         : seg.kind === 'reasoning'
         ? (showThoughts ? <ReasoningBlock key={i} text={seg.text} full={full} live={turn.streaming && i === turn.segments.length - 1} /> : null)
+        : seg.kind === 'image'
+        ? <SharedImage key={i} image={seg.image} caption={seg.caption} full={full} />
         : <ToolPills key={i} tools={seg.items} full={full} live={turn.streaming && i === turn.segments.length - 1} />))}</>;
 
   if (full) {

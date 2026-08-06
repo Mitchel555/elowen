@@ -62,6 +62,9 @@ export interface CapabilitySpec {
    *  otherwise). Built lazily like `elowenTools` so it is only constructed when deferral is engaged. It is
    *  a built-in (permission-gated, not plugin-hook-gated), so it rides with the elowen/memory group. */
   toolSearch?: () => ToolDefinition[];
+  /** `ShareImage` — the one way the agent can put a picture in front of the user. Interactive sessions
+   *  only: a task worker has no one watching to show it to. */
+  shareImage?: () => ToolDefinition[];
   pluginTools: ToolDefinition[];
   /** Observer fired after a PERMITTED plugin tool's execute resolves (never for a policy-denied call or
    *  a throwing execute). The caller typically forwards it to the plugin hook bus as `tools.call.after`.
@@ -260,6 +263,8 @@ export function composeSessionTools(spec: CapabilitySpec): ToolDefinition[] {
   // user's own deny can still hide it) but never the plugin hook wrapper. Only present when the session
   // actually defers tools; otherwise the list is empty and the composed set is byte-identical to before.
   const toolSearchTools = spec.kind !== 'task-worker' ? (spec.toolSearch?.() ?? []) : [];
+  // Same reasoning as memory: every interactive surface has a reader, a task worker does not.
+  const shareImageTools = spec.kind !== 'task-worker' ? (spec.shareImage?.() ?? []) : [];
   // Plan mode is an owner-chat concept — a channel, cron or sub-agent turn carries no mode at all
   // (currentTurnMode), so there would be nothing for this tool to exit. Composed unconditionally for the
   // owner rather than only while planning, mirroring the reference: the tool is what REFUSES outside plan
@@ -269,7 +274,7 @@ export function composeSessionTools(spec: CapabilitySpec): ToolDefinition[] {
   // Every composed tool gains an optional leading `_reason` (withReason augments the schema; excluded tools
   // — ToolSearch, mcp__* — pass through), then the whole set takes the permission gate, then stripReason
   // wraps OUTERMOST so `_reason` is removed from the arguments before any inner wrapper or handler sees it.
-  return [...elowenTools, ...memoryTools, ...toolSearchTools, ...pluginTools, ...planTools]
+  return [...elowenTools, ...memoryTools, ...toolSearchTools, ...shareImageTools, ...pluginTools, ...planTools]
     .map(withReason).map(gateDeniedTools).map(gatePermissions).map(stripReason);
 }
 

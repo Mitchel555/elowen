@@ -35,7 +35,10 @@ const transport = {
     a.rest('DELETE', `/channels/${channelId}/messages/${messageId}`).catch(() => {}),
   replyRef: (replyToId) => ({ message_reference: { message_id: replyToId, fail_if_not_exists: false } }),
   hasImages: (a) => typeof a.resolveImageFiles === 'function' && typeof a.uploadImages === 'function',
-  postImages: (a, channelId, data) => a.uploadImages(channelId, '', data, 0, {}),
+  // A Discord upload carries the message content itself, so an image the agent captioned arrives with its
+  // caption as that message's text instead of as a separate bubble. Clamped to the surface limit — a
+  // caption over it would fail the whole upload and lose the picture.
+  postImages: (a, channelId, data, _replyToId, caption) => a.uploadImages(channelId, String(caption ?? '').slice(0, CHUNK), data, 0, {}),
 };
 
 // Discord renders markdown, so the style escapes @everyone/<@ ping injection, neutralizes ``` fences, and

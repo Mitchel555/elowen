@@ -6,7 +6,7 @@ import { MESSAGES } from './messages.mjs';
 import { LiveMessage, postWithImages } from './stream.mjs';
 import { resolveDisplaySettings, updateDisplayOverrides, observesLiveEvents } from './display.mjs';
 import { buildRoleAccess, applyVisionModel } from '../../_shared/access.mjs';
-import { resolveImageFiles } from '../../_shared/images.mjs';
+import { resolveImageFiles, imageMimeType } from '../../_shared/images.mjs';
 import { voiceCreds, transcribeBuffer } from '../../_shared/voice.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
 import { isSteered } from '../../_shared/turnResult.mjs';
@@ -774,12 +774,12 @@ export class DiscordAdapter {
     return resolveImageFiles(this.imageDirs, names, cfgNum(this.cfg, 'maxUploadImages', MAX_UPLOAD_IMAGES, 1, 10));
   }
 
-  /** Multipart message post: text + attached PNG files (Discord renders uploads; a relative daemon
+  /** Multipart message post: text + attached image files (Discord renders uploads; a relative daemon
    *  link would be dead text). Same auth + 429 retry discipline as rest(). */
   async uploadImages(channelId, content, files, attempt = 0, extra = {}) {
     const form = new FormData();
     form.append('payload_json', JSON.stringify({ content, ...extra }));
-    files.forEach((f, i) => form.append(`files[${i}]`, new Blob([f.data], { type: 'image/png' }), f.name));
+    files.forEach((f, i) => form.append(`files[${i}]`, new Blob([f.data], { type: imageMimeType(f.name) }), f.name));
     const res = await fetch(`${this.api}/channels/${channelId}/messages`, {
       method: 'POST',
       headers: { authorization: `Bot ${this.cfg.botToken}` }, // content-type: fetch sets the multipart boundary

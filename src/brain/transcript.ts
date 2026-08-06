@@ -166,7 +166,11 @@ export type ChatTurn = YouTurn | ElowenTurn | DividerTurn | EventTurn;
 export interface HistoryMessage {
   role: string;
   text: string;
-  segments?: ({ kind: 'text'; text: string } | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: SubagentState; wf?: WorkflowState; plan?: string })[];
+  segments?: (
+    | { kind: 'text'; text: string }
+    | { kind: 'tool'; name: string; id?: string; detail?: string; diff?: string; output?: ToolOutputView; command?: string; sub?: SubagentState; wf?: WorkflowState; plan?: string }
+    | { kind: 'image'; image: { url: string; mimeType: string }; caption?: string }
+  )[];
   /** The source's own id: the store row's for a `user`/`assistant`/`compaction` row, the session-change
    *  marker's for a `role:'event'` row. Absent only when the source had none. */
   id?: string;
@@ -195,6 +199,12 @@ export function turnsFromHistory(msgs: HistoryMessage[]): ChatTurn[] {
     for (const seg of m.segments ?? (m.text.trim() ? [{ kind: 'text' as const, text: m.text }] : [])) {
       if (seg.kind === 'text') {
         segments.push({ kind: 'text', text: seg.text });
+      } else if (seg.kind === 'image') {
+        // The terminal shows no pictures, so the shared image becomes one plain line saying what was sent.
+        // Dropping it would be worse than terse: the user would see the agent claim it shared something
+        // and find nothing at all.
+        const name = seg.image.url.slice(seg.image.url.lastIndexOf('/') + 1);
+        segments.push({ kind: 'text', text: `🖼 ${seg.caption?.trim() || `shared ${name}`}` });
       } else {
         const item: ToolItem = { name: seg.name, id: seg.id, detail: seg.detail, diff: seg.diff, output: seg.output, command: seg.command, sub: seg.sub, wf: seg.wf, plan: seg.plan };
         const tail = segments[segments.length - 1];

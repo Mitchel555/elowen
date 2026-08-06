@@ -1077,6 +1077,69 @@ describe('discord extractImageRefs (generated-image markdown → uploads)', () =
   });
 });
 
+/** An image the agent shares (ShareImage) arrives as an `image` stream event, not as markdown in the
+ *  reply — Discord must still turn it into a real upload, because the daemon path in the ref is dead text
+ *  in a chat client. */
+describe('discord shared-image delivery (image event → upload)', () => {
+  const load = async () => (await import(join(repoRoot, 'plugins/discord/index.mjs'))) as unknown as {
+    LiveMessage: new (adapter: unknown, channelId: string) => { onEvent: (e: unknown) => void; finalize: (reply?: string) => Promise<void> };
+  };
+  const NAME = `${'a'.repeat(64)}.webp`;
+
+  const mk = () => {
+    const uploads: { content: string; names: string[] }[] = [];
+    const asked: string[][] = [];
+    const posted: string[] = [];
+    const adapter = {
+      cfg: { runtimeFooter: false, answerMode: 'final' },
+      rest: async (_m: string, _p: string, body?: { content?: string }) => { posted.push(body?.content ?? ''); return { id: 'm1' }; },
+      // The text path asks with an empty list for every reply; only a real lookup is interesting here.
+      resolveImageFiles: (names: string[]) => {
+        if (names.length) asked.push(names);
+        return names.map((name) => ({ name, data: Buffer.from('IMG') }));
+      },
+      uploadImages: async (_c: string, content: string, files: { name: string }[]) => {
+        uploads.push({ content, names: files.map((f) => f.name) });
+        return { id: 'm2' };
+      },
+    };
+    return { adapter, uploads, asked, posted };
+  };
+
+  it('uploads the file the ref points at and sends the caption as that message', async () => {
+    const { LiveMessage } = await load();
+    const { adapter, uploads, asked } = mk();
+    const lm = new LiveMessage(adapter, 'chan');
+    lm.onEvent({ type: 'image', ref: `/api/brain/chat-images/${NAME}`, id: 't1', caption: 'Tady je ten graf.' });
+    await lm.finalize('Hotovo.');
+    expect(asked).toEqual([[NAME]]);                    // the stored name, not the whole daemon path
+    expect(uploads.map((u) => u.names)).toEqual([[NAME]]);
+    expect(uploads[0].content).toBe('Tady je ten graf.'); // the caption rides the attachment
+  });
+
+  it('still uploads a generated image referenced the older way', async () => {
+    const { LiveMessage } = await load();
+    const { adapter, uploads } = mk();
+    const lm = new LiveMessage(adapter, 'chan');
+    lm.onEvent({ type: 'image', ref: '/api/brain/images/abc123.png', id: 't1' });
+    await lm.finalize('Hotovo.');
+    expect(uploads.map((u) => u.names)).toEqual([['abc123.png']]);
+    expect(uploads[0].content).toBe(''); // no caption — the attachment stands on its own
+  });
+
+  it('never turns a ref outside the two image routes into a file read', async () => {
+    const { LiveMessage } = await load();
+    const { adapter, uploads, asked } = mk();
+    const lm = new LiveMessage(adapter, 'chan');
+    for (const ref of ['/api/brain/chat-images/../../secret.png', '/etc/passwd', `/api/brain/chat-images/${'a'.repeat(64)}.svg`]) {
+      lm.onEvent({ type: 'image', ref, id: 't1' });
+    }
+    await lm.finalize('Hotovo.');
+    expect(asked).toEqual([]);   // nothing was ever looked up on disk
+    expect(uploads).toEqual([]);
+  });
+});
+
 describe('discord context helpers', () => {
   const load = async () => (await import(join(repoRoot, 'plugins/discord/index.mjs'))) as unknown as {
     displayNameOf: (m: unknown) => string;

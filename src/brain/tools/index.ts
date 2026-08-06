@@ -2,6 +2,8 @@ import type { ElowenToolCtx } from './elowenTools.js';
 import { elowenListTasks, elowenCreateTask, elowenUpdateTask, elowenPlan, elowenListMissions, elowenListSessions, elowenGetTask, elowenStopTask, elowenTaskOutput } from './elowenTools.js';
 import { buildMemoryTools } from './memoryTools.js';
 import { buildLspTools } from './lspTools.js';
+import { buildShareImageTool } from './shareImageTool.js';
+export type BuiltinToolGroup = 'elowen' | 'memory' | 'image';
 
 export type { ElowenToolCtx } from './elowenTools.js';
 export { buildMemoryTools } from './memoryTools.js';
@@ -14,6 +16,7 @@ export const BUILTIN_TOOL_ICONS: Record<string, string> = {
   'Memory*': '🧠',
   'Lsp*': '🔎',
   'ToolSearch': '🧭',
+  'ShareImage': '🖼',
   'ExitPlanMode': '📋',
   // Not a real tool: the display name a skill-file Read is RENAMED to on the `tool` event (see
   // toolDisplay in messageView.ts), so the stamped icon matches what clients render.
@@ -43,6 +46,9 @@ export const BUILTIN_TOOL_PLAN_SAFE: string[] = [
   'ElowenListTasks', 'ElowenListMissions', 'ElowenListSessions',
   'MemorySearch', 'MemoryListRecent', 'MemoryCategories',
   'LspDiagnostics', 'LspGoToDefinition', 'LspFindReferences', 'LspHover', 'LspDocumentSymbol', 'LspWorkspaceSymbol',
+  // Showing the user a screenshot is exactly what planning a UI change needs, and it mutates nothing: the
+  // file is copied into the conversation's own image store, nothing the user owns is touched.
+  'ShareImage',
   // NOTE: ToolSearch is deliberately NOT plan-safe. In plan mode the deferred tools it would fetch are
   // external MCP tools — presumed mutating and refused by the plan-safe boundary anyway — so activating
   // them buys nothing and would only spend tokens on schemas the turn cannot call. Deferred MCP tools
@@ -60,9 +66,12 @@ export function buildElowenTools(ctx: ElowenToolCtx) {
  *  definitions so it can never drift from what a session actually composes. Used by the users overview
  *  to list a user's effective tools without spinning up a session. The tool factories only touch their
  *  deps inside `execute`, so passing a stub here is safe — we read only the static name/label. */
-export function builtinToolMetas(): { name: string; label: string; group: 'elowen' | 'memory' }[] {
-  const meta = (group: 'elowen' | 'memory') => (t: { name: string; label?: string }) => ({ name: t.name, label: t.label ?? t.name, group });
+export function builtinToolMetas(): { name: string; label: string; group: BuiltinToolGroup }[] {
+  const meta = (group: BuiltinToolGroup) => (t: { name: string; label?: string }) => ({ name: t.name, label: t.label ?? t.name, group });
   const elowen = buildElowenTools({ url: '', token: '' }).map(meta('elowen'));
   const memory = buildMemoryTools(undefined as never).map(meta('memory'));
-  return [...elowen, ...memory];
+  // Its own group because neither of the others describes it: the control plane is admin-only, memory is
+  // per-user, and sharing an image is simply something every interactive session can do.
+  const share = [buildShareImageTool(undefined as never)].map(meta('image'));
+  return [...elowen, ...memory, ...share];
 }

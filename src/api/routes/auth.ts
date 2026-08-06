@@ -400,7 +400,7 @@ export function registerAuthRoutes(app: ElowenApp, ctx: RouteContext): void {
     // Per-user deny-list: a plugin tool the admin switched off for this user's own brain sessions.
     const disabled = new Set(users.get(id)?.disabled_tools ?? []);
     type ToolState = 'allowed' | 'inherited' | 'unavailable' | 'disabled';
-    const pills: { name: string; label: string; icon: string | null; plugin: string | null; group: 'elowen' | 'memory' | 'plugin'; state: ToolState; toggleable: boolean }[] = [];
+    const pills: { name: string; label: string; icon: string | null; plugin: string | null; group: 'elowen' | 'memory' | 'image' | 'plugin'; state: ToolState; toggleable: boolean }[] = [];
     for (const m of builtinToolMetas()) {
       const state: ToolState = m.group === 'elowen' ? (targetIsAdmin ? 'allowed' : 'unavailable') : 'inherited';
       pills.push({ name: m.name, label: m.label, icon: iconOf(m.name) ?? null, plugin: null, group: m.group, state, toggleable: false });

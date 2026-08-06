@@ -105,6 +105,9 @@ export interface SessionSpec {
 
 export interface SessionFactoryDeps {
   store: BrainStore;
+  /** Where a tool result's image bytes are externalized to when the turn is persisted. Absent for
+   *  in-memory stores and tests, where the bytes simply stay on the row. */
+  chatImagesDir?: string;
   /** Injected for tests; defaults to PI's createAgentSession. */
   createSession?: typeof createAgentSession;
   /** Injected for tests; builds the resource loader that carries the system prompt. A test passes
@@ -423,7 +426,7 @@ export class BrainSessionFactory {
     // aborted) mirrors; a no-op/failed run leaves the store untouched. Callers layer their own
     // subscriptions on top (the `compacted` client-notify in the chat brain, liveness in the worker).
     session.subscribe(createSessionPersistenceProjector(
-      this.d.store, session, spec.sessionId, spec.model.contextWindow,
+      this.d.store, session, spec.sessionId, spec.model.contextWindow, this.d.chatImagesDir,
     ));
     // Last, so observers see the finished session — and before the caller can run a turn on it.
     await spec.onSpawned?.({ sessionId: spec.sessionId, messages: session.messages });

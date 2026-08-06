@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainMessageImage } from '../shared/wireContract.js';
 
-/** An image attached to a user message, kept on disk so the conversation still shows it after a reload.
- *  Raw base64 deliberately never reaches `brain_messages` (see persistence.ts) — the row carries this
- *  reference instead, and the bytes live next to the database like avatars do. */
+/** An image in a conversation, kept on disk so it still shows after a reload — one the USER attached, or
+ *  one a TOOL produced (a screenshot, a page render) and the agent shared back. Raw base64 deliberately
+ *  never reaches `brain_messages` (see persistence.ts) — the row carries this reference instead, and the
+ *  bytes live next to the database like avatars do. */
 export interface StoredChatImage {
   /** File name inside the chat-images dir; also the path segment the read route accepts. */
   file: string;
@@ -28,8 +29,13 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   webp: 'image/webp',
 };
 
-/** A stored name is exactly `<uuid>.<ext>` — no separators, no traversal, nothing the caller chose. */
-const STORED_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(png|jpg|gif|webp)$/;
+/** A stored name is exactly `<uuid>.<ext>` or `<sha256>.<ext>` — no separators, no traversal, nothing the
+ *  caller chose. The two forms differ by WHO names the file, which is why both exist: a user attachment is
+ *  a one-off event and gets a random name, while a tool's image is named by its own CONTENT so that
+ *  writing it twice is the same write. That matters because a turn is persisted twice — once as pending
+ *  rows the moment each message lands, then again from `agent_end` once the real run order is known — and
+ *  a random name would leave an orphan file behind on every screenshot. */
+const STORED_NAME = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64})\.(png|jpg|gif|webp)$/;
 
 /** Write a turn's attachments to disk and return the references to persist on the user row. Best-effort
  *  per image: one that cannot be written is skipped rather than failing the turn, because the message
@@ -47,6 +53,100 @@ export function storeChatImages(dir: string, images: readonly { data: string; mi
     } catch { /* keep the turn; the attachment just won't survive a reload */ }
   }
   return stored;
+}
+
+/** Write one image's bytes under a name derived from those bytes, and return the reference. Idempotent by
+ *  construction: the same picture always lands on the same name, so persisting a turn twice writes the
+ *  same file twice rather than leaving a duplicate behind. Returns null when the type is not one we serve
+ *  or the write fails — the caller then keeps the original block rather than losing the image. */
+export function storeImageByContent(dir: string, data: string, mimeType: string): StoredChatImage | null {
+  const ext = EXTENSION[mimeType];
+  if (!ext) return null;
+  let bytes: Buffer;
+  try { bytes = Buffer.from(data, 'base64'); } catch { return null; }
+  if (bytes.length === 0) return null;
+  const file = `${createHash('sha256').update(bytes).digest('hex')}.${ext}`;
+  try {
+    mkdirSync(dir, { recursive: true });
+    // `wx` so an existing file is left exactly as it is: same content by definition, and rewriting it
+    // would move its mtime and hand the sweep's grace window a file it already accounted for.
+    try { writeFileSync(join(dir, file), bytes, { flag: 'wx' }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    return { file, mimeType };
+  } catch {
+    return null;
+  }
+}
+
+/** An image block as it is PERSISTED: the bytes have moved to disk and the row keeps only the reference.
+ *  The live block PI hands us (`{type:'image', data, mimeType}`) is never rewritten — that copy is what
+ *  the provider already saw, and editing an already-sent message is what breaks a warm prompt cache. */
+interface PersistedImageBlock { type: 'image'; ref: StoredChatImage }
+
+function isPersistedImageBlock(part: unknown): part is PersistedImageBlock {
+  if (typeof part !== 'object' || part === null) return false;
+  const { type, ref } = part as { type?: unknown; ref?: unknown };
+  if (type !== 'image' || typeof ref !== 'object' || ref === null) return false;
+  const { file, mimeType } = ref as { file?: unknown; mimeType?: unknown };
+  return typeof file === 'string' && typeof mimeType === 'string' && STORED_NAME.test(file);
+}
+
+/** Move the image bytes out of a message that is about to be stored, leaving a reference in their place.
+ *  Without this a single browser screenshot puts ~2 MB of base64 into `brain_messages`, where it is dead
+ *  weight forever: it inflates the row, it is re-read on every rehydrate, and the invariant the file above
+ *  states — that raw base64 stays out of the table — quietly did not hold for tool results.
+ *
+ *  Returns the message unchanged (same object identity) when there is nothing to move, so the common path
+ *  costs one `Array.isArray` and the caller can store what it already had. */
+export function externalizeImageBlocks<T>(message: T, dir: string): T {
+  const content = (message as { content?: unknown } | null)?.content;
+  if (!Array.isArray(content)) return message;
+  let changed = false;
+  const rewritten = content.map((part) => {
+    const block = part as { type?: unknown; data?: unknown; mimeType?: unknown };
+    if (block?.type !== 'image' || typeof block.data !== 'string' || typeof block.mimeType !== 'string') return part;
+    const stored = storeImageByContent(dir, block.data, block.mimeType);
+    if (!stored) return part; // unwritable or a type we do not serve — better a fat row than a lost image
+    changed = true;
+    return { type: 'image', ref: stored } satisfies PersistedImageBlock;
+  });
+  return changed ? { ...(message as object), content: rewritten } as T : message;
+}
+
+/** Every stored image file a persisted row references, whatever kind of row it is: a user attachment
+ *  (`images`), a tool result whose bytes were externalized (`content[].ref`), or an image the agent shared
+ *  (`details.sharedImage`). Ownership and the sweep both read through here, so a new way to reference an
+ *  image only has to be taught to this one function — miss it in the sweep and live pictures get deleted,
+ *  miss it in the ownership check and a private image answers 404 to the person who owns it. */
+export function collectImageFiles(content: unknown): string[] {
+  if (typeof content !== 'object' || content === null) return [];
+  const files: string[] = [];
+  const add = (value: unknown): void => {
+    if (typeof value === 'string' && STORED_NAME.test(value)) files.push(value);
+  };
+  const row = content as { images?: unknown; content?: unknown; details?: unknown };
+  for (const image of Array.isArray(row.images) ? row.images : []) {
+    add((image as { file?: unknown } | null)?.file);
+  }
+  for (const part of Array.isArray(row.content) ? row.content : []) {
+    if (isPersistedImageBlock(part)) add(part.ref.file);
+  }
+  const shared = (row.details as { sharedImage?: unknown } | null | undefined)?.sharedImage;
+  if (typeof shared === 'object' && shared !== null) add((shared as { file?: unknown }).file);
+  return files;
+}
+
+/** The real type of these bytes, from their MAGIC NUMBER — never from the file name. A caller can point
+ *  `ShareImage` at any readable path, and serving `evil.png` that is actually HTML would be a stored XSS
+ *  against the very same origin the web UI runs on. Returns null for anything that is not one of the four
+ *  types we serve, which is also what keeps a PDF or a video from being renamed into the image route. */
+export function sniffImageMime(bytes: Buffer): string | null {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a')) return 'image/gif';
+  // RIFF....WEBP — the size field sits between the two markers, so both ends have to be checked.
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
 }
 
 /** Read a stored image back. Returns null for an unknown or malformed name, so the route answers 404

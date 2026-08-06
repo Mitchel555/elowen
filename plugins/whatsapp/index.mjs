@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { StateStore } from './lib/state.mjs';
 import { WhatsAppAdapter } from './lib/adapter.mjs';
 import { registerTools } from './lib/tools.mjs';
+import { platformImageDirs } from '../_shared/images.mjs';
 
 export { stripThinking, extractImageRefs, parseModelExec, buildReplyContext, splitContent, footerLine } from './lib/format.mjs';
 export { parseAskReply } from './lib/ask.mjs';
@@ -33,8 +34,7 @@ export function register(ctx) {
   const state = new StateStore(join(dataDir, 'channel-state.json'));
   const authDir = join(dataDir, 'auth');
   try { mkdirSync(authDir, { recursive: true }); } catch { /* exists */ }
-  // The image-gen/image-edit plugins are data-dir siblings — their generated PNGs upload from there.
-  const imageDirs = [join(dataDir, '..', 'image-gen'), join(dataDir, '..', 'image-edit')];
+  const imageDirs = platformImageDirs(dataDir);
   // Pass chatCommands LAZILY (a function, not a snapshot) so a plugin registered after WhatsApp — or a live
   // plugin reload — is always reflected in /help and dispatch.
   const adapter = new WhatsAppAdapter({ ...ctx.config }, ctx.logger, state, ctx.listModels, imageDirs, authDir, join(dataDir, 'qr.png'), ctx.answerQuestion, () => ctx.chatCommands('whatsapp'));

@@ -15,7 +15,7 @@ import { buildAppPackage } from './appPackage.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
 import { observesLiveEvents, resolveDisplaySettings, updateDisplayOverrides } from '../../_shared/display.mjs';
 import { applyVisionModel, buildRoleAccess } from '../../_shared/access.mjs';
-import { resolveImageFiles } from '../../_shared/images.mjs';
+import { resolveImageFiles, imageMimeType } from '../../_shared/images.mjs';
 
 /** The `/display` axes and their values — mirrors the resolution sets in _shared/display.mjs. */
 const DISPLAY_AXES = {
@@ -334,11 +334,12 @@ export class MsTeamsAdapter {
   async sendImages(conversationId, files) {
     const serviceUrl = this.serviceUrlFor(conversationId);
     if (!serviceUrl || !files.length) return;
-    const attachments = files.map((f) => ({
-      contentType: f.name.toLowerCase().endsWith('.jpg') || f.name.toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png',
-      contentUrl: `data:${f.name.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'};base64,${f.data.toString('base64')}`,
-      name: f.name,
-    }));
+    const attachments = files.map((f) => {
+      // One type for BOTH fields: a .gif/.webp used to be declared png in the attachment and jpeg in the
+      // data URI, which is a picture Teams cannot render.
+      const contentType = imageMimeType(f.name);
+      return { contentType, contentUrl: `data:${contentType};base64,${f.data.toString('base64')}`, name: f.name };
+    });
     await this.connector.send(serviceUrl, conversationId, { type: 'message', attachments }).catch((e) => this.log.error(`image upload failed: ${e?.message ?? e}`));
   }
 

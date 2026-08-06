@@ -5,6 +5,7 @@ import { logger } from '../../shared/logger.js';
 import type { BrainRuntimeConfig } from '../providers.js';
 import { buildBrainRegistry, resolveBrainModelRoute } from '../providers.js';
 import { buildElowenTools, buildMemoryTools, BUILTIN_TOOL_ICONS, BUILTIN_TOOL_PLAN_SAFE } from '../tools/index.js';
+import { buildShareImageTool } from '../tools/shareImageTool.js';
 import { makeToolIconResolver } from '../toolIcons.js';
 import { composeSessionTools } from '../session/capabilities.js';
 import { computeDeferredToolNames } from '../toolSearch/deferralPolicy.js';
@@ -31,6 +32,7 @@ interface SpawnerDeps {
   runtime: BrainDeps['runtime'];
   users: BrainDeps['users'];
   prompts: BrainDeps['prompts'];
+  chatImagesDir: BrainDeps['chatImagesDir'];
   url: string;
   cwd?: string;
   projectPath?: () => string | undefined;
@@ -192,6 +194,9 @@ export class LiveSessionSpawner {
       // ToolSearch rides the built-in group (permission-gated, not plugin-hook-gated); present only when
       // the session actually defers tools.
       toolSearch: toolSearchHandle ? () => [toolSearchTool(toolSearchHandle)] : undefined,
+      // Needs somewhere to keep the bytes; an in-memory store has none, and the tool says so rather than
+      // silently doing nothing.
+      shareImage: () => [buildShareImageTool({ store: this.d.store, imagesDir: this.d.chatImagesDir })],
       pluginTools,
       // Plugin tools are gated at EXECUTE time from the turn's ToolPolicy (set in runWithPolicy), not
       // filtered at compose — one shared mechanism for owner chat and shared channels alike.

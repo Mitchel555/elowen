@@ -769,6 +769,13 @@ function useBrainChatController(): BrainChatValue {
       const { id, plan } = JSON.parse((e as MessageEvent).data) as { id?: string; plan?: string };
       applyEvent({ type: 'tool_end', id, plan });
     });
+    // An image the agent shared on purpose (ShareImage), or one an image tool produced. Folded as its own
+    // segment so the picture appears the moment it lands; the `ref` is normalized by the fold into the
+    // exact shape stored history rebuilds after a reload, so nothing on screen changes when it settles.
+    onFrame('image', (e) => {
+      const { ref, id, caption } = JSON.parse((e as MessageEvent).data) as { ref: string; id?: string; caption?: string };
+      applyEvent({ type: 'image', ref, id, caption });
+    });
     // AskUserQuestion parked the turn — render the inline choice card until the user answers.
     onFrame('ask', (e) => {
       const { id, questions, kind } = JSON.parse((e as MessageEvent).data) as { id: string; questions: AskQuestion[]; kind?: 'approval' };

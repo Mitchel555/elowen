@@ -6,6 +6,7 @@ import { dbTsToIso } from '../shared/time.js';
 import { planFilePath, toolResultSpillDir } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
 import { CHANNEL_PREFIX, TASK_PREFIX } from '../brain/sessionId.js';
+import { collectImageFiles } from '../brain/chatImages.js';
 import { rollupActivatedTools } from '../brain/continuity/activatedTools.js';
 import { rollupWorkingSet } from '../brain/continuity/workingSet.js';
 import {
@@ -922,38 +923,59 @@ export class BrainStore {
    *  another account that comes by the name. The LIKE only narrows the scan; the match itself is decided
    *  by parsing the row, so a name appearing in unrelated prose cannot grant access. */
   chatImageBelongsTo(userId: number, file: string): boolean {
+    // Deliberately not filtered by role: an image is just as private when a tool produced it (a screenshot
+    // of a logged-in page) as when the user attached it, and those live on `toolResult` and `assistant`
+    // rows instead of `user` ones.
     const rows = this.db.prepare(
       `SELECT m.content FROM brain_messages m
          JOIN brain_sessions s ON s.id = m.session_id
-        WHERE s.user_id = ? AND m.role = 'user' AND m.content LIKE ?`,
+        WHERE s.user_id = ? AND m.content LIKE ?`,
     ).all(userId, `%${file}%`) as { content: string }[];
     for (const row of rows) {
       try {
-        const images = (JSON.parse(row.content) as { images?: unknown }).images;
-        if (!Array.isArray(images)) continue;
-        if (images.some((image) => (image as { file?: unknown })?.file === file)) return true;
+        if (collectImageFiles(JSON.parse(row.content)).includes(file)) return true;
       } catch { /* a malformed row references nothing */ }
     }
     return false;
   }
 
-  /** Every chat-image file still referenced by a stored user message. The sweep deletes what this does
-   *  NOT return, so it has to stay complete: the LIKE only narrows the scan, the names themselves come
-   *  from parsing each candidate row. */
+  /** The image the most recent tool call in this conversation produced, or undefined when none has. Read
+   *  from the store rather than from live state so it still answers after a restart, and so it sees the
+   *  pending row a tool result writes the moment it lands — which is what makes `ShareImage({latest})`
+   *  work on a screenshot taken seconds earlier in the same turn. */
+  latestToolImage(sessionId: string): { file: string; mimeType: string } | undefined {
+    const rows = this.db.prepare(
+      `SELECT content FROM brain_messages
+        WHERE session_id = ? AND role = 'toolResult' AND content LIKE '%"ref"%'
+        ORDER BY rowid DESC LIMIT 20`,
+    ).all(sessionId) as { content: string }[];
+    for (const row of rows) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(row.content); } catch { continue; }
+      const content = (parsed as { content?: unknown }).content;
+      // Last block wins within a row: a tool that returned several images ends on its newest.
+      for (const part of Array.isArray(content) ? [...content].reverse() : []) {
+        const block = part as { type?: unknown; ref?: unknown };
+        if (block?.type !== 'image') continue;
+        const ref = block.ref as { file?: unknown; mimeType?: unknown } | undefined;
+        if (typeof ref?.file === 'string' && typeof ref.mimeType === 'string') return { file: ref.file, mimeType: ref.mimeType };
+      }
+    }
+    return undefined;
+  }
+
+  /** Every chat-image file still referenced by any stored message. The sweep deletes what this does NOT
+   *  return, so it has to stay complete: the LIKE only narrows the scan, the names themselves come from
+   *  parsing each candidate row. Both reference shapes are matched — a user attachment carries `images`,
+   *  an externalized tool image carries `ref` — and missing one here would delete live pictures. */
   referencedChatImages(): Set<string> {
     const rows = this.db.prepare(
-      `SELECT content FROM brain_messages WHERE role = 'user' AND content LIKE '%"images"%'`,
+      `SELECT content FROM brain_messages WHERE content LIKE '%"images"%' OR content LIKE '%"ref"%' OR content LIKE '%"sharedImage"%'`,
     ).all() as { content: string }[];
     const files = new Set<string>();
     for (const row of rows) {
       try {
-        const parsed: unknown = JSON.parse(row.content);
-        const images = (parsed as { images?: unknown })?.images;
-        if (!Array.isArray(images)) continue;
-        for (const image of images) {
-          const file = (image as { file?: unknown })?.file;
-          if (typeof file === 'string') files.add(file);
-        }
+        for (const file of collectImageFiles(JSON.parse(row.content))) files.add(file);
       } catch { /* a malformed row references nothing */ }
     }
     return files;

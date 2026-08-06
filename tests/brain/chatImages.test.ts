@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   storeChatImages, readChatImage, parseStoredChatImages, sweepChatImages,
-  toMessageImages, stripAttachmentMarker, attachmentMarker,
+  toMessageImages, stripAttachmentMarker, attachmentMarker, externalizeImageBlocks, collectImageFiles,
 } from '../../src/brain/chatImages.js';
 
 // A chat attachment has to outlive its turn: the base64 exists only while the turn runs, so unless the
@@ -34,6 +34,81 @@ describe('storeChatImages', () => {
       { data: PNG.toString('base64'), mimeType: 'image/png' },
     ]);
     expect(new Set(stored.map((s) => s.file)).size).toBe(2);
+  });
+});
+
+// A tool's image is the other direction: a browser screenshot arrives as ~2 MB of base64 inside a tool
+// result, and until now that base64 went into brain_messages verbatim — against the invariant the module
+// states — where it inflated the row and was re-read on every rehydrate.
+describe('externalizeImageBlocks', () => {
+  const toolResult = (data: string) => ({
+    role: 'toolResult', toolCallId: 't1', toolName: 'take_screenshot', isError: false,
+    content: [{ type: 'text', text: 'Took a screenshot.' }, { type: 'image', data, mimeType: 'image/png' }],
+  });
+
+  it('moves the bytes to disk and leaves a reference the row can carry', () => {
+    const stored = externalizeImageBlocks(toolResult(PNG.toString('base64')), dir);
+    const blocks = stored.content as { type: string; ref?: { file: string; mimeType: string }; data?: string }[];
+
+    expect(blocks[0]).toEqual({ type: 'text', text: 'Took a screenshot.' });
+    expect(blocks[1]!.data).toBeUndefined();
+    expect(readChatImage(dir, blocks[1]!.ref!.file)?.body).toEqual(PNG);
+    // The whole point: what gets serialised into the row no longer contains the base64.
+    expect(JSON.stringify(stored)).not.toContain(PNG.toString('base64'));
+  });
+
+  it('names the file after its content, so persisting the same turn twice writes one file', () => {
+    // A turn is stored twice — pending rows as each message lands, then again from agent_end once the run
+    // order is known. Under a random name the second pass would strand an orphan on every screenshot.
+    const first = externalizeImageBlocks(toolResult(PNG.toString('base64')), dir);
+    const second = externalizeImageBlocks(toolResult(PNG.toString('base64')), dir);
+    const fileOf = (m: typeof first) => (m.content as { ref?: { file: string } }[])[1]!.ref!.file;
+
+    expect(fileOf(second)).toBe(fileOf(first));
+    expect(readdirSync(dir)).toHaveLength(1);
+  });
+
+  it('keeps the message untouched when there is nothing to move', () => {
+    const plain = { role: 'toolResult', content: [{ type: 'text', text: 'no images here' }] };
+    expect(externalizeImageBlocks(plain, dir)).toBe(plain); // same object, not a copy
+    expect(existsSync(dir) ? readdirSync(dir) : []).toHaveLength(0);
+  });
+
+  it('keeps the bytes inline rather than losing an image it cannot store', () => {
+    // An unservable type has nowhere to go. A fat row is recoverable; a dropped screenshot is not.
+    const odd = toolResult(PNG.toString('base64'));
+    (odd.content[1] as { mimeType: string }).mimeType = 'image/svg+xml';
+    const stored = externalizeImageBlocks(odd, dir);
+    expect((stored.content as { data?: string }[])[1]!.data).toBe(PNG.toString('base64'));
+  });
+});
+
+// Ownership and the sweep both read through this one function: miss a shape in the sweep and live images
+// get deleted, miss it in the ownership check and a private image 404s to the person who owns it.
+describe('collectImageFiles', () => {
+  it('finds every shape a row can reference an image by', () => {
+    const [attachment] = storeChatImages(dir, [{ data: PNG.toString('base64'), mimeType: 'image/png' }]);
+    const externalized = externalizeImageBlocks({
+      role: 'toolResult', content: [{ type: 'image', data: PNG.toString('base64'), mimeType: 'image/png' }],
+    }, dir);
+    const toolFile = (externalized.content as { ref: { file: string } }[])[0]!.ref.file;
+
+    expect(collectImageFiles({ role: 'user', images: [attachment] })).toEqual([attachment!.file]);
+    expect(collectImageFiles(externalized)).toEqual([toolFile]);
+    expect(collectImageFiles({ role: 'toolResult', details: { sharedImage: { file: toolFile, mimeType: 'image/png' } } }))
+      .toEqual([toolFile]);
+  });
+
+  it('refuses a name that is not one we wrote, whatever the row claims', () => {
+    // The names reach a filesystem read, so anything the shape of a path must not survive this.
+    for (const file of ['../../etc/passwd', '/etc/passwd', 'not-a-uuid.png', 'a'.repeat(64) + '.exe']) {
+      expect(collectImageFiles({ images: [{ file, mimeType: 'image/png' }] })).toEqual([]);
+      expect(collectImageFiles({ content: [{ type: 'image', ref: { file, mimeType: 'image/png' } }] })).toEqual([]);
+    }
+  });
+
+  it('reads nothing out of a row that is not an object', () => {
+    for (const row of [null, 'text', 42, []]) expect(collectImageFiles(row)).toEqual([]);
   });
 });
 

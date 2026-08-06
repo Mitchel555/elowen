@@ -19,16 +19,36 @@ export function stripForSpeech(md) {
     .trim();
 }
 
-/** Find generated-image markdown links — `![…](…/brain/images/<name>.png)`, relative or absolute — and
- *  return the text with them removed plus the extracted file names. The name rule mirrors the daemon's
- *  GET /brain/images/:file validation (`[a-z0-9]+.png`), so path tricks never match. */
+// The two daemon image paths an adapter may turn into a real upload, with the file-name rule of each.
+// A matched name is joined onto a directory and read off disk, so these patterns are a security boundary:
+// they mirror the daemon's own validation exactly and admit nothing with a separator, a `..` or another
+// extension. `/brain/images/` is the image-gen/image-edit output (route check `[a-z0-9]+\.png`);
+// `/brain/chat-images/` is a stored chat image (STORED_NAME in src/brain/chatImages.ts) — a random uuid
+// for a user attachment, a content hash for a tool's picture, in any of the four types we serve.
+const GENERATED_NAME = '[a-z0-9]+\\.png';
+const STORED_NAME = '(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64})\\.(?:png|jpg|gif|webp)';
+const REF_TAIL = `\\/brain\\/(?:images\\/(${GENERATED_NAME})|chat-images\\/(${STORED_NAME}))`;
+const MARKDOWN_IMAGE = new RegExp(`!\\[[^\\]]*\\]\\([^)\\s]*${REF_TAIL}\\)`, 'g');
+const IMAGE_REF = new RegExp(`^[^\\s]*${REF_TAIL}$`);
+
+/** Find image markdown links — `![…](…/brain/images/<name>.png)` or `![…](…/brain/chat-images/<name>)`,
+ *  relative or absolute — and return the text with them removed plus the extracted file names. */
 export function extractImageRefs(text) {
   const files = [];
-  const cleaned = String(text ?? '').replace(/!\[[^\]]*\]\([^)\s]*\/brain\/images\/([a-z0-9]+\.png)\)/g, (_, name) => {
-    files.push(name);
+  const cleaned = String(text ?? '').replace(MARKDOWN_IMAGE, (_, generated, stored) => {
+    files.push(generated ?? stored);
     return '';
   });
   return { cleaned, files };
+}
+
+/** The stored file name an `image` stream event's `ref` points at (`/api/brain/chat-images/<name>` or the
+ *  older `/api/brain/images/<name>.png`), or null when the ref is anything else. An event reaches the
+ *  filesystem the same way a markdown link does, so it is held to the same name rule rather than trusted
+ *  for coming from the daemon. */
+export function imageRefName(ref) {
+  const m = IMAGE_REF.exec(String(ref ?? ''));
+  return m ? (m[1] ?? m[2]) : null;
 }
 
 /** Strip inline chain-of-thought (`<think>…</think>` / `<thinking>…</thinking>`) that some vision-fallback

@@ -59,9 +59,10 @@ export type BrainEvent =
    *  `tool_output`/`diff` for that id SUPERSEDES it — so a long build streams live without ever doubling
    *  its dump. Safe to ignore (the final output still arrives). */
   | { type: 'tool_progress'; id: string; text: string }
-  /** A tool produced a stored image (`/api/brain/images/…`) — channels attach it even when the
-   *  model's final text forgets to repeat the markdown link. */
-  | { type: 'image'; ref: string; id?: string }
+  /** A stored image to put in front of the user: one the agent shared on purpose (`ShareImage`, which
+   *  also carries a `caption`), or one an image tool produced and the model's final text forgot to link.
+   *  `ref` is a daemon path under `/api/brain/chat-images/` or the older `/api/brain/images/`. */
+  | { type: 'image'; ref: string; id?: string; caption?: string }
   /** A transient runtime notice (rate-limit retry, context compaction) — so a stalled turn explains
    *  itself instead of just hanging on the spinner. `done` marks the end of that phase. */
   | { type: 'notice'; kind: 'retry' | 'compaction'; message: string; done?: boolean }
@@ -382,7 +383,7 @@ function progressTail(partial: unknown): string {
 export function toBrainEvent(e: AgentSessionEvent, now: number = Date.now()): BrainEvent | null {
   if (e.type === 'agent_end') return { type: 'idle' };
   const anyE = e as {
-    type: string; toolName?: string; args?: unknown; result?: { details?: { diff?: unknown } }; isError?: boolean;
+    type: string; toolName?: string; args?: unknown; result?: { details?: { diff?: unknown; sharedImage?: unknown } }; isError?: boolean;
     toolCallId?: string; partialResult?: unknown;
     // toolcall_start additionally carries the in-progress assistant message: the tool NAME is already on
     // the partial block at `contentIndex` (only its arguments stream in later), so we thread it out.
@@ -487,6 +488,15 @@ export function toBrainEvent(e: AgentSessionEvent, now: number = Date.now()): Br
       // for diff results, riding the diff event so live rendering matches the history path.
       const output = typeof anyE.toolName === 'string' ? toolOutputView(anyE.toolName, anyE.args, anyE.result, anyE.isError === true) : undefined;
       return { type: 'diff', diff, id: anyE.toolCallId, ...(output ? { output } : {}) };
+    }
+    // ShareImage states its intent structurally, so it needs none of the text sniffing below: the file is
+    // already stored and named in the result's details.
+    const shared = anyE.result?.details?.sharedImage as { file?: unknown; mimeType?: unknown; caption?: unknown } | undefined;
+    if (typeof shared?.file === 'string') {
+      return {
+        type: 'image', ref: `/api/brain/chat-images/${shared.file}`, id: anyE.toolCallId,
+        ...(typeof shared.caption === 'string' && shared.caption ? { caption: shared.caption } : {}),
+      };
     }
     // Image tools return a markdown link to the stored file; surface it as a first-class event so
     // channel adapters can attach the real file (models often omit the link from their final text). Skip
