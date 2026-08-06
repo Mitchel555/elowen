@@ -173,6 +173,16 @@ export class TranscriptModel implements TranscriptRead {
         this.publish(fresh ? { kind: 'append', index } : { kind: 'turn', index });
         return true;
       }
+      case 'image': {
+        // The terminal draws no pictures, so the shared image becomes one line naming it. Falling through
+        // to `default` would drop the event entirely and the agent's "here it is" would point at nothing.
+        // Same wording as the rehydrated form in `transcript.ts`, so a restart changes nothing on screen.
+        const { turn, index, fresh } = this.ensureAssistant();
+        const name = event.ref.slice(event.ref.lastIndexOf('/') + 1);
+        appendSegmentText(turn, 'text', `\n🖼 ${event.caption?.trim() || `shared ${name}`}\n`);
+        this.publish(fresh ? { kind: 'append', index } : { kind: 'turn', index });
+        return true;
+      }
       case 'reasoning': {
         const { turn, index, fresh } = this.ensureAssistant();
         appendSegmentText(turn, 'reasoning', event.delta);

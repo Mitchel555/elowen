@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { parseBody } from '../validation.js';
 import { brainStartSchema, brainStopSchema, brainVisibilitySchema, brainSendSchema, brainModelSchema, brainRenameSchema, brainToggleSchema, brainThinkSchema, brainCwdSchema, brainCompactSchema, brainContextSchema, brainTerminalSchema, brainGoalSchema, brainAnswerSchema, lspInstallSchema, subagentSendSchema } from '../schemas/brain.js';
 import { brainConfigFromElowen } from '../../brain/config.js';
-import { readChatImage } from '../../brain/chatImages.js';
+import { readChatImage, isStoredChatImageName } from '../../brain/chatImages.js';
 import { listBrainModels, fetchOpenAiModels } from '../../brain/models.js';
 import { elowenExec, isExecAllowedForUser } from '../../shared/execs.js';
 import type { BrainEvent } from '../../brain/events.js';
@@ -220,14 +220,25 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
     if (forbidden(c)) return c.json({ error: 'forbidden' }, 403);
     if (!d.chatImagesDir || !d.brainStore) return c.json({ error: 'not found' }, 404);
     const file = c.req.param('file');
+    // Shape first, and only then the database: the ownership check scans message content for this string,
+    // so a wildcard like `%` would otherwise buy an unauthenticated-shaped scan of the caller's whole
+    // history per request. It can never match a real name, only cost work.
+    if (!isStoredChatImageName(file)) return c.json({ error: 'not found' }, 404);
     // An unguessable name is secrecy, not authorization: the attachment is exactly as private as the
     // conversation it was sent in, so serve it only to an owner of a message that references it. Answered
     // as 404, not 403 — telling a stranger the file exists is itself a leak.
     if (!d.brainStore.chatImageBelongsTo(c.get('user').id, file)) return c.json({ error: 'not found' }, 404);
     const image = readChatImage(d.chatImagesDir, file);
     if (!image) return c.json({ error: 'not found' }, 404);
-    // Immutable bytes under a random name, so it caches hard and privately.
-    return c.body(new Uint8Array(image.body), 200, { 'content-type': image.mimeType, 'cache-control': 'private, max-age=31536000' });
+    // Immutable bytes under a random name, so it caches hard and privately. `nosniff` because these bytes
+    // are agent-supplied and served from the app's own origin: a file that is a valid image AND valid
+    // script must never be re-interpreted as one by a browser guessing at the type.
+    return c.body(new Uint8Array(image.body), 200, {
+      'content-type': image.mimeType,
+      'cache-control': 'private, max-age=31536000',
+      'x-content-type-options': 'nosniff',
+      'content-disposition': 'inline',
+    });
   });
 
   // Generated images (image-gen plugin) — name is strictly sanitized, path stays inside the data dir.

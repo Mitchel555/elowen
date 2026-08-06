@@ -159,7 +159,9 @@ describe('the sweep and the store agree on what is still in use', () => {
     const file = storedRefFile('brain-1');
     for (const row of store.getMessages('brain-1')) store.deleteMessage('brain-1', row.id);
     expect(store.referencedChatImages().has(file)).toBe(false);
-    expect(sweepChatImages(dir, store.referencedChatImages(), 0)).toBe(1);
+    // Explicit `now` a second ahead: Date.now() is whole ms while mtimeMs carries a fraction, so a zero
+    // grace window can come out NEGATIVE and skip the file — a real flake, not a hypothetical one.
+    expect(sweepChatImages(dir, store.referencedChatImages(), 0, Date.now() + 1000)).toBe(1);
   });
 
   it('stops referencing an attachment once its message is deleted, and the file then goes', () => {
@@ -167,7 +169,9 @@ describe('the sweep and the store agree on what is still in use', () => {
     const [row] = store.getMessages('brain-1');
     store.deleteMessage('brain-1', row.id);
     expect(store.referencedChatImages().has(file)).toBe(false);
-    expect(sweepChatImages(dir, store.referencedChatImages(), 0)).toBe(1);
+    // Explicit `now` a second ahead: Date.now() is whole ms while mtimeMs carries a fraction, so a zero
+    // grace window can come out NEGATIVE and skip the file — a real flake, not a hypothetical one.
+    expect(sweepChatImages(dir, store.referencedChatImages(), 0, Date.now() + 1000)).toBe(1);
   });
 
   it('does not confuse an assistant row that merely mentions the word', () => {

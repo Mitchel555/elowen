@@ -35,8 +35,12 @@ const IMAGE_REF = new RegExp(`^[^\\s]*${REF_TAIL}$`);
  *  relative or absolute — and return the text with them removed plus the extracted file names. */
 export function extractImageRefs(text) {
   const files = [];
-  const cleaned = String(text ?? '').replace(MARKDOWN_IMAGE, (_, generated, stored) => {
-    files.push(generated ?? stored);
+  const cleaned = String(text ?? '').replace(MARKDOWN_IMAGE, (_, generated) => {
+    // Only the generated-image directory is honoured from PROSE. `chat-images` is one shared directory
+    // holding every user's private attachments, and this text is written by the model — treating a name
+    // it typed as permission to read and upload that file would be an authorization check we never made.
+    // Those arrive as an `image` event instead, which the daemon emits only after checking ownership.
+    if (generated) files.push(generated);
     return '';
   });
   return { cleaned, files };

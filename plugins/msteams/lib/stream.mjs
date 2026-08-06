@@ -31,7 +31,7 @@ const transport = {
   remove: (a, conversationId, activityId) => a.tmDelete(conversationId, activityId),
   replyRef: (replyToId) => ({ replyToId }),
   hasImages: (a) => typeof a.resolveImageFiles === 'function' && typeof a.sendImages === 'function',
-  postImages: (a, conversationId, data) => a.sendImages(conversationId, data),
+  postImages: (a, conversationId, data, _replyToId, caption) => a.sendImages(conversationId, data, caption),
 };
 
 // Teams renders a markdown subset, so the style leans on it: bold tool names, struck-through failures,

@@ -331,7 +331,7 @@ export class MsTeamsAdapter {
   }
 
   /** Attach images as inline data-URI attachments (Teams renders these in the message body). */
-  async sendImages(conversationId, files) {
+  async sendImages(conversationId, files, caption) {
     const serviceUrl = this.serviceUrlFor(conversationId);
     if (!serviceUrl || !files.length) return;
     const attachments = files.map((f) => {
@@ -340,7 +340,8 @@ export class MsTeamsAdapter {
       const contentType = imageMimeType(f.name);
       return { contentType, contentUrl: `data:${contentType};base64,${f.data.toString('base64')}`, name: f.name };
     });
-    await this.connector.send(serviceUrl, conversationId, { type: 'message', attachments }).catch((e) => this.log.error(`image upload failed: ${e?.message ?? e}`));
+    const message = { type: 'message', attachments, ...(caption ? { text: caption } : {}) };
+    await this.connector.send(serviceUrl, conversationId, message).catch((e) => this.log.error(`image upload failed: ${e?.message ?? e}`));
   }
 
   /** Host `send` (bound-session output): strip the /new generation suffix and post to the stored ref. */

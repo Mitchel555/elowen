@@ -130,6 +130,14 @@ export function currentSessionId(): string | undefined {
   return store.getStore()?.sessionId;
 }
 
+/** An opaque token identifying THIS prompt turn, or undefined outside one. `runWithPolicy` builds a fresh
+ *  scope object per turn, so object identity already is the turn boundary — a tool that must budget "per
+ *  turn" holds it in a WeakMap keyed on this rather than inventing its own notion of when a turn ended.
+ *  The session id cannot serve: it stays the same for the whole conversation. */
+export function currentTurnToken(): object | undefined {
+  return store.getStore();
+}
+
 /** The effective tool policy for the current turn (used by the plugin-tool execute-time gate), or
  *  undefined when none was established (→ every plugin tool permitted). */
 export function currentToolPolicy(): ToolPolicy | undefined {

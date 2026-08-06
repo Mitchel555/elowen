@@ -32,13 +32,23 @@ describe('shared plugin format helpers', () => {
   const UUID = '3f2b7c14-9a8d-4e6f-b0c1-2d3e4f5a6b7c';
   const SHA = 'a'.repeat(64);
 
-  it('extractImageRefs also pulls a shared chat image, in every type the daemon serves', () => {
+  it('extractImageRefs never uploads a chat image a model merely NAMED in its prose', () => {
+    // `chat-images` is one directory shared by the whole instance, holding every user's private
+    // attachments. This text is written by the model, so treating a name it typed as permission to read
+    // and upload that file would be an authorization decision nobody made. Shared images arrive as an
+    // `image` event instead, which the daemon emits only for a file it checked ownership of.
     const r = extractImageRefs(`hle ![p](/api/brain/chat-images/${UUID}.png) a ![q](https://x/api/brain/chat-images/${SHA}.webp)`);
-    expect(r.files).toEqual([`${UUID}.png`, `${SHA}.webp`]);
+    expect(r.files).toEqual([]);
+    // Still stripped from the text — a raw markdown link is not something to show the reader.
     expect(r.cleaned).not.toContain('chat-images');
-    // The generated-image form the image plugins produce keeps working alongside it.
+    // The generated-image directory is unaffected: global plugin output, always reachable this way.
     expect(extractImageRefs(`![a](/api/brain/images/abc123.png) ![b](/api/brain/chat-images/${UUID}.jpg)`).files)
-      .toEqual(['abc123.png', `${UUID}.jpg`]);
+      .toEqual(['abc123.png']);
+  });
+
+  it('imageRefName still accepts a chat image, because that ref comes from the daemon', () => {
+    expect(imageRefName(`/api/brain/chat-images/${UUID}.png`)).toBe(`${UUID}.png`);
+    expect(imageRefName(`/api/brain/chat-images/${SHA}.webp`)).toBe(`${SHA}.webp`);
   });
 
   it('extractImageRefs refuses a chat-image name that is not exactly a stored name (it reaches the filesystem)', () => {

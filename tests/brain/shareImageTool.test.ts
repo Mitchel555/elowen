@@ -8,6 +8,7 @@ import { runWithPolicy } from '../../src/plugins/policyContext.js';
 import { openDb } from '../../src/store/db.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import type { Policy } from '../../src/plugins/policy.js';
+import type { TurnIdentity } from '../../src/plugins/policyContext.js';
 
 // ShareImage is the one path by which bytes the AGENT chose end up served from the app's own origin, to
 // whoever opens the conversation. Every check here is about that: what it will read, how big, and whether
@@ -15,6 +16,8 @@ import type { Policy } from '../../src/plugins/policy.js';
 
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
 const JPEG = Buffer.from('ffd8ffe000104a464946', 'hex');
+const GIF = Buffer.from('GIF89a\x00\x00', 'binary');
+const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 ')]);
 const SESSION = 'brain-1';
 
 let home: string;
@@ -34,12 +37,16 @@ afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 /** The turn scope the tool reads its session and path policy from. `allowedPaths` is the real boundary a
  *  scoped user gets; `repo` stands in for their one permitted project. */
-function call(params: unknown, policy?: Policy): Promise<{ content: { text: string }[]; details?: { sharedImage?: { file: string; mimeType: string; caption?: string } } }> {
+const OWNER: TurnIdentity = { platform: 'web', userId: '1', admin: true, owner: true };
+/** An admin-ROLE platform member: all-access policy, but not the operator. */
+const ADMIN_STRANGER: TurnIdentity = { platform: 'discord', userId: '99', admin: true, owner: false };
+
+function call(params: unknown, policy?: Policy, identity: TurnIdentity = OWNER): Promise<{ content: { text: string }[]; details?: { sharedImage?: { file: string; mimeType: string; caption?: string } } }> {
   const tool = buildShareImageTool({ store, imagesDir: images });
   return runWithPolicy(
     policy ?? { allowedProjectIds: 'all', allowedPaths: () => [repo] },
     () => tool.execute('call-1', params as never, undefined, undefined, {} as never) as never,
-    { sessionId: SESSION },
+    { sessionId: SESSION, identity },
   );
 }
 
@@ -89,8 +96,36 @@ describe('ShareImage from a file', () => {
   });
 
   it('accepts the other formats it claims to', async () => {
-    const res = await call({ path: write('photo.jpg', JPEG) });
-    expect(res.details?.sharedImage?.mimeType).toBe('image/jpeg');
+    for (const [name, bytes, mime] of [
+      ['photo.jpg', JPEG, 'image/jpeg'],
+      ['anim.gif', GIF, 'image/gif'],
+      ['modern.webp', WEBP, 'image/webp'],
+    ] as const) {
+      expect((await call({ path: write(name, bytes) })).details?.sharedImage?.mimeType).toBe(mime);
+    }
+  });
+
+  it('is not fooled by a near-miss of a magic number', async () => {
+    // RIFF alone is also AVI and WAV; GIF alone is not a version. Accepting either would mean serving a
+    // non-image under an image content-type.
+    const riffAvi = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('AVI ')]);
+    for (const [name, bytes] of [['fake.webp', riffAvi], ['fake.gif', Buffer.from('GIF00a__')]] as const) {
+      expect((await call({ path: write(name, bytes) })).details?.sharedImage).toBeUndefined();
+    }
+  });
+
+  it('refuses an empty file', async () => {
+    const res = await call({ path: write('empty.png', Buffer.alloc(0)) });
+    expect(res.details?.sharedImage).toBeUndefined();
+  });
+
+  it('refuses a file path for an all-access turn that is not the operator', async () => {
+    // An all-access turn skips path roots entirely, and a platform member mapped to an admin role lands
+    // there too — without this gate they could have any file on the box uploaded into a shared channel.
+    const res = await call({ path: write('shot.png', PNG) }, undefined, ADMIN_STRANGER);
+
+    expect(res.details?.sharedImage).toBeUndefined();
+    expect(res.content[0]!.text).toContain('only available to the operator');
   });
 
   it('refuses a file past the size limit without reading it in', async () => {
@@ -100,12 +135,11 @@ describe('ShareImage from a file', () => {
     expect(res.content[0]!.text).toMatch(/over the 10 MB limit/);
   });
 
-  it('reports a directory and a missing file rather than throwing', async () => {
-    for (const path of [repo, join(repo, 'nope.png')]) {
-      const res = await call({ path });
-      expect(res.details?.sharedImage).toBeUndefined();
-      expect(res.content[0]!.text).toContain('ShareImage:');
-    }
+  it('tells a directory apart from a missing file rather than throwing', async () => {
+    // Distinct messages, because "is not a file" and "cannot find" send the agent to different fixes;
+    // asserting only the shared "ShareImage:" prefix let the isFile() check be removed unnoticed.
+    expect((await call({ path: repo })).content[0]!.text).toContain('is not a file');
+    expect((await call({ path: join(repo, 'nope.png') })).content[0]!.text).toContain('cannot find');
   });
 });
 
@@ -163,18 +197,42 @@ describe('ShareImage argument handling', () => {
     }
   });
 
+  it('starts each turn with a fresh budget', async () => {
+    // The budget is per TURN. Keyed on the session it would be spent once and refuse for the rest of the
+    // conversation, which is the feature quietly dying rather than limiting anything.
+    const tool = buildShareImageTool({ store, imagesDir: images });
+    const turn = (name: string, byte: number) => runWithPolicy(
+      { allowedProjectIds: 'all', allowedPaths: () => [repo] },
+      () => tool.execute('c', { path: write(name, Buffer.concat([PNG, Buffer.of(byte)])) } as never, undefined, undefined, {} as never) as never,
+      { sessionId: SESSION, identity: OWNER },
+    ) as Promise<{ content: { text: string }[]; details?: { sharedImage?: unknown } }>;
+
+    for (let i = 0; i < 4; i++) await turn(`t${i}.png`, i);
+    // A NEW runWithPolicy scope is a new turn, even though the session id has not changed.
+    expect((await turn('next-turn.png', 9)).details?.sharedImage).toBeDefined();
+  });
+
   it('stops after four images in one turn', async () => {
     // A model that decides screenshots are the answer would otherwise turn one reply into a gallery — and
     // on a chat platform, into that many separate uploads.
     const tool = buildShareImageTool({ store, imagesDir: images });
-    const share = (name: string, byte: number) => runWithPolicy(
+    type Res = { content: { text: string }[]; details?: { sharedImage?: unknown } };
+    // All five calls inside ONE scope, because one scope is one turn — five separate scopes would each
+    // get their own budget and prove nothing about the limit.
+    const results = await runWithPolicy(
       { allowedProjectIds: 'all', allowedPaths: () => [repo] },
-      () => tool.execute('c', { path: write(name, Buffer.concat([PNG, Buffer.of(byte)])) } as never, undefined, undefined, {} as never) as never,
-      { sessionId: SESSION },
-    ) as Promise<{ content: { text: string }[]; details?: { sharedImage?: unknown } }>;
+      async () => {
+        const out: Res[] = [];
+        for (let i = 0; i < 5; i++) {
+          out.push(await (tool.execute('c', { path: write(`s${i}.png`, Buffer.concat([PNG, Buffer.of(i)])) } as never, undefined, undefined, {} as never) as unknown as Promise<Res>));
+        }
+        return out;
+      },
+      { sessionId: SESSION, identity: OWNER },
+    );
 
-    for (let i = 0; i < 4; i++) expect((await share(`s${i}.png`, i)).details?.sharedImage).toBeDefined();
-    const fifth = await share('s4.png', 4);
+    for (const res of results.slice(0, 4)) expect(res.details?.sharedImage).toBeDefined();
+    const fifth = results[4]!;
     expect(fifth.details?.sharedImage).toBeUndefined();
     expect(fifth.content[0]!.text).toContain('already shared 4 images');
   });

@@ -6,7 +6,7 @@ import { dbTsToIso } from '../shared/time.js';
 import { planFilePath, toolResultSpillDir } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
 import { CHANNEL_PREFIX, TASK_PREFIX } from '../brain/sessionId.js';
-import { collectImageFiles } from '../brain/chatImages.js';
+import { collectImageFiles, isPersistedImageBlock } from '../brain/chatImages.js';
 import { rollupActivatedTools } from '../brain/continuity/activatedTools.js';
 import { rollupWorkingSet } from '../brain/continuity/workingSet.js';
 import {
@@ -957,8 +957,9 @@ export class BrainStore {
       for (const part of Array.isArray(content) ? [...content].reverse() : []) {
         const block = part as { type?: unknown; ref?: unknown };
         if (block?.type !== 'image') continue;
-        const ref = block.ref as { file?: unknown; mimeType?: unknown } | undefined;
-        if (typeof ref?.file === 'string' && typeof ref.mimeType === 'string') return { file: ref.file, mimeType: ref.mimeType };
+        // Validated here, not just where it is read back: a plugin or MCP tool can put whatever it likes
+        // in a `ref`, and this value goes on to be served and uploaded by name.
+        if (isPersistedImageBlock(block)) return { file: block.ref.file, mimeType: block.ref.mimeType };
       }
     }
     return undefined;

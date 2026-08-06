@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainMessageImage } from '../shared/wireContract.js';
 
@@ -37,6 +37,13 @@ const MIME_BY_EXTENSION: Record<string, string> = {
  *  a random name would leave an orphan file behind on every screenshot. */
 const STORED_NAME = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64})\.(png|jpg|gif|webp)$/;
 
+/** Whether `file` is a name this module could have written. Exported so a caller can reject a malformed
+ *  name BEFORE spending real work on it — the name is the only thing standing between a request and a
+ *  path join, and one validator keeps every caller agreeing on what a valid name is. */
+export function isStoredChatImageName(file: string): boolean {
+  return STORED_NAME.test(file);
+}
+
 /** Write a turn's attachments to disk and return the references to persist on the user row. Best-effort
  *  per image: one that cannot be written is skipped rather than failing the turn, because the message
  *  itself (and the copy the model sees) is unaffected — only its thumbnail after a reload is. */
@@ -60,18 +67,35 @@ export function storeChatImages(dir: string, images: readonly { data: string; mi
  *  same file twice rather than leaving a duplicate behind. Returns null when the type is not one we serve
  *  or the write fails — the caller then keeps the original block rather than losing the image. */
 export function storeImageByContent(dir: string, data: string, mimeType: string): StoredChatImage | null {
-  const ext = EXTENSION[mimeType];
+  // Own-property lookup: a mimeType of "constructor" would otherwise resolve up the prototype chain to a
+  // truthy value and build a nonsense file name.
+  const ext = Object.hasOwn(EXTENSION, mimeType) ? EXTENSION[mimeType] : undefined;
   if (!ext) return null;
   let bytes: Buffer;
   try { bytes = Buffer.from(data, 'base64'); } catch { return null; }
   if (bytes.length === 0) return null;
   const file = `${createHash('sha256').update(bytes).digest('hex')}.${ext}`;
+  const path = join(dir, file);
   try {
     mkdirSync(dir, { recursive: true });
-    // `wx` so an existing file is left exactly as it is: same content by definition, and rewriting it
-    // would move its mtime and hand the sweep's grace window a file it already accounted for.
-    try { writeFileSync(join(dir, file), bytes, { flag: 'wx' }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (existsSync(path)) {
+      // Same bytes by construction, so there is nothing to rewrite — but the sweep's grace window is
+      // measured from mtime, and this file is being referenced again right now. Left untouched, a copy
+      // that went unreferenced for a while could be swept out from under the row about to point at it.
+      try { utimesSync(path, new Date(), new Date()); } catch { /* a stale mtime only risks an early sweep */ }
+      return { file, mimeType };
+    }
+    // Written to a temp name and renamed, because a write interrupted halfway (a full disk) would
+    // otherwise leave a TRUNCATED file under a name that promises those exact bytes — and being
+    // content-addressed, every later attempt would find it, trust it, and serve the broken image forever.
+    const tmp = `${path}.${process.pid}.${randomUUID()}.part`;
+    try {
+      writeFileSync(tmp, bytes);
+      renameSync(tmp, path);
+    } catch (error) {
+      try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      throw error;
+    }
     return { file, mimeType };
   } catch {
     return null;
@@ -83,7 +107,7 @@ export function storeImageByContent(dir: string, data: string, mimeType: string)
  *  the provider already saw, and editing an already-sent message is what breaks a warm prompt cache. */
 interface PersistedImageBlock { type: 'image'; ref: StoredChatImage }
 
-function isPersistedImageBlock(part: unknown): part is PersistedImageBlock {
+export function isPersistedImageBlock(part: unknown): part is PersistedImageBlock {
   if (typeof part !== 'object' || part === null) return false;
   const { type, ref } = part as { type?: unknown; ref?: unknown };
   if (type !== 'image' || typeof ref !== 'object' || ref === null) return false;

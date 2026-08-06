@@ -2,8 +2,8 @@ import { readFileSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { assertPathAllowed } from '../../plugins/pathGuard.js';
-import { currentSessionId } from '../../plugins/policyContext.js';
+import { assertPathAllowed, isAllAccess } from '../../plugins/pathGuard.js';
+import { currentSessionId, currentTurnToken, currentIdentity } from '../../plugins/policyContext.js';
 import { sniffImageMime, storeImageByContent, type StoredChatImage } from '../chatImages.js';
 import type { BrainStore } from '../../store/brainStore.js';
 
@@ -35,12 +35,13 @@ function text(message: string) {
  *  a rule that forwarded each one would bury the conversation and, on a chat platform, fire an upload for
  *  every single one. */
 export function buildShareImageTool(deps: ShareImageDeps) {
-  let sharedThisTurn = 0;
-  let turnKey = '';
+  // Keyed on the turn scope's own identity, which is a fresh object per turn — the session id is the same
+  // for the whole conversation, so budgeting on it would spend the allowance once and refuse ever after.
+  const spent = new WeakMap<object, number>();
   return defineTool({
     name: 'ShareImage',
     label: 'Share image',
-    description: 'Show the user an image in the conversation — a screenshot you just took, a chart you rendered, an image file from the repo. Use it when what you are describing is easier to SEE than to read: a layout that looks wrong, a diff of a rendered page, a photo the user asked about. Pass `path` for a file on disk, or `latest: true` for the image the most recent tool call returned to you (a screenshot taken without a file path exists only in that result). Exactly one of the two. The image reaches the web chat and any connected platform; it does not go back into your own context, which already has it.',
+    description: 'Show the user an image in the conversation — a screenshot you just took, a chart you rendered, an image file from the repo. Use it when what you are describing is easier to SEE than to read: a layout that looks wrong, a diff of a rendered page, a photo the user asked about. Pass `path` for a file on disk, or `latest: true` for the image the most recent tool call returned to you (a screenshot taken without a file path exists only in that result). Exactly one of the two. The image appears in THIS conversation — the web chat and any connected platform — so from a sub-agent it reaches the panel for that sub-agent, not the parent conversation. It does not go back into your own context, which already has it.',
     parameters: Type.Object({
       path: Type.Optional(Type.String({ description: 'Absolute path to an image file (png, jpeg, gif or webp).' })),
       latest: Type.Optional(Type.Boolean({ description: 'Share the image the most recent tool call returned instead of a file on disk.' })),
@@ -53,17 +54,16 @@ export function buildShareImageTool(deps: ShareImageDeps) {
         return text('ShareImage: pass exactly one of `path` (a file on disk) or `latest: true` (the image the last tool returned).');
       }
       const sessionId = currentSessionId();
-      if (!sessionId) return text('ShareImage: no conversation to share into.');
-      // The counter is per TURN, and a turn is the only thing that can reset it — keying on the session
-      // alone would let a long conversation spend the budget once and never share again.
-      if (turnKey !== sessionId) { turnKey = sessionId; sharedThisTurn = 0; }
-      if (sharedThisTurn >= MAX_PER_TURN) {
+      const turn = currentTurnToken();
+      if (!sessionId || !turn) return text('ShareImage: no conversation to share into.');
+      const used = spent.get(turn) ?? 0;
+      if (used >= MAX_PER_TURN) {
         return text(`ShareImage: already shared ${MAX_PER_TURN} images in this turn — say what the rest show instead.`);
       }
 
       const stored = p.latest === true ? latestToolImage(deps.store, sessionId) : fromDisk(p.path!, dir);
       if (typeof stored === 'string') return text(stored);
-      sharedThisTurn += 1;
+      spent.set(turn, used + 1);
       const caption = p.caption?.trim();
       return {
         content: [{ type: 'text' as const, text: `Shared the image with the user${caption ? ` (${caption})` : ''}. They can see it; do not describe it back to them in full.` }],
@@ -87,6 +87,13 @@ function latestToolImage(store: BrainStore, sessionId: string): StoredChatImage 
  *  origin as the app, so none of them may be skipped: the path must be inside the caller's own roots, the
  *  size must be sane, and the type must come from the bytes rather than the name. */
 function fromDisk(rawPath: string, dir: string): StoredChatImage | string {
+  // An all-access turn skips path roots entirely (pathGuard), so for those the guard below is the ONLY
+  // boundary — and all-access is not the same as operator: a platform member mapped to an admin role
+  // lands there too. Without this, such a member could have any file on the box uploaded into a shared
+  // channel. Same reasoning, and the same `owner` gate, as the terminal tools.
+  if (isAllAccess() && currentIdentity()?.owner !== true) {
+    return 'ShareImage: sharing a file by path is only available to the operator. Use `latest: true` for an image a tool produced in this conversation.';
+  }
   let path: string;
   try { path = assertPathAllowed(rawPath); }
   catch (e) { return `ShareImage: ${(e as Error).message}`; }
@@ -96,7 +103,7 @@ function fromDisk(rawPath: string, dir: string): StoredChatImage | string {
     const stat = statSync(path);
     if (!stat.isFile()) return `ShareImage: ${basename(path)} is not a file.`;
     size = stat.size;
-  } catch { return `ShareImage: cannot read ${basename(path)}.`; }
+  } catch { return `ShareImage: cannot find ${basename(path)}.`; }
   // Checked BEFORE the read, so a huge file is refused rather than pulled into memory to be refused.
   if (size > MAX_BYTES) {
     return `ShareImage: ${basename(path)} is ${(size / 1048576).toFixed(1)} MB, over the ${MAX_BYTES / 1048576} MB limit.`;

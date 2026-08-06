@@ -21,6 +21,7 @@ const MAX_IMAGES = 4;                    // default vision cap per message (cfg:
 // `askTimeoutMs` governs both, so raising it for a slow chat cannot leave the picker expiring six minutes in.
 const ASK_TTL_MS = 6 * 60_000;           // default: drop a parked prompt after this (cfg: askTimeoutMs; > the core 5-min timeout)
 const MAX_UPLOAD_IMAGES = 4;             // default generated-image uploads per outgoing message (cfg: maxUploadImages)
+const TG_CAPTION_LIMIT = 1024;           // Telegram rejects the whole sendPhoto call above this, caption included
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Whisper's per-file limit — larger clips are just noted
 const TTS_MAX_CHARS = 4000;              // cap the spoken text (OpenAI TTS input limit is 4096)
 const PICKER_PAGE = 8;                   // inline-keyboard rows per page for the /model + /context pickers
@@ -688,10 +689,13 @@ export class TelegramAdapter {
     return this.bot.api.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji }]);
   }
 
-  /** Send generated images as photo messages (the first optionally anchored to the trigger). */
-  async sendPhotos(chatId, files, extra = {}) {
+  /** Send generated images as photo messages (the first optionally anchored to the trigger). A caption
+   *  rides on the FIRST photo only — Telegram shows one per photo, and repeating it under each would read
+   *  as the bot saying the same thing several times. */
+  async sendPhotos(chatId, files, extra = {}, caption) {
     for (let i = 0; i < files.length; i++) {
-      try { await this.bot.api.sendPhoto(chatId, new InputFile(files[i].data, files[i].name), i === 0 ? extra : {}); }
+      const opts = i === 0 ? { ...extra, ...(caption ? { caption: caption.slice(0, TG_CAPTION_LIMIT) } : {}) } : {};
+      try { await this.bot.api.sendPhoto(chatId, new InputFile(files[i].data, files[i].name), opts); }
       catch (e) { this.log.error(`sendPhoto failed: ${e?.message ?? e}`); }
     }
   }

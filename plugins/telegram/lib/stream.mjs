@@ -34,7 +34,7 @@ const transport = {
   remove: (a, chatId, messageId) => a.tgDelete(chatId, messageId),
   replyRef: (replyToId) => ({ reply_parameters: { message_id: replyToId, allow_sending_without_reply: true } }),
   hasImages: (a) => typeof a.resolveImageFiles === 'function' && typeof a.sendPhotos === 'function',
-  postImages: (a, chatId, data) => a.sendPhotos(chatId, data, {}),
+  postImages: (a, chatId, data, _replyToId, caption) => a.sendPhotos(chatId, data, {}, caption),
 };
 
 // Telegram sends plain text (no parse_mode), so the style is all-identity — nothing to escape

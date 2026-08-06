@@ -46,6 +46,20 @@ describe('externalizeImageBlocks', () => {
     content: [{ type: 'text', text: 'Took a screenshot.' }, { type: 'image', data, mimeType: 'image/png' }],
   });
 
+  it('leaves the ORIGINAL message untouched, bytes and all', () => {
+    // The whole point of externalizing on a copy. The live message is what the provider already saw, and
+    // rewriting it mid-conversation invalidates the warm prompt cache for every remaining turn — real
+    // money, and the reason this never mutates in place.
+    const live = toolResult(PNG.toString('base64'));
+    const blocks = live.content as { type: string; data?: string }[];
+    const before = structuredClone(live);
+
+    externalizeImageBlocks(live, dir);
+
+    expect(live).toEqual(before);
+    expect(blocks[1]!.data).toBe(PNG.toString('base64'));
+  });
+
   it('moves the bytes to disk and leaves a reference the row can carry', () => {
     const stored = externalizeImageBlocks(toolResult(PNG.toString('base64')), dir);
     const blocks = stored.content as { type: string; ref?: { file: string; mimeType: string }; data?: string }[];
