@@ -5,7 +5,7 @@ import { UserSettingStore, DiscordIdConflictError, WhatsAppNumberConflictError, 
 describe('UserSettingStore', () => {
   it('defaults CLI settings when nothing is stored', () => {
     const s = new UserSettingStore(openDb(':memory:'));
-    expect(s.cliSettings(1)).toEqual({ model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'professional', personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: true });
+    expect(s.cliSettings(1)).toEqual({ model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: true, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'concise', personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: false });
   });
 
   it('round-trips model + autoCompact + threshold via the typed helper', () => {
@@ -43,17 +43,18 @@ describe('UserSettingStore', () => {
     expect(s.cliSettings(1).thinkingLevel).toBe('off');
   });
 
-  it('memory autoRecall/autoSave default on and round-trip false', () => {
+  it('memory autoRecall defaults on, autoSave defaults off, and both round-trip', () => {
     const s = new UserSettingStore(openDb(':memory:'));
     expect(s.cliSettings(1).autoRecall).toBe(true);
-    expect(s.cliSettings(1).autoSave).toBe(true);
-    s.setCliSettings(1, { autoRecall: false, autoSave: false });
-    expect(s.cliSettings(1).autoRecall).toBe(false);
     expect(s.cliSettings(1).autoSave).toBe(false);
-    // A partial patch touching only autoSave leaves autoRecall as previously stored.
+    s.setCliSettings(1, { autoRecall: false, autoSave: true });
+    expect(s.cliSettings(1).autoRecall).toBe(false);
+    expect(s.cliSettings(1).autoSave).toBe(true);
+    // A partial patch touching only autoRecall leaves autoSave as previously stored — and the stored
+    // value is the non-default one, so falling back to the default would fail this.
     s.setCliSettings(1, { autoRecall: true });
     expect(s.cliSettings(1).autoRecall).toBe(true);
-    expect(s.cliSettings(1).autoSave).toBe(false);
+    expect(s.cliSettings(1).autoSave).toBe(true);
   });
 
   it('clamps the auto-compact threshold into the safe band', () => {
@@ -66,9 +67,9 @@ describe('UserSettingStore', () => {
 
   it('applies a partial patch without clobbering the other field', () => {
     const s = new UserSettingStore(openDb(':memory:'));
-    s.setCliSettings(1, { model: 'm', autoCompact: true });
+    s.setCliSettings(1, { model: 'm', autoCompact: false });
     s.setCliSettings(1, { model: 'n' });
-    expect(s.cliSettings(1)).toEqual({ model: 'n', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: true, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'professional', personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: true });
+    expect(s.cliSettings(1)).toEqual({ model: 'n', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'concise', personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: false });
   });
 
   it('isolates settings per user', () => {
@@ -93,7 +94,7 @@ describe('UserSettingStore', () => {
     const s = new UserSettingStore(openDb(':memory:'));
     s.setCliSettings(1, { model: 'a', autoCompact: true });
     s.removeForUser(1);
-    expect(s.cliSettings(1)).toEqual({ model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'professional', personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: true });
+    expect(s.cliSettings(1)).toEqual({ model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: true, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: 'concise', personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: false });
   });
 
   it('terminal settings default, round-trip, merge, and survive a corrupt blob', () => {

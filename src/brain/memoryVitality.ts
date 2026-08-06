@@ -12,11 +12,15 @@ export const DEFAULT_MEMORY_RETENTION: MemoryRetentionConfig = {
   enabled: true,
   graceDays: 14,
   vitalityFloor: 10,
+  // How fast a memory's vitality decays when it is not being used, per importance rank, in days. Zero is
+  // not "decay instantly" but "never decays" — it also makes the rank unevictable outright (isEvictable).
+  // The cost of a memory is not storage but the recall budget it competes for, so the middle ranks fade
+  // fast; 5 is the pin and never decays.
   halfLifeByImportance: {
-    1: 15,
-    2: 30,
-    3: 60,
-    4: 90,
+    1: 3,
+    2: 7,
+    3: 14,
+    4: 30,
     5: 0,
   },
 };

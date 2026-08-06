@@ -10,12 +10,12 @@ import type { BrainLimits } from '../../lib/types';
 
 /** Fallback for seeding the Limits form before the daemon's config arrives (it always sends real values). */
 export const BRAIN_LIMIT_DEFAULTS: BrainLimits = {
-  toolOutputMaxLines: 80, toolOutputMaxChars: 30000, toolResultInlineBytes: 50000,
-  toolResultGroupBudgetBytes: 200000, compactionFailureLimit: 3, elicitationTimeoutMs: 300000,
-  memoryRecallCount: 6, memoryRecallChars: 6000,
-  memoryLiveRecallPasses: 3, memoryLiveRecallCount: 8, memoryLiveRecallChars: 6000,
-  goalTurnBudget: 24, goalMaxTurns: 64, channelSessionCap: 32,
-  delegateContextChars: 20000, askHistoryTurns: 30,
+  toolOutputMaxLines: 100, toolOutputMaxChars: 41000, toolResultInlineBytes: 60000,
+  toolResultGroupBudgetBytes: 200000, compactionFailureLimit: 3, elicitationTimeoutMs: 21600000,
+  memoryRecallCount: 10, memoryRecallChars: 20000,
+  memoryLiveRecallPasses: 10, memoryLiveRecallCount: 10, memoryLiveRecallChars: 8000,
+  goalTurnBudget: 50, goalMaxTurns: 50, channelSessionCap: 32,
+  delegateContextChars: 40000, askHistoryTurns: 30,
 };
 
 const MILLISECONDS_PER_MINUTE = 60_000;
@@ -37,21 +37,21 @@ type BrainLimitField = {
  *  the daemon would silently lower. `web/tests/modules/settings/brainLimitsParity.test.ts` compares the two
  *  tables and fails on drift; `kind` owns the UI unit conversion. */
 const BRAIN_LIMIT_FIELDS: BrainLimitField[] = [
-  { key: 'toolOutputMaxLines', kind: 'count', min: 40, max: 200, step: 10, icon: AlignLeft },
-  { key: 'toolOutputMaxChars', kind: 'size', min: 15000, max: 80000, step: 1000, icon: Type },
-  { key: 'toolResultInlineBytes', kind: 'size', min: 25000, max: 75000, step: 5000, icon: HardDrive },
+  { key: 'toolOutputMaxLines', kind: 'count', min: 50, max: 200, step: 10, icon: AlignLeft },
+  { key: 'toolOutputMaxChars', kind: 'size', min: 20500, max: 80000, step: 1000, icon: Type },
+  { key: 'toolResultInlineBytes', kind: 'size', min: 30000, max: 90000, step: 5000, icon: HardDrive },
   { key: 'toolResultGroupBudgetBytes', kind: 'size', min: 100000, max: 300000, step: 10000, icon: Layers },
   { key: 'compactionFailureLimit', kind: 'count', min: 1, max: 10, step: 1, icon: ShieldAlert },
   { key: 'elicitationTimeoutMs', kind: 'duration', min: 30000, max: 21600000, step: 30000, icon: Timer },
-  { key: 'memoryRecallCount', kind: 'count', min: 3, max: 20, step: 1, icon: Brain },
-  { key: 'memoryRecallChars', kind: 'size', min: 3000, max: 20000, step: 500, icon: ListChecks },
+  { key: 'memoryRecallCount', kind: 'count', min: 5, max: 20, step: 1, icon: Brain },
+  { key: 'memoryRecallChars', kind: 'size', min: 10000, max: 20000, step: 500, icon: ListChecks },
   { key: 'memoryLiveRecallPasses', kind: 'count', min: 0, max: 10, step: 1, icon: Brain },
   { key: 'memoryLiveRecallCount', kind: 'count', min: 0, max: 20, step: 1, icon: Brain },
-  { key: 'memoryLiveRecallChars', kind: 'size', min: 3000, max: 20000, step: 500, icon: ListChecks },
+  { key: 'memoryLiveRecallChars', kind: 'size', min: 4000, max: 20000, step: 500, icon: ListChecks },
   { key: 'goalTurnBudget', kind: 'count', min: 4, max: 500, step: 1, icon: Target },
   { key: 'goalMaxTurns', kind: 'count', min: 8, max: 500, step: 1, icon: Repeat },
   { key: 'channelSessionCap', kind: 'count', min: 4, max: 256, step: 1, icon: MessagesSquare },
-  { key: 'delegateContextChars', kind: 'size', min: 10000, max: 80000, step: 1000, icon: Share2 },
+  { key: 'delegateContextChars', kind: 'size', min: 20000, max: 80000, step: 1000, icon: Share2 },
   { key: 'askHistoryTurns', kind: 'count', min: 15, max: 45, step: 1, icon: MessageCircleQuestion },
 ];
 

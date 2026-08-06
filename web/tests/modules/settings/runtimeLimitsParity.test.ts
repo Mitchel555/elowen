@@ -96,7 +96,7 @@ describe('runtime limits — web editor against the daemon clamp', () => {
     expect(daemonBounds().localShellTimeoutMs).toEqual([10000, 300000]);
     expect(daemonBounds().memorySemanticFloorPerMille).toEqual([100, 800]);
     expect(webBounds().eventRetentionDays).toEqual([1, 365]);
-    expect(webDefaults.memorySemanticFloorPerMille).toBe(300);
+    expect(webDefaults.memorySemanticFloorPerMille).toBe(200);
   });
 
   // The two score weights are the one group where a bound is a CORRECTNESS limit, not taste: semantic

@@ -91,7 +91,7 @@ describe('ConfigStore', () => {
   it('defaults include empty autopilot notes and launch defaults', () => {
     const c = cfg.get();
     expect(c.autopilot.notes).toBe('');
-    expect(c.defaults).toEqual({ exec: 'sonnet', autonomy: 'L3', maxSessions: 1 });
+    expect(c.defaults).toEqual({ exec: 'sonnet', autonomy: 'L3', maxSessions: 2 });
   });
   it('update merges notes and defaults', () => {
     cfg.update({ autopilot: { notes: 'be careful' }, defaults: { exec: 'codex:gpt-5.4', maxSessions: 3 } });
@@ -127,8 +127,8 @@ describe('ConfigStore', () => {
     cfg.update({ security: { tokenTtlDays: 9.8 } });     // floored
     expect(cfg.get().security.tokenTtlDays).toBe(9);
   });
-  it('defaults sessionRetention to off with a 90-day horizon, toggles, and clamps days', () => {
-    expect(cfg.get().sessionRetention).toEqual({ enabled: false, days: 90 });
+  it('defaults sessionRetention to on with a 10-day horizon, toggles, and clamps days', () => {
+    expect(cfg.get().sessionRetention).toEqual({ enabled: true, days: 10 });
     cfg.update({ sessionRetention: { enabled: true, days: 30 } });
     expect(cfg.get().sessionRetention).toEqual({ enabled: true, days: 30 });
     // An unrelated patch must not silently flip retention off or reset the horizon.
@@ -160,7 +160,7 @@ describe('ConfigStore', () => {
     db.prepare("INSERT INTO settings (id, data) VALUES (1, ?)").run(JSON.stringify({ allowedExecs: ['sonnet'], autopilot: { model: 'm', apiUrl: 'u' }, apiKey: null }));
     const c = cfg.get();
     expect(c.autopilot.notes).toBe('');
-    expect(c.defaults).toEqual({ exec: 'sonnet', autonomy: 'L3', maxSessions: 1 });
+    expect(c.defaults).toEqual({ exec: 'sonnet', autonomy: 'L3', maxSessions: 2 });
   });
   it('reads an old row without customModels as empty array', () => {
     db.prepare("INSERT INTO settings (id, data) VALUES (1, ?)").run(JSON.stringify({ allowedExecs: ['sonnet'], autopilot: { model: 'm', apiUrl: 'u' }, apiKey: null }));

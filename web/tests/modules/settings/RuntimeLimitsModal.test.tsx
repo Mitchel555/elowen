@@ -26,9 +26,9 @@ describe('RuntimeLimitsModal', () => {
   it('shows the semantic floor as a cosine value but writes it back in per mille', () => {
     const { apply } = renderModal();
 
-    // 300 per mille is the operator-facing 0.30 — displaying the raw 300 would be meaningless on a
-    // similarity scale, and writing 0.3 back would be rounded to zero by the daemon's clamp.
-    expect(screen.getByText('0.30')).toBeTruthy();
+    // 200 per mille is the operator-facing 0.20 — displaying the raw 200 would be meaningless on a
+    // similarity scale, and writing 0.2 back would be rounded to zero by the daemon's clamp.
+    expect(screen.getByText('0.20')).toBeTruthy();
     const floor = screen.getByRole('slider', { name: 'Memory relevance floor' }) as HTMLInputElement;
     expect(floor.min).toBe('0.1');
     expect(floor.max).toBe('0.8');

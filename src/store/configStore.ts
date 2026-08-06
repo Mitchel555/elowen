@@ -192,7 +192,7 @@ const clampTtlDays = (next: number | undefined, fallback: number): number =>
 
 /** Default and bounds for the brain's per-run agent step ceiling. A whole number in [1, 200]; anything
  *  invalid falls back to the current value. Enforced in BrainService (turn_start counting → abort). */
-const DEFAULT_MAX_STEPS = 20;
+const DEFAULT_MAX_STEPS = 200;
 const clampMaxSteps = (next: number | undefined, fallback: number): number =>
   typeof next === 'number' && Number.isFinite(next) ? Math.min(200, Math.max(1, Math.floor(next))) : fallback;
 
@@ -204,12 +204,13 @@ const clampMaxSteps = (next: number | undefined, fallback: number): number =>
  *  safety ceiling), Channels (live-session LRU cap), and the subagent plugin (context handed to a
  *  delegated child / workflow node). The shape is the shared wire contract (re-exported above). */
 export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
-  toolOutputMaxLines: 80,
-  // Matches Claude Code's BASH_MAX_OUTPUT_DEFAULT (30 000 chars).
-  toolOutputMaxChars: 30_000,
-  // Matches Claude Code's DEFAULT_MAX_RESULT_SIZE_CHARS — a single result above this is spilled to disk
-  // and the model gets a placeholder instead (toolResultClearing's size trigger).
-  toolResultInlineBytes: 50_000,
+  toolOutputMaxLines: 100,
+  // Above Claude Code's BASH_MAX_OUTPUT_DEFAULT (30 000 chars): a truncated build or test log costs a
+  // second run to read the part that was cut, which is dearer than the tokens the headroom spends.
+  toolOutputMaxChars: 41_000,
+  // A single result above this is spilled to disk and the model gets a placeholder instead
+  // (toolResultClearing's size trigger). Claude Code's equivalent sits at 50 000.
+  toolResultInlineBytes: 60_000,
   // Matches Claude Code's per-message budget: four full-size single results, ~50k tokens, the point at
   // which one turn's fan-out alone costs a quarter of a 200k window (toolResultClearing's group trigger).
   toolResultGroupBudgetBytes: 200_000,
@@ -217,21 +218,25 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   // attempt, so three failures mean three exhausted retry chains — a transient provider outage does not
   // reach it, while an irrecoverable context wastes three calls rather than one per turn forever.
   compactionFailureLimit: 3,
-  elicitationTimeoutMs: 300_000,
-  memoryRecallCount: 6,
-  // ~1500 tokens. Spread over memoryRecallCount hits that is ~1000 chars per memory, enough for one to
-  // arrive whole; the previous 1500 total left ~250 each and cut most of them off mid-sentence.
-  memoryRecallChars: 6000,
-  // Recall during the work itself. Three passes is enough to catch a turn changing subject (open a file,
-  // hit an error, move to a different service) without paying for a search on every single model call.
-  memoryLiveRecallPasses: 3,
-  memoryLiveRecallCount: 8,
-  memoryLiveRecallChars: 6000,
-  // A goal worth starting autonomously routinely needs tens of turns — see goalMaxTurns (its ceiling).
-  goalTurnBudget: 24,
-  goalMaxTurns: 64,
+  // Six hours: a question may legitimately wait out a working day rather than a session, and an
+  // elicitation that expires unanswered costs the whole turn that was waiting on it.
+  elicitationTimeoutMs: 21_600_000,
+  memoryRecallCount: 10,
+  // ~5000 tokens, the budget the hits SHARE — at memoryRecallCount that is ~2000 chars each, enough for
+  // a memory carrying a decision and its reasoning to arrive whole instead of cut mid-sentence.
+  memoryRecallChars: 20_000,
+  // Recall during the work itself. A long turn changes subject repeatedly (open a file, hit an error,
+  // move to a different service) and each change is a chance to surface something already learned, so
+  // this sits at the ceiling; the count and char budgets bound what a pass may actually spend.
+  memoryLiveRecallPasses: 10,
+  memoryLiveRecallCount: 10,
+  memoryLiveRecallChars: 8000,
+  // A goal worth starting autonomously routinely needs tens of turns. Budget and ceiling are set equal:
+  // the ceiling exists to stop a runaway goal, not to cut short one that is still making progress.
+  goalTurnBudget: 50,
+  goalMaxTurns: 50,
   channelSessionCap: 32,
-  delegateContextChars: 20_000,
+  delegateContextChars: 40_000,
   // An ask thread is a short clarification exchange, not a conversation — 30 turns already reaches back
   // past anything the overseer needs to answer the question that was just asked.
   askHistoryTurns: 30,
@@ -256,7 +261,7 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // receives inline, so its tuning margin is the default band rather than a raised operator ceiling.
   toolResultInlineBytes: band('toolResultInlineBytes'),
   // Plain ±50% rule (100 000–300 000). The floor is what matters: it stays above the per-result ceiling
-  // (75 000), so a group can always hold one full-size inline result and the aggregate layer can never be
+  // (90 000), so a group can always hold one full-size inline result and the aggregate layer can never be
   // tuned into spilling every result it sees. selectBudgetedToolResults re-floors it at the value in force.
   toolResultGroupBudgetBytes: band('toolResultGroupBudgetBytes'),
   // Exempt from the ±50% rule: 0 must NOT be reachable — it would trip the breaker before a session ever
@@ -264,24 +269,24 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // this knob exists to prevent. 1 stops after a single failure; 10 is patient without being unbounded.
   compactionFailureLimit: [1, 10],
   // memoryRecallChars is the budget these hits SHARE, so raising the count alone makes each hit smaller:
-  // at the 6000-char default, 20 memories leave ~300 chars each and most get cut mid-sentence. An
-  // operator who wants many memories wants the char budget raised with it — hence both ceilings.
+  // at the char floor, 20 memories leave ~500 chars each and most get cut mid-sentence. An operator who
+  // wants many memories wants the char budget raised with it — hence both ceilings.
   memoryRecallCount: band('memoryRecallCount', 20),
   memoryRecallChars: band('memoryRecallChars', 20_000),
   // Exempt from the ±50% rule because 0 has to stay reachable: an operator who does not want the agent
-  // interrupted mid-turn must be able to switch the passes off outright, which a band around 3 would
-  // forbid. The count/char ceilings mirror the turn-start ones so raising one does not strand the other.
+  // interrupted mid-turn must be able to switch the passes off outright, which a band around the default
+  // would forbid. The count/char ceilings mirror the turn-start ones so raising one does not strand the other.
   memoryLiveRecallPasses: [0, 10],
   memoryLiveRecallCount: [0, 20],
   memoryLiveRecallChars: band('memoryLiveRecallChars', 20_000),
-  // Raised past the ±50% rule at the owner's request to ~20k tokens. The ceiling is bounded by
+  // Raised past the ±50% rule at the owner's request to ~20k tokens of ceiling. It is bounded by
   // MAX_PROMPT_TOTAL_CHARS (brain/delegatedScope.ts), the budget packDelegatedPromptAppend fair-shares
   // with the child's role prompt — that budget was raised to 120 000 alongside this, so the value here
   // is now reachable rather than trimmed straight back off.
   delegateContextChars: band('delegateContextChars', 80_000),
   // Deliberately exempt from the ±50% rule: for these four the wide range is load-bearing, not a tuning
-  // margin. The elicitation ceiling was raised to 6 hours by the instance owner — a question may
-  // legitimately wait out a whole working day, not just a session. A busy channel may hold many more
+  // margin. The elicitation range reaches 6 hours — a question may legitimately wait out a whole working
+  // day, not just a session — and the default sits at that ceiling. A busy channel may hold many more
   // live sessions than a quiet one, and the two goal knobs are one family — a per-goal budget that could
   // not approach its own ceiling would make the ceiling unreachable, so both span the same range.
   elicitationTimeoutMs: [30_000, 21_600_000],
@@ -314,8 +319,10 @@ function clampBrainLimits(next: Partial<BrainLimits> | undefined, fallback: Brai
  *  whole numbers, clamped per field, an unset/invalid field keeping the current value. */
 const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   localShellTimeoutMs: 30_000,
-  // 0.30 cosine, carried in per mille because the clamp rounds to a whole number — see RuntimeLimits.
-  memorySemanticFloorPerMille: 300,
+  // 0.20 cosine, carried in per mille because the clamp rounds to a whole number — see RuntimeLimits.
+  // Measured against the live store's pair distribution (p50 0.216), a floor of 0.30 discards the
+  // majority of genuine matches; the duplicate/paraphrase thresholds above do the precision work.
+  memorySemanticFloorPerMille: 200,
   // Both calibrated against the measured pair distribution of the live store rather than picked by feel
   // (p50 0.216, p90 0.383, p99 0.539, max 0.765): the previous hard-coded 0.85/0.97 sat above every pair
   // that exists, so neither check had ever fired once. Re-measure after changing the embedding model.
@@ -487,16 +494,28 @@ const DEFAULT_CONFIG: ElowenConfig = {
   modelNotes: { ...EXEC_NOTES },
   autopilot: { model: 'gpt-4o-mini', overseerModel: '', apiUrl: 'https://api.openai.com/v1', providerId: '', apiKeySet: false, notes: '', prompt: defaultPromptTemplate(), pilotExec: '', overseerExec: '', reviewOnDone: false, tddMode: false, prEnabled: false, prBaseBranch: '', prAutoOpen: false, prVerifyCommand: '', ghTokenSet: false },
   providers: { ...DEFAULT_PROVIDERS },
-  defaults: { exec: 'sonnet', autonomy: 'L3', maxSessions: 1 },
+  defaults: { exec: 'sonnet', autonomy: 'L3', maxSessions: 2 },
   security: { tokenTtlDays: 30 },
-  sessionRetention: { enabled: false, days: 90 },
+  // On, at ten days: an idle conversation older than that is history nobody reopens, and left to
+  // accumulate it is what turns the message store into the largest table in the database.
+  sessionRetention: { enabled: true, days: 10 },
   autoUpdate: false,
   lspEnabled: true,
   webPush: { publicKey: '', publicKeySet: false },
   webPushContact: '',
-  // elowen-docs ships on: it is how the agent answers questions about Elowen itself and looks a setting
-  // up before changing it, which has to work on a fresh install or it is never there when it is needed.
-  plugins: { enabled: ['files', 'terminal', 'askuser', 'runtime-context', 'skills', 'subagent', 'elowen-docs'], removed: [] },
+  // Everything that works without being configured first ships on, so a fresh install behaves like a
+  // tuned one instead of like a stripped one. elowen-docs is how the agent answers questions about
+  // Elowen itself and looks a setting up before changing it; codebase and mcp stay inert until an
+  // embedding provider resp. a server is configured. The chat platforms stay OFF because each declares
+  // a required credential, and a plugin that ships on may not open by asking for one — the fresh-default
+  // suite enforces exactly that. Also off: dev-commands and formatters, which act on the repo unasked.
+  plugins: {
+    enabled: [
+      'files', 'terminal', 'askuser', 'runtime-context', 'skills', 'subagent', 'elowen-docs',
+      'cronjob', 'security-scan', 'statusline', 'codebase', 'mcp',
+    ],
+    removed: [],
+  },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
   runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, memoryRetention: defaultMemoryRetention() },
   embedding: { providerId: '', model: '', baseUrl: '', dimensions: null },

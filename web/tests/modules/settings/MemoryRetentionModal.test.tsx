@@ -12,7 +12,7 @@ const CONFIG: RuntimeConfig = {
     enabled: true,
     graceDays: 14,
     vitalityFloor: 10,
-    halfLifeByImportance: { 1: 15, 2: 30, 3: 60, 4: 90, 5: 0 },
+    halfLifeByImportance: { 1: 3, 2: 7, 3: 14, 4: 30, 5: 0 },
   },
 };
 
@@ -62,7 +62,7 @@ describe('MemoryRetentionModal', () => {
     fireEvent.change(screen.getByRole('slider', { name: 'Half-life — importance 2' }), { target: { value: '0.5' } });
     next = apply(3);
     expect(next.memoryRetention?.halfLifeByImportance[2]).toBe(0.5);
-    expect(next.memoryRetention?.halfLifeByImportance[1]).toBe(15);
+    expect(next.memoryRetention?.halfLifeByImportance[1]).toBe(3);
   });
 
   it('shows importance 5 as pinned instead of a half-life knob that would have no effect', () => {

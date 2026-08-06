@@ -9,8 +9,15 @@ import { isCanonicalThinkingLevel } from '../brain/modelCapabilities.js';
  *  `advisorStyle` picks the advisor's communication style (the `{{personality}}` prompt paragraph). */
 export interface CliSettings { model: string; modelProvider: string; visionModel: string; visionModelProvider: string; compactModel: string; compactModelProvider: string; thinkingLevel: string; autoCompact: boolean; autoCompactAt: number; autoCompactAtByModel: Record<string, number>; advisorStyle: string; personalityBody: string; discordUserId: string; whatsappNumber: string; telegramUserId: string; autoRecall: boolean; autoLiveRecall: boolean; autoSave: boolean }
 export interface ProjectModelPreference { provider: string; model: string }
-// autoRecall/autoSave default to true so upgrading users keep the prior always-on memory behaviour.
-const CLI_DEFAULTS: CliSettings = { model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: false, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: DEFAULT_ADVISOR_STYLE, personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: true };
+// autoRecall/autoLiveRecall default to true so upgrading users keep the prior always-on memory behaviour.
+// autoCompact is on because the alternative is a conversation that dies at the context limit instead of
+// summarizing itself — the first wall a new user hits. autoSave is off because an automatic curator
+// writing memories nobody asked for is harder to undo than a memory that was never saved.
+// thinkingLevel stays EMPTY on purpose, meaning "whatever the model does by default". Empty is persisted
+// by REMOVING the key, so a non-empty default would make that choice unreachable — and the account UI
+// resets the level to empty whenever the active model does not offer it, which would then loop against a
+// default that model cannot honour. The level belongs per model, not in the fallback.
+const CLI_DEFAULTS: CliSettings = { model: '', modelProvider: '', visionModel: '', visionModelProvider: '', compactModel: '', compactModelProvider: '', thinkingLevel: '', autoCompact: true, autoCompactAt: 80, autoCompactAtByModel: {}, advisorStyle: DEFAULT_ADVISOR_STYLE, personalityBody: '', discordUserId: '', whatsappNumber: '', telegramUserId: '', autoRecall: true, autoLiveRecall: true, autoSave: false };
 
 /** Raised when a user tries to link a Discord snowflake another user has already claimed. The route
  *  maps it to a 409 with a Czech user message; the identity link stays with the original owner. */

@@ -5,7 +5,7 @@
 
 export const ADVISOR_STYLES = ['professional', 'friendly', 'concise', 'detailed'] as const;
 export type AdvisorStyle = typeof ADVISOR_STYLES[number];
-export const DEFAULT_ADVISOR_STYLE: AdvisorStyle = 'professional';
+export const DEFAULT_ADVISOR_STYLE: AdvisorStyle = 'concise';
 
 /** True when the string is one of the known styles (used to validate stored/incoming values). */
 export function isAdvisorStyle(v: string | undefined): v is AdvisorStyle {

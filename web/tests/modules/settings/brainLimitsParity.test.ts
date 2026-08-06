@@ -84,9 +84,9 @@ describe('brain limits — web editor against the daemon clamp', () => {
   it('actually read both tables', () => {
     expect(Object.keys(daemonBounds())).toHaveLength(16);
     expect(Object.keys(webBounds())).toHaveLength(16);
-    expect(daemonBounds().delegateContextChars).toEqual([10000, 80000]);
+    expect(daemonBounds().delegateContextChars).toEqual([20000, 80000]);
     expect(daemonBounds().elicitationTimeoutMs).toEqual([30000, 21600000]);
-    expect(webBounds().toolOutputMaxChars).toEqual([15000, 80000]);
-    expect(webDefaults.toolOutputMaxChars).toBe(30000);
+    expect(webBounds().toolOutputMaxChars).toEqual([20500, 80000]);
+    expect(webDefaults.toolOutputMaxChars).toBe(41000);
   });
 });

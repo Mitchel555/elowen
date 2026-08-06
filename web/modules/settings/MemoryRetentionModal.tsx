@@ -15,7 +15,7 @@ export const DEFAULT_MEMORY_RETENTION: MemoryRetentionConfig = {
   enabled: true,
   graceDays: 14,
   vitalityFloor: 10,
-  halfLifeByImportance: { 1: 15, 2: 30, 3: 60, 4: 90, 5: 0, },
+  halfLifeByImportance: { 1: 3, 2: 7, 3: 14, 4: 30, 5: 0, },
 };
 
 /** Which importance levels get a half-life knob. 5 is deliberately absent: the daemon never decays or

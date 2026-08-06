@@ -33,16 +33,21 @@ describe('BrainLimitsModal', () => {
       </LanguageProvider>,
     );
 
-    expect(screen.getByText('5 min')).toBeTruthy();
-    expect(screen.getByText('≈ 7.5k tokens')).toBeTruthy();
+    // Read each label off ITS OWN row rather than off the whole dialog: two size fields can round to the
+    // same token estimate, and a bare getByText would then fail on an ambiguity that says nothing about
+    // the formatting under test.
+    const rowLabel = (sliderName: string): string | undefined =>
+      screen.getByRole('slider', { name: sliderName }).closest('div')?.parentElement?.textContent ?? undefined;
+    expect(rowLabel('Question timeout')).toContain('360 min');
+    expect(rowLabel('Tool output — tokens')).toContain('≈ 10k tokens');
     fireEvent.change(screen.getByRole('slider', { name: 'Question timeout' }), { target: { value: '10' } });
-    fireEvent.change(screen.getByRole('slider', { name: 'Tool output — tokens' }), { target: { value: '4000' } });
+    fireEvent.change(screen.getByRole('slider', { name: 'Tool output — tokens' }), { target: { value: '6000' } });
 
     const durationUpdate = updates[0];
     const sizeUpdate = updates[1];
     if (!durationUpdate || !sizeUpdate) throw new Error('slider changes did not reach onChange');
     expect(durationUpdate(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(600000);
-    expect(sizeUpdate(BRAIN_LIMIT_DEFAULTS).toolOutputMaxChars).toBe(16000);
+    expect(sizeUpdate(BRAIN_LIMIT_DEFAULTS).toolOutputMaxChars).toBe(24000);
   });
 
   it('keeps slider changes inside the canonical field bounds', () => {
@@ -56,11 +61,14 @@ describe('BrainLimitsModal', () => {
     expect(timeout.min).toBe('0.5');
     expect(timeout.max).toBe('360'); // 6 hours, in the slider's own unit (minutes)
 
-    fireEvent.change(timeout, { target: { value: '500' } }); // past the ceiling — must come back clamped
+    // Clamped from BELOW, because this field's default already sits on its ceiling: a value pushed past
+    // the top would come back as the value the slider already holds, and an input whose value did not
+    // change fires no event at all — the assertion would then be waiting on a change that never happens.
+    fireEvent.change(timeout, { target: { value: '0.1' } });
 
     const update = updates[0];
     if (!update) throw new Error('slider change did not reach onChange');
-    expect(update(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(21_600_000);
+    expect(update(BRAIN_LIMIT_DEFAULTS).elicitationTimeoutMs).toBe(30_000);
   });
 
   it('names the value actually in force on a field the daemon clamped', () => {

@@ -74,7 +74,7 @@ describe('memory retention — web editor against the daemon clamp', () => {
   // Guards the parsing itself: were a regex to stop matching, the tables above would silently be empty.
   it('actually read both tables', () => {
     expect(daemonDefaults).toEqual({
-      graceDays: 14, vitalityFloor: 10, 1: 15, 2: 30, 3: 60, 4: 90, 5: 0,
+      graceDays: 14, vitalityFloor: 10, 1: 3, 2: 7, 3: 14, 4: 30, 5: 0,
     });
     expect(daemonBounds()).toEqual({ graceDays: [0, 365], vitalityFloor: [0, 90], halfLife: [0, 90] });
     expect(webFieldBounds().graceDays).toEqual([0, 365]);

@@ -46,12 +46,12 @@ describe('ConfigStore brain limits', () => {
   it('defaults to the built-in limits', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     expect(cs.get().brain.limits).toEqual({
-      toolOutputMaxLines: 80, toolOutputMaxChars: 30000, toolResultInlineBytes: 50000,
-      toolResultGroupBudgetBytes: 200000, compactionFailureLimit: 3, elicitationTimeoutMs: 300000,
-      memoryRecallCount: 6, memoryRecallChars: 6000,
-      memoryLiveRecallPasses: 3, memoryLiveRecallCount: 8, memoryLiveRecallChars: 6000,
-      goalTurnBudget: 24, goalMaxTurns: 64, channelSessionCap: 32,
-      delegateContextChars: 20000, askHistoryTurns: 30,
+      toolOutputMaxLines: 100, toolOutputMaxChars: 41000, toolResultInlineBytes: 60000,
+      toolResultGroupBudgetBytes: 200000, compactionFailureLimit: 3, elicitationTimeoutMs: 21600000,
+      memoryRecallCount: 10, memoryRecallChars: 20000,
+      memoryLiveRecallPasses: 10, memoryLiveRecallCount: 10, memoryLiveRecallChars: 8000,
+      goalTurnBudget: 50, goalMaxTurns: 50, channelSessionCap: 32,
+      delegateContextChars: 40000, askHistoryTurns: 30,
     });
   });
 
@@ -72,14 +72,14 @@ describe('ConfigStore brain limits', () => {
   // and memory recall chars), so those are pinned to their explicit overrides instead.
   it('accepts a tuning knob anywhere in its band and clamps beyond it', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    cs.update({ brain: { limits: { toolOutputMaxChars: 22_000, memoryRecallChars: 5_000, toolOutputMaxLines: 200 } } });
+    cs.update({ brain: { limits: { toolOutputMaxChars: 22_000, memoryRecallChars: 12_000, toolOutputMaxLines: 200 } } });
     expect(cs.get().brain.limits.toolOutputMaxChars).toBe(22000);
-    expect(cs.get().brain.limits.memoryRecallChars).toBe(5000);
+    expect(cs.get().brain.limits.memoryRecallChars).toBe(12000);
     expect(cs.get().brain.limits.toolOutputMaxLines).toBe(200); // upper edge, exactly in range
     cs.update({ brain: { limits: { toolOutputMaxChars: 500_000, memoryRecallChars: 100_000, toolOutputMaxLines: 1 } } });
     expect(cs.get().brain.limits.toolOutputMaxChars).toBe(80000); // explicit ceiling, ~20k tokens
     expect(cs.get().brain.limits.memoryRecallChars).toBe(20000);  // explicit ceiling, ~5k tokens
-    expect(cs.get().brain.limits.toolOutputMaxLines).toBe(40);    // 80 − 50%
+    expect(cs.get().brain.limits.toolOutputMaxLines).toBe(50);    // 100 − 50%
   });
 
   // The aggregate tool-result budget bands at ±50%, and its floor is the load-bearing part: 100 000 stays
@@ -141,20 +141,20 @@ describe('ConfigStore brain limits', () => {
     cs.update({ brain: { limits: { delegateContextChars: 500_000 } } });
     expect(cs.get().brain.limits.delegateContextChars).toBe(80000);
     cs.update({ brain: { limits: { delegateContextChars: 10 } } });
-    expect(cs.get().brain.limits.delegateContextChars).toBe(10000);
-    cs.update({ brain: { limits: { delegateContextChars: 12_345 } } });
-    expect(cs.get().brain.limits.delegateContextChars).toBe(12345);
+    expect(cs.get().brain.limits.delegateContextChars).toBe(20000);
+    cs.update({ brain: { limits: { delegateContextChars: 32_345 } } });
+    expect(cs.get().brain.limits.delegateContextChars).toBe(32345);
   });
 
   it('merges a partial patch per-field without resetting siblings, and clamps out-of-range values', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     cs.update({ brain: { limits: { goalTurnBudget: 10 } } });
     expect(cs.get().brain.limits.goalTurnBudget).toBe(10);
-    expect(cs.get().brain.limits.memoryRecallCount).toBe(6); // sibling untouched
+    expect(cs.get().brain.limits.memoryRecallCount).toBe(10); // sibling untouched
     // Clamp both ends + round a fractional value to a whole number.
     cs.update({ brain: { limits: { goalTurnBudget: 999, memoryRecallCount: 0, channelSessionCap: 40.7 } } });
     expect(cs.get().brain.limits.goalTurnBudget).toBe(500);  // exempt: shares goalMaxTurns' ceiling
-    expect(cs.get().brain.limits.memoryRecallCount).toBe(3); // min 3 (6 − 50%)
+    expect(cs.get().brain.limits.memoryRecallCount).toBe(5); // min 5 (10 − 50%)
     expect(cs.get().brain.limits.channelSessionCap).toBe(41); // rounded, in range
   });
 

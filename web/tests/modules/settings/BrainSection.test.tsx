@@ -11,13 +11,13 @@ const CONFIG = {
   brain: { providers: [], agentName: 'Elowen', maxSteps: 20 },
   runtime: {
     limits: {
-      localShellTimeoutMs: 30000, memorySemanticFloorPerMille: 300, toolDeferThreshold: 10, eventRetentionDays: 30,
+      localShellTimeoutMs: 30000, memorySemanticFloorPerMille: 200, toolDeferThreshold: 10, eventRetentionDays: 30,
       streamSilenceLimitMs: 75000, streamReviveSilenceLimitMs: 45000, toastDurationMs: 4500,
     },
     toolDeferralEnabled: true,
     memoryRetention: {
       enabled: true, graceDays: 14, vitalityFloor: 10,
-      halfLifeByImportance: { 1: 15, 2: 30, 3: 60, 4: 90, 5: 0 },
+      halfLifeByImportance: { 1: 3, 2: 7, 3: 14, 4: 30, 5: 0 },
     },
   },
 };
