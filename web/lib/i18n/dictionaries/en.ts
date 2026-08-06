@@ -1743,8 +1743,6 @@ export const en = {
     heroCost: 'Cost',
     roleYou: 'You',
     roleElowen: 'Elowen',
-    fullscreen: 'Fullscreen',
-    exitFullscreen: 'Exit fullscreen',
   },
   telemetry: {
     title: 'Telemetry',

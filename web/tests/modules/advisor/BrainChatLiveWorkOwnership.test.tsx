@@ -9,10 +9,10 @@ import { BrainChatSurface } from '../../../modules/advisor/BrainChatSurface';
 import { BrainChatProvider } from '../../../modules/advisor/BrainChatProvider';
 import type { ProcessInfo } from '../../../lib/types';
 
-/** Running agents and background processes must be announced in exactly ONE place. The docked telemetry
- *  rail lists both and drills into both, so while it is open the in-transcript process panel and agents
- *  chip are duplicates. With no rail — or a hidden one — the transcript has to keep reporting them, or the
- *  work would become invisible instead of merely un-duplicated. */
+/** Background processes belong to the telemetry panel and nowhere else: a long-running command reported
+ *  both above the composer and in the rail was the same work announced twice, and the transcript copy is
+ *  the one that crowded the conversation. Running AGENTS still fall back to the transcript, because the
+ *  chip is one line and a reader with no rail on screen would otherwise have no sign of them at all. */
 
 class FakeES {
   static instances: FakeES[] = [];
@@ -34,9 +34,6 @@ const process1: ProcessInfo = {
   startedAt: '2026-07-27T10:00:00.000Z', running: true, exitCode: null, completionMode: 'service',
 };
 
-/** Asserting a row is ABSENT only means something once the data it would come from has actually arrived. */
-let processFetches = 0;
-
 const server = setupServer(
   http.post('*/api/brain/start', () => HttpResponse.json({ sessionId: 'brain-1' }, { status: 201 })),
   http.get('*/api/brain/messages', ({ request }) => (new URL(request.url).searchParams.has('limit')
@@ -45,7 +42,7 @@ const server = setupServer(
   http.get('*/api/brain/status', () => HttpResponse.json({
     running: true, sessionId: 'brain-1', model: 'm', usage: null, statusline: null, cards: [], queued: [],
   })),
-  http.get('*/api/brain/processes', () => { processFetches += 1; return HttpResponse.json([process1]); }),
+  http.get('*/api/brain/processes', () => HttpResponse.json([process1])),
   http.get('*/api/brain/processes/:id/output', () => HttpResponse.json({ output: '' })),
   http.get('*/api/brain/rate-limits', () => HttpResponse.json(null)),
   http.get('*/api/brain/sessions', () => HttpResponse.json([])),
@@ -56,10 +53,13 @@ beforeAll(() => {
   server.listen({ onUnhandledRequest });
   (Element.prototype as unknown as { scrollTo: () => void }).scrollTo = () => {};
 });
-afterEach(() => { server.resetHandlers(); FakeES.instances.length = 0; processFetches = 0; localStorage.clear(); });
+afterEach(() => { server.resetHandlers(); FakeES.instances.length = 0; localStorage.clear(); });
 afterAll(() => server.close());
 beforeEach(() => { (globalThis as unknown as { EventSource: unknown }).EventSource = FakeES; });
 
+/** Renders the surface with a live process AND a live agent already reported over the stream, so an
+ *  assertion that the process row is absent means "the surface refuses to draw it", not "no data arrived".
+ *  The agent chip is the arrival signal: it is fed by the same stream in the same act(). */
 async function renderSurface(telemetryShown: boolean | undefined): Promise<{ showRail: (shown: boolean) => void }> {
   const { wrapper: Wrapper } = createWrapper();
   const tree = (shown: boolean | undefined) => (
@@ -76,39 +76,37 @@ async function renderSurface(telemetryShown: boolean | undefined): Promise<{ sho
     type: 'subagent', id: 'call-1', sessionId: 'brain-sub-1', status: 'running',
     task: 'sleep 50', tools: 1, seconds: 3,
   });
-  await waitFor(() => expect(processFetches).toBeGreaterThan(0));
   return { showRail: (shown: boolean) => act(() => view.rerender(tree(shown))) };
 }
 
 describe('live work is reported in one place', () => {
-  it('keeps the transcript copies when there is no docked rail', async () => {
+  it('never draws a background process in the transcript, even with no rail to defer to', async () => {
     await renderSurface(undefined);
 
-    expect(await screen.findByText('Background processes')).toBeInTheDocument();
+    // The agent chip proves the stream was consumed, so the missing process row is a decision.
     expect(await screen.findByText(/1 agent/)).toBeInTheDocument();
+    expect(screen.queryByText('Background processes')).toBeNull();
+    expect(screen.queryByTitle('sleep 55')).toBeNull();
   });
 
-  it('keeps the transcript copies when the rail is hidden', async () => {
+  it('never draws one when the rail is merely hidden either', async () => {
     await renderSurface(false);
 
-    expect(await screen.findByText('Background processes')).toBeInTheDocument();
     expect(await screen.findByText(/1 agent/)).toBeInTheDocument();
+    expect(screen.queryByText('Background processes')).toBeNull();
+    expect(screen.queryByTitle('sleep 55')).toBeNull();
   });
 
-  it('drops the transcript copies once the rail takes over, and restores them when it closes', async () => {
-    // Start with the rail closed so BOTH copies are on screen first. Asserting they are absent from a fresh
-    // render would also pass if the process and agent data had simply never arrived — the in-transcript
-    // panel is itself what fetches the process list, so a hidden one means nothing is fetched at all.
+  it('still hands the AGENTS chip to the rail while it is open, and takes it back when it closes', async () => {
     const { showRail } = await renderSurface(false);
-    expect(await screen.findByText('Background processes')).toBeInTheDocument();
     expect(await screen.findByText(/1 agent/)).toBeInTheDocument();
 
     showRail(true);
-    await waitFor(() => expect(screen.queryByText('Background processes')).toBeNull());
-    expect(screen.queryByText(/1 agent/)).toBeNull();
+    await waitFor(() => expect(screen.queryByText(/1 agent/)).toBeNull());
 
     showRail(false);
-    expect(await screen.findByText('Background processes')).toBeInTheDocument();
     expect(await screen.findByText(/1 agent/)).toBeInTheDocument();
+    // The rail closing must not bring the process row back with the chip.
+    expect(screen.queryByText('Background processes')).toBeNull();
   });
 });

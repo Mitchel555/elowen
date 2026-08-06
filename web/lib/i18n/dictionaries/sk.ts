@@ -1743,8 +1743,6 @@ export const sk = {
     heroCost: 'Náklady',
     roleYou: 'Vy',
     roleElowen: 'Elowen',
-    fullscreen: 'Celá obrazovka',
-    exitFullscreen: 'Zavrieť celú obrazovku',
   },
   telemetry: {
     title: 'Telemetria',

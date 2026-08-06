@@ -94,7 +94,7 @@ describe('BrainChatSurface reasoning display toggle', () => {
     expect(screen.queryByText(REASONING)).toBeNull();
   });
 
-  it('offers the same toggle in the full (mobile fullscreen) variant', async () => {
+  it('offers the same toggle in the full /chat variant', async () => {
     renderSurface('full');
     await streamReasoning();
     expect(await screen.findByText(REASONING)).toBeInTheDocument();

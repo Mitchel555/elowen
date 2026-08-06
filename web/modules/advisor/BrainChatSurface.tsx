@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Maximize2, Minimize2, Loader2, Brain, Activity, Pencil, MoreHorizontal, ListChecks } from 'lucide-react';
+import { Send, Square, Plus, ChevronDown, Paperclip, X, FileText, Users, ChevronRight, PanelLeft, Loader2, Brain, Activity, Pencil, MoreHorizontal, ListChecks } from 'lucide-react';
 import { toolGlyph } from '../../lib/toolGlyph';
 import { usePersistentState } from '../../lib/usePersistentState';
 import { plural, useTranslation } from '../../lib/i18n';
@@ -16,8 +16,6 @@ import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { AskQuestionCard } from './AskQuestionCard';
-import { ProcessPanel } from './ProcessPanel';
-import { ownedSessionIds } from '../../lib/processScope';
 import { AgentsTable } from './AgentsTable';
 import { StatsModal } from './StatsModal';
 import { PlanDecisionModal } from './PlanDecisionModal';
@@ -26,8 +24,6 @@ import { ModelPicker } from './ModelPicker';
 import { useBrainChat } from './BrainChatProvider';
 import { formatTokens, formatCost, formatDuration } from '../../lib/format';
 
-const FULLSCREEN_KEY = 'elowen.chat.fullscreen';
-const FULLSCREEN_VALUES = ['on', 'off'] as const;
 const STATUSLINE_VALUES = ['shown', 'hidden'] as const;
 
 /** Sanitized-markdown block for one assistant text segment (marked + DOMPurify, no bubble). */
@@ -464,7 +460,7 @@ function Message({ turn, full, showRole, showThoughts, tk }: { turn: ChatTurn; f
 }
 
 /** Header switch for showing the model's reasoning in the transcript. Rendered as a pressed-state icon
- *  button like its sibling controls (new chat, fullscreen) rather than ui/IconButton or ui/Toggle: neither
+ *  button like its sibling controls (new chat, telemetry) rather than ui/IconButton or ui/Toggle: neither
  *  carries a toggled state at this bar's size, and a switch pill reads as a settings control here. */
 function ThoughtsToggle({ full, on, onToggle }: { full?: boolean; on: boolean; onToggle: () => void }) {
   const { t } = useTranslation();
@@ -504,11 +500,11 @@ function WorkModePill({ mode, full }: { mode: BrainWorkMode; full?: boolean }) {
 }
 
 /** Phone-only overflow for the conversation bar: on a narrow screen the bar can't hold the model picker,
- *  work-mode pill, thoughts toggle AND fullscreen inline without cramming, so they fold behind one ⋯ button.
+ *  work-mode pill and thoughts toggle inline without cramming, so they fold behind one ⋯ button.
  *  A transient popover (outside-pointer / Escape dismiss, same grammar as ModelPicker), never a persistent
  *  panel. Desktop keeps every control inline and never mounts this. */
-function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen, onToggleFullscreen, hasTodos, onOpenTodos }: {
-  workMode: BrainWorkMode; showThoughts: boolean; onToggleThoughts: () => void; fullscreen: boolean; onToggleFullscreen: () => void; hasTodos: boolean; onOpenTodos: () => void;
+function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, hasTodos, onOpenTodos }: {
+  workMode: BrainWorkMode; showThoughts: boolean; onToggleThoughts: () => void; hasTodos: boolean; onOpenTodos: () => void;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -536,14 +532,13 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
       </button>
       {/* A plain popover, NOT `role="menu"`: that role promises menuitem children and arrow-key roving
           focus, and this popover leads with the model picker — a composite control, not a menu row — so
-          the promise was one a screen reader could not cash. `data-chat-popover` is what the fullscreen
-          Escape guard looks for, since there is no longer a role to key off. */}
+          the promise was one a screen reader could not cash. */}
       {open ? (
         <div data-chat-popover className="absolute right-0 z-20 mt-1 flex w-60 flex-col gap-0.5 rounded-lg border border-border bg-elevated p-1.5 shadow-lg">
           {/* The picker is the menu's heading — it is a control, not a menu row, so it reads wrong pushed
               below one. Plain rows follow it. */}
           <div className="px-1 pb-1"><ModelPicker variant="full" /></div>
-          {/* Fullscreen drops the inline TODO card, so the menu is the way to reach it there. */}
+          {/* The narrow bar has no room for a TODO control of its own, so the menu is the way to reach it. */}
           {hasTodos ? (
             <button type="button" onClick={() => { setOpen(false); onOpenTodos(); }} className={rowClass}>
               <ListChecks size={16} className="text-text-muted" aria-hidden />
@@ -553,10 +548,6 @@ function BarOverflowMenu({ workMode, showThoughts, onToggleThoughts, fullscreen,
           <button type="button" onClick={onToggleThoughts} aria-pressed={showThoughts} className={rowClass}>
             <Brain size={16} className={showThoughts ? 'text-text' : 'text-text-muted'} aria-hidden />
             <span>{showThoughts ? t.brainChat.hideThoughts : t.brainChat.showThoughts}</span>
-          </button>
-          <button type="button" onClick={onToggleFullscreen} aria-pressed={fullscreen} className={rowClass}>
-            {fullscreen ? <Minimize2 size={16} className="text-text-muted" aria-hidden /> : <Maximize2 size={16} className="text-text-muted" aria-hidden />}
-            <span>{fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}</span>
           </button>
           {workMode !== 'build' ? (
             <div className="flex items-center gap-2 px-2 py-1.5 text-sm text-text-muted">
@@ -608,7 +599,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   const { toast } = useToast();
   const c = useBrainChat();
   const {
-    turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly, activeSessionId,
+    turns, busy, ready, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued, readOnly,
     usage, lineCfg, currentModel, subagents, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, onQueueRemove, onAnswer, slash, sessions, focusNonce,
     ensureAttached, abort, loadOlder, hasMoreHistory, showThoughts, setShowThoughts,
@@ -623,44 +614,28 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [slashIdx, setSlashIdx] = useState(0);
-  // Fullscreen is a CSS-only overlay on the SAME root node (never a portal/remount), so the stream,
-  // draft and running turn survive the toggle. Only meaningful for the full /chat variant. Persisted
-  // per device like the rail's width and the reasoning toggle: someone who reads in fullscreen wants it
-  // on the next visit too, and re-entering it on every reload is exactly the chore they complained about.
-  const [fullscreenPref, setFullscreenPref] = usePersistentState<'on' | 'off'>(FULLSCREEN_KEY, 'off', FULLSCREEN_VALUES);
-  const fullscreen = fullscreenPref === 'on';
-  // Whether the statusline row (model / context / tokens / cost) is shown is a per-device display choice
-  // like fullscreen — it belongs to the screen you are on, not the user record. Collapsing it in-chat
-  // (a small chevron) is the quick alternative to the statusline plugin's settings toggles.
+  // Whether the statusline row (model / context / tokens / cost) is shown is a per-device display choice —
+  // it belongs to the screen you are on, not the user record. Collapsing it in-chat (a small chevron) is
+  // the quick alternative to the statusline plugin's settings toggles.
   const [statuslinePref, setStatuslinePref] = usePersistentState<'shown' | 'hidden'>('elowen.chat.statusline', 'shown', STATUSLINE_VALUES);
   const statuslineShown = statuslinePref === 'shown';
-  // Stable identity on purpose: two effects below close over this, and a fresh function each render would
-  // re-subscribe the Escape listener on every keystroke.
-  const setFullscreen = useCallback((on: boolean): void => setFullscreenPref(on ? 'on' : 'off'), [setFullscreenPref]);
-  // Running agents and background processes are reported in exactly ONE place. The docked rail lists both
-  // (and drills into both), so while it is open the in-transcript copies are redundant — the same work was
-  // being announced twice. `telemetryShown` is undefined wherever there is no docked rail (the compact dock,
-  // and a phone where the rail is a drawer), so only an actually-visible rail takes ownership; hidden or
-  // absent hands the reporting back to the transcript rather than dropping it.
+  // Running agents are reported in exactly ONE place. The docked rail lists them (and drills into them), so
+  // while it is open the in-transcript chip is redundant — the same work was being announced twice.
+  // `telemetryShown` is undefined wherever there is no docked rail (the compact dock, and a phone where the
+  // rail is a drawer), so only an actually-visible rail takes ownership; hidden or absent hands the
+  // reporting back to the transcript rather than dropping it.
   const railOwnsLiveWork = telemetryShown === true;
   // `undefined` until the viewport has actually been measured. Every branch below therefore tests `=== true`
   // or `=== false` and renders NOTHING in between: the boolean-returning hook reports `false` first, which
-  // on a phone painted one frame of the desktop controls (inline picker, mode pill, thoughts toggle,
-  // fullscreen button) plus the TODO card and process panel before swapping them for the ⋯ menu. A bar that
-  // is briefly missing a control is quieter than one that visibly rearranges itself. Same approach as
-  // ChatView, which reads this hook for its own layout.
+  // on a phone painted one frame of the desktop controls (inline picker, mode pill, thoughts toggle) before
+  // swapping them for the ⋯ menu. A bar that is briefly missing a control is quieter than one that visibly
+  // rearranges itself. Same approach as ChatView, which reads this hook for its own layout.
   const mobile = useMobileViewport();
-  // Phone fullscreen is an immersive view of the conversation: the bar stays (it is the only way back out
-  // of fullscreen), but the inline TODO card, the background-process panel and the sub-agent chip would
-  // just pile clutter above the composer on a small screen, so they leave the transcript there. Outside
-  // fullscreen they stay — that layout reads fine. Desktop fullscreen is untouched.
-  const immersive = mobile === true && fullscreen;
-  // The transcript's out-of-band extras (TODO cards, process panel, agents chip) wait for the measurement
-  // too: rendering them while the viewport is still unknown paints them once on a phone, only to pull them
-  // straight back out when the immersive view resolves a frame later.
-  const transcriptExtras = mobile !== undefined && !immersive;
-  // TODO cards with open work (CardBlock hides a card whose every item is done). The transcript copy is
-  // out of the immersive phone view, so the ⋯ menu opens them in a dialog instead.
+  // The transcript's out-of-band extras (TODO cards, agents chip) wait for the measurement too: rendering
+  // them while the viewport is still unknown paints them once on a phone before the layout resolves.
+  const transcriptExtras = mobile !== undefined;
+  // TODO cards with open work (CardBlock hides a card whose every item is done). The phone bar has no room
+  // for a control of its own, so the ⋯ menu opens them in a dialog instead.
   const todoCards = cards.filter((cd) => {
     if (cd.id === 'bg-processes') return false;
     const items = cd.items ?? [];
@@ -683,14 +658,13 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   const anchorTopRef = useRef(0);
 
   // The element that actually scrolls the transcript: in the full page it is the shell <main> (the page
-  // itself scrolls), except in fullscreen where the fixed overlay's own messages div is the scroll box; the
-  // compact dock always scrolls its own box. Every scroll read/write below goes through this one resolver.
+  // itself scrolls); the compact dock scrolls its own box. Every scroll read/write below goes through this
+  // one resolver.
   const getScroller = useCallback((): HTMLElement | null => {
     const el = scrollRef.current;
     if (!el) return null;
-    if (variant === 'full') return fullscreen ? el : el.closest('main');
-    return el;
-  }, [variant, fullscreen]);
+    return variant === 'full' ? el.closest('main') : el;
+  }, [variant]);
 
   // Grab the current topmost turn node as the prepend anchor, then fetch the next older page (the layout
   // effect restores its position once the page lands). Guarded so a burst of scroll events fires at most one
@@ -712,8 +686,6 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
 
   const active = sessions.data?.find((s) => s.active);
   const runningAgents = subagents.filter((agent) => agent.status === 'running').length;
-  // The sessions whose background processes this conversation owns — itself plus its delegated children.
-  const ownedProcessSessions = useMemo(() => ownedSessionIds(activeSessionId, subagents), [activeSessionId, subagents]);
   // Index of the first live (id-less) turn — the boundary between stored history and the live streaming tail
   // used to key the tail stably across a lazy-load prepend (see the transcript map below).
   const firstLiveTurn = turns.findIndex((turn) => !turn.id);
@@ -749,12 +721,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
       s.scrollTo({ top: s.scrollHeight });
     }
     prevTurnsRef.current = turns;
-  }, [turns, variant, fullscreen, getScroller]);
+  }, [turns, variant, getScroller]);
 
   // Watch the live scroll position: track "near the bottom" (the stick-to-newest gate above) and load the
   // next older page when the reader nears the top. Bound imperatively because the scroller is sometimes the
-  // shell <main>, not a node this component renders; rebinds only when the resolver changes
-  // (variant/fullscreen) — the trigger is read through a ref so a per-render identity can't churn the bind.
+  // shell <main>, not a node this component renders; rebinds only when the resolver changes (variant) —
+  // the trigger is read through a ref so a per-render identity can't churn the bind.
   useEffect(() => {
     const s = getScroller();
     if (!s) return;
@@ -781,67 +753,16 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
   // whose setSlashIdx(0) moved into the surface since slashIdx is now surface-local view state).
   useEffect(() => { if (slash.modelOptsOpen) setSlashIdx(0); }, [slash.modelOptsOpen]);
 
-  // Escape leaves fullscreen — but only when no transient UI owns Escape. The slash menu's own Escape
-  // (the composer clears it) and an open ModelPicker menu (its own Escape closes it) must win first, so we
-  // bail while the slash menu is open or a picker listbox is mounted. Guarding by state/DOM (not
-  // stopPropagation) lets the owning handler run in the same keystroke without also collapsing fullscreen.
-  useEffect(() => {
-    if (!fullscreen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (slashOpen) return;
-      // A picker listbox, a modal drawer/dialog (the history rail) or the bar's ⋯ popover owns Escape
-      // first — its own handler closes it on this same keystroke, so fullscreen must not also collapse.
-      // The popover was missing from this list, so one Escape closed the menu AND dropped fullscreen.
-      if (document.querySelector('[role="listbox"],[role="dialog"],[aria-modal="true"],[data-chat-popover]')) return;
-      setFullscreen(false);
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [fullscreen, slashOpen, setFullscreen]);
-
-  // The overlay is `fixed`, but the shell's scroll container behind it still holds a viewport-tall
-  // placeholder and keeps scrolling — its scrollbar showed through along the edge as if the chat itself
-  // had one. Lock the background scroller for as long as the overlay is up (standard overlay scroll lock);
-  // the cleanup releases it on exit, on unmount and on a variant switch.
-  useEffect(() => {
-    if (variant !== 'full' || !fullscreen) return;
-    const root = document.documentElement;
-    root.classList.add('chat-fullscreen-lock');
-    return () => root.classList.remove('chat-fullscreen-lock');
-  }, [variant, fullscreen]);
-
-  // Auto-enter fullscreen on a phone so the conversation owns the whole viewport (the embedded /chat page
-  // is cramped there) — but ONLY for someone who has never made the choice on this device. `fullscreenPref`
-  // cannot tell "never chose" from "chose off", since both read 'off', so the stored key is read directly:
-  // without that, leaving /chat and coming back remounts this component and forces fullscreen on again,
-  // overriding the user every single time. The ref additionally keeps an orientation change that re-crosses
-  // the breakpoint from re-firing within one mount.
-  const autoFullscreenedRef = useRef(false);
-  useEffect(() => {
-    if (variant !== 'full' || mobile !== true || autoFullscreenedRef.current) return;
-    autoFullscreenedRef.current = true;
-    let chose = false;
-    try { chose = localStorage.getItem(FULLSCREEN_KEY) !== null; } catch { /* private mode — treat as unchosen */ }
-    if (!chose) setFullscreen(true);
-  }, [variant, mobile, setFullscreen]);
-
   const newChat = () => { setPickerOpen(false); void switchSession({ fresh: true }).catch(() => toast(t.brainChat.searchOpenError, 'error')); };
 
   return (
     <div
-      className={`relative flex flex-col ${
-        variant === 'full'
-          ? fullscreen ? 'fixed inset-0 z-50 overflow-hidden bg-bg' : 'flex-1'
-          : 'h-full min-h-0'
-      }`}
-      style={variant === 'full' && fullscreen ? { height: 'calc(100dvh / var(--ui-scale, 1))' } : undefined}
+      className={`relative flex flex-col ${variant === 'full' ? 'flex-1' : 'h-full min-h-0'}`}
       data-variant={variant}
     >
       {/* Conversation bar. Compact (dock): title + picker dropdown + new chat. Full (/chat): a light
           header — the shared history rail owns the session list, so here it is only the title, a mobile
-          drawer toggle and new chat. Space is reserved for the model picker (Fáze 3), terminal
-          (Fáze 4/5) and fullscreen (Fáze 6). */}
+          drawer toggle and new chat. */}
       {variant === 'compact' ? (
         <div className="relative flex items-center gap-1 border-b border-border px-2 py-1.5">
           <button
@@ -867,7 +788,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           <ChatHistoryRail variant="dropdown" open={pickerOpen} onClose={() => setPickerOpen(false)} />
         </div>
       ) : (
-        <div className={`chat-gutter ${fullscreen ? '' : 'sticky top-0 '}z-10 flex shrink-0 items-center gap-1.5 bg-bg py-2`}>
+        <div className="chat-gutter sticky top-0 z-10 flex shrink-0 items-center gap-1.5 bg-bg py-2">
           {/* No hairline under the sticky bar — a soft fade separates it from the scrolling transcript. */}
           <div aria-hidden className="pointer-events-none absolute inset-x-0 top-full h-4 bg-gradient-to-b from-bg to-transparent" />
           {onOpenHistory ? (
@@ -916,26 +837,12 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           >
             <Plus size={18} aria-hidden />
           </button>
-          {/* A phone is auto-fullscreen (see the mount effect), so the inline fullscreen toggle is desktop-
-              only; on mobile it lives inside the ⋯ menu alongside the model/mode/thoughts controls. */}
-          {mobile === false ? (
-            <button
-              type="button"
-              onClick={() => setFullscreen(!fullscreen)}
-              aria-pressed={fullscreen}
-              aria-label={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
-              title={fullscreen ? t.chat.exitFullscreen : t.chat.fullscreen}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-elevated hover:text-text"
-            >
-              {fullscreen ? <Minimize2 size={18} aria-hidden /> : <Maximize2 size={18} aria-hidden />}
-            </button>
-          ) : mobile === true ? (
+          {/* Desktop keeps the model/mode/thoughts controls inline above; a phone folds them behind ⋯. */}
+          {mobile === true ? (
             <BarOverflowMenu
               workMode={workMode}
               showThoughts={showThoughts}
               onToggleThoughts={() => setShowThoughts(!showThoughts)}
-              fullscreen={fullscreen}
-              onToggleFullscreen={() => setFullscreen(!fullscreen)}
               hasTodos={todoCards.length > 0}
               onOpenTodos={() => setTodosOpen(true)}
             />
@@ -947,11 +854,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
           turns stack with NO container gap — each segment carries its own margin, so tool rows keep one
           uniform rhythm across turn boundaries and only a speaker change opens a block break. The compact
           dock keeps its own internal scroll and per-turn gap. */}
-      {/* The scrollbar is hidden only in the immersive PHONE view, where a permanent gutter stripe reads as
-          chrome the small screen cannot spare and touch scrolling needs no visible track. Desktop
-          fullscreen keeps its scrollbar: a mouse user has no other cue to where they are in a long
-          conversation. */}
-      <div ref={scrollRef} data-testid="chat-transcript" className={`flex flex-1 flex-col ${variant === 'full' ? `chat-gutter py-4${fullscreen ? ` min-h-0 overflow-y-auto${immersive ? ' chat-scroll-hide' : ''}` : ''}` : 'gap-3 min-h-0 overflow-y-auto p-3'}`}>
+      <div ref={scrollRef} data-testid="chat-transcript" className={`flex flex-1 flex-col ${variant === 'full' ? 'chat-gutter py-4' : 'gap-3 min-h-0 overflow-y-auto p-3'}`}>
         {turns.length === 0 && ready ? (
           variant === 'full' ? (
             <div className="m-auto flex max-w-md flex-col items-center gap-2 text-center">
@@ -988,13 +891,14 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
         {/* Out-of-band extras (cards, processes, agents, questions). In the full page they get their own
             spacing group under the flush transcript; in the dock `contents` keeps them in the parent's
             gap flow exactly as before. `empty:hidden` drops the group when everything in it is null.
-            The monospace type is set ONCE here and inherited by every extra, so the todo card, the
-            process list and the agents chip end up the exact size the statusline and the tool rows use
-            for the same variant instead of each hardcoding `text-tiny` and reading smaller than the
-            column they sit in. `display:contents` keeps inheriting, it only removes the box. */}
+            The monospace type is set ONCE here and inherited by every extra, so the todo card and the
+            agents chip end up the exact size the statusline and the tool rows use for the same variant
+            instead of each hardcoding `text-tiny` and reading smaller than the column they sit in.
+            `display:contents` keeps inheriting, it only removes the box.
+            Background processes are deliberately NOT here: the telemetry panel is their single home, so
+            a long-running command reports in one place instead of also crowding the composer. */}
         <div className={`font-mono ${variant === 'full' ? 'mt-4 flex flex-col gap-3 text-[0.6875rem] empty:hidden' : 'contents text-tiny'}`}>
         {transcriptExtras ? todoCards.map((card) => <CardBlock key={card.id} card={card} />) : null}
-        {transcriptExtras && !railOwnsLiveWork ? <ProcessPanel owned={ownedProcessSessions} /> : null}
         {/* Workflow view: a clickable link that opens the table of delegated agents (drill-in / back). The
             table itself stays mounted below whatever the rail does — `agentsOpen` lives in the provider, so
             the rail's own agent row opens THIS instance. Only the chip is redundant beside an open rail. */}
@@ -1060,7 +964,7 @@ export function BrainChatSurface({ variant = 'compact', onOpenHistory, onOpenTel
       {/* Composer footer (statusline + staged attachments + queue + composer). In the full page it sticks
           to the viewport bottom so it stays reachable while the whole page scrolls behind it; the compact
           dock keeps it in normal flow at the bottom of its own scroll box. */}
-      <div className={variant === 'full' ? `sticky bottom-0 z-10 bg-bg${fullscreen ? ' chat-composer-safe' : ''}` : ''}>
+      <div className={variant === 'full' ? 'sticky bottom-0 z-10 bg-bg' : ''}>
       {/* No hairline above the footer — a soft fade lets the transcript slide under it instead. */}
       {variant === 'full' ? (
         <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-bg to-transparent" />

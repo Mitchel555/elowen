@@ -204,7 +204,7 @@ export class ChatPage {
 
   /** Scroll every scrollable ancestor of the transcript (and the window) to the top, tripping the
    *  scroll-up loader — robust to whether the actual scroller is the page `<main>` or the surface's own
-   *  box (fullscreen). Assert on `historySentinel` afterwards. */
+   *  box (the compact dock). Assert on `historySentinel` afterwards. */
   async scrollToTopForOlder(): Promise<void> {
     await this.transcript.evaluate((el) => {
       for (let node = el.parentElement; node; node = node.parentElement) {

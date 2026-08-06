@@ -95,7 +95,7 @@ describe('ChatView (/chat page)', () => {
     await waitFor(() => expect(screen.queryByTestId('telemetry-column')).toBeNull());
   });
 
-  it('toggling fullscreen keeps ONE stream, preserves the draft, and never remounts the surface', async () => {
+  it('toggling the telemetry rail keeps ONE stream, preserves the draft, and never remounts the surface', async () => {
     const { container } = renderChat(<ChatView />);
     const composer = await screen.findByPlaceholderText(/Write a message|Napište zprávu/i) as HTMLTextAreaElement;
     await waitFor(() => expect(FakeES.instances.length).toBe(1));
@@ -105,15 +105,14 @@ describe('ChatView (/chat page)', () => {
     const surface = container.querySelector('[data-variant="full"]');
     expect(surface).not.toBeNull();
 
-    // Enter fullscreen: fullscreen is a CSS-only class toggle on the SAME node, so the surface element,
-    // the single EventSource, and the composer draft must all survive.
-    fireEvent.click(screen.getByRole('button', { name: /^(Fullscreen|Celá obrazovka)$/i }));
+    // The rail is a sibling column, so collapsing it must not take the chat down with it: the surface
+    // element, the single EventSource and the composer draft all have to survive the layout change.
+    fireEvent.click(screen.getByRole('button', { name: /^(Hide telemetry|Skrýt telemetrii)$/i }));
     expect(container.querySelector('[data-variant="full"]')).toBe(surface);
     expect(FakeES.instances.length).toBe(1);
     expect(composer.value).toBe('draft survives');
 
-    // Leave fullscreen — still one stream, still the same node, draft still intact.
-    fireEvent.click(screen.getByRole('button', { name: /^(Exit fullscreen|Zavřít celou obrazovku)$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^(Show telemetry|Zobrazit telemetrii)$/i }));
     expect(container.querySelector('[data-variant="full"]')).toBe(surface);
     expect(FakeES.instances.length).toBe(1);
     expect(composer.value).toBe('draft survives');

@@ -9,8 +9,7 @@ import { BrainChatSurface } from '../../../modules/advisor/BrainChatSurface';
 import { BrainChatProvider } from '../../../modules/advisor/BrainChatProvider';
 
 // The conversation bar carries different controls on a phone (folded into the ⋯ popover) than on desktop
-// (inline). Which set is chosen must wait for the viewport measurement, and the fullscreen view it opens
-// onto has to leave Escape to whatever transient UI is on top of it.
+// (inline). Which set is chosen must wait for the viewport measurement.
 
 class FakeES {
   static instances: FakeES[] = [];
@@ -22,8 +21,6 @@ class FakeES {
   }
   close() {}
 }
-
-const STORAGE_KEY = 'elowen.chat.fullscreen';
 
 const server = setupServer(
   http.post('*/api/brain/start', () => HttpResponse.json({ sessionId: 'brain-1' }, { status: 201 })),
@@ -56,7 +53,7 @@ describe('conversation bar controls', () => {
     // The boolean-returning useMobile reports `false` before the first measurement, so the phone briefly
     // got the inline desktop bar and then swapped it for the ⋯ popover — a visible rearrangement on load.
     setViewport(true);
-    const sawDesktopControls = watchMounts('[aria-label="Fullscreen"],[aria-label="Exit fullscreen"]');
+    const sawDesktopControls = watchMounts('[data-testid="chat-thoughts-toggle"]');
     renderSurface();
 
     await screen.findByRole('button', { name: 'More options' });
@@ -67,63 +64,19 @@ describe('conversation bar controls', () => {
     setViewport(false);
     renderSurface();
 
-    expect(await screen.findByRole('button', { name: 'Fullscreen' })).toBeInTheDocument();
+    expect(await screen.findByTestId('chat-thoughts-toggle')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'More options' })).toBeNull();
   });
 
-  it('lets Escape close the ⋯ popover without also dropping fullscreen', async () => {
-    // Both handlers fire on the same keystroke, so the fullscreen guard has to recognise the popover as
-    // transient UI that owns Escape first — it used to look only for listboxes and dialogs.
+  it('closes the ⋯ popover on Escape', async () => {
     setViewport(true);
     renderSurface();
     fireEvent.click(await screen.findByRole('button', { name: 'More options' }));
     await waitFor(() => expect(document.querySelector('[data-chat-popover]')).not.toBeNull());
-    // A phone auto-enters fullscreen on mount.
-    await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBe('on'));
 
     fireEvent.keyDown(document, { key: 'Escape' });
 
     await waitFor(() => expect(document.querySelector('[data-chat-popover]')).toBeNull());
-    expect(localStorage.getItem(STORAGE_KEY)).toBe('on');
-  });
-
-  it('hides the transcript scrollbar in the immersive phone view only', async () => {
-    setViewport(true);
-    renderSurface();
-
-    const transcript = await screen.findByTestId('chat-transcript');
-    await waitFor(() => expect(transcript.className).toContain('chat-scroll-hide'));
-  });
-
-  it('keeps the scrollbar in desktop fullscreen, where it is the only position cue', async () => {
-    localStorage.setItem(STORAGE_KEY, 'on');
-    setViewport(false);
-    renderSurface();
-
-    const transcript = await screen.findByTestId('chat-transcript');
-    // Still a fullscreen scroll box, just not a hidden-scrollbar one.
-    await waitFor(() => expect(transcript.className).toContain('overflow-y-auto'));
-    expect(transcript.className).not.toContain('chat-scroll-hide');
-  });
-
-  // The auto-enter fires per MOUNT, and leaving /chat and coming back is a remount — so a phone user who
-  // deliberately left fullscreen was dragged straight back into it on their next visit, permanently. The
-  // stored preference is what separates "never chose" from "chose off"; both read 'off' in state.
-  it('respects a phone user who has already turned fullscreen off', async () => {
-    localStorage.setItem(STORAGE_KEY, 'off');
-    setViewport(true);
-    renderSurface();
-
-    await screen.findByTestId('chat-transcript');
-    await waitFor(() => expect(screen.getByRole('button', { name: 'More options' })).toBeTruthy());
-    expect(localStorage.getItem(STORAGE_KEY)).toBe('off');
-  });
-
-  it('still auto-enters for a phone user who has never chosen', async () => {
-    setViewport(true);
-    renderSurface();
-
-    await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBe('on'));
   });
 
   // The footer metrics (model / context / tokens / cost) must stay ONE line on a phone: a second row
