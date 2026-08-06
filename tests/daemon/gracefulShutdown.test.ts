@@ -8,11 +8,11 @@ import type { BrainService } from '../../src/brain/brainService.js';
  *  `reads` counts busy() calls, which is what actually proves the handler WAITED: asserting only on the
  *  exit code passes just as happily when the wait loop is deleted entirely. */
 type Busy = { turns: number; children: number; undelivered?: number };
-const brainBusy = (sequence: Busy[], sent?: string[]) => {
+const brainBusy = (sequence: Busy[], sent?: string[], notices?: unknown[]) => {
   const state = { reads: 0 };
   const brain = ({
     busy: () => ({ undelivered: 0, ...sequence[Math.min(state.reads++, sequence.length - 1)] }),
-    notify: async (text: string) => { sent?.push(text); },
+    notify: async (text: string, _channelId?: string, notice?: unknown) => { sent?.push(text); notices?.push(notice); },
   }) as unknown as BrainService;
   return { brain, state };
 };
@@ -109,6 +109,19 @@ describe('installGracefulShutdown — a stop waits for running work instead of c
     const sent: string[] = [];
     await runSignal(brainBusy([{ turns: 0, children: 0 }], sent).brain, { notify: true });
     expect(sent[0]).toBe('🛑 **Stopping** — Elowen is shutting down.');
+  });
+
+  // The English text above is only half of what goes out: adapters translate from a descriptor naming
+  // WHICH announcement this is. Send the text without it and nothing looks wrong — every assertion on the
+  // wording still passes, while a Czech or Slovak instance quietly stays English for good.
+  it('names the announcement so an adapter can translate it', async () => {
+    const busyNotices: unknown[] = [];
+    await runSignal(brainBusy([{ turns: 2, children: 3 }, { turns: 0, children: 0 }], [], busyNotices).brain, { notify: true });
+    expect(busyNotices[0]).toEqual({ key: 'stopping', args: [2, 3, 0] });
+
+    const idleNotices: unknown[] = [];
+    await runSignal(brainBusy([{ turns: 0, children: 0 }], [], idleNotices).brain, { notify: true });
+    expect(idleNotices[0]).toEqual({ key: 'stoppingIdle', args: [] });
   });
 
   it('exits even when the announcement fails — a chat outage must not strand the process', async () => {

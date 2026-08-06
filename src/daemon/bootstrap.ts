@@ -55,6 +55,7 @@ import { usagePath } from '../integrations/usage/usagePath.js';
 import { RealGitReader } from '../git/gitReader.js';
 import type { TmuxDriver } from '../tmux/types.js';
 import { uniqueName } from './uniqueName.js';
+import { lifecycleNotice } from './lifecycleNotices.js';
 import { logger, setLogSink } from '../shared/logger.js';
 import { PluginLogBuffer } from '../shared/logBuffer.js';
 import { HookAuditBuffer } from '../shared/hookAudit.js';
@@ -236,10 +237,10 @@ export function installGracefulShutdown(
       if (opts?.notify !== false) {
         // Only worth a message when something is actually being waited for; an idle restart already
         // announces itself on the way back up, and saying it twice is noise.
-        const text = busy
-          ? `🛑 **Stopping** — waiting for ${at.turns} turn(s), ${at.children} sub-agent(s) and ${at.undelivered} undelivered result(s)…`
-          : '🛑 **Stopping** — Elowen is shutting down.';
-        await brain?.notify(text).catch(() => { /* best-effort: never block the exit on a chat API */ });
+        const { text, notice } = busy
+          ? lifecycleNotice('stopping', at.turns, at.children, at.undelivered)
+          : lifecycleNotice('stoppingIdle');
+        await brain?.notify(text, undefined, notice).catch(() => { /* best-effort: never block the exit on a chat API */ });
       }
       const deadline = Date.now() + drainMs;
       for (;;) {
@@ -278,9 +279,8 @@ export async function announceBoot(
     } catch { /* no previous announcement — this is the first */ }
   }
   try { writeFileSync(bootMarker, String(Date.now())); } catch { /* the guard is a nicety, not required */ }
-  await brain?.notify(requested
-    ? '✅ **Back online** — Elowen restarted and is ready.'
-    : `✅ **Back online** — the daemon started (v${version}).`).catch(() => { /* best-effort */ });
+  const { text, notice } = requested ? lifecycleNotice('backOnline') : lifecycleNotice('backOnlineVersion', version);
+  await brain?.notify(text, undefined, notice).catch(() => { /* best-effort */ });
 }
 
 /** Janitor tick: reap finished agents' zombie tmux sessions. Log what it reaps so the trail shows when a
@@ -1054,7 +1054,8 @@ export async function buildApp(opts: BuildOpts) {
   const restartDaemon = restartMarker
     ? async (byUserId: number): Promise<void> => {
         log.info(`/restart requested by user ${byUserId}`);
-        await brain?.notify('🔄 **Restart** — Elowen is restarting, back in a moment…').catch(() => { /* best-effort */ });
+        const restartingNotice = lifecycleNotice('restarting');
+        await brain?.notify(restartingNotice.text, undefined, restartingNotice.notice).catch(() => { /* best-effort */ });
         // Drop the marker (timestamped) so the NEXT boot echoes "back online" — but ONLY for a restart that
         // actually takes. systemctl() resolves an exit code (never throws); on failure the daemon keeps
         // running, so we must undo the marker + tell the operator, or a future unrelated boot would falsely
@@ -1065,7 +1066,8 @@ export async function buildApp(opts: BuildOpts) {
             if (r.code !== 0) {
               log.error(`/restart failed (systemctl exit ${r.code}): ${r.stdout.trim()}`);
               try { unlinkSync(restartMarker); } catch { /* nothing to undo */ }
-              void brain?.notify('⚠️ **Restart failed** — the daemon could not restart itself. Check the service logs.').catch(() => { /* best-effort */ });
+              const failed = lifecycleNotice('restartFailed');
+              void brain?.notify(failed.text, undefined, failed.notice).catch(() => { /* best-effort */ });
             }
             // On success this process is torn down before the promise settles — nothing more to do.
           });

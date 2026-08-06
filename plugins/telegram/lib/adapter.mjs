@@ -12,6 +12,7 @@ import { buildRoleAccess, applyVisionModel } from '../../_shared/access.mjs';
 import { resolveImageFiles } from '../../_shared/images.mjs';
 import { voiceCreds, transcribeBuffer } from '../../_shared/voice.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
+import { lifecycleText } from '../../_shared/lifecycle.mjs';
 import { isSteered } from '../../_shared/turnResult.mjs';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // default: larger images are noted, not downloaded (cfg: maxImageBytes)
@@ -749,12 +750,14 @@ export class TelegramAdapter {
 
   // ── proactive + tools ──
 
-  /** Host-initiated push (cron/tick echoes) → the configured notification chat. No-op without one. */
-  async notify(text, chatId) {
+  /** Host-initiated push (cron/tick echoes) → the configured notification chat. No-op without one.
+   *  A `notice` marks one of the daemon's standing announcements, which we say in the configured
+   *  language; free-form text arrives without one and is delivered as written. */
+  async notify(text, chatId, notice) {
     const target = (typeof chatId === 'string' && chatId.trim())
       || (typeof this.cfg.notifyChatId === 'string' ? this.cfg.notifyChatId.trim() : '');
     if (!target || !this.bot) return;
-    await this.reply(chatTarget(target), text);
+    await this.reply(chatTarget(target), lifecycleText(this.cfg.language, notice, text));
   }
 
   /** The live bot, or a thrown error when not yet connected — used by the Telegram* tools. */

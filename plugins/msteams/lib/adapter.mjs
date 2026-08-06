@@ -13,6 +13,7 @@ import { LiveMessage, postWithImages } from './stream.mjs';
 import { buildAskCard, buildPickerCard, settledCard } from './cards.mjs';
 import { buildAppPackage } from './appPackage.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
+import { lifecycleText } from '../../_shared/lifecycle.mjs';
 import { observesLiveEvents, resolveDisplaySettings, updateDisplayOverrides } from '../../_shared/display.mjs';
 import { applyVisionModel, buildRoleAccess } from '../../_shared/access.mjs';
 import { resolveImageFiles, imageMimeType } from '../../_shared/images.mjs';
@@ -359,7 +360,7 @@ export class MsTeamsAdapter {
    *  personal conversation is opened via the connector — Teams hands back the existing chat for a
    *  known pair. No-op (with a warn) until the bot has seen at least one activity: proactive sends
    *  ride the last known serviceUrl. */
-  async notify(text, channelId) {
+  async notify(text, channelId, notice) {
     const target = (typeof channelId === 'string' && channelId.trim().replace(/#\d+$/, ''))
       || (typeof this.cfg.notifyConversationId === 'string' ? this.cfg.notifyConversationId.trim() : '');
     if (!target) return;
@@ -376,7 +377,9 @@ export class MsTeamsAdapter {
       if (!conversationId) { this.log.warn(`msteams notify: could not open a conversation with ${target}`); return; }
       this.notifyConversations.set(target, conversationId);
     }
-    for (const piece of splitContent(String(text))) {
+    // Translate before splitting: the pieces are sized to the transport, and a translation has its own
+    // length.
+    for (const piece of splitContent(String(lifecycleText(this.cfg.language, notice, text)))) {
       await this.tmSend(conversationId, piece);
     }
   }

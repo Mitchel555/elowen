@@ -183,6 +183,16 @@ export interface SessionSource {
      *  at full price. Unset → the host default (SESSION_IDLE_ROLLOVER_MS). */
     sessionIdleMs?: number };
 }
+/** Names one of the host's own standing announcements so an adapter can say it in the user's language.
+ *  The host has no language setting — the per-platform `language` config is the only place that knows
+ *  one — so it sends the identity of the message alongside its English rendering and lets the adapter
+ *  choose. `args` carries the values interpolated into the wording, in the order the phrasing takes
+ *  them; a translation is free to arrange them differently. */
+export interface ServiceNotice {
+  key: string;
+  args?: (string | number)[];
+}
+
 /** A messaging channel a plugin attaches (Discord, …). The host calls `listen` + `connect` at startup;
  *  the handler returns the brain's reply (or undefined to stay silent) and the adapter delivers it. */
 export interface PlatformAdapter {
@@ -193,8 +203,13 @@ export interface PlatformAdapter {
   send(channelId: string, text: string): Promise<void>;
   /** Deliver a proactive (host-initiated) message — to `channelId` when given, else to this
    *  platform's configured notification channel. Optional — an adapter without a notify channel
-   *  simply omits it. Used for cron/tick echoes. */
-  notify?(text: string, channelId?: string): Promise<void>;
+   *  simply omits it. Used for cron/tick echoes.
+   *
+   *  `notice` names WHICH standing announcement this is, for the ones the host words itself, so an
+   *  adapter can render it in its configured language instead of shipping the host's English. It is
+   *  absent for free-form text (a cron echo has nothing to translate). An adapter that ignores the
+   *  argument — every external one, until it opts in — keeps delivering `text` exactly as before. */
+  notify?(text: string, channelId?: string, notice?: ServiceNotice): Promise<void>;
   /** Optional out-of-band control the host wires right after `listen`, for slash commands that act on a
    *  channel SESSION (stop/status/compact) or the daemon (restart) instead of sending a message. Omit for
    *  a message-only adapter. */

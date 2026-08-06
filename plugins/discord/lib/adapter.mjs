@@ -9,6 +9,7 @@ import { buildRoleAccess, applyVisionModel } from '../../_shared/access.mjs';
 import { resolveImageFiles, imageMimeType } from '../../_shared/images.mjs';
 import { voiceCreds, transcribeBuffer } from '../../_shared/voice.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
+import { lifecycleText } from '../../_shared/lifecycle.mjs';
 import { isSteered } from '../../_shared/turnResult.mjs';
 
 const API = 'https://discord.com/api/v10';
@@ -844,12 +845,14 @@ export class DiscordAdapter {
     return res.json();
   }
 
-  /** Host-initiated push (cron/tick echoes) → the configured notification channel. No-op without one. */
-  async notify(text, channelId) {
+  /** Host-initiated push (cron/tick echoes) → the configured notification channel. No-op without one.
+   *  A `notice` marks one of the daemon's standing announcements, which we say in the configured
+   *  language; free-form text arrives without one and is delivered as written. */
+  async notify(text, channelId, notice) {
     const target = (typeof channelId === 'string' && channelId.trim())
       || (typeof this.cfg.notifyChannelId === 'string' ? this.cfg.notifyChannelId.trim() : '');
     if (!target) return;
-    await this.reply(target, text);
+    await this.reply(target, lifecycleText(this.cfg.language, notice, text));
   }
 
   /** The one 429 discipline every Discord call shares (rest + both multipart posters): on a rate-limited

@@ -1,5 +1,5 @@
 import type { PluginRegistry } from '../plugins/registry.js';
-import type { ChannelRef } from '../plugins/api.js';
+import type { ChannelRef, ServiceNotice } from '../plugins/api.js';
 import type { Policy } from '../plugins/policy.js';
 import type { ToolPolicy, TurnIdentity } from '../plugins/policyContext.js';
 import type { IdentityResolver } from './identity.js';
@@ -60,7 +60,7 @@ const keyOf = (ref: ChannelRef): string => `${ref.platform}-${ref.threadId ?? re
  *  fan proactive notifications out to them. Fail-open per adapter — one broken platform must not
  *  block the rest. */
 export class PlatformOrchestrator {
-  private started: { name: string; disconnect?(): void; notify?(t: string, channelId?: string): Promise<void> }[] = [];
+  private started: { name: string; disconnect?(): void; notify?(t: string, channelId?: string, notice?: ServiceNotice): Promise<void> }[] = [];
 
   constructor(private d: PlatformOrchestratorDeps) {}
 
@@ -288,13 +288,13 @@ export class PlatformOrchestrator {
    *  pending delivery on a resolved push). So that case rejects, carrying each sink's failure.
    *  An instance with no notification sink at all is a configuration state, not a delivery failure — it
    *  resolves, exactly as before, so nothing queues results for a channel that does not exist. */
-  async notify(text: string, channelId?: string): Promise<void> {
+  async notify(text: string, channelId?: string, notice?: ServiceNotice): Promise<void> {
     let delivered = false;
     const failures: string[] = [];
     for (const p of this.started) {
       if (typeof p.notify === 'function') {
         try {
-          await p.notify(text, channelId);
+          await p.notify(text, channelId, notice);
           delivered = true;
         } catch (e) {
           failures.push(`${p.name}: ${e instanceof Error ? e.message : String(e)}`);

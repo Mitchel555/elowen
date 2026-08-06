@@ -1,6 +1,6 @@
 import type { PluginRegistry } from '../plugins/registry.js';
 import { PluginHookBus } from '../plugins/hookBus.js';
-import type { SubagentProgressEvent } from '../plugins/api.js';
+import type { ServiceNotice, SubagentProgressEvent } from '../plugins/api.js';
 import { ElicitationRegistry } from './elicitation.js';
 import { CardRegistry } from './cards.js';
 import type { BrainSearchHit, BrainGoalRow } from '../store/brainStore.js';
@@ -1126,9 +1126,11 @@ export class BrainService {
     void this.reloadPlugins().catch((e) => logger('brain').error(`deferred plugin reload failed: ${e instanceof Error ? e.message : String(e)}`));
   }
 
-  /** Push a proactive message out through the platform adapters (cron/tick echoes). */
-  async notify(text: string, channelId?: string): Promise<void> {
-    await this.platforms.notify(text, channelId);
+  /** Push a proactive message out through the platform adapters (cron/tick echoes).
+   *  `notice` is set only for the host's own standing announcements, which an adapter may translate; a
+   *  cron echo carries none and is delivered as written. */
+  async notify(text: string, channelId?: string, notice?: ServiceNotice): Promise<void> {
+    await this.platforms.notify(text, channelId, notice);
   }
 
   /** Start every plugin-contributed platform adapter — see PlatformOrchestrator. */

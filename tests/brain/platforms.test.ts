@@ -432,7 +432,7 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
   // A proactive push that reached nobody used to resolve like a successful one, so the cron scheduler
   // deleted the pending delivery it had promised to retry and the finished result was lost for good.
   describe('proactive notify', () => {
-    const orchestratorWith = async (adapters: { name: string; notify?: (t: string) => Promise<void> }[]) => {
+    const orchestratorWith = async (adapters: { name: string; notify?: (t: string, channelId?: string, notice?: unknown) => Promise<void> }[]) => {
       const orch = new PlatformOrchestrator({
         plugins: async () => ({ platforms: adapters.map((a) => ({ ...a, listen: () => {}, connect: async () => {} })) }) as never,
         platformOwner: () => 1,
@@ -464,6 +464,27 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     it('resolves when no platform has a notification channel at all', async () => {
       const orch = await orchestratorWith([{ name: 'cron' }]);
       await expect(orch.notify('the report')).resolves.toBeUndefined();
+    });
+
+    // The daemon words its lifecycle announcements in English and names them, so an adapter can say them
+    // in its configured language. Drop the descriptor anywhere along this path and nothing looks broken:
+    // the English fallback still arrives, and a translated instance silently stays English forever.
+    it('hands the notice descriptor to the adapter alongside the text', async () => {
+      const seen: { text: string; notice?: unknown }[] = [];
+      const orch = await orchestratorWith([
+        { name: 'discord', notify: async (text, _channelId, notice) => { seen.push({ text, notice }); } },
+      ]);
+      await orch.notify('🛑 **Stopping** — Elowen is shutting down.', undefined, { key: 'stoppingIdle' });
+      expect(seen).toEqual([{ text: '🛑 **Stopping** — Elowen is shutting down.', notice: { key: 'stoppingIdle' } }]);
+    });
+
+    it('leaves free-form notifications without a descriptor', async () => {
+      const seen: unknown[] = [];
+      const orch = await orchestratorWith([
+        { name: 'discord', notify: async (_text, _channelId, notice) => { seen.push(notice); } },
+      ]);
+      await orch.notify('the cron result');
+      expect(seen).toEqual([undefined]);
     });
   });
 

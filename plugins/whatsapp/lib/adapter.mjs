@@ -12,6 +12,7 @@ import { sameId, isGroup, numberOf, toJid, senderIsAdmin } from './jid.mjs';
 import { MESSAGES } from './messages.mjs';
 import { LiveMessage } from './stream.mjs';
 import { CONTROL_COMMANDS, runControlCommand } from '../../_shared/chatCommands.mjs';
+import { lifecycleText } from '../../_shared/lifecycle.mjs';
 import { isSteered } from '../../_shared/turnResult.mjs';
 import { buildRoleAccess, applyVisionModel } from '../../_shared/access.mjs';
 import { resolveImageFiles } from '../../_shared/images.mjs';
@@ -714,11 +715,13 @@ export class WhatsAppAdapter {
     try { return (await this.sock.groupMetadata(jid))?.subject || undefined; } catch { return undefined; }
   }
 
-  /** Host-initiated push (cron/tick echoes) → the configured notification chat. No-op without one. */
-  async notify(text, chatId) {
+  /** Host-initiated push (cron/tick echoes) → the configured notification chat. No-op without one.
+   *  A `notice` marks one of the daemon's standing announcements, which we say in the configured
+   *  language; free-form text arrives without one and is delivered as written. */
+  async notify(text, chatId, notice) {
     const target = (typeof chatId === 'string' && chatId.trim()) || (typeof this.cfg.notifyChat === 'string' ? this.cfg.notifyChat.trim() : '');
     if (!target || !this.sock) return;
-    await this.sendText(toJid(target), text);
+    await this.sendText(toJid(target), lifecycleText(this.cfg.language, notice, text));
   }
 
   /** The live socket, or a thrown error when not yet connected — used by the Whatsapp* tools. */
