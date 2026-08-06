@@ -7,6 +7,14 @@
  *  conversations run concurrently); the bare session id is the inner lock guarding prompt()/spawn.
  *  start()/ensureLive lock the bare session id only — that key difference is what makes
  *  send() → ensureLive() re-entrant. */
+
+/** The outer send-lock prefix. Written here rather than at the call sites so `busy()` can map the pair of
+ *  locks a turn holds back onto the single conversation they belong to. */
+const SEND_LOCK_PREFIX = 'send-';
+export const sendLockKey = (sessionId: string): string => `${SEND_LOCK_PREFIX}${sessionId}`;
+const lockedConversation = (key: string): string =>
+  key.startsWith(SEND_LOCK_PREFIX) ? key.slice(SEND_LOCK_PREFIX.length) : key;
+
 export class LiveSessionRegistry<T extends { sessionId: string; session: { dispose(): void; isStreaming: boolean }; pendingReasoningMarker?: { timer: ReturnType<typeof setTimeout> } }> {
   private live = new Map<string, T>();
   private active = new Map<number, string>();
@@ -120,7 +128,12 @@ export class LiveSessionRegistry<T extends { sessionId: string; session: { dispo
   busy(): { turns: number; children: number } {
     let children = 0;
     for (const set of this.children.values()) children += set.size;
-    return { turns: this.locks.size, children };
+    // A running turn holds BOTH locks of the topology above at once — `send-<id>` around the whole send and
+    // the bare id around prompt() — so counting map entries reports every turn twice. Collapse each key
+    // onto the conversation it locks and count those instead.
+    const conversations = new Set<string>();
+    for (const key of this.locks.keys()) conversations.add(lockedConversation(key));
+    return { turns: conversations.size, children };
   }
   requestPendingAbort(sessionId: string): void { this.pendingAborts.add(sessionId); }
   /** Observe a pending child abort without consuming it. Fast owner-steering needs this so the original

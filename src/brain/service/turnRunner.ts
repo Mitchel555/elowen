@@ -1,3 +1,4 @@
+import { sendLockKey } from '../session/liveRegistry.js';
 import type { PluginRegistry } from '../../plugins/registry.js';
 import type { HookAuditBuffer } from '../../shared/hookAudit.js';
 import type { BrainStore } from '../../store/brainStore.js';
@@ -148,7 +149,7 @@ export class BrainTurnRunner {
     }
     // The bare session lock (inner) is nested under the outer `send-` lock, matching a user turn's own
     // ordering (send-<id> → <id>), so this never deadlocks against a concurrent send()/compact/stop.
-    await this.serial(`send-${target}`, () => this.serial(target, async () => {
+    await this.serial(sendLockKey(target), () => this.serial(target, async () => {
       const live = this.d.sessions.get(target);
       if (!live) throw new Error('brain not started for user');
       // An earlier steer that landed while we queued behind that turn is already in the context. Sending a
@@ -460,7 +461,7 @@ export class BrainTurnRunner {
     // inner (bare session id) lock in runTurn guards each prompt().
     let completedSessionId = active.sessionId;
     try {
-      await this.serial(`send-${targetId}`, async () => {
+      await this.serial(sendLockKey(targetId), async () => {
         // Re-resolve under the lock: an unbound send that queued behind a rollover/model switch must follow
         // the active pointer to wherever the conversation went; a bound send stays on its explicit target.
         let b = session ? this.d.sessions.get(targetId) : this.d.lifecycle.activeLive(userId);
