@@ -38,6 +38,44 @@ describe('LiveEventReplay', () => {
     ]);
   });
 
+  // Coalescing used to re-serialize the WHOLE accumulated string on every provider chunk, which is
+  // quadratic in the length of a streamed answer — paid on the event loop every other session shares.
+  // The assertion is on TIME because that is the property being protected; a correctness-only test
+  // passes just as happily with the quadratic version. The threshold is deliberately loose (the linear
+  // version runs in single-digit ms here) so it flags an algorithmic regression, not a slow machine.
+  it('coalesces a long stream in linear time', () => {
+    const replay = new LiveEventReplay(new Set());
+    replay.beginRun();
+    const chunk = 'x'.repeat(200);
+    const started = Date.now();
+    for (let i = 0; i < 4_000; i++) replay.publish({ type: 'text', delta: chunk });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(1_500);
+  });
+
+  it('coalesces characters that JSON has to escape', () => {
+    const replay = new LiveEventReplay(new Set());
+    replay.beginRun();
+    // Quotes and newlines serialize longer than they read, which is exactly what the incremental size
+    // estimate has to account for.
+    replay.publish({ type: 'text', delta: 'a"b' });
+    replay.publish({ type: 'text', delta: '\nc' });
+    expect(replay.snapshot().events).toEqual([{ type: 'text', delta: 'a"b\nc' }]);
+  });
+
+  // The size budget is what stops one very long answer from pinning half a megabyte per session. It is
+  // enforced from the running `chars` total, so an incremental estimate that drifted would silently
+  // disable it — the stream would just keep growing.
+  it('still enforces the size budget on a stream that outgrows it', () => {
+    const replay = new LiveEventReplay(new Set());
+    replay.beginRun();
+    const chunk = 'y'.repeat(64 * 1024);
+    for (let i = 0; i < 12; i++) replay.publish({ type: 'text', delta: chunk });
+    const [event] = replay.snapshot().events;
+    const kept = event?.type === 'text' ? event.delta.length : 0;
+    expect(kept).toBeLessThan(12 * chunk.length);
+  });
+
   it('replaces snapshot-style progress and hard-bounds event count', () => {
     const replay = new LiveEventReplay(new Set());
     replay.publish({ type: 'tool_progress', id: 'run', text: 'one' });

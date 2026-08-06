@@ -424,14 +424,20 @@ export function toBrainEvent(e: AgentSessionEvent, now: number = Date.now()): Br
       const block = typeof ev.contentIndex === 'number' ? ev.partial?.content?.[ev.contentIndex] : undefined;
       if (block?.type !== 'toolCall') return null;
       const name = typeof block.name === 'string' ? block.name : undefined;
+      const id = typeof block.id === 'string' ? block.id : undefined;
+      const last = id ? lastAuthoringAt.get(id) : undefined;
+      // Inside the throttle window the answer is already decided, EXCEPT for the one case that is allowed
+      // to bypass it (the delta first carrying a reason) — and that cannot happen once a reason is known.
+      // Deriving the label first would parse the whole accumulated argument JSON on every chunk only to
+      // throw the result away, which is work the event loop does not have to spare while a tool authors a
+      // large payload.
+      if (last && last.reason !== undefined && now - last.at < AUTHORING_THROTTLE_MS) return null;
       const detail = toolDetail(block.arguments, name);
       // The model-authored `reason` (the tool's leading arg) as it streams — it supersedes the derived
       // label in the CLI. Grows character-by-character; `toolDetail` never reads `reason`, so detail is
       // unaffected. A reason-only change must still emit, so it joins the dedup key below.
       const reason = extractReason(block.arguments);
-      const id = typeof block.id === 'string' ? block.id : undefined;
       if (!id) return (detail || reason) ? { type: 'tool_authoring', ...(name ? { name } : {}), detail, ...(reason ? { reason } : {}) } : null;
-      const last = lastAuthoringAt.get(id);
       if (last && last.detail === detail && last.reason === reason) return null; // unchanged → nothing new
       // The delta that FIRST carries a reason bypasses the throttle window: a provider that still delivers
       // arguments in a late burst emits only one reason-bearing delta before the tool starts executing, and

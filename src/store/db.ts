@@ -20,6 +20,16 @@ export function openDb(path: string): Db {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
+  // better-sqlite3 is synchronous, so every commit's fsync happens ON the event loop — and at SQLite's
+  // default FULL that is a disk round-trip per stored message, with every other session and the whole
+  // HTTP API waiting behind it. NORMAL is the setting WAL is designed around: a process crash still
+  // cannot corrupt or lose committed data, only a power cut or kernel panic can drop the most recent
+  // commits, which for a conversation transcript is the right trade for keeping the loop free.
+  db.pragma('synchronous = NORMAL');
+  // Several processes legitimately open this file (see the runOnce comment further down), and WAL lets a
+  // reader and a writer proceed at once — but with no timeout a writer that finds the lock held fails
+  // INSTANTLY with SQLITE_BUSY rather than waiting the milliseconds it would take to clear.
+  db.pragma('busy_timeout = 5000');
   // Enforce foreign keys so any REFERENCES added to the schema actually cascade/reject.
   db.pragma('foreign_keys = ON');
   db.exec(readFileSync(join(here, 'schema.sql'), 'utf-8'));

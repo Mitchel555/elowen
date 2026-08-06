@@ -131,6 +131,21 @@ function eventChars(event: BrainEvent): number {
   catch { return 0; }
 }
 
+/** How much longer the serialized form gets when `delta` is appended to a coalesced string.
+ *
+ *  Re-serializing the WHOLE coalesced entry on every provider chunk is quadratic in the length of the
+ *  stream: a long answer arriving in n chunks re-stringifies the accumulated text n times, on the event
+ *  loop every other session shares. JSON escaping is per-character, so the growth can be measured from
+ *  the delta alone (minus its two quotes) without touching the text already counted.
+ *
+ *  It is an estimate in one edge case — a surrogate pair split across two chunks escapes as two lone
+ *  surrogates here but as one character when re-serialized — and that is fine: `chars` only feeds the
+ *  replay size budget, which is a bound, not an accounting figure. */
+function appendedChars(delta: string): number {
+  try { return JSON.stringify(delta).length - 2; }
+  catch { return 0; }
+}
+
 /** Current-run replay buffer plus the single fan-out seam for a LiveBrain. Adjacent text/reasoning
  *  deltas are coalesced and snapshot-style events are replaced in place, so a long streaming run does
  *  not retain one object per provider chunk. Both event count and serialized size are hard-bounded. */
@@ -182,11 +197,13 @@ export class LiveEventReplay {
     this.truncated = false;
   }
 
-  private replaceAt(index: number, event: BrainEvent, seq: number): void {
+  /** `chars` may be supplied by a caller that can derive the new size cheaply — see {@link appendedChars}.
+   *  Left out, the event is serialized to measure it. */
+  private replaceAt(index: number, event: BrainEvent, seq: number, chars?: number): void {
     const prior = this.entries[index]!;
-    const chars = eventChars(event);
-    this.chars += chars - prior.chars;
-    this.entries[index] = { seq, event, chars };
+    const size = chars ?? eventChars(event);
+    this.chars += size - prior.chars;
+    this.entries[index] = { seq, event, chars: size };
   }
 
   private record(event: BrainEvent): BrainEvent {
@@ -199,12 +216,12 @@ export class LiveEventReplay {
     // Provider deltas are often a few characters each. One replay event per visible stream keeps the
     // snapshot compact while preserving the exact text the reducer would have received.
     if (last && stamped.type === 'text' && last.event.type === 'text') {
-      this.replaceAt(this.entries.length - 1, stampBrainEventReplayCursor({ type: 'text', delta: last.event.delta + stamped.delta }, seq), seq);
+      this.replaceAt(this.entries.length - 1, stampBrainEventReplayCursor({ type: 'text', delta: last.event.delta + stamped.delta }, seq), seq, last.chars + appendedChars(stamped.delta));
       this.trim();
       return stamped;
     }
     if (last && stamped.type === 'reasoning' && last.event.type === 'reasoning') {
-      this.replaceAt(this.entries.length - 1, stampBrainEventReplayCursor({ type: 'reasoning', delta: last.event.delta + stamped.delta }, seq), seq);
+      this.replaceAt(this.entries.length - 1, stampBrainEventReplayCursor({ type: 'reasoning', delta: last.event.delta + stamped.delta }, seq), seq, last.chars + appendedChars(stamped.delta));
       this.trim();
       return stamped;
     }

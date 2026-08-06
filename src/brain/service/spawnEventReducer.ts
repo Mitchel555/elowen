@@ -50,6 +50,13 @@ function publicProviderError(message: string, sessionId: string, provider: strin
   }
   if (!isRetryableAssistantError({ role: 'assistant', stopReason: 'error', errorMessage: message } as never)) return message;
   logger('brain-provider').warn(`provider retries exhausted for ${provider}/${model} (${sessionId})`);
+  // A read deadline deserves its own wording, because its cause is often on THIS side: when the daemon's
+  // event loop is saturated the response never gets read in time, and the generic text sends the reader
+  // to the provider's status page instead of to the load they just started. `/health` reports the
+  // event-loop percentiles that settle which of the two it was.
+  if (/request timed out/i.test(message)) {
+    return 'The provider request passed its read deadline, and the automatic retries did not help. That is usually a slow provider — but heavy local load can starve the connection too, so check the daemon\'s event-loop lag if a lot of work was running.';
+  }
   return 'Provider request failed after automatic retries. Please retry the turn.';
 }
 

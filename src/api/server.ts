@@ -6,6 +6,7 @@ import { registerRoutes } from './routes/index.js';
 import { bodyLimitBytes, formatZodError } from './validation.js';
 import type { ServerDeps } from './deps.js';
 import { ELOWEN_VERSION } from './version.js';
+import { startLoopLagMonitor, watchLoopLag } from '../shared/eventLoopLag.js';
 
 export type { ServerDeps };
 
@@ -21,6 +22,8 @@ const MAX_LOGIN_BODY_BYTES = 16 * 1024;
 export function createServer(d: ServerDeps): ElowenApp {
   const ctx = createRouteContext(d);
   const { log } = ctx;
+  const loopLag = startLoopLagMonitor();
+  watchLoopLag(loopLag, log);
   const app: ElowenApp = new Hono();
   app.use('*', cors());
   app.use('/auth/login', bodyLimitBytes(MAX_LOGIN_BODY_BYTES));
@@ -34,7 +37,11 @@ export function createServer(d: ServerDeps): ElowenApp {
     log.error('unhandled route error', err);
     return c.json({ error: 'internal error' }, 500);
   });
-  app.get('/health', c => c.json({ ok: true, version: ELOWEN_VERSION }));
+  // Event loop percentiles ride along on the probe that already exists, because the question "is the
+  // daemon keeping up" has no other answer from outside: a starved loop and a slow provider look
+  // identical in every other signal, and CPU graphs show a single core busy either way. Reading the
+  // histogram is a few arithmetic ops, so the probe stays the ~1 ms round-trip it is today.
+  app.get('/health', c => c.json({ ok: true, version: ELOWEN_VERSION, eventLoop: loopLag.lag() }));
   // Public: lets the web decide whether to show onboarding (no users yet) or the login form.
   app.get('/setup', c => c.json({ needsSetup: d.users ? d.users.count() === 0 : false }));
 
