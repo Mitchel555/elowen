@@ -15,20 +15,18 @@
 // immediately: their useMe() fires on the same tick as the gate's own probe, so the app would ask twice.
 // Sharing one query key makes the duplicate structurally impossible instead of merely unlikely.
 import { Suspense, useEffect, useState, type ReactNode } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { AUTH_CLEARED_EVENT } from '../../lib/token';
-import { elowenClient, ElowenApiError } from '../../lib/elowenClient';
+import { elowenClient } from '../../lib/elowenClient';
 import { useMe } from '../../lib/queries';
 import { EventBridge } from '../../app/providers';
 import { LoginForm } from './LoginForm';
+import { SetupPending } from './SetupPending';
 
-type Gate = 'checking' | 'login' | 'open';
+type Gate = 'checking' | 'open' | 'login' | 'setup';
 
 export function LoginGate({ children }: { children: ReactNode }) {
   const [gate, setGate] = useState<Gate>('checking');
-  const router = useRouter();
-  const pathname = usePathname();
   const qc = useQueryClient();
   const me = useMe();
   const meSettled = !me.isPending;
@@ -37,22 +35,24 @@ export function LoginGate({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!meSettled) return;
     // The session query answers the gate: data means the httpOnly cookie is a valid session → open the
-    // shell. A 401 means no/invalid session → a brand-new install (no users yet) shows onboarding without
-    // a login, otherwise the login form. A transient/network error is treated as "not authed" so we show
-    // login rather than a blank gate.
-    if (!meFailed) { setGate('open'); return; }
-    const status = meFailed instanceof ElowenApiError ? meFailed.status : undefined;
-    if (status !== 401) { setGate('login'); return; }
+    // shell. A 401 means no/invalid session → on a box where the installer never finished there is no
+    // account to sign in as, so we say that instead of showing a login nobody can pass. A transient/
+    // network error is treated as "not authed" so we show login rather than a blank gate.
+    setGate(meFailed ? 'login' : 'open');
+  }, [meSettled, meFailed]);
+
+  // Whether "log in" is even meaningful is a separate question from whether this session is valid, so it
+  // gets its own probe. Hanging it off the session query does not work: a 401 clears the query cache
+  // synchronously, which leaves useMe() pending forever and the probe unreachable — the bug that made the
+  // old first-run route dead code. Keyed on the gate, it runs however we arrived at the login screen.
+  useEffect(() => {
+    if (gate !== 'login') return;
     let alive = true;
     elowenClient.setupStatus()
-      .then((s) => {
-        if (!alive) return;
-        if (s.needsSetup) { setGate('open'); if (pathname !== '/onboarding') router.replace('/onboarding'); }
-        else setGate('login');
-      })
-      .catch(() => { if (alive) setGate('login'); });
+      .then((s) => { if (alive && s.needsSetup) setGate('setup'); })
+      .catch(() => { /* unreachable daemon: the login form is still the honest fallback */ });
     return () => { alive = false; };
-  }, [meSettled, meFailed, pathname, router]);
+  }, [gate]);
 
   // Token dropped (stale-token validation 401, mid-session 401, or explicit logout): go to login with
   // no reload, and clear the cache so a re-login can never flash the previous user's data.
@@ -64,6 +64,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
 
   // The login form REPLACES the shell (an unauthenticated visitor must not reach the app), but the
   // 'checking' state renders children so the shell and its query fan-out start immediately.
+  if (gate === 'setup') return <SetupPending />;
   if (gate === 'login') return <LoginForm onAuthed={() => setGate('open')} />;
 
   return (

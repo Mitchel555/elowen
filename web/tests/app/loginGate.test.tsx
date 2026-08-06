@@ -47,6 +47,21 @@ describe('LoginGate', () => {
     expect(screen.queryByText('secret-content')).toBeNull();
   });
 
+  it('points at the terminal installer when the box has no account yet, and keeps the shell closed', async () => {
+    // Setup lives in the terminal installer, so a box with no admin has no credentials to offer: showing
+    // the login form would strand the visitor, and opening the shell would hand out an unauthenticated app.
+    server.use(
+      http.get('*/api/auth/me', () => new HttpResponse(null, { status: 401 })),
+      http.get('*/api/setup', () => HttpResponse.json({ needsSetup: true })),
+    );
+
+    render(<Wrap><LoginGate><span>secret-content</span></LoginGate></Wrap>);
+
+    await waitFor(() => expect(screen.getByText('elowen setup')).toBeInTheDocument());
+    expect(screen.queryByText('secret-content')).toBeNull();
+    expect(passwordInput()).toBeNull();
+  });
+
   it('opens the shell when the session cookie is valid (me() 200)', async () => {
     server.use(http.get('*/api/auth/me', () => HttpResponse.json({ user: { id: 1, username: 'admin' } })));
 
