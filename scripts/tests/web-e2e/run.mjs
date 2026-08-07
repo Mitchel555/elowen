@@ -192,11 +192,13 @@ async function main() {
 
     // --- 1) KEY PAGES SERVE 200 (not 500). -------------------------------------------------------
     // Every app route is a client-rendered SPA behind a client-side LoginGate, so the standalone
-    // returns a 200 HTML shell for all of them even on a fresh install — the login/onboarding UI is
-    // painted in the browser, not by an SSR redirect. The teeth here is therefore "renders at all":
+    // returns a 200 HTML shell for all of them even on a fresh install — the login screen is painted
+    // in the browser, not by an SSR redirect. The teeth here is therefore "renders at all":
     // a 500 means a broken build/bundle. We assert 200 AND that the body is the HTML document.
+    // There is deliberately no /onboarding: setup happens in the terminal installer, and a visitor
+    // with no account is shown the installer command by the login gate rather than a separate route.
     const PAGES = [
-      '/', '/onboarding', '/dash', '/settings', '/users', '/stats', '/kanban', '/tasks',
+      '/', '/dash', '/settings', '/users', '/stats', '/kanban', '/tasks',
       '/chat', '/sessions', '/projects', '/memory', '/timeline', '/escalations', '/account',
       '/editor', '/terminal/e2e', // dynamic route [name] — arbitrary segment must still render
     ];
@@ -205,7 +207,7 @@ async function main() {
       assert(r.status === 200, `page ${path} returned ${r.status} (expected 200; a 500 = broken build)`);
       assert(/<html/i.test(r.text), `page ${path} 200 but body is not an HTML document`);
     }
-    ok(`key pages serve 200 (${PAGES.length} routes incl. onboarding, login-gated app, dynamic /terminal)`);
+    ok(`key pages serve 200 (${PAGES.length} routes incl. login-gated app, dynamic /terminal)`);
 
     // --- 2) BFF PROXY: SETUP-MODE TOKENLESS PASSTHROUGH (0 users). --------------------------------
     // With no session cookie the proxy forwards tokenless; the daemon's own guard keeps public and
