@@ -83,7 +83,10 @@
     "test:e2e:parity": "node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline.json",
     "test:e2e:parity:runner": "ELOWEN_SUBAGENT_RUNNER=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline.json",
     "test:e2e:parity:mcp": "ELOWEN_PARITY_MCP=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline-mcp.json",
-    "test:e2e:parity:mcp:runner": "ELOWEN_PARITY_MCP=1 ELOWEN_SUBAGENT_RUNNER=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline-mcp.json"
+    "test:e2e:parity:mcp:runner": "ELOWEN_PARITY_MCP=1 ELOWEN_SUBAGENT_RUNNER=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline-mcp.json",
+    "test:e2e:parity:mcp:deferred": "ELOWEN_PARITY_MCP=deferred node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline-mcp-deferred.json",
+    "test:e2e:parity:mcp:deferred:runner": "ELOWEN_PARITY_MCP=deferred ELOWEN_SUBAGENT_RUNNER=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline-mcp-deferred.json",
+    "test:e2e:lazy-mcp": "npm run build --silent && node scripts/tests/subagent-lazy-mcp/run.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.0",

@@ -24,6 +24,12 @@
 // so on its own this harness cannot see drift in BRIDGED tools at all. The MCP variant closes exactly
 // that hole and asserts the bridged tools are present, so an MCP set that silently came up empty can
 // never pass as parity.
+//
+// ELOWEN_PARITY_MCP=deferred runs the same thing with a TWELVE-tool server (`--many`), which is past the
+// deferral threshold (deferralPolicy.ts defers `mcp__*` only above 10). That is the production shape —
+// chrome-devtools alone bridges 29 — and it takes a DIFFERENT path through the session: a deferred tool is
+// withheld from the wire `tools` array entirely and advertised by name in the system prompt instead. The
+// two-tool variant rides in `tools` and therefore cannot see drift in the deferred path at all.
 
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -41,12 +47,20 @@ const MOCK_MCP_SERVER = join(here, 'mock-mcp-server.mjs');
  *  (`mcp__<server>__<tool>`). Spelled out rather than counted: a check that only counted would stay green
  *  if a rename silently replaced one bridged tool with another. */
 const MCP_SERVER_NAME = 'parity';
-const EXPECTED_MCP_TOOLS = ['mcp__parity__echo_text', 'mcp__parity__sum_numbers'];
+const BASE_MCP_TOOLS = ['mcp__parity__echo_text', 'mcp__parity__sum_numbers'];
+const PROBE_MCP_TOOLS = Array.from({ length: 10 }, (_, i) => `mcp__parity__probe_${String(i + 1).padStart(2, '0')}`);
 
 const args = process.argv.slice(2);
 const mode = args[0] === '--check' ? 'check' : 'save';
-const useMcp = process.env.ELOWEN_PARITY_MCP === '1';
-const file = args[1] ?? `scripts/tests/subagent-parity/${useMcp ? 'baseline-mcp.json' : 'baseline.json'}`;
+const mcpMode = process.env.ELOWEN_PARITY_MCP === 'deferred' ? 'deferred' : process.env.ELOWEN_PARITY_MCP === '1' ? 'plain' : 'off';
+const useMcp = mcpMode !== 'off';
+// Above the deferral threshold the bridged tools leave the wire `tools` array and appear in the system
+// prompt instead — so the fingerprint's evidence lives in a different field, and needs its own baseline.
+const deferredMcp = mcpMode === 'deferred';
+const EXPECTED_MCP_TOOLS = deferredMcp ? [...BASE_MCP_TOOLS, ...PROBE_MCP_TOOLS] : BASE_MCP_TOOLS;
+const MCP_SERVER_ARGS = deferredMcp ? [MOCK_MCP_SERVER, '--many'] : [MOCK_MCP_SERVER];
+const baselineName = deferredMcp ? 'baseline-mcp-deferred.json' : useMcp ? 'baseline-mcp.json' : 'baseline.json';
+const file = args[1] ?? `scripts/tests/subagent-parity/${baselineName}`;
 // Run the SAME check with delegated turns executing in the forked sub-agent runner. The fingerprint must
 // not move: the runner composes the child's session through the same builder, and the system prompt is
 // the prompt-cache key — one byte of drift re-bills every delegated turn at full price.
@@ -129,6 +143,15 @@ function startModel(onChildRequest) {
   });
 }
 
+/** Which of the expected bridged tools are ABSENT from a fingerprint (captured or baseline). Below the
+ *  deferral threshold a bridged tool is a normal entry in the wire `tools` array; above it the tool is
+ *  withheld from that array entirely and advertised as a `- <name>: <description>` line inside the system
+ *  prompt's `<available_tools_deferred>` block — so the evidence lives in a different field and a check
+ *  that only ever looked at `toolNames` would report a missing tool set as parity. */
+const missingMcpTools = (fp) => (deferredMcp
+  ? EXPECTED_MCP_TOOLS.filter((t) => !fp.systemPrompt.includes(`\n- ${t}:`))
+  : EXPECTED_MCP_TOOLS.filter((t) => !fp.toolNames.includes(t)));
+
 /** Count `idle` events so a send can be awaited to settlement (POST /brain/send returns on admission). */
 async function watchIdle(baseUrl, token, session) {
   const res = await fetch(`${baseUrl}/brain/stream?session=${encodeURIComponent(session)}`, {
@@ -193,7 +216,7 @@ async function main() {
           values: {
             servers: [{
               name: MCP_SERVER_NAME, enabled: true, transport: 'stdio',
-              command: process.execPath, args: [MOCK_MCP_SERVER],
+              command: process.execPath, args: MCP_SERVER_ARGS,
             }],
           },
         }),
@@ -225,6 +248,9 @@ async function main() {
       if (!log.includes('sub-agent runner ready')) throw new Error('the sub-agent runner never came up — this run proves nothing');
       if (log.includes('running this delegated turn in-process')) throw new Error('the dispatcher fell back in-process — this run proves nothing');
       console.log('  (verified: the delegated turn was served by the forked runner)');
+      // The runner's own boot trace. Printed rather than asserted: what a fork costs is a MEASUREMENT, and
+      // the only place it is recorded is the child's phase log (the daemon sees fork→ready and no more).
+      for (const line of log.split('\n')) if (/runner:\d+ .*boot: /.test(line)) console.log(`  ${line.trim()}`);
     }
 
     const systemMessages = (childBody.messages ?? []).filter((m) => m?.role === 'system');
@@ -241,12 +267,19 @@ async function main() {
     // against a baseline that also has none, and report parity for a tool set that never arrived. Assert
     // presence on BOTH sides — the captured run and, below, the baseline it is compared with.
     if (useMcp) {
-      const missing = EXPECTED_MCP_TOOLS.filter((t) => !fingerprint.toolNames.includes(t));
+      const missing = missingMcpTools(fingerprint);
       if (missing.length) {
         throw new Error(`the delegated child received no bridged MCP tools for ${missing.join(', ')} — `
-          + `this run proves nothing about MCP parity (mcp__ tools seen: ${fingerprint.toolNames.filter((t) => t.startsWith('mcp__')).join(', ') || 'none'})`);
+          + `this run proves nothing about MCP parity (mcp__ tools in the wire tool list: ${fingerprint.toolNames.filter((t) => t.startsWith('mcp__')).join(', ') || 'none'})`);
       }
-      console.log(`  (verified: the child received ${EXPECTED_MCP_TOOLS.length} bridged MCP tools)`);
+      if (deferredMcp) {
+        // …and that they got there by being DEFERRED. A bridged tool sitting in the wire `tools` array
+        // means the threshold was not crossed, so this run would be the plain variant wearing a second
+        // baseline — green, and testing nothing new.
+        const active = EXPECTED_MCP_TOOLS.filter((t) => fingerprint.toolNames.includes(t));
+        if (active.length) throw new Error(`the deferred variant is not deferring: ${active.join(', ')} rode in the wire tool list`);
+      }
+      console.log(`  (verified: the child received ${EXPECTED_MCP_TOOLS.length} bridged MCP tools${deferredMcp ? ', all of them deferred into the system prompt' : ''})`);
     }
 
     if (mode === 'save') {
@@ -260,7 +293,7 @@ async function main() {
     if (!existsSync(file)) throw new Error(`no baseline at ${file} — run with --save first`);
     const baseline = JSON.parse(readFileSync(file, 'utf-8'));
     if (useMcp) {
-      const missing = EXPECTED_MCP_TOOLS.filter((t) => !baseline.toolNames.includes(t));
+      const missing = missingMcpTools(baseline);
       if (missing.length) throw new Error(`${file} carries no bridged MCP tools (${missing.join(', ')}) — recapture it with --save`);
     }
     const diffs = [];

@@ -5,6 +5,7 @@ import { SubagentRunnerPool } from '../../src/subagent/pool.js';
 import { subagentBuildId, type DaemonToRunner, type RunnerToDaemon } from '../../src/subagent/protocol.js';
 import { IDLE_REAP_MS, MAX_TURNS_PER_RUNNER, type MachineInputs } from '../../src/subagent/sizing.js';
 import { SubagentRunnerUnavailable, type DelegatedTurnRequest } from '../../src/brain/delegatedTurn.js';
+import type { McpBridgeSnapshot } from '../../src/plugins/mcpSnapshot.js';
 
 const GB = 1024 ** 3;
 
@@ -49,7 +50,12 @@ interface Harness {
   children: FakeChild[];
 }
 
-function poolWith(opts: { machine?: MachineInputs; poolMax?: () => number | null; enabled?: () => boolean } = {}): Harness {
+function poolWith(opts: {
+  machine?: MachineInputs;
+  poolMax?: () => number | null;
+  enabled?: () => boolean;
+  mcpBridgeSnapshot?: () => Promise<McpBridgeSnapshot | undefined>;
+} = {}): Harness {
   const children: FakeChild[] = [];
   const pool = new SubagentRunnerPool({
     dbPath: '/tmp/elowen-test.db',
@@ -59,9 +65,14 @@ function poolWith(opts: { machine?: MachineInputs; poolMax?: () => number | null
     machine: opts.machine ?? machine(16, 64),
     ...(opts.poolMax ? { poolMax: opts.poolMax } : {}),
     ...(opts.enabled ? { enabled: opts.enabled } : {}),
+    ...(opts.mcpBridgeSnapshot ? { mcpBridgeSnapshot: opts.mcpBridgeSnapshot } : {}),
   });
   return { pool, children };
 }
+
+/** The boot frame a child was handed — what travelled with the fork. */
+const bootFrame = (child: FakeChild): Extract<DaemonToRunner, { type: 'boot' }> | undefined =>
+  child.received.find((m): m is Extract<DaemonToRunner, { type: 'boot' }> => m.type === 'boot');
 
 /** Let the pool's promise chain (fork → handshake → place → send) settle. */
 const settle = async (times = 4): Promise<void> => {
@@ -468,6 +479,58 @@ describe('SubagentRunnerPool — what /health shows', () => {
     // The estimate is replaced by what the runner actually reported.
     expect(s.measuredRunnerRss).toBe(true);
     expect(s.runnerRssBytes).toBe(300 * 1024 * 1024);
+    void run;
+    h.pool.reset('test over');
+  });
+});
+
+/** A runner that connected every configured MCP server at boot launched its OWN server process tree — in
+ *  production a whole Chrome per runner, invisible to the RSS-based sizing above. The pool hands the child
+ *  the daemon's bridged tool DEFINITIONS instead, so the child declares the same tools and connects
+ *  nothing until a tool is actually called. */
+describe('SubagentRunnerPool — the bridged MCP snapshot the fork carries', () => {
+  const snapshot: McpBridgeSnapshot = [{ serverName: 'parity', tools: [{ name: 'echo_text', description: 'Echo it' }] }];
+
+  it('reads the snapshot at SPAWN time and sends it in the boot frame', async () => {
+    const h = poolWith({ mcpBridgeSnapshot: () => Promise.resolve(snapshot) });
+    const { run } = await coldStart(h);
+    expect(bootFrame(h.children[0]!)?.mcp).toEqual(snapshot);
+    void run;
+    h.pool.reset('test over');
+  });
+
+  it('re-reads it for EVERY fork, so a runner mirrors the registry as it stands at that moment', async () => {
+    // Not cached anywhere — that is the design. An MCP server the operator added or removed since the
+    // daemon booted needs no invalidation, because nothing about it is remembered between forks.
+    let generation = 0;
+    const h = poolWith({
+      mcpBridgeSnapshot: () => { generation += 1; return Promise.resolve([{ serverName: `gen-${generation}`, tools: [] }]); },
+    });
+    const { run } = await coldStart(h);
+    expect(bootFrame(h.children[0]!)?.mcp).toEqual([{ serverName: 'gen-1', tools: [] }]);
+    // Lose the runner; the next turn cold-starts a fresh one, which must be handed a FRESH snapshot.
+    h.children[0]!.die();
+    await settle();
+    const second = fire(h.pool.run(request('subagent-sub-dlg-2', 'brain-2'), 'after the death'));
+    await settle();
+    h.children[1]?.boot();
+    await settle();
+    expect(h.children).toHaveLength(2);
+    expect(bootFrame(h.children[1]!)?.mcp).toEqual([{ serverName: 'gen-2', tools: [] }]);
+    void run; void second;
+    h.pool.reset('test over');
+  });
+
+  it('forks WITHOUT a snapshot when there is none to be had, rather than failing the turn', async () => {
+    // Fail-open on purpose: a snapshot we could not obtain must never be the reason a delegated turn has
+    // no runner. The child then connects its servers itself — the old, slower boot, not a broken one.
+    const h = poolWith({ mcpBridgeSnapshot: () => Promise.reject(new Error('the plugin registry will not load')) });
+    const { run } = await coldStart(h);
+    const frame = bootFrame(h.children[0]!);
+    expect(frame).toBeTruthy();
+    expect(frame && 'mcp' in frame).toBe(false);
+    const [turn] = h.children[0]!.turns();
+    expect(turn?.text).toBe('first');
     void run;
     h.pool.reset('test over');
   });

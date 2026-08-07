@@ -271,7 +271,9 @@ function fakeBrain() {
 let pluginRoots: string[] = [];
 afterEach(() => { for (const p of pluginRoots) rmSync(p, { recursive: true, force: true }); pluginRoots = []; });
 
-/** A minimal on-disk MCP plugin registering the `listServers` control the telemetry rail reads. */
+/** A minimal on-disk MCP plugin registering the `mcp` control the telemetry rail reads. It must carry the
+ *  control's WHOLE contract — `PluginRegistry.control()` refuses a partial one — so `bridgeSnapshot` is
+ *  here too even though this route never calls it. */
 function mcpPluginProvider(servers: { name: string; status: string }[]): PluginRegistryProvider {
   const root = mkdtempSync(join(tmpdir(), 'brain-mcp-plugin-'));
   pluginRoots.push(root);
@@ -282,7 +284,7 @@ function mcpPluginProvider(servers: { name: string; status: string }[]): PluginR
   }));
   writeFileSync(join(dir, 'index.mjs'), `
     export function register(ctx){
-      ctx.registerControl('mcp', { listServers: () => (${JSON.stringify(servers)}) });
+      ctx.registerControl('mcp', { listServers: () => (${JSON.stringify(servers)}), bridgeSnapshot: () => [] });
     }
   `);
   return new PluginRegistryProvider(() => loadPlugins({

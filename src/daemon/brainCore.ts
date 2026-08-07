@@ -47,6 +47,7 @@ import { BUILTIN_TOOL_OUTPUT_SHOWN } from '../brain/tools/index.js';
 import type { DelegatedChildBridge } from '../plugins/api.js';
 import type { DelegatedTurnRunner } from '../brain/delegatedTurn.js';
 import type { Policy } from '../plugins/policy.js';
+import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 import { discoverPlugins, loadPlugins } from '../plugins/loader.js';
 import { PluginRegistryProvider } from '../plugins/pluginsProvider.js';
 import { resolvePolicy } from '../plugins/policy.js';
@@ -112,6 +113,11 @@ export interface BrainCoreOpts {
   /** The forked sub-agent runner — DAEMON-ONLY (see BrainDeps.subagentRunner). A runner omits it, which
    *  is what keeps a nested delegation inside the same process instead of forking a runner from a runner. */
   subagentRunner?: DelegatedTurnRunner;
+  /** The daemon's bridged MCP tool definitions, captured at the instant this process was forked —
+   *  RUNNER-ONLY, and the mirror image of `subagentRunner` above. With it the `mcp` plugin declares the
+   *  identical bridged tool set without connecting anything, and connects a server only when one of its
+   *  tools is actually called. The daemon passes nothing and connects at boot exactly as before. */
+  mcpBridgeSnapshot?: McpBridgeSnapshot;
 }
 
 /** Construct the store + plugin registry + brain services that ANY Elowen process needs, with no HTTP
@@ -381,6 +387,9 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
       // use, so a semantic-index plugin reuses the operator's ONE embedding model — no second provider.
       embeddings,
       embeddingConfig,
+      // Present only in a sub-agent runner (see BrainCoreOpts). Captured once, at fork time, and reused
+      // across this process's plugin reloads: it describes the tool SET, which a reload does not change.
+      ...(opts.mcpBridgeSnapshot ? { mcpBridgeSnapshot: opts.mcpBridgeSnapshot } : {}),
       logger: log,
     }).then((registry) => {
       // Snapshot the merged plugin output-show patterns so the (sync) messageView policy above reads the

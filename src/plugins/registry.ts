@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { DelegatedChildBridge, KnownControls, PluginCapabilities, PluginCommand, PluginContext, PluginControl, PluginEmbeddings, PluginHook, PluginHttpRoute, PluginLogger, PluginModelOption, PluginSkill, PlatformAdapter, ProviderCredentials, TurnContextContribution } from './api.js';
+import type { McpBridgeSnapshot } from './mcpSnapshot.js';
 import { isEmbeddingConfigured } from '../embeddings/embeddingService.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
 import { commandsWithPlugins, isReservedCommandName, type PluginSlashCommand } from '../brain/slashCommands.js';
@@ -51,7 +52,7 @@ const KNOWN_CONTROL_METHODS: { [K in keyof KnownControls]: readonly (keyof Known
   terminal: ['detachForeground', 'killForeground'],
   cron: ['pendingWakeupOriginSessionIds'],
   workflow: ['cancelForSession', 'detachForeground'],
-  mcp: ['listServers'],
+  mcp: ['listServers', 'bridgeSnapshot'],
 };
 
 /** Aggregates every enabled plugin's contributions, and hands each plugin a PluginContext scoped to its
@@ -210,7 +211,7 @@ export class PluginRegistry {
 
   /** Build the context passed to one plugin's `register()`. `config` is that plugin's own slice;
    *  `dataRoot` hosts per-plugin writable dirs (tests fall back to the OS tmpdir). */
-  contextFor(name: string, config: Record<string, unknown>, logger: PluginLogger, dataRoot?: string, notify?: (text: string, channelId?: string) => Promise<void>, listModels?: () => Promise<PluginModelOption[]>, resolveProvider?: (id: string) => ProviderCredentials | null, caps?: PluginCapabilities, provides?: PluginManifest['provides'], answerQuestion?: (id: string, answers: AskAnswer[]) => boolean, embedder?: PluginEmbedder, embeddingConfig?: () => EmbeddingConfig, allToolNames?: () => string[], timezone?: () => string, subagentTypes?: () => { name: string; description: string }[], requestReload?: () => void, allChatCommands?: () => PluginSlashCommand[], delegateContextChars?: () => number, delegatedChildren?: DelegatedChildBridge): PluginContext {
+  contextFor(name: string, config: Record<string, unknown>, logger: PluginLogger, dataRoot?: string, notify?: (text: string, channelId?: string) => Promise<void>, listModels?: () => Promise<PluginModelOption[]>, resolveProvider?: (id: string) => ProviderCredentials | null, caps?: PluginCapabilities, provides?: PluginManifest['provides'], answerQuestion?: (id: string, answers: AskAnswer[]) => boolean, embedder?: PluginEmbedder, embeddingConfig?: () => EmbeddingConfig, allToolNames?: () => string[], timezone?: () => string, subagentTypes?: () => { name: string; description: string }[], requestReload?: () => void, allChatCommands?: () => PluginSlashCommand[], delegateContextChars?: () => number, delegatedChildren?: DelegatedChildBridge, mcpBridgeSnapshot?: McpBridgeSnapshot): PluginContext {
     const scoped: PluginLogger = {
       info: (m) => logger.info(`[plugin:${name}] ${m}`),
       warn: (m) => logger.warn(`[plugin:${name}] ${m}`),
@@ -335,6 +336,10 @@ export class PluginRegistry {
       // behaviour every wall-clock consumer had before the setting existed.
       timezone: () => timezone?.() || Intl.DateTimeFormat().resolvedOptions().timeZone,
       delegateContextChars: () => delegateContextChars?.() ?? DEFAULT_BRAIN_LIMITS.delegateContextChars,
+      // Absent, not undefined, when nothing was handed down: the `mcp` plugin branches on presence, and
+      // "the daemon told us it bridges nothing" (an empty array) must stay distinguishable from "nobody
+      // told us anything" (a plain daemon, which connects at boot).
+      ...(mcpBridgeSnapshot ? { mcpBridgeSnapshot } : {}),
       isAdminSession: isAllAccess,
       currentAccess,
       currentIdentity,

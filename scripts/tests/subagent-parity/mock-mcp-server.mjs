@@ -14,7 +14,7 @@ const PROTOCOL_VERSION = '2024-11-05';
 
 // Non-trivial input schemas on purpose: the fingerprint exists to catch drift in what the model is shown,
 // and an empty `{}` schema would still look identical after a schema-carrying refactor broke it.
-const TOOLS = [
+const BASE_TOOLS = [
   {
     name: 'echo_text',
     title: 'Echo text',
@@ -45,6 +45,28 @@ const TOOLS = [
   },
 ];
 
+// `--many` adds ten more tools, taking the server past the deferral threshold (11 deferrable tools;
+// see src/brain/toolSearch/deferralPolicy.ts). PRODUCTION is this case — chrome-devtools alone bridges 29
+// tools — and a deferred tool never reaches the wire `tools` array at all: it is advertised by name in the
+// system prompt instead. Without a fixture above the threshold, the whole deferred path is untested.
+// Generated from a fixed template rather than hand-written: they exist to be COUNTED, and ten
+// copy-pasted blocks would only invite one of them to drift.
+const PROBE_TOOLS = Array.from({ length: 10 }, (_, i) => {
+  const n = String(i + 1).padStart(2, '0');
+  return {
+    name: `probe_${n}`,
+    title: `Probe ${n}`,
+    description: `Return probe ${n}'s marker. Deterministic parity fixture for the deferred-tool path.`,
+    inputSchema: {
+      type: 'object',
+      properties: { note: { type: 'string', description: `Optional note echoed by probe ${n}.` } },
+      additionalProperties: false,
+    },
+  };
+});
+
+const TOOLS = process.argv.includes('--many') ? [...BASE_TOOLS, ...PROBE_TOOLS] : BASE_TOOLS;
+
 const text = (t) => ({ content: [{ type: 'text', text: t }], isError: false });
 
 function callTool(name, args) {
@@ -57,6 +79,8 @@ function callTool(name, args) {
     const total = numbers.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
     return text(args?.label ? `${args.label}: ${total}` : String(total));
   }
+  const probe = /^probe_(\d{2})$/.exec(String(name ?? ''));
+  if (probe) return text(args?.note ? `probe ${probe[1]}: ${args.note}` : `probe ${probe[1]}`);
   return { content: [{ type: 'text', text: `unknown tool: ${name}` }], isError: true };
 }
 

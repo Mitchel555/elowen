@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { ELOWEN_VERSION } from '../api/version.js';
 import type { BrainUsage } from '../brain/events.js';
 import type { DelegatedProgressEvent, DelegatedTurnRequest } from '../brain/delegatedTurn.js';
+import { parseMcpBridgeSnapshot, type McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 
 /** The forked runner's entry module. Resolved relative to THIS file so the daemon and the child always
  *  name the same build: in a packaged install both are `dist/subagent/*.js`. A source checkout run through
@@ -42,6 +43,15 @@ export interface RunnerBootMessage {
   buildId: string;
   dbPath: string;
   project: { id: number; slug: string; path: string };
+  /** The daemon's bridged MCP tool definitions AT THE INSTANT OF THIS FORK, so the runner can declare the
+   *  same tools without connecting a single MCP server at boot (each one would otherwise launch its own
+   *  server process tree — in production a whole Chrome per runner). Read fresh per fork rather than
+   *  cached anywhere, so a runner mirrors the daemon's live registry by construction.
+   *
+   *  Extending the boot payload is safe precisely because {@link subagentBuildId} already refuses a
+   *  cross-build pair: a runner that predates this field can never be handed one. ABSENT (not empty) when
+   *  the daemon cannot say — the runner then connects at boot, exactly as it always did. */
+  mcp?: McpBridgeSnapshot;
 }
 
 export type DaemonToRunner =
@@ -88,7 +98,15 @@ export function parseDaemonMessage(raw: unknown): DaemonToRunner | undefined {
     const slug = str(p?.slug);
     const path = str(p?.path);
     if (!buildId || !dbPath || !p || !slug || !path || !Number.isSafeInteger(p.id)) return undefined;
-    return { type: 'boot', buildId, dbPath, project: { id: p.id as number, slug, path } };
+    // A snapshot that does not parse is REFUSED along with the whole frame, not silently dropped: booting
+    // without it would look identical from outside while composing a different tool list — and a tool list
+    // is the prompt-cache key. Absent is fine; malformed is not.
+    let mcp: McpBridgeSnapshot | undefined;
+    if (v.mcp !== undefined) {
+      mcp = parseMcpBridgeSnapshot(v.mcp);
+      if (!mcp) return undefined;
+    }
+    return { type: 'boot', buildId, dbPath, project: { id: p.id as number, slug, path }, ...(mcp ? { mcp } : {}) };
   }
   if (v.type === 'turn') {
     const turnId = str(v.turnId);

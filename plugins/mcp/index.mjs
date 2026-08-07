@@ -29,6 +29,10 @@ const state = {
   live: [],
   reconnecting: new Set(),
   servers: new Map(),
+  /** serverName → the in-flight LAZY connect for it. Single-flight: two bridged tools of the same server
+   *  called in the same turn must share ONE connect, or a first parallel call would launch two server
+   *  process trees and leave one of them orphaned in `live`. Only ever populated in a sub-agent runner. */
+  connecting: new Map(),
 };
 
 /** Whether an MCP error means the server simply doesn't implement the method (no `resources` capability),
@@ -138,7 +142,11 @@ function mapResult(res) {
  *  NOTE: the `mcp__` prefix is the deferred-tool-loading contract — src/brain/toolSearch/deferralPolicy.ts
  *  (`MCP_TOOL_PREFIX`) keys deferral off exactly this literal. Keep the two in sync; a drift would silently
  *  stop ToolSearch from ever deferring MCP tools. A test guards the prefix (deferralPolicy.test.ts). */
-function registerBridgedTool(ctx, client, serverName, tool) {
+/** `getClient` is resolved INSIDE execute, never at registration: a tool must be DECLARED to the model,
+ *  but the server behind it only has to exist when the tool is CALLED. That asymmetry is what lets a
+ *  forked sub-agent runner register the daemon's whole bridged tool set from a snapshot and connect
+ *  nothing (see the `snapshot` branch in register()). */
+function registerBridgedTool(ctx, getClient, serverName, tool) {
   const name = `mcp__${sanitize(serverName)}__${sanitize(tool.name)}`;
   const params = tool.inputSchema && typeof tool.inputSchema === 'object' ? Type.Unsafe(tool.inputSchema) : Type.Object({});
   ctx.registerTool(defineTool({
@@ -149,6 +157,9 @@ function registerBridgedTool(ctx, client, serverName, tool) {
     execute: async (_id, args) => {
       try {
         const callTimeoutMs = configNumber(ctx.config?.callTimeoutMs, CALL_TIMEOUT_MS, 30000, 300000);
+        // A connect that fails here surfaces through the same `fail(e)` a call against a dead client
+        // does — an error result the model can read, never a crash and never a silent empty answer.
+        const client = await getClient();
         const res = await withTimeout(client.callTool({ name: tool.name, arguments: args ?? {} }), callTimeoutMs, `mcp call ${tool.name}`);
         return mapResult(res);
       } catch (e) { return fail(e); }
@@ -158,20 +169,77 @@ function registerBridgedTool(ctx, client, serverName, tool) {
 
 /** Register bridged tools for several servers in ONE deterministic order. Tool order is part of the
  *  cached prompt prefix, so it must not depend on which server's listTools() answered first — collect
- *  from every server, sort by the final namespaced tool name (locale-independent), then register. */
-function registerBridgedTools(ctx, live, perServer) {
+ *  from every server, sort by the final namespaced tool name (locale-independent), then register.
+ *
+ *  `resolveClient(serverName)` returns how THAT server's client is obtained at call time, or undefined to
+ *  skip the server entirely. It is the ONE thing that differs between a connected load and a snapshot
+ *  load — everything below (naming, sorting, registration) is shared, so the two cannot produce different
+ *  tool lists. */
+function registerBridgedTools(ctx, resolveClient, perServer) {
   const pairs = [];
   for (const { serverName, tools } of perServer) {
-    const client = live.find((e) => e.name === serverName)?.client;
-    if (!client) continue;
-    for (const tool of tools) pairs.push({ client, serverName, tool });
+    const getClient = resolveClient(serverName);
+    if (!getClient) continue;
+    for (const tool of tools) pairs.push({ getClient, serverName, tool });
   }
   pairs.sort((a, b) => {
     const an = `mcp__${sanitize(a.serverName)}__${sanitize(a.tool.name)}`;
     const bn = `mcp__${sanitize(b.serverName)}__${sanitize(b.tool.name)}`;
     return an < bn ? -1 : an > bn ? 1 : 0;
   });
-  for (const p of pairs) registerBridgedTool(ctx, p.client, p.serverName, p.tool);
+  for (const p of pairs) registerBridgedTool(ctx, p.getClient, p.serverName, p.tool);
+}
+
+/** The ALREADY-CONNECTED resolver: bind the live client at registration, exactly as this plugin always
+ *  did. A server that is not live is skipped, and a client that later dies stays bound and dead until the
+ *  operator reconnects it — deliberately, because that is the daemon's existing behaviour and this change
+ *  must not alter it. */
+const connectedClient = (live) => (serverName) => {
+  const client = live.find((e) => e.name === serverName)?.client;
+  return client ? () => Promise.resolve(client) : undefined;
+};
+
+/** The LAZY resolver, used only when a snapshot was handed down: connect on the first call to one of this
+ *  server's tools, and let every concurrent first call share that one connect. */
+const lazyClient = (ctx, live) => (serverName) => () => connectLazily(ctx, serverName, live);
+
+/** Connect `serverName` on demand, SINGLE-FLIGHT: concurrent callers share one promise, so two bridged
+ *  tools of the same server called in parallel produce one connect and one server process, and every
+ *  caller settles on that connect's own outcome.
+ *
+ *  It is what makes "one connect" true BY CONSTRUCTION rather than by an accident of timing. Today the
+ *  `live.push` inside connectServer happens before its first await, so a second caller would find the
+ *  entry anyway — but that is a property of where the awaits currently sit, not of the design, and the day
+ *  connectServer gains an await before that push (a config read, a resolver, a lock) the accident stops
+ *  holding and two servers get launched with nothing to notice it. */
+function connectLazily(ctx, serverName, live) {
+  // The IN-FLIGHT connect is consulted BEFORE `live`, because connectServer pushes its entry into `live`
+  // synchronously and only then connects: between those two moments the entry exists but the connection
+  // does not, and connectServer splices it back out if the connect fails. A caller reading `live` first
+  // would therefore be handed a client that is mid-handshake — or one about to be abandoned, whose call
+  // then waits out the full 120 s call timeout instead of failing with the connect's own error.
+  const inflight = state.connecting.get(serverName);
+  if (inflight) return inflight;
+  const entry = live.find((e) => e.name === serverName);
+  if (entry) return Promise.resolve(entry.client);
+  const spec = state.specs.find((s) => s.name === serverName);
+  if (!spec) return Promise.reject(new Error(`unknown MCP server "${serverName}"`));
+  if (!spec.enabled) return Promise.reject(new Error(`MCP server "${serverName}" is disabled`));
+  const pending = connectServer(ctx, spec, live).then(() => {
+    const connected = live.find((e) => e.name === serverName);
+    // connectServer pushes its entry into `live` before connecting and splices it out on failure, so a
+    // fulfilled connect with nothing live means the transport closed between the two — treat it as the
+    // failure it is rather than handing the caller an undefined client.
+    if (!connected) throw new Error(`MCP server "${serverName}" closed immediately after connecting`);
+    return connected.client;
+  });
+  state.connecting.set(serverName, pending);
+  // Clear the slot once it settles, so a FAILED connect is retried on the next call instead of caching the
+  // rejection forever. Guarded on identity: a later attempt may already own the slot by then.
+  void pending.catch(() => {}).finally(() => {
+    if (state.connecting.get(serverName) === pending) state.connecting.delete(serverName);
+  });
+  return pending;
 }
 
 /** Connect one server, list its tools, and bridge them. Errors propagate to the caller (per-server
@@ -209,6 +277,10 @@ async function connectServer(ctx, spec, live) {
         description: tool.description ?? '',
         schema: tool.inputSchema ?? null,
       })),
+      // The descriptors VERBATIM, beside the flattened `tools` above. The flattening is lossy for exactly
+      // the fields registration reads (a tool with no description becomes '' there, which would bridge a
+      // DIFFERENT description than this process did), so bridgeSnapshot() must not be built from it.
+      bridged: tools,
     });
     ctx.logger?.info?.(`mcp: connected "${spec.name}" (${tools.length} tools)`);
     // Capture the last transport error (if any) so an unexpected close can report WHY, not just THAT.
@@ -226,6 +298,7 @@ async function connectServer(ctx, spec, live) {
         lastError: entry.lastTransportError ?? 'connection closed unexpectedly',
         toolCount: 0,
         tools: [],
+        bridged: [],
       });
       ctx.logger?.warn?.(`mcp: "${spec.name}" disconnected unexpectedly`);
     };
@@ -235,7 +308,7 @@ async function connectServer(ctx, spec, live) {
     if (i >= 0) live.splice(i, 1);
     try { await transport.close?.(); } catch { /* ignore */ }
     killTree(child);
-    setServerState(spec.name, { status: 'error', lastError: e instanceof Error ? e.message : String(e), toolCount: 0, tools: [] });
+    setServerState(spec.name, { status: 'error', lastError: e instanceof Error ? e.message : String(e), toolCount: 0, tools: [], bridged: [] });
     throw e;
   }
 }
@@ -254,16 +327,21 @@ async function connectAll(ctx, specs, live) {
     const r = results[i];
     if (r.status === 'fulfilled' && Array.isArray(r.value)) perServer.push({ serverName: s.name, tools: r.value });
   });
-  registerBridgedTools(ctx, live, perServer);
+  registerBridgedTools(ctx, connectedClient(live), perServer);
 }
 
 export async function register(ctx) {
   const specs = Array.isArray(ctx.config?.servers) ? ctx.config.servers : [];
   const live = []; // { name, client, transport, child }
+  // Handed down by a process that has ALREADY connected these servers (the daemon → its sub-agent
+  // runners). Its presence is the whole switch: with it we declare the same bridged tools and connect
+  // nothing; without it — every daemon — we connect at boot exactly as before.
+  const snapshot = Array.isArray(ctx.mcpBridgeSnapshot) ? ctx.mcpBridgeSnapshot : null;
   state.ctx = ctx;
   state.specs = specs.filter((s) => s && s.name);
   state.live = live;
   state.servers.clear();
+  state.connecting.clear();
   for (const spec of state.specs) {
     setServerState(spec.name, { status: spec.enabled ? 'disconnected' : 'disabled', transport: transportKind(spec), lastError: null, tools: [], toolCount: 0 });
   }
@@ -277,6 +355,9 @@ export async function register(ctx) {
   // a rejected close becomes a caught, logged result — never an unhandled rejection — and a reload can't
   // overlap the previous remote transports still tearing down.
   const cleanup = async () => {
+    // A lazy connect still in flight belongs to the load being torn down: forget it so the next load's
+    // first call starts a fresh one instead of sharing a promise whose transport this cleanup is killing.
+    state.connecting.clear();
     const closing = [];
     for (const c of live.splice(0)) {
       // Deliberate teardown, not a crash: suppress the onclose transition before triggering it.
@@ -294,12 +375,37 @@ export async function register(ctx) {
   ctx.registerHook({ name: 'plugin.reload.before', run: async () => { await cleanup(); } });
   ctx.registerControl('mcp', {
     listServers: listMcpServers,
+    bridgeSnapshot: mcpBridgeSnapshot,
     reconnectServer: reconnectMcpServer,
     reconnectDisconnected: reconnectMcpDisconnected,
   });
 
-  // Connecting blocks register() (the loader awaits it) — bounded + fail-open per server above.
-  await connectAll(ctx, specs, live);
+  if (snapshot) {
+    // Same registration and same ordering as the connected path — only the client resolution differs.
+    // Registering here rather than after the two resource tools below is deliberate: bridged tools come
+    // FIRST in this plugin's registration order in the daemon, and that order is part of the cached
+    // prompt prefix.
+    registerBridgedTools(ctx, lazyClient(ctx, live), snapshot);
+    const bridged = snapshot.reduce((n, s) => n + s.tools.length, 0);
+    ctx.logger?.info?.(`mcp: declared ${bridged} bridged tool(s) from an inherited snapshot — servers connect on first use`);
+  } else {
+    // Connecting blocks register() (the loader awaits it) — bounded + fail-open per server above.
+    await connectAll(ctx, specs, live);
+  }
+
+  /** Make sure the servers a RESOURCE call is about are live. Resources have no declaration to ride on —
+   *  unlike a bridged tool, whose schema the snapshot carries, a resource list can only come from a
+   *  connected server — so under a snapshot the naming of one (or the absence of a name, meaning "every
+   *  connected server") is itself the request to connect. Fail-open and single-flight, like a tool call.
+   *  A no-op without a snapshot: the daemon connected at boot, and a server that DIED there stays dead
+   *  until an operator reconnects it, which is this plugin's existing behaviour. */
+  const ensureResourceServers = async (serverName) => {
+    if (!snapshot) return;
+    const names = serverName
+      ? [serverName]
+      : state.specs.filter((s) => s.enabled).map((s) => s.name);
+    await Promise.allSettled(names.map((n) => connectLazily(ctx, n, live)));
+  };
 
   // ── MCP resource browsing tools ──────────────────────────────────────────────────────────────────
   // Let the model discover and read resources exposed by connected MCP servers (prompts, docs, data).
@@ -310,6 +416,7 @@ export async function register(ctx) {
       server: Type.Optional(Type.String({ description: 'Only list resources from this MCP server (by name).' })),
     }),
     execute: async (_id, p) => {
+      await ensureResourceServers(p?.server);
       const targets = p?.server ? live.filter((e) => e.name === p.server) : live;
       if (p?.server && targets.length === 0) return fail(new Error(`MCP server "${p.server}" is not connected. Use ListMcpResources with no server to see connected servers.`));
       const results = [];
@@ -348,6 +455,7 @@ export async function register(ctx) {
       uri: Type.String({ description: 'URI of the resource to read' }),
     }),
     execute: async (_id, p) => {
+      await ensureResourceServers(p.server);
       const entry = live.find((e) => e.name === p.server);
       if (!entry) return fail(new Error(`MCP server "${p.server}" is not connected. Use ListMcpResources to see available servers.`));
       try {
@@ -370,6 +478,31 @@ export function listMcpServers() {
   return state.specs.map(publicServerState);
 }
 
+/** The bridged tool DEFINITIONS this process currently holds — everything a forked sub-agent runner needs
+ *  to declare the identical tools without connecting anything (see src/plugins/mcpSnapshot.ts for the
+ *  field contract, which is exactly what registerBridgedTool reads).
+ *
+ *  Only CONNECTED servers contribute: the snapshot has to describe the tool set this process actually
+ *  registered, and a server that failed to connect contributed none. Under a snapshot itself (a runner
+ *  asked) the answer is empty — a runner forks nothing, so nobody asks. */
+export function mcpBridgeSnapshot() {
+  const out = [];
+  for (const spec of state.specs) {
+    const entry = state.servers.get(spec.name);
+    if (entry?.status !== 'connected' || !Array.isArray(entry.bridged) || entry.bridged.length === 0) continue;
+    out.push({
+      serverName: spec.name,
+      tools: entry.bridged.map((tool) => ({
+        name: tool.name,
+        ...(typeof tool.title === 'string' ? { title: tool.title } : {}),
+        ...(typeof tool.description === 'string' ? { description: tool.description } : {}),
+        ...(tool.inputSchema && typeof tool.inputSchema === 'object' ? { inputSchema: tool.inputSchema } : {}),
+      })),
+    });
+  }
+  return out;
+}
+
 export async function reconnectMcpServer(name) {
   const spec = state.specs.find((s) => s.name === name);
   if (!spec) throw new Error(`unknown MCP server "${name}"`);
@@ -383,7 +516,7 @@ export async function reconnectMcpServer(name) {
     const tools = await connectServer(state.ctx, spec, state.live);
     // connectServer no longer registers (ordering lives in registerBridgedTools) — register here with the
     // same deterministic, name-sorted order as the initial load.
-    if (tools.length) registerBridgedTools(state.ctx, state.live, [{ serverName: spec.name, tools }]);
+    if (tools.length) registerBridgedTools(state.ctx, connectedClient(state.live), [{ serverName: spec.name, tools }]);
     return publicServerState(spec);
   } finally {
     state.reconnecting.delete(name);

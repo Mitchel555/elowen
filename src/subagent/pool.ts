@@ -39,6 +39,7 @@ import { SubagentRunnerUnavailable, type DelegatedTurnRequest, type DelegatedTur
 import { SubagentRunnerHost, type RunnerHeartbeat, type SubagentRunnerHostDeps } from './runnerHost.js';
 import { FairQueue } from './fairQueue.js';
 import type { SubagentPoolStats } from './poolStats.js';
+import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 import {
   HEARTBEAT_INTERVAL_MS,
   MAX_TURNS_PER_RUNNER,
@@ -90,7 +91,13 @@ interface PooledRunner {
   lastActivityAt: number;
 }
 
-export interface SubagentRunnerPoolDeps extends Omit<SubagentRunnerHostDeps, 'onHeartbeat' | 'onExit'> {
+export interface SubagentRunnerPoolDeps extends Omit<SubagentRunnerHostDeps, 'onHeartbeat' | 'onExit' | 'mcpBridgeSnapshot'> {
+  /** The daemon's bridged MCP tool definitions, read AT SPAWN TIME — once per fork, never cached here.
+   *  That is the whole point: a runner then declares exactly what the daemon's registry holds at the
+   *  moment it is created, so an MCP server the operator added or removed since boot needs no
+   *  invalidation anywhere. Resolving it touches the plugin registry, hence async; a rejection or an
+   *  absent control simply means no snapshot, and the runner connects at boot as before. */
+  mcpBridgeSnapshot?: () => Promise<McpBridgeSnapshot | undefined>;
   /** The operator's knob, read LIVE: `null` = auto (size from the machine), 0 = pool off (every delegated
    *  turn stays in-process), N >= 1 = hard cap. Live so raising it takes effect on the next turn. */
   poolMax?: () => number | null;
@@ -279,6 +286,13 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
       // so without this line the daemon's log has no timestamp to measure fork→ready against — and a
       // spawn that never reports ready leaves no trace at all that one was attempted.
       log.info(`sub-agent pool: forking a runner (${this.runners.length} live, cap ${this.cap()})`);
+      // Read BEFORE the fork, so the child is handed the registry as it stands right now. Fail-open: a
+      // snapshot we could not obtain must never be the reason a delegated turn has no runner — the child
+      // then connects its MCP servers itself, which is merely the old, slower boot.
+      const mcpBridgeSnapshot = await this.d.mcpBridgeSnapshot?.().catch((e: unknown) => {
+        log.warn(`could not snapshot the bridged MCP tools for this runner: ${e instanceof Error ? e.message : String(e)}`);
+        return undefined;
+      });
       // The callbacks close over `entry`, which is assigned on the next line — safe because a host never
       // invokes them from its constructor, only from IPC frames that cannot arrive before the fork.
       let entry: PooledRunner;
@@ -286,6 +300,7 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
         dbPath: this.d.dbPath,
         project: this.d.project,
         cwd: this.d.cwd,
+        ...(mcpBridgeSnapshot ? { mcpBridgeSnapshot } : {}),
         ...(this.d.fork ? { fork: this.d.fork } : {}),
         onHeartbeat: (beat) => this.onHeartbeat(entry, beat),
         onExit: () => this.onRunnerExit(entry),

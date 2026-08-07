@@ -66,6 +66,7 @@ import { buildBrainCore } from './brainCore.js';
 import { SubagentRunnerPool } from '../subagent/pool.js';
 import { resolvePoolMax } from '../subagent/sizing.js';
 import type { RuntimeConfig } from '../shared/wireContract.js';
+import type { PluginRegistryProvider } from '../plugins/pluginsProvider.js';
 
 const log = logger('daemon');
 
@@ -392,10 +393,18 @@ export async function buildApp(opts: BuildOpts) {
   // The pool size knob is read through a late-bound getter: the config store is built by buildBrainCore
   // below, and the knob is only ever consulted on a delegated turn, long after that has returned.
   let runtimeConfigForPool: (() => RuntimeConfig) | undefined;
+  // Same late binding, same reason: the plugin registry is built by buildBrainCore below, and this is only
+  // ever read when a runner is being forked — long after that returned.
+  let pluginsForPool: PluginRegistryProvider | undefined;
   const subagentRunner = opts.dbPath !== ':memory:'
     ? new SubagentRunnerPool({
       dbPath: opts.dbPath,
       project: opts.project,
+      // What the daemon's OWN registry bridges right now. The mcp plugin is the single source: it holds
+      // the tool definitions it registered from, so a runner registers from the same data through the same
+      // code. Absent control (plugin disabled, or a registry that will not load) ⇒ no snapshot ⇒ the
+      // runner connects at boot, exactly as before.
+      mcpBridgeSnapshot: async () => (await pluginsForPool?.get())?.control('mcp')?.bridgeSnapshot(),
       // Explicit: a delegated turn's cwd ends in `process.cwd()`, so a child forked with a different
       // one would change what the model is told about where it is running.
       cwd: process.cwd(),
@@ -431,6 +440,7 @@ export async function buildApp(opts: BuildOpts) {
   // Close the late binding opened above the pool: from here the knob resolves against the live store,
   // so raising or zeroing it takes effect on the next delegated turn with no restart.
   runtimeConfigForPool = () => config.get().runtime;
+  pluginsForPool = pluginProvider;
   ensureVapidKeys(config); // generate the web-push VAPID keypair on first boot (idempotent thereafter)
   // The overseer relay client, rebuilt per-call so a key set/cleared at runtime takes effect.
   // Overseer decisions use their own model when set, else fall back to the planner model.

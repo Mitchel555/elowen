@@ -10,6 +10,7 @@ import {
   type DelegatedTurnRunner,
 } from '../brain/delegatedTurn.js';
 import { RUNNER_ENTRY, parseRunnerMessage, subagentBuildId, type DaemonToRunner } from './protocol.js';
+import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 
 const log = logger('subagent-runner');
 
@@ -28,6 +29,10 @@ export interface SubagentRunnerHostDeps {
    *  `turnWorkDir(...) ?? cwd ?? process.cwd()`, so a child forked with a different one would silently
    *  tell the model it is somewhere else. */
   cwd: string;
+  /** The daemon's bridged MCP tool definitions as they stood when the POOL decided to fork this host
+   *  (see RunnerBootMessage.mcp). Carried in the boot frame so the child declares the same bridged tools
+   *  without connecting a single MCP server. Omitted ⇒ the child connects at boot, as it always did. */
+  mcpBridgeSnapshot?: McpBridgeSnapshot;
   /** The fork itself. Injectable ONLY so the handshake and the death path can be exercised without
    *  booting a real brain in a child process; production always takes the default below. */
   fork?: () => ChildProcess;
@@ -277,6 +282,7 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
       });
       this.post(child, {
         type: 'boot', buildId: this.buildId, dbPath: this.d.dbPath, project: this.d.project,
+        ...(this.d.mcpBridgeSnapshot ? { mcp: this.d.mcpBridgeSnapshot } : {}),
       });
     });
   }

@@ -5,24 +5,27 @@ import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 // The plugin is a plain ESM module (no build step) — import it directly.
 // @ts-expect-error - .mjs plugin has no type declarations
-import { register, killTree, sanitize, mapResult, DetachedStdioTransport, configNumber, listMcpServers, reconnectMcpServer } from '../../plugins/mcp/index.mjs';
+import { register, killTree, sanitize, mapResult, DetachedStdioTransport, configNumber, listMcpServers, reconnectMcpServer, mcpBridgeSnapshot } from '../../plugins/mcp/index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER = join(here, '../fixtures/mock-mcp-server.mjs');
 const PAGINATED_MOCK_SERVER = join(here, '../fixtures/mock-mcp-paginated-server.mjs');
 const LATENCY_MOCK_SERVER = join(here, '../fixtures/mock-mcp-latency-server.mjs');
+const SLOW_INIT_MOCK_SERVER = join(here, '../fixtures/mock-mcp-slow-init-server.mjs');
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (fn: () => boolean, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await wait(50); } return fn(); };
 
-/** A minimal PluginContext stand-in capturing the tools/hooks the plugin registers. */
-function fakeCtx(config: Record<string, unknown>) {
+/** A minimal PluginContext stand-in capturing the tools/hooks the plugin registers. `mcpBridgeSnapshot`
+ *  is what a forked sub-agent runner is handed: present ⇒ declare these tools and connect nothing. */
+function fakeCtx(config: Record<string, unknown>, mcpBridgeSnapshot?: unknown) {
   const tools: { name: string; execute: (id: string, args: unknown) => Promise<unknown> }[] = [];
   const hooks: { name: string; run: (p: unknown) => unknown }[] = [];
   const controls = new Map<string, unknown>();
   return {
     config,
+    ...(mcpBridgeSnapshot ? { mcpBridgeSnapshot } : {}),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     registerTool: (t: { name: string; execute: (id: string, args: unknown) => Promise<unknown> }) => tools.push(t),
     registerHook: (h: { name: string; run: (p: unknown) => unknown }) => hooks.push(h),
@@ -233,4 +236,156 @@ describe('mcp plugin — end-to-end connection + process-group cleanup', () => {
     const hook = ctx.hooks.find((h) => h.name === 'plugin.reload.before');
     await hook!.run({});
   }, 20000);
+});
+
+/** A forked sub-agent runner used to connect every configured MCP server at boot — its own copy of every
+ *  one of them, in production a whole Chrome per runner. It does not have to: a tool must be DECLARED to
+ *  the model, but the server behind it only has to exist when the tool is CALLED. Handed the daemon's
+ *  bridged tool definitions, the plugin declares the identical tools and connects on first use.
+ *
+ *  The requirement these tests defend is PARITY: whichever path the plugin took, the model must be shown
+ *  exactly the same tools. The tool list is part of the prompt-cache key, so drift here is silent and
+ *  re-bills every delegated turn at full price. */
+describe('mcp plugin — declaring bridged tools from an inherited snapshot', () => {
+  let dirs: string[] = [];
+  const tmpDir = (tag: string): string => { const p = mkdtempSync(join(tmpdir(), `elowen-${tag}-`)); dirs.push(p); return p; };
+  afterEach(() => { for (const p of dirs) rmSync(p, { recursive: true, force: true }); dirs = []; });
+
+  /** How many times the scripted server was LAUNCHED (one appended line per start). */
+  const starts = (log: string): number =>
+    (existsSync(log) ? readFileSync(log, 'utf-8').split('\n').filter(Boolean).length : 0);
+
+  /** Everything about a registered tool that the MODEL sees. Compared field for field between the two
+   *  registration paths, because "the same tool names" would still pass with a mangled schema. */
+  const declarations = (ctx: ReturnType<typeof fakeCtx>): unknown[] =>
+    ctx.tools.filter((t) => t.name.startsWith('mcp__'))
+      .map((t) => { const { execute: _execute, ...rest } = t as Record<string, unknown> & { execute: unknown }; return rest; });
+
+  const teardown = async (ctx: ReturnType<typeof fakeCtx>): Promise<void> => {
+    await ctx.hooks.find((h) => h.name === 'plugin.reload.before')!.run({});
+  };
+
+  it('declares the same tools as a connected load, launches nothing at boot, and connects on the first call', async () => {
+    const log = join(tmpDir('mcp-snapshot'), 'starts.log');
+    const servers = [{
+      name: 'mock', enabled: true, transport: 'stdio',
+      command: process.execPath, args: [MOCK_SERVER], env: { SERVER_START_LOG: log },
+    }];
+
+    // 1. The DAEMON's load: connect at boot, and record what it registered.
+    const daemonCtx = fakeCtx({ servers });
+    await register(daemonCtx as never);
+    const snapshot = mcpBridgeSnapshot();
+    const daemonDeclarations = declarations(daemonCtx);
+    expect(daemonDeclarations).toHaveLength(1);
+    expect(starts(log)).toBe(1);
+    await teardown(daemonCtx);
+
+    // 2. The RUNNER's load: same config, plus the snapshot the daemon just produced.
+    const runnerCtx = fakeCtx({ servers }, snapshot);
+    await register(runnerCtx as never);
+    expect(declarations(runnerCtx)).toEqual(daemonDeclarations);
+    // …and it cost no server process at all. This is the whole point of the change.
+    expect(starts(log)).toBe(1);
+
+    // 3. Calling one connects it, once, and the call works.
+    const echo = runnerCtx.tools.find((t) => t.name === 'mcp__mock__echo');
+    const res = (await echo!.execute('1', { text: 'lazy hello' })) as { content: { text: string }[] };
+    expect(res.content[0]!.text).toBe('lazy hello');
+    expect(starts(log)).toBe(2);
+
+    // 4. A SECOND call reuses the connection rather than launching another server.
+    await echo!.execute('2', { text: 'again' });
+    expect(starts(log)).toBe(2);
+    await teardown(runnerCtx);
+  }, 30000);
+
+  it('shares ONE connect between concurrent first calls, and neither sees a half-connected client', async () => {
+    // The server holds its `initialize` reply for 400 ms, so the second call lands squarely INSIDE the
+    // first one's handshake rather than after it — the window where a broken lazy connect would show.
+    // Both calls must come back with the server's real answers, off one server process.
+    const log = join(tmpDir('mcp-singleflight'), 'starts.log');
+    const snapshot = [{ serverName: 'mock', tools: [{ name: 'echo', description: 'Echo the text back', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] }];
+    const ctx = fakeCtx({
+      servers: [{
+        name: 'mock', enabled: true, transport: 'stdio', command: process.execPath,
+        args: [SLOW_INIT_MOCK_SERVER], env: { SERVER_START_LOG: log, INIT_DELAY_MS: '400' },
+      }],
+    }, snapshot);
+    await register(ctx as never);
+    expect(starts(log)).toBe(0);
+
+    const echo = ctx.tools.find((t) => t.name === 'mcp__mock__echo');
+    const [a, b] = await Promise.all([
+      echo!.execute('1', { text: 'first' }) as Promise<{ content: { text: string }[]; details: { ok: boolean } }>,
+      echo!.execute('2', { text: 'second' }) as Promise<{ content: { text: string }[]; details: { ok: boolean } }>,
+    ]);
+    expect(a.details.ok, `first call failed: ${a.content[0]?.text}`).toBe(true);
+    expect(b.details.ok, `second call failed: ${b.content[0]?.text}`).toBe(true);
+    expect(a.content[0]!.text).toBe('first');
+    expect(b.content[0]!.text).toBe('second');
+    expect(starts(log), 'exactly one server process for two concurrent first calls').toBe(1);
+    await teardown(ctx);
+  }, 30000);
+
+  it('surfaces a connect that fails at first call the way a dead server does — an error result, not a crash', async () => {
+    const ctx = fakeCtx({
+      connectTimeoutMs: 5000,
+      // A command that exits immediately: the transport closes and the connect rejects.
+      servers: [{ name: 'dead', enabled: true, transport: 'stdio', command: process.execPath, args: ['-e', 'process.exit(1)'] }],
+    }, [{ serverName: 'dead', tools: [{ name: 'ghost', description: 'never answers' }] }]);
+    await register(ctx as never);
+
+    const ghost = ctx.tools.find((t) => t.name === 'mcp__dead__ghost');
+    expect(ghost, 'the tool is still DECLARED — the model sees the same surface either way').toBeTruthy();
+    const res = (await ghost!.execute('1', {})) as { content: { text: string }[]; details: { ok: boolean } };
+    expect(res.details.ok).toBe(false);
+    expect(res.content[0]!.text).toMatch(/^Error: /);
+    // The failure is not cached: a later call tries again rather than answering from a stale rejection.
+    const second = (await ghost!.execute('2', {})) as { details: { ok: boolean } };
+    expect(second.details.ok).toBe(false);
+    await teardown(ctx);
+  }, 30000);
+
+  it('connects on demand for the RESOURCE tools too, which have no declaration to ride on', async () => {
+    // A bridged tool carries its schema in the snapshot; a resource listing can only come from a live
+    // server. Under a snapshot, asking for resources is therefore itself the request to connect.
+    const log = join(tmpDir('mcp-resources'), 'starts.log');
+    const ctx = fakeCtx({
+      servers: [{ name: 'mock', enabled: true, transport: 'stdio', command: process.execPath, args: [MOCK_SERVER], env: { SERVER_START_LOG: log } }],
+    }, [{ serverName: 'mock', tools: [{ name: 'echo' }] }]);
+    await register(ctx as never);
+    expect(starts(log)).toBe(0);
+
+    const list = ctx.tools.find((t) => t.name === 'ListMcpResources');
+    await list!.execute('1', {});
+    expect(starts(log), 'ListMcpResources brought the server up').toBe(1);
+
+    // ReadMcpResource against the SAME server reuses that connection.
+    const read = ctx.tools.find((t) => t.name === 'ReadMcpResource');
+    const res = (await read!.execute('2', { server: 'mock', uri: 'file:///nope' })) as { details: { ok: boolean } };
+    expect(res.details.ok).toBe(false); // the mock exposes no resources — but it was ASKED, not skipped
+    expect(starts(log)).toBe(1);
+    await teardown(ctx);
+  }, 30000);
+
+  it('bridgeSnapshot() reports only CONNECTED servers, with the fields registration reads', async () => {
+    const ctx = fakeCtx({
+      connectTimeoutMs: 5000,
+      servers: [
+        { name: 'mock', enabled: true, transport: 'stdio', command: process.execPath, args: [MOCK_SERVER] },
+        { name: 'broken', enabled: true, transport: 'stdio', command: process.execPath, args: ['-e', 'process.exit(1)'] },
+        { name: 'off', enabled: false, transport: 'stdio', command: process.execPath, args: [MOCK_SERVER] },
+      ],
+    });
+    await register(ctx as never);
+    const snapshot = mcpBridgeSnapshot() as { serverName: string; tools: { name: string; description?: string; inputSchema?: unknown }[] }[];
+    // A server that failed to connect contributed no tools to THIS process either, so it must contribute
+    // none to a runner — otherwise the runner would declare tools the daemon does not have.
+    expect(snapshot.map((s) => s.serverName)).toEqual(['mock']);
+    expect(snapshot[0]!.tools.map((t) => t.name)).toEqual(['echo']);
+    expect(snapshot[0]!.tools[0]!.description).toBe('Echo the text back');
+    expect(snapshot[0]!.tools[0]!.inputSchema).toMatchObject({ type: 'object' });
+    await teardown(ctx);
+  }, 30000);
 });

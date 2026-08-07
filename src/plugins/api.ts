@@ -5,6 +5,7 @@ import type { ProcessRegistry } from '../brain/processRegistry.js';
 import type { NoninteractivePermissionBoundary } from '../brain/toolPermissions.js';
 import type { SlashCommandDef } from '../brain/slashCommands.js';
 import type { DelegatedChildSummary } from '../store/brainDelegationStore.js';
+import type { McpBridgeSnapshot } from './mcpSnapshot.js';
 
 export type { DelegatedChildSummary };
 
@@ -367,6 +368,10 @@ export interface McpServerState { name: string; status: string }
  *  whether each is currently connected. Daemon-global state, so every caller applies its own gate. */
 export interface McpListControl {
   listServers(): McpServerState[];
+  /** The bridged tool DEFINITIONS this process currently holds, for a forked sub-agent runner to declare
+   *  the identical tool set without connecting anything (see plugins/mcpSnapshot.ts). Read at fork time,
+   *  never cached: a runner then mirrors the daemon's live registry by construction. */
+  bridgeSnapshot(): McpBridgeSnapshot;
 }
 
 /** The controls whose shape core needs to CALL by key. `registerControl` stays generic (a plugin may
@@ -469,6 +474,12 @@ export interface PluginContext {
    *  raising it does not mean editing a plugin. Read live, so a change applies on the next delegation
    *  without a restart. Falls back to the configured default when nothing is wired. */
   delegateContextChars(): number;
+  /** Bridged MCP tool definitions handed down by the process that forked this one, or undefined when
+   *  nothing was handed down (every normal daemon). Present ONLY in a sub-agent runner: the `mcp` plugin
+   *  registers exactly these instead of connecting every configured server at boot, and connects a server
+   *  on the first call to one of its tools. Read once, at register time — it describes the forking
+   *  process's registry at the instant of the fork. */
+  mcpBridgeSnapshot?: McpBridgeSnapshot;
   /** The working directory an exec/file tool uses when the caller names none: the project path the
    *  current turn's session is bound to (a task worker's checkout), else the first allowed root, else
    *  the daemon's own cwd. Evaluated per tool call against the per-run turn scope, so a directory the

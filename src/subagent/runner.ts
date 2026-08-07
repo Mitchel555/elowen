@@ -28,6 +28,7 @@ import type { BrainService } from '../brain/brainService.js';
 import { parseDelegatedTurnRequest, toDelegatedProgress } from '../brain/delegatedTurn.js';
 import { SUBAGENT_PLATFORM, channelSessionId } from '../brain/sessionId.js';
 import { parseDaemonMessage, subagentBuildId, type RunnerToDaemon } from './protocol.js';
+import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 
 // A runner writes into the daemon's own log file and builds the same brain core, so its lines carry the
 // same scopes the daemon's do (`[daemon] plugin loaded: …`). The pid is what makes them attributable —
@@ -106,11 +107,21 @@ let brain: BrainService | undefined;
  *  up, which is well before plugins are loaded. */
 let booting: Promise<void> | undefined;
 
-async function boot(dbPath: string, project: { id: number; slug: string; path: string }): Promise<void> {
+async function boot(
+  dbPath: string,
+  project: { id: number; slug: string; path: string },
+  mcpBridgeSnapshot: McpBridgeSnapshot | undefined,
+): Promise<void> {
   const core = await buildBrainCore({
     dbPath,
     project,
     tmux: REFUSING_TMUX,
+    // The daemon already connected every configured MCP server and knows what each one bridges, so this
+    // process declares the identical tools from that snapshot and connects a server only if one of its
+    // tools is actually CALLED. Without it every runner launched its own copy of every server — in
+    // production a whole Chrome per runner, ~2.5 s of this boot, and a process tree the pool's RSS-based
+    // sizing cannot see. Absent ⇒ connect at boot, exactly as before.
+    ...(mcpBridgeSnapshot ? { mcpBridgeSnapshot } : {}),
     // The daemon prepared this database; a process attaching to it must not create accounts…
     bootstrap: null,
     // …nor take the write lock to re-prove a schema that is already final.
@@ -124,7 +135,12 @@ async function boot(dbPath: string, project: { id: number; slug: string; path: s
   // plugin load (every plugin, every MCP server) is a phase of its own in the log instead of being
   // charged to platform startup.
   await core.pluginProvider.get();
-  phase('plugins loaded');
+  // Say WHICH of the two MCP paths this boot took. Without it the difference between "declared 29 tools
+  // from a snapshot" and "launched 29 tools' worth of servers" is invisible in the phase timing alone.
+  const bridged = mcpBridgeSnapshot?.reduce((n, s) => n + s.tools.length, 0);
+  phase('plugins loaded', mcpBridgeSnapshot
+    ? `${bridged} bridged MCP tool(s) declared from the daemon's snapshot — no MCP server connected`
+    : undefined);
   brain = core.brain;
   // Report NESTED delegated edges upward. The daemon's LiveSessionRegistry is the authoritative abort
   // tree, so it has to see work happening over here — but never the edge of the dispatched turn itself,
@@ -181,7 +197,7 @@ process.on('message', (raw: unknown) => {
         send({ type: 'fatal', reason: `build mismatch (daemon ${msg.buildId}, runner ${own})` });
         process.exit(2);
       }
-      booting = boot(msg.dbPath, msg.project).then(
+      booting = boot(msg.dbPath, msg.project, msg.mcp).then(
         () => { phase('ready'); send({ type: 'ready', buildId: own }); },
         (e: unknown) => { send({ type: 'fatal', reason: errorText(e) }); process.exit(3); },
       );

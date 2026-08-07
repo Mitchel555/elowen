@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 
 const pidFile = process.env.GRANDCHILD_PID_FILE;
 if (pidFile) {
@@ -18,6 +18,12 @@ if (pidFile) {
 
 const serverPidFile = process.env.SERVER_PID_FILE;
 if (serverPidFile) writeFileSync(serverPidFile, String(process.pid));
+
+// One APPENDED line per start, so a test can count how many times this server was LAUNCHED. That is how
+// "two concurrent first calls shared one lazy connect" is proved at the process level, rather than by
+// inspecting the plugin's own bookkeeping — which is the thing under test.
+const startLog = process.env.SERVER_START_LOG;
+if (startLog) appendFileSync(startLog, `${process.pid}\n`);
 
 const server = new McpServer({ name: 'mock-mcp', version: '0.0.1' });
 server.registerTool('echo', { description: 'Echo the text back', inputSchema: { text: z.string() } }, async ({ text }) => ({

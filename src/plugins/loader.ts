@@ -6,6 +6,7 @@ import type { PluginManifest } from './manifest.js';
 import { PluginRegistry } from './registry.js';
 import type { PluginEmbedder } from './registry.js';
 import type { DelegatedChildBridge, PluginLogger, PluginModule, ProviderCredentials } from './api.js';
+import type { McpBridgeSnapshot } from './mcpSnapshot.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
 import type { AskAnswer } from '../brain/events.js';
 import type { PluginModelOption } from './api.js';
@@ -108,6 +109,11 @@ export interface LoadPluginsOptions {
    *  ctx.continueSubagent(). Absent (worker or unit-test wiring) → listing is empty and reads/continuations
    *  are refused. */
   delegatedChildren?: DelegatedChildBridge;
+  /** Bridged MCP tool definitions inherited from the process that forked this one, exposed to plugins as
+   *  ctx.mcpBridgeSnapshot. Set ONLY by the sub-agent runner: it lets the `mcp` plugin declare the daemon's
+   *  bridged tools without connecting a single server at boot (see plugins/mcpSnapshot.ts). Absent in the
+   *  daemon, which connects at boot exactly as before. */
+  mcpBridgeSnapshot?: McpBridgeSnapshot;
   logger: PluginLogger;
 }
 
@@ -156,7 +162,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<PluginRegis
           // Like `toolNames`, this closes over the MERGED registry (not the staging one): the adapter reads it
           // long after every plugin has merged, so it must see the whole live set of plugin prompt commands.
           () => [...registry.commands.values()].map((c) => ({ name: c.name, description: c.description, prompt: c.prompt, surfaces: c.surfaces, plugin: registry.commandOwner.get(c.name) })),
-          opts.delegateContextChars, opts.delegatedChildren);
+          opts.delegateContextChars, opts.delegatedChildren, opts.mcpBridgeSnapshot);
         await mod.register(ctx);
         registry.merge(staging, (m) => opts.logger.warn(`[plugin:${name}] ${m}`));
         // Capture the plugin's declared capabilities (deny-by-default `{}` when absent) — the manifest
