@@ -1380,6 +1380,8 @@ export const en = {
       toastDurationMsHint: "How long a notification in the top-right corner of the web app stays on screen before it dismisses itself. Hovering over it pauses the countdown and it can always be closed by hand, so this only sets how long it waits on its own. Range 2-15 s, default 4.5 s.",
       toolDeferralEnabled: "Defer external tools",
       toolDeferralEnabledHint: "The master switch for the threshold above. Off = no tool is ever withheld from the prompt, whatever the threshold says. On by default.",
+      subagentRunnerEnabled: "Run sub-agents in separate processes",
+      subagentRunnerEnabledHint: "Delegated turns run in their own worker processes instead of sharing the daemon's single thread, so the operating system can spread them across cores and the interface stays responsive during a large fan-out. Workers run at a lower priority than the daemon, and the pool only grows as far as processor and memory allow. Off runs every sub-agent inside the daemon, as before. Takes effect immediately, without a restart.",
       clamped: "Saved as {value} — the value you set was outside the allowed range.",
       secondUnit: "s",
       dayUnit: { one: "day", few: "days", many: "days" },

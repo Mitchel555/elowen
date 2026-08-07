@@ -1380,6 +1380,8 @@ export const cs = {
       toastDurationMsHint: "Jak dlouho zůstane oznámení v pravém horním rohu webové aplikace na obrazovce, než samo zmizí. Najetím myší se odpočet pozastaví a zavřít ho lze vždy ručně, takže tato hodnota určuje jen to, jak dlouho čeká samo od sebe. Rozsah 2–15 s, výchozí 4,5 s.",
       toolDeferralEnabled: "Odkládat externí nástroje",
       toolDeferralEnabledHint: "Hlavní vypínač k prahu výše. Vypnuto = žádný nástroj se z promptu nikdy nevynechá, bez ohledu na práh. Ve výchozím stavu zapnuto.",
+      subagentRunnerEnabled: "Spouštět sub-agenty v samostatných procesech",
+      subagentRunnerEnabledHint: "Delegované tahy poběží ve vlastních procesech místo toho, aby sdílely jediné vlákno démona. Operační systém je tak může rozložit mezi jádra a rozhraní zůstane svižné i při rozsáhlém větvení. Procesy běží s nižší prioritou než démon a jejich počet roste jen do mezí, které dovolí procesor a paměť. Vypnuto znamená, že všichni sub-agenti běží uvnitř démona jako dosud. Změna platí okamžitě, bez restartu.",
       clamped: "Uloženo jako {value} — zadaná hodnota byla mimo povolený rozsah.",
       secondUnit: "s",
       dayUnit: { one: "den", few: "dny", many: "dní" },

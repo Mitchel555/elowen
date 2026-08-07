@@ -1,5 +1,5 @@
 'use client';
-import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, MessageSquare, Copy, CopyCheck, Star, HeartPulse, PenLine, type LucideIcon } from 'lucide-react';
+import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, MessageSquare, Copy, CopyCheck, Star, HeartPulse, PenLine, Cpu, type LucideIcon } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { HelpTip } from '../../components/ui/HelpTip';
@@ -150,6 +150,22 @@ export function RuntimeLimitsModal({ runtime, applied, onChange, onClose, presen
               checked={runtime.toolDeferralEnabled}
               onChange={(next) => onChange((cur) => ({ ...cur, toolDeferralEnabled: next }))}
               label={t.brain.runtime.toolDeferralEnabled}
+            />
+          </div>
+          {/* The daemon re-reads this per delegation, so flipping it takes effect on the next sub-agent
+              without a restart — that live read is what makes it a usable rollback under load. */}
+          <div className="flex items-center gap-2.5 py-3.5">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center text-text-muted">
+              <Cpu size={18} aria-hidden />
+            </span>
+            <span className="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-medium text-text">
+              {t.brain.runtime.subagentRunnerEnabled}
+              <HelpTip>{t.brain.runtime.subagentRunnerEnabledHint}</HelpTip>
+            </span>
+            <Toggle
+              checked={runtime.subagentRunnerEnabled}
+              onChange={(next) => onChange((cur) => ({ ...cur, subagentRunnerEnabled: next }))}
+              label={t.brain.runtime.subagentRunnerEnabled}
             />
           </div>
         </div>
