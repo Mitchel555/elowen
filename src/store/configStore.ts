@@ -355,9 +355,12 @@ const MIN_STREAM_SILENCE_MS = 35_000;
 const DEFAULT_TOOL_DEFERRAL_ENABLED = true;
 
 /** Whether a delegated sub-agent turn executes in the forked runner process instead of on the daemon's
- *  own event loop. OFF: `false` is literally the pre-runner code path, so flipping this back is a
- *  complete rollback with no redeploy. */
-const DEFAULT_SUBAGENT_RUNNER_ENABLED = false;
+ *  own event loop. ON: in-process sub-agents share the daemon's single JS thread, so a fan-out starves the
+ *  interactive path — measured at 20 concurrent children, the daemon's own CPU dropped from ~45% to ~5%
+ *  once they moved out. The pool sizes itself from the machine, so this is safe on a small VPS too.
+ *  `false` is still literally the pre-runner code path, so flipping it back is a rollback with no
+ *  redeploy — which is why it stays a switch rather than becoming unconditional. */
+const DEFAULT_SUBAGENT_RUNNER_ENABLED = true;
 
 /** AUTO. The pool sizes itself from the machine, which is the whole point — a hard-coded default would be
  *  wrong on either a 2-core VPS or a 16-core server, and probably on both. The operator sets a number only

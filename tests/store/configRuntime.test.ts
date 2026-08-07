@@ -25,9 +25,9 @@ describe('ConfigStore runtime limits', () => {
         toastDurationMs: 4_500,           // TOAST_MS
       },
       toolDeferralEnabled: true,
-      // OFF: `false` is literally the pre-runner in-process path, so adding the setting changed nothing
-      // until an operator turns it on.
-      subagentRunnerEnabled: false,
+      // ON: in-process sub-agents share the daemon's one JS thread, so a fan-out starves the interactive
+      // path. `false` remains the pre-runner code path, i.e. the rollback an operator can reach for.
+      subagentRunnerEnabled: true,
       // AUTO: the pool measures the machine it is on, because any hard-coded count would be wrong on
       // either a 2-core VPS or a 16-core server. An operator only sets a number when those inputs lie.
       subagentRunnerPoolMax: null,
@@ -115,16 +115,18 @@ describe('ConfigStore runtime limits', () => {
 
   it('round-trips the sub-agent runner switch and leaves it alone on a limits-only patch', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    expect(cs.get().runtime.subagentRunnerEnabled).toBe(false); // OFF by default — the rollback position
-    cs.update({ runtime: { subagentRunnerEnabled: true } });
-    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
-    // A patch that tunes an unrelated knob must not silently switch delegated execution back.
-    cs.update({ runtime: { limits: { toolDeferThreshold: 12 } } });
-    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
-    cs.update({ runtime: { toolDeferralEnabled: false } });
-    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true); // ON by default; off is the rollback position
     cs.update({ runtime: { subagentRunnerEnabled: false } });
     expect(cs.get().runtime.subagentRunnerEnabled).toBe(false);
+    // An operator who switched delegated execution off did so to get out of trouble. Tuning any other
+    // knob afterwards must not hand them the runner back, which is the direction that now matters:
+    // the default is on, so a lost `false` silently re-enables it.
+    cs.update({ runtime: { limits: { toolDeferThreshold: 12 } } });
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(false);
+    cs.update({ runtime: { toolDeferralEnabled: false } });
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(false);
+    cs.update({ runtime: { subagentRunnerEnabled: true } });
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
   });
 
   it('round-trips the pool size knob, including the two values that are not "a number"', () => {
