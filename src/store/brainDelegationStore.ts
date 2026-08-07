@@ -1,4 +1,5 @@
 import type { Db } from './db.js';
+import { withWriteLock } from './db.js';
 import type { WorkflowNode, WorkflowUpdate } from '../brain/events.js';
 import { isSubagentSession } from '../brain/sessionId.js';
 import { logger } from '../shared/logger.js';
@@ -284,7 +285,7 @@ export class BrainDelegationStore {
     if (typeof update.sessionId !== 'string' || !update.sessionId) return false;
     const state = normalizeSubagentState(update);
     if (!state) return false;
-    return this.db.transaction(() => {
+    return withWriteLock(this.db, () => {
       const relation = this.db.prepare(
         `SELECT p.user_id AS parent_user, c.user_id AS child_user, c.parent_session_id AS linked_parent
            FROM brain_sessions p JOIN brain_sessions c ON c.id = ?
@@ -302,7 +303,7 @@ export class BrainDelegationStore {
            state = excluded.state, updated_at = datetime('now')`
       ).run(parentSessionId, update.id, update.sessionId, JSON.stringify(state));
       return true;
-    })();
+    });
   }
 
   /** Read only still-valid direct same-owner relations. Malformed legacy/corrupted JSON is ignored at
@@ -443,7 +444,7 @@ export class BrainDelegationStore {
     if (!parentSessionId) return false;
     const state = normalizeWorkflowState(raw);
     if (!state) return false;
-    return this.db.transaction(() => {
+    return withWriteLock(this.db, () => {
       const parent = this.db.prepare('SELECT id FROM brain_sessions WHERE id = ?').get(parentSessionId) as { id: string } | undefined;
       if (!parent) return false;
       const prior = this.db.prepare(
@@ -457,7 +458,7 @@ export class BrainDelegationStore {
            state = excluded.state, updated_at = datetime('now')`
       ).run(parentSessionId, state.toolCallId, state.id, JSON.stringify(state));
       return true;
-    })();
+    });
   }
 
   /** Read the durable DAGs of one conversation, with each node's drill-in target re-derived from the
@@ -554,7 +555,7 @@ export class BrainDelegationStore {
   enqueueSubagentResult(parentSessionId: string, raw: unknown): boolean {
     const result = normalizeSubagentResult(raw);
     if (!parentSessionId || !result) return false;
-    return this.db.transaction(() => {
+    return withWriteLock(this.db, () => {
       const linked = result.sessionId ? this.db.prepare(
         `SELECT 1 FROM brain_subagent_runs r
           JOIN brain_sessions p ON p.id = r.parent_session_id
@@ -592,7 +593,7 @@ export class BrainDelegationStore {
         `SELECT parent_session_id, tool_call_id, child_session_id FROM brain_subagent_results WHERE result_id = ?`
       ).get(result.id) as { parent_session_id: string; tool_call_id: string; child_session_id: string } | undefined;
       return row?.parent_session_id === parentSessionId && row.tool_call_id === result.toolCallId && row.child_session_id === result.sessionId;
-    })();
+    });
   }
 
   /** Persist a terminal WORKFLOW result before waking the parent. Same durable queue as a sub-agent
@@ -604,7 +605,7 @@ export class BrainDelegationStore {
   enqueueWorkflowResult(parentSessionId: string, raw: unknown): boolean {
     const result = normalizeWorkflowCompletion(raw);
     if (!parentSessionId || !result) return false;
-    return this.db.transaction(() => {
+    return withWriteLock(this.db, () => {
       // The workflow id is part of the linkage, not just the (parent, tool_call) pair: without it a
       // completion naming a DIFFERENT workflow is accepted and filed under this row, so the parent is
       // woken with a summary that belongs to another DAG. upsertWorkflowRun already refuses to let a
@@ -625,7 +626,7 @@ export class BrainDelegationStore {
         'SELECT parent_session_id, tool_call_id FROM brain_subagent_results WHERE result_id = ?'
       ).get(result.id) as { parent_session_id: string; tool_call_id: string } | undefined;
       return row?.parent_session_id === parentSessionId && row.tool_call_id === result.toolCallId;
-    })();
+    });
   }
 
   /** How many delegated results are still waiting to reach a parent turn, across every conversation.

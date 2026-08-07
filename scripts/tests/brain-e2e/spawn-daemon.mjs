@@ -64,7 +64,10 @@ async function waitForHealth(baseUrl, deadlineMs) {
  * @param {string} [opts.providerId]     Config id for the injected provider (default 'e2e').
  * @param {string} [opts.model]          Model id the provider advertises (default 'mock-model').
  * @param {number} [opts.healthTimeoutMs] Hard deadline for boot readiness (default 30000).
- * @returns {Promise<{ baseUrl: string, token: string, dataDir: string, port: number, providerId: string, model: string, stop: ()=>Promise<void>, restart: ()=>Promise<string> }>}
+ * @param {Record<string,string>} [opts.env] Extra environment for the daemon child, applied LAST. The
+ *        filter below strips every inherited `ELOWEN_*` var on purpose, so a suite that needs one (the
+ *        load harness needs its trace-output dir) has to pass it explicitly rather than rely on leakage.
+ * @returns {Promise<{ baseUrl: string, token: string, dataDir: string, port: number, providerId: string, model: string, pid: ()=>number|undefined, stop: ()=>Promise<void>, restart: ()=>Promise<string> }>}
  */
 export async function spawnRealDaemon(opts) {
   if (!opts?.providerBaseUrl) throw new Error('spawnRealDaemon requires providerBaseUrl');
@@ -97,7 +100,7 @@ export async function spawnRealDaemon(opts) {
     ELOWEN_LOG_DIR: join(dataDir, 'logs'),
     ELOWEN_BOOTSTRAP_USER: bootstrapUser,
     ELOWEN_BOOTSTRAP_PASS: bootstrapPass,
-  });
+  }, opts.env ?? {});
 
   let child = null;
   let logs = [];
@@ -183,7 +186,9 @@ export async function spawnRealDaemon(opts) {
 
     // Everything the daemon wrote so far. A harness that flips a runtime switch needs to prove the
     // daemon actually took that path instead of silently falling back to the old one.
-    return { baseUrl, token, dataDir, port, providerId, model, stop, restart, logText: () => logs.join('') };
+    // `pid` is a getter, not a value: a restart replaces the child, and a caller sampling /proc must
+    // follow the live process rather than keep polling a pid that has exited.
+    return { baseUrl, token, dataDir, port, providerId, model, pid: () => child?.pid, stop, restart, logText: () => logs.join('') };
   } catch (e) {
     const tail = logs.join('').split('\n').slice(-40).join('\n');
     await stop();

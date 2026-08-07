@@ -73,12 +73,11 @@ function migrate(db: Db): void {
  *  `busy_timeout` covers a lock held by a writer that is making progress, but not SQLITE_BUSY_SNAPSHOT —
  *  raised when our read snapshot cannot be upgraded — which no timeout resolves and only a fresh attempt
  *  can clear. Bounded: a lock still held after this many tries is a genuine fault and must surface. */
-function withWriteLock(db: Db, apply: () => void): void {
+export function withWriteLock<T>(db: Db, apply: () => T): T {
   const attempts = 5;
   for (let i = 1; ; i++) {
     try {
-      db.transaction(apply).immediate();
-      return;
+      return db.transaction(apply).immediate();
     } catch (e) {
       const code = (e as { code?: string }).code ?? '';
       if (i >= attempts || !code.startsWith('SQLITE_BUSY')) throw e;

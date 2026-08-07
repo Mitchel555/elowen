@@ -1,0 +1,259 @@
+TEMPORARY INSTRUMENTATION for scripts/tests/subagent-load/ — NOT APPLIED, and deliberately kept out of
+src/ because it monkey-patches better-sqlite3 and must never ship. It is preserved here only so the
+decisive measurements can be reproduced without re-deriving them.
+
+    git apply scripts/tests/subagent-load/loadtrace.patch && npm run build
+    node scripts/tests/subagent-load/matrix.mjs
+    git apply -R scripts/tests/subagent-load/loadtrace.patch && npm run build
+
+Applied, it adds three per-process signals to every run: sql-<pid>.tsv (every better-sqlite3 call that
+blocked its thread >50 ms, plus every SQLITE_BUSY throw, with SQL and call site), lag-<pid>.tsv
+(event-loop delay percentiles every 250 ms) and canary-<pid>.tsv (a trivial daemon INSERT every 100 ms
+whose duration is essentially pure write-lock wait). Without it the harness still records health.tsv,
+cpu.tsv and wal.tsv, which is enough to see a stall but not to attribute one.
+
+diff --git a/src/shared/loadTrace.ts b/src/shared/loadTrace.ts
+new file mode 100644
+index 00000000..43c864b0
+--- /dev/null
++++ b/src/shared/loadTrace.ts
+@@ -0,0 +1,218 @@
++/* ============================================================================================
++ * TEMPORARY LOAD-TRACE INSTRUMENTATION — NOT FOR COMMIT. DELETE THIS FILE AND THE SINGLE
++ * `attachLoadTrace(db)` CALL IN src/store/db.ts WHEN THE STALL INVESTIGATION IS DONE.
++ *
++ * Built for scripts/tests/subagent-load/. Entirely inert unless ELOWEN_LOAD_TRACE names a directory,
++ * so a process started without it pays one env read at openDb time and nothing else.
++ *
++ * It records two things per process, both on a wall-clock timeline the harness can correlate:
++ *   - sql-<pid>.tsv  — every better-sqlite3 call that BLOCKED the calling thread for longer than
++ *     ELOWEN_LOAD_TRACE_SLOW_MS (default 50). better-sqlite3 is synchronous, so this duration IS
++ *     event-loop blocking, whether it was spent waiting on the write lock or doing the work.
++ *   - lag-<pid>.tsv  — event-loop delay percentiles over a short window (default 250 ms), which is
++ *     the resolution watchLoopLag's 30 s transition-only logging cannot give.
++ * ============================================================================================ */
++import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
++import { join } from 'node:path';
++import { monitorEventLoopDelay } from 'node:perf_hooks';
++
++/** better-sqlite3's Database/Statement surface, as much of it as this file touches. */
++interface TracedStatement {
++  readonly source?: string;
++  run: (...args: unknown[]) => unknown;
++  get: (...args: unknown[]) => unknown;
++  all: (...args: unknown[]) => unknown;
++}
++interface TracedDb {
++  prepare: (sql: string) => TracedStatement;
++  exec: (sql: string) => unknown;
++  transaction: (fn: (...args: unknown[]) => unknown) => ((...args: unknown[]) => unknown) & {
++    default: (...a: unknown[]) => unknown;
++    deferred: (...a: unknown[]) => unknown;
++    immediate: (...a: unknown[]) => unknown;
++    exclusive: (...a: unknown[]) => unknown;
++  };
++}
++
++const traceDir = process.env.ELOWEN_LOAD_TRACE ?? '';
++const slowMs = Number(process.env.ELOWEN_LOAD_TRACE_SLOW_MS ?? '50');
++const lagSampleMs = Number(process.env.ELOWEN_LOAD_TRACE_LAG_MS ?? '250');
++const canaryMs = Number(process.env.ELOWEN_LOAD_TRACE_CANARY_MS ?? '100');
++
++/** `runner` is exact: only src/subagent/runner.ts is ever the entry of a forked runner. */
++const role = /subagent[\\/]runner\.(js|ts)$/.test(process.argv[1] ?? '') ? 'runner' : 'daemon';
++
++let sqlPath = '';
++let started = false;
++/** Buffered so the tracer's own fs writes cannot become the stall it is measuring. */
++let pending: string[] = [];
++
++const flush = (): void => {
++  if (pending.length === 0) return;
++  const batch = pending.join('');
++  pending = [];
++  try { appendFileSync(sqlPath, batch); } catch { /* a trace is never worth failing a turn for */ }
++};
++
++/** First line of the caller's stack outside this file and better-sqlite3 — enough to name a call site. */
++function callSite(err: Error): string {
++  const limit = Error.stackTraceLimit;
++  Error.stackTraceLimit = 12;
++  const stack = err.stack ?? '';
++  Error.stackTraceLimit = limit;
++  for (const line of stack.split('\n').slice(1)) {
++    if (line.includes('loadTrace') || line.includes('better_sqlite3') || line.includes('better-sqlite3')) continue;
++    return line.trim().replace(/^at\s+/, '').slice(0, 160);
++  }
++  return '?';
++}
++
++const record = (kind: string, ms: number, sql: string, err: Error, busy: string): void => {
++  pending.push([
++    new Date().toISOString(), role, String(process.pid), kind, ms.toFixed(1), busy,
++    sql.replace(/\s+/g, ' ').slice(0, 120), callSite(err),
++  ].join('\t') + '\n');
++  if (pending.length >= 64) flush();
++};
++
++/** Run `fn`, timing how long it blocked this thread; report it when that exceeds the threshold. */
++function timed<T>(kind: string, sql: string, fn: () => T): T {
++  const site = new Error();
++  const t0 = performance.now();
++  try {
++    const out = fn();
++    const ms = performance.now() - t0;
++    if (ms >= slowMs) record(kind, ms, sql, site, '-');
++    return out;
++  } catch (e) {
++    const ms = performance.now() - t0;
++    const code = (e as { code?: string }).code ?? 'ERR';
++    record(kind, ms, sql, site, code);
++    throw e;
++  }
++}
++
++/** THE unambiguous cross-process write-lock measurement.
++ *
++ *  A trivial INSERT on the DAEMON's own connection, every `canaryMs`. Its work is microseconds, so its
++ *  DURATION is almost entirely time spent acquiring SQLite's write lock — and because better-sqlite3 is
++ *  synchronous on a single thread, this call can never overlap the daemon's own other statements. So it
++ *  separates the two things a slow `persistAgentRun` conflates: how much the daemon is writing, and how
++ *  long another process is making it wait. `drift` is recorded beside it so a late TIMER (event-loop lag)
++ *  is never mistaken for a slow WRITE. */
++function startCanary(db: TracedDb, rawPrepare: (sql: string) => TracedStatement, dir: string): void {
++  const path = join(dir, `canary-${process.pid}.tsv`);
++  try { writeFileSync(path, 'iso\tms\tdrift\tcode\n'); } catch { return; }
++  let insert: TracedStatement | null = null;
++  let seq = 0;
++  let expected = Date.now() + canaryMs;
++  const tick = (): void => {
++    const now = Date.now();
++    const drift = now - expected;
++    expected = now + canaryMs;
++    let ms = 0;
++    let code = '-';
++    try {
++      if (!insert) {
++        db.exec('CREATE TABLE IF NOT EXISTS _loadtrace_canary (id INTEGER PRIMARY KEY, t TEXT NOT NULL)');
++        insert = rawPrepare('INSERT INTO _loadtrace_canary (t) VALUES (?)');
++      }
++      const t0 = performance.now();
++      insert.run(new Date(now).toISOString());
++      ms = performance.now() - t0;
++    } catch (e) {
++      code = (e as { code?: string }).code ?? 'ERR';
++    }
++    seq += 1;
++    // Bounded: the canary must not become the disk pressure it is measuring.
++    if (seq % 200 === 0) { try { db.exec('DELETE FROM _loadtrace_canary'); } catch { /* ignore */ } }
++    try { appendFileSync(path, `${new Date(now).toISOString()}\t${ms.toFixed(2)}\t${drift}\t${code}\n`); } catch { /* ignore */ }
++    const timer = setTimeout(tick, canaryMs);
++    timer.unref?.();
++  };
++  // Deferred: attachLoadTrace runs before journal_mode/migrations, and the canary must not be the process
++  // that creates a table in a database still being brought up.
++  const first = setTimeout(tick, 3_000);
++  first.unref?.();
++}
++
++function startLagSampler(dir: string): void {
++  const path = join(dir, `lag-${process.pid}.tsv`);
++  try { writeFileSync(path, 'iso\trole\tpid\tp50\tp99\tmax\tdrift\n'); } catch { return; }
++  const histogram = monitorEventLoopDelay({ resolution: 1 });
++  histogram.enable();
++  let expected = Date.now() + lagSampleMs;
++  const tick = (): void => {
++    const now = Date.now();
++    const drift = now - expected;
++    const toMs = (n: number): number => (Number.isFinite(n) ? Math.round(n / 1e4) / 100 : 0);
++    try {
++      appendFileSync(path, [
++        new Date(now).toISOString(), role, String(process.pid),
++        toMs(histogram.percentile(50)), toMs(histogram.percentile(99)), toMs(histogram.max), drift,
++      ].join('\t') + '\n');
++    } catch { /* ignore */ }
++    histogram.reset();
++    expected = now + lagSampleMs;
++    const timer = setTimeout(tick, lagSampleMs);
++    timer.unref?.();
++  };
++  const first = setTimeout(tick, lagSampleMs);
++  first.unref?.();
++}
++
++/** Wrap one better-sqlite3 connection so every blocking call it serves is timed. Idempotent-ish: called
++ *  once per openDb, and a process only opens one connection. */
++export function attachLoadTrace(db: unknown): void {
++  if (!traceDir) return;
++  const target = db as TracedDb;
++  if (!started) {
++    started = true;
++    try { mkdirSync(traceDir, { recursive: true }); } catch { return; }
++    sqlPath = join(traceDir, `sql-${process.pid}.tsv`);
++    try { writeFileSync(sqlPath, 'iso\trole\tpid\tkind\tms\tcode\tsql\tsite\n'); } catch { return; }
++    const flusher = setInterval(flush, 500);
++    flusher.unref?.();
++    process.on('exit', flush);
++    startLagSampler(traceDir);
++  }
++
++  const rawPrepare = target.prepare.bind(target);
++  // The canary is the daemon's own measurement of how long ANOTHER process makes it wait, so it belongs
++  // in the daemon only — and it uses the untraced `prepare` so it never appears in its own SQL trace.
++  if (role === 'daemon' && process.env.ELOWEN_LOAD_TRACE_CANARY === '1') startCanary(target, rawPrepare, traceDir);
++  target.prepare = (sql: string): TracedStatement => {
++    const stmt = rawPrepare(sql);
++    return new Proxy(stmt, {
++      get(t, prop, receiver): unknown {
++        const value = Reflect.get(t, prop, t);
++        if (typeof value !== 'function') return value;
++        if (prop === 'run' || prop === 'get' || prop === 'all') {
++          return (...args: unknown[]): unknown => timed(String(prop), sql, () => (value as (...a: unknown[]) => unknown).apply(t, args));
++        }
++        // pluck()/raw()/bind() return the statement itself — hand back the proxy so a chained call stays traced.
++        return (...args: unknown[]): unknown => {
++          const out = (value as (...a: unknown[]) => unknown).apply(t, args);
++          return out === t ? receiver : out;
++        };
++      },
++    }) as TracedStatement;
++  };
++
++  const rawExec = target.exec.bind(target);
++  target.exec = (sql: string): unknown => timed('exec', sql, () => rawExec(sql));
++
++  const rawTransaction = target.transaction.bind(target);
++  target.transaction = ((fn: (...args: unknown[]) => unknown) => {
++    const built = rawTransaction(fn);
++    const label = fn.name || 'anon';
++    const wrap = (mode: string, call: (...a: unknown[]) => unknown) =>
++      (...args: unknown[]): unknown => timed(`tx:${mode}`, label, () => call(...args));
++    return Object.assign(wrap('default', built), {
++      default: wrap('default', built.default),
++      deferred: wrap('deferred', built.deferred),
++      immediate: wrap('immediate', built.immediate),
++      exclusive: wrap('exclusive', built.exclusive),
++    });
++  }) as TracedDb['transaction'];
++}
+diff --git a/src/store/db.ts b/src/store/db.ts
+index dc764b1b..595b910c 100644
+--- a/src/store/db.ts
++++ b/src/store/db.ts
+@@ -3,6 +3,8 @@ import { readFileSync, mkdirSync } from 'node:fs';
+ import { fileURLToPath } from 'node:url';
+ import { dirname, join } from 'node:path';
+ import { renameRegistryTool, renameTool, repairImageTool } from './toolRenames.js';
++// TEMPORARY LOAD-TRACE INSTRUMENTATION — NOT FOR COMMIT (see src/shared/loadTrace.ts).
++import { attachLoadTrace } from '../shared/loadTrace.js';
+ 
+ const here = dirname(fileURLToPath(import.meta.url));
+ 
+@@ -26,6 +28,7 @@ export interface OpenDbOptions {
+ export function openDb(path: string, opts: OpenDbOptions = {}): Db {
+   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+   const db = new Database(path);
++  attachLoadTrace(db); // TEMPORARY LOAD-TRACE INSTRUMENTATION — NOT FOR COMMIT
+   // BEFORE journal_mode: switching a database into WAL takes an exclusive lock, so when two processes
+   // open a fresh file at the same moment the loser throws SQLITE_BUSY instantly unless the timeout is
+   // already armed. Setting it first is what makes that race wait a few milliseconds instead of failing.
