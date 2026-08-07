@@ -125,6 +125,10 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
    *  a pool sized off its smallest member is a pool that overcommits. */
   private measuredRss = 0;
   private lastSpawnAt = 0;
+  /** Why the last fork failed, held until one succeeds. A failure that is only logged is invisible to
+   *  anyone reading `/health`, and this particular one is silent by design: the dispatcher catches it and
+   *  runs the turn in-process, so the delegation still works and nothing surfaces except a slower daemon. */
+  private lastSpawnFailure: { reason: string; at: number; consecutive: number } | null = null;
   private spawning: Promise<void> | null = null;
   private maintenance: NodeJS.Timeout | null = null;
   /** Bumped by every `reset`. A spawn that was in flight across one belongs to the pool that no longer
@@ -310,7 +314,9 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
       try {
         await host.start();
       } catch (e) {
-        log.warn(`could not add a sub-agent runner: ${e instanceof Error ? e.message : String(e)}`);
+        const reason = e instanceof Error ? e.message : String(e);
+        log.warn(`could not add a sub-agent runner: ${reason}`);
+        this.lastSpawnFailure = { reason, at: Date.now(), consecutive: (this.lastSpawnFailure?.consecutive ?? 0) + 1 };
         throw e;
       }
       // Registered only once it is genuinely up: a half-booted entry in the list would be counted as
@@ -321,6 +327,8 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
         return;
       }
       this.runners.push(entry);
+      // A live runner is the only thing that makes a past refusal stop being the pool's current state.
+      this.lastSpawnFailure = null;
       this.startMaintenance();
       log.info(`sub-agent pool: runner up in ${Date.now() - startedAt}ms — ${this.runners.length} runner(s) live (cap ${this.cap()})`);
       this.drain();
@@ -476,6 +484,16 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
       operatorCapped: sizing.operatorCapped,
       queueDepth: this.queue.depth,
       oldestQueuedMs: oldest === undefined ? 0 : Math.max(0, Date.now() - oldest),
+      // Deliberately survives `reset`: what refuses a fork is usually a property of the environment, not
+      // of the pool instance, so a plugin reload clearing this would hide the fault at the one moment it
+      // is most likely to be looked at. A successful spawn is what clears it.
+      spawnFailure: this.lastSpawnFailure
+        ? {
+            reason: this.lastSpawnFailure.reason,
+            agoMs: Math.max(0, Date.now() - this.lastSpawnFailure.at),
+            consecutive: this.lastSpawnFailure.consecutive,
+          }
+        : null,
       runners: this.runners.map((r) => ({
         pid: r.host.pid ?? null,
         sessions: sessions.get(r) ?? 0,

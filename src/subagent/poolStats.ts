@@ -38,5 +38,13 @@ export interface SubagentPoolStats {
   queueDepth: number;
   /** How long the longest-waiting turn has been queued, in ms. 0 when nothing is queued. */
   oldestQueuedMs: number;
+  /** Why the most recent fork failed, cleared as soon as one succeeds — null in the healthy case.
+   *
+   *  `mode` alone cannot express this: it reports the CONFIGURATION, so a pool whose every spawn is being
+   *  refused still reads `runner` with an empty `runners` list, which is byte for byte what an idle pool
+   *  with nothing to do looks like. That is not hypothetical — a daemon running an older build than the
+   *  one in `dist/` has every fork rejected on the build-id handshake and silently serves every delegated
+   *  turn in-process, which is precisely the state an operator comes to `/health` to rule out. */
+  spawnFailure: { reason: string; agoMs: number; consecutive: number } | null;
   runners: SubagentPoolRunnerStats[];
 }

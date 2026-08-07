@@ -173,6 +173,37 @@ describe('SubagentRunnerPool — cold start and the operator knob', () => {
     h.children[0]!.reply({ type: 'fatal', reason: 'no brain for this database' });
     await expect(run).rejects.toBeInstanceOf(SubagentRunnerUnavailable);
   });
+
+  // `mode` reports the CONFIGURATION, so a pool whose every fork is refused reads exactly like an idle
+  // one: `runner`, empty list, queue 0. That is the state a daemon running an older build than `dist/`
+  // sits in — every delegated turn quietly served in-process — and the dispatcher's fallback means
+  // nothing else surfaces it. The reason has to reach the place an operator actually looks.
+  it('surfaces why a fork was refused, and clears it once one succeeds', async () => {
+    const h = poolWith();
+    expect(h.pool.stats().spawnFailure).toBeNull();
+
+    const refuse = async (channel: string, index: number): Promise<void> => {
+      const run = fire(h.pool.run(request(channel), 'x'));
+      await settle();
+      h.children[index]!.reply({ type: 'fatal', reason: 'build mismatch (daemon 0.27.80, runner 0.27.81)' });
+      await expect(run).rejects.toBeInstanceOf(SubagentRunnerUnavailable);
+    };
+
+    await refuse('subagent-sub-dlg-1', 0);
+    expect(h.pool.stats().spawnFailure?.reason).toContain('build mismatch');
+    expect(h.pool.stats().spawnFailure?.consecutive).toBe(1);
+
+    // Consecutive refusals are what separate a one-off hiccup from a pool that cannot work at all.
+    await refuse('subagent-sub-dlg-2', 1);
+    expect(h.pool.stats().spawnFailure?.consecutive).toBe(2);
+
+    fire(h.pool.run(request('subagent-sub-dlg-3'), 'x'));
+    await settle();
+    h.children[2]!.boot();
+    await settle();
+    expect(h.pool.stats().runners).toHaveLength(1);
+    expect(h.pool.stats().spawnFailure).toBeNull();
+  });
 });
 
 describe('SubagentRunnerPool — placement and routing', () => {
