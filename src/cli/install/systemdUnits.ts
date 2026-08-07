@@ -156,6 +156,12 @@ Environment=LANG=${UTF8_LOCALE}
 ExecStart=${p.nodePath} ${p.webServer}
 Restart=on-failure
 RestartSec=3
+# A BACKSTOP, not the fix. Next's standalone server ships no signal handler, so the build injects one
+# (scripts/build-web-bundle.mjs) and a stop then completes in milliseconds. Should a bundle ever reach a
+# box without it, the default 90 s stop timeout is long enough that systemd records the stop as FAILED —
+# and a failed stop makes it discard the START half of a restart, leaving the web down until someone
+# notices. Fifteen seconds keeps that from turning a slow stop into an outage.
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

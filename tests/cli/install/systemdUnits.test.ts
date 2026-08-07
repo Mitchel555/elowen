@@ -40,6 +40,13 @@ describe('install/systemdUnits.daemonUnit', () => {
   it('pins a UTF-8 locale so accented output never depends on the box default environment', () => {
     expect(u).toMatch(/^Environment=LANG=C\.UTF-8$/m);
   });
+  // The daemon drains running turns for up to 10 minutes on SIGTERM. systemd's default 90 s stop timeout
+  // would SIGKILL it mid-drain and destroy the very work being waited for, so this must stay ABOVE the
+  // drain budget — the daemon is always the one that gives up first.
+  it('allows the full shutdown drain before systemd resorts to SIGKILL', () => {
+    const seconds = Number(/^TimeoutStopSec=(\d+)$/m.exec(u)?.[1]);
+    expect(seconds).toBeGreaterThan(10 * 60);
+  });
   it('binds 127.0.0.1 by default (private behind a proxy / on localhost)', () => expect(u).toMatch(/^Environment=ELOWEN_HOST=127\.0\.0\.1$/m));
   it('can bind 0.0.0.0 for proxy-less IP mode so the browser reaches the terminal WS', () => {
     expect(daemonUnit({ ...p, daemonHost: '0.0.0.0' })).toMatch(/^Environment=ELOWEN_HOST=0\.0\.0\.0$/m);
@@ -73,6 +80,15 @@ describe('install/systemdUnits.webUnit', () => {
   it('omits ELOWEN_WS_DIRECT_PORT behind a proxy (same-origin WS)', () => expect(u).not.toContain('ELOWEN_WS_DIRECT_PORT'));
   it('advertises the daemon port to the browser in IP mode (direct WS)', () => {
     expect(webUnit({ ...p, wsDirectPort: 4400 })).toMatch(/^Environment=ELOWEN_WS_DIRECT_PORT=4400$/m);
+  });
+  // Measured before the build started injecting a SIGTERM handler: a stop took 5.29 s and ended in
+  // SIGKILL, systemd recorded the stop as FAILED, and a failed stop makes it discard the START half of
+  // a restart — the web stayed down. The handler is the fix; this bound is what keeps a bundle without
+  // one from turning a slow stop into an outage, so it must stay well under systemd's 90 s default.
+  it('bounds the stop so a missing signal handler cannot fail the restart', () => {
+    const seconds = Number(/^TimeoutStopSec=(\d+)$/m.exec(u)?.[1]);
+    expect(seconds).toBeGreaterThan(0);
+    expect(seconds).toBeLessThan(90);
   });
 });
 
