@@ -38,7 +38,7 @@ export function subagentBuildId(): string {
 
 /** Boot the runner: the database it attaches to (WITHOUT migrating — the daemon owns the schema) and the
  *  home project, so its brain core is constructed from the same inputs the daemon's was. */
-export interface RunnerBootMessage {
+interface RunnerBootMessage {
   type: 'boot';
   buildId: string;
   dbPath: string;

@@ -173,10 +173,10 @@ export function compactionReserveTokens(contextWindow: number, proactive: boolea
  * after each compaction and stops the retry loop when the summary has grown past the headroom.
  * {@link COMPACTION_TRIGGER_MARGIN} keeps the floor comfortably below the trigger rather than at it, so
  * one summarization request buys a useful amount of working room. */
-export const COMPACTION_TAIL_MIN = 2_000;
-export const COMPACTION_TAIL_MAX = 20_000;
-export const COMPACTION_SUMMARY_ALLOWANCE = 8_000;
-export const COMPACTION_TRIGGER_MARGIN = 5_000;
+const COMPACTION_TAIL_MIN = 2_000;
+const COMPACTION_TAIL_MAX = 20_000;
+const COMPACTION_SUMMARY_ALLOWANCE = 8_000;
+const COMPACTION_TRIGGER_MARGIN = 5_000;
 
 /** The token room left under the trigger after the fixed cost, the summary allowance and the margin.
  *  Negative (or smaller than the minimal tail) means the percentage cannot be honored on this session. */
@@ -206,7 +206,7 @@ export function compactionKeepRecentTokens(triggerTokens: number, fixedCostToken
 /** The smallest post-compaction floor this session can be expected to reach: fixed cost + the summary
  *  allowance + the minimal tail. Seeded into the circuit breaker at spawn so an unreachable threshold is
  *  caught BEFORE the first summarization request, not after it. */
-export function compactionFloorSeedEstimate(fixedCostTokens: number): number {
+function compactionFloorSeedEstimate(fixedCostTokens: number): number {
   return fixedCostTokens + COMPACTION_SUMMARY_ALLOWANCE + COMPACTION_TAIL_MIN;
 }
 

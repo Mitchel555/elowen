@@ -511,7 +511,15 @@ export interface ProjectGit { isRepo: boolean; status: GitStatus | null; branche
 export interface Note { id: number; scope: string; target: string; author: string; body: string; created_at: string }
 
 
-export interface CliStatus {
+interface FreshInstallInfo {
+  noConfigPersisted: boolean;
+  noApiKey: boolean;
+  noCustomSetup: boolean;
+}
+
+/** One detected CLI. Not exported: nothing outside this file names it on its own, and the web only ever
+ *  receives it inside a CliDetectionResult. */
+interface CliStatus {
   name: string;
   installed: boolean;
   functional: boolean;
@@ -519,12 +527,8 @@ export interface CliStatus {
   error: string | null;
 }
 
-interface FreshInstallInfo {
-  noConfigPersisted: boolean;
-  noApiKey: boolean;
-  noCustomSetup: boolean;
-}
-
+/** Consumed by the e2e fake daemon rather than by app code — knip cannot see that, since the e2e tree is
+ *  outside the workspace it analyses (see knip.json ignoreIssues). */
 export interface CliDetectionResult {
   tools: CliStatus[];
   summary: { allInstalled: boolean; allFunctional: boolean };

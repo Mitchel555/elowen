@@ -46,6 +46,12 @@
     ],
     "web/lib/transcript.ts": [
       "exports"
+    ],
+    "plugins/_shared/lifecycle.mjs": [
+      "exports"
+    ],
+    "web/lib/types.ts": [
+      "types"
     ]
   },
   "ignore": [

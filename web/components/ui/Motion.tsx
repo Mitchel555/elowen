@@ -2,7 +2,7 @@
 import { AnimatePresence, type HTMLMotionProps } from 'motion/react';
 import * as m from 'motion/react-m';
 import { forwardRef, type ReactNode } from 'react';
-import { motionTransition, revealVariants, staggerVariants } from '../../lib/motion';
+import { motionTransition, revealVariants } from '../../lib/motion';
 import { useEffects } from '../../lib/useEffects';
 
 type DivMotionProps = Omit<HTMLMotionProps<'div'>, 'ref' | 'initial' | 'animate' | 'exit' | 'transition' | 'variants'>;
@@ -27,35 +27,6 @@ export function MotionReveal({ children, delay = 0, ...props }: MotionRevealProp
       exit="exit"
       variants={variants}
       transition={{ ...motionTransition, delay }}
-    >
-      {children}
-    </m.div>
-  );
-}
-
-/** Parent for a calm, short cascade of sibling MotionItems. */
-export function MotionStagger({ children, ...props }: DivMotionProps & { children: ReactNode }) {
-  const { resolvedMode } = useEffects();
-  return (
-    <m.div
-      {...props}
-      initial={resolvedMode === 'off' ? false : 'hidden'}
-      animate="visible"
-      variants={resolvedMode === 'full' ? staggerVariants : undefined}
-    >
-      {children}
-    </m.div>
-  );
-}
-
-/** Child of MotionStagger; motion is deliberately subtle and never required to understand state. */
-export function MotionItem({ children, ...props }: DivMotionProps & { children: ReactNode }) {
-  const { resolvedMode } = useEffects();
-  return (
-    <m.div
-      {...props}
-      variants={resolvedMode === 'full' ? revealVariants : undefined}
-      transition={motionTransition}
     >
       {children}
     </m.div>

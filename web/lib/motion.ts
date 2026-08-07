@@ -9,7 +9,3 @@ export const revealVariants = {
   exit: { opacity: 0, y: 4 },
 } satisfies Variants;
 
-export const staggerVariants = {
-  hidden: {},
-  visible: { transition: { staggerChildren: 0.045, delayChildren: 0.04 } },
-} satisfies Variants;
