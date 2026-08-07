@@ -39,11 +39,37 @@ export function compactionStoppedMessage(failures: number): string {
   return `Automatic context compaction failed ${failures} times in a row, so it has been stopped for this conversation — every further attempt would spend a model call that cannot succeed. This conversation can no longer shrink its own context: start a new one, or run /compact yourself once the oversized content is out of the way.`;
 }
 
+/** What the user is told when a threshold is physically unreachable. Distinct from a failure: the
+ *  compactions SUCCEEDED, they just cannot do their job — the post-compaction context still sits at or
+ *  above the trigger, so PI would fire again on the next turn at full summarization cost. */
+export function compactionUnreachableMessage(floorTokens: number, triggerTokens: number): string {
+  return `Automatic context compaction cannot shrink this conversation below its threshold: after a compaction the context still measures about ${floorTokens} tokens, at or above the ${triggerTokens}-token point automatic compaction fires at. Retrying would keep spending summarization requests that cannot help, so automatic threshold compaction has been stopped for this conversation. /compact still works, and a new conversation is the reliable fix.`;
+}
+
+/** The live view of the compaction settings that determine whether the threshold is reachable. The
+ *  factory mutates `trigger` whenever the user's percentage is (re)applied, so the breaker always
+ *  compares against the trigger actually in force. Absent a budget entirely, the guard is inert and the
+ *  breaker behaves exactly as it did before. */
+export interface CompactionThresholdBudget {
+  /** The effective trigger in force: contextWindow − reserveTokens (null while unknown). */
+  trigger: number | null;
+  /** Estimated never-shrinking request cost — system prompt + tool definitions, chars/4 (see
+   *  estimateFixedCostTokens). The post-compaction floor is this plus what PI measured it kept. */
+  fixedCostTokens: number;
+  /** A compaction must land at least this far below the trigger to count as useful. Absorbs measurement
+   *  noise between the chars/4 estimate and the provider's real tokenizer, and encodes that a compaction
+   *  buying less than this of working room is not worth its summarization cost. */
+  floorMargin: number;
+}
+
 export interface CompactionCircuitBreakerOptions {
   sessionId: string;
   /** Reported ONCE per trip, so the user learns the conversation stopped managing its own context.
    *  Callers route it to whatever channel they already use for terminal session errors. */
   onTripped?: (message: string) => void;
+  /** Live budget for the unreachable-threshold guard. The factory provides it and mutates its trigger on
+   *  every percentage change; without it the guard never engages. */
+  thresholdBudget?: CompactionThresholdBudget;
 }
 
 export interface CompactionCircuitBreaker {
@@ -54,6 +80,11 @@ export interface CompactionCircuitBreaker {
   /** Whether a compaction with this reason is currently refused. The gate and the tests share this one
    *  rule instead of each restating the threshold. */
   blocks: (reason: CompactionReason) => boolean;
+  /** Re-evaluate the unreachable-threshold guard against the budget currently in force. Called by the
+   *  factory after a live threshold change, and with an explicit `floorEstimate` at spawn to seed the
+   *  guard BEFORE the first (provably pointless) summarization request. Detection only — the user-facing
+   *  report waits for the first threshold compaction the guard actually refuses. */
+  applyBudget: (floorEstimate?: number | null) => void;
 }
 
 /** Stop a session from retrying a compaction that keeps failing.
@@ -68,15 +99,55 @@ export function createCompactionCircuitBreaker(options: CompactionCircuitBreaker
    *  must not count against the budget. */
   let attemptStarted = false;
   let reported = false;
+  // Unreachable-threshold state: the last measured post-compaction floor and whether it proves the
+  // threshold cannot be honored. Deliberately separate from the failure counter — a successful-but-
+  // pointless compaction must NOT reset this the way a success resets failures, and a run of failures
+  // must not stop counting just because the floor is also too high.
+  let lastFloorEstimate: number | null = null;
+  let pointless = false;
+  let pointlessReported = false;
 
   const tripped = (): boolean => consecutiveFailures >= failureLimit();
 
-  const blocks = (reason: CompactionReason): boolean => reason !== 'manual' && tripped();
+  /** A threshold compaction is pointless when the last measured post-compaction floor — fixed cost plus
+   *  what PI kept — sits within {@link CompactionThresholdBudget.floorMargin} of the trigger: the next
+   *  attempt would summarize the same un-shrinkable context again and buy no working room. One measured
+   *  floor is enough evidence: the floor is what it is until a smaller summary or a higher trigger.
+   *  State only — reporting waits for a refusal, because this runs at every spawn via the seed. */
+  const evaluatePointless = (): void => {
+    const budget = options.thresholdBudget;
+    if (!budget || lastFloorEstimate === null || budget.trigger === null) return;
+    pointless = lastFloorEstimate + budget.floorMargin >= budget.trigger;
+    if (!pointless) pointlessReported = false;
+  };
+
+  const blocks = (reason: CompactionReason): boolean => reason !== 'manual' && (tripped() || (reason === 'threshold' && pointless));
+
+  /** Reported at the FIRST refused threshold compaction, not when the condition is detected: the seeded
+   *  detection runs on every respawn, and a conversation that never grows near its trigger must not open
+   *  with an error about a compaction it will never attempt. The refusal is the moment the condition
+   *  actually costs the user something, so that is when they are told. */
+  const reportPointless = (): void => {
+    const trigger = options.thresholdBudget?.trigger;
+    if (pointlessReported || lastFloorEstimate === null || trigger == null) return;
+    pointlessReported = true;
+    log.warn(
+      `post-compaction context (est. ${lastFloorEstimate} tokens incl. system+tools) stays at/above the ${trigger}-token auto-compact trigger on ${options.sessionId}; `
+      + 'automatic threshold compaction stopped — each further attempt would loop at full summarization cost',
+    );
+    options.onTripped?.(compactionUnreachableMessage(lastFloorEstimate, trigger));
+  };
 
   const extension = (pi: ExtensionAPI): void => {
     // A manual /compact is never refused: it is the user's own recovery lever, and succeeding with it
     // resets the counter. Only the attempts PI repeats unattended are stopped.
-    pi.on('session_before_compact', (event) => (blocks(event.reason) ? { cancel: true } : undefined));
+    pi.on('session_before_compact', (event) => {
+      if (!blocks(event.reason)) return undefined;
+      // Failure trips carry their own report (at trip time); only a refusal whose operative cause is the
+      // unreachable threshold announces that condition.
+      if (event.reason === 'threshold' && pointless && !tripped()) reportPointless();
+      return { cancel: true };
+    });
   };
 
   const observe = (event: AgentSessionEvent): void => {
@@ -93,6 +164,13 @@ export function createCompactionCircuitBreaker(options: CompactionCircuitBreaker
     if (event.result != null) {
       consecutiveFailures = 0;
       reported = false;
+      // Measure the post-compaction floor from what PI itself estimated it kept after the reload, plus
+      // the never-shrinking fixed cost — the two together are what the next shouldCompact check sees.
+      // Extension-supplied compactions carry no estimate; keep the last known floor in that case.
+      if (event.result.estimatedTokensAfter !== undefined) {
+        lastFloorEstimate = (options.thresholdBudget?.fixedCostTokens ?? 0) + event.result.estimatedTokensAfter;
+        evaluatePointless();
+      }
       return;
     }
     if (!started) return;
@@ -106,5 +184,10 @@ export function createCompactionCircuitBreaker(options: CompactionCircuitBreaker
     options.onTripped?.(compactionStoppedMessage(consecutiveFailures));
   };
 
-  return { extension, observe, blocks };
+  const applyBudget = (floorEstimate?: number | null): void => {
+    if (floorEstimate !== undefined) lastFloorEstimate = floorEstimate;
+    evaluatePointless();
+  };
+
+  return { extension, observe, blocks, applyBudget };
 }

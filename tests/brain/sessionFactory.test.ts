@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BrainSessionFactory, compactionReserveTokens, resolveAutoCompactPct } from '../../src/brain/session/factory.js';
+import {
+  BrainSessionFactory,
+  compactionKeepRecentTokens,
+  compactionReserveTokens,
+  estimateFixedCostTokens,
+  resolveAutoCompactPct,
+} from '../../src/brain/session/factory.js';
 import { openDb } from '../../src/store/db.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { CLEAR_MIN_BYTES } from '../../src/brain/session/toolResultClearing.js';
@@ -42,6 +48,100 @@ describe('BrainSessionFactory compaction budget', () => {
   it('preserves the configured proactive threshold', () => {
     expect(compactionReserveTokens(200_000, true, 80)).toBe(40_000);
     expect(compactionReserveTokens(200_000, true, 95)).toBe(10_000);
+  });
+
+  it('estimates the fixed request cost with the same chars/4 heuristic PI uses', () => {
+    // 4 system chars + 4 append chars + the tool JSON (58 chars) → 66 chars → 17 tokens.
+    const tool = { name: 't', label: 'l', description: 'd', parameters: {} };
+    expect(estimateFixedCostTokens('aaaa', ['bbbb'], [tool])).toBe(17);
+    // An empty session still serializes the (empty) tools array as "[]".
+    expect(estimateFixedCostTokens('', [], [])).toBe(1);
+    // The measured E2E session: 32113-char persona + 78357 chars of tool JSON ≈ 27 617 tokens.
+    expect(estimateFixedCostTokens('x'.repeat(32_113), [], [])).toBe(Math.ceil((32_113 + 2) / 4));
+  });
+
+  it('sizes the tail from the headroom under the trigger, not the window', () => {
+    // 200k at 40% (trigger 80k) with the measured ~27.6k fixed cost: the whole default tail fits.
+    expect(compactionKeepRecentTokens(80_000, 27_619)).toBe(20_000); // cap = PI's own default
+    // 128k at 40% (trigger 51.2k): headroom = 51_200 − 27_619 − 8_000 allowance − 5_000 margin.
+    expect(compactionKeepRecentTokens(51_200, 27_619)).toBe(10_581);
+    // 32k at 40% (trigger 12.8k): fixed cost alone already exceeds it — the tail can only shrink.
+    expect(compactionKeepRecentTokens(12_800, 27_619)).toBe(2_000); // floor clamp
+    // A tiny 8k window at 40%: the tail must not swallow half of it.
+    expect(compactionKeepRecentTokens(3_200, 8_000)).toBe(2_000);   // floor clamp
+  });
+
+});
+
+describe('BrainSessionFactory compaction settings handed to PI', () => {
+  async function captureCompactionSettings(
+    contextWindow: number, autoCompact: boolean, autoCompactAtPct: number, fixedCostTokens = 8_000,
+  ) {
+    const session = {
+      sessionId: 'sess-compaction-settings',
+      agent: {} as Record<string, unknown>,
+      subscribe: () => () => {},
+      messages: [] as unknown[],
+      setSteeringMode: vi.fn(),
+    };
+    const createSession = vi.fn(async () => ({ session }));
+    const factory = new BrainSessionFactory({
+      store: new BrainStore(openDb(':memory:')),
+      createSession: createSession as never,
+      resourceLoaderFactory: () => undefined,
+    });
+    // The fixed cost is derived from the spec's system prompt at chars/4, so a prompt of `fixedCostTokens
+    // * 4 − 2` chars (the empty tools array serializes as "[]") yields exactly the requested estimate.
+    const systemPrompt = 's'.repeat(fixedCostTokens * 4 - 2);
+    const { applyCompaction } = await factory.create({
+      sessionId: session.sessionId, ownerUserId: 1, runtime: undefined,
+      model: { id: 'test-model', provider: 'kimi-coding', contextWindow },
+      cwd: process.cwd(), systemPrompt, appendSystemPrompt: [], skills: [], tools: [],
+      autoCompact, autoCompactAtPct,
+    } as never);
+    // createAgentSession receives the session's in-memory SettingsManager — the same object PI reads at
+    // every compaction check, so what it holds IS what PI runs on.
+    const options = (createSession.mock.calls[0] as unknown[])[0] as {
+      settingsManager: { getCompactionSettings: () => { enabled: boolean; reserveTokens: number; keepRecentTokens: number } };
+    };
+    return { read: () => options.settingsManager.getCompactionSettings(), applyCompaction };
+  }
+
+  it('hands PI an explicit keepRecentTokens, not the constant default by omission', async () => {
+    // 64k at 40%: trigger 25.6k; after the 8k fixed cost, the 8k summary allowance and the 5k margin only
+    // 4.6k of headroom remain, so the tail Elowen hands over is a value only this derivation produces.
+    // PI's own constant default (20k) would not survive the headroom math, so asserting it proves the
+    // value is explicit rather than defaulted by omission.
+    const { read } = await captureCompactionSettings(64_000, true, 40);
+    expect(read()).toEqual({ enabled: true, reserveTokens: 38_400, keepRecentTokens: 4_600 });
+  });
+
+  it('keeps the retained tail small relative to a small window', async () => {
+    // Regression: keepRecentTokens was never set, so a 32k model kept PI's constant 20k — 62% of the
+    // window — after every compaction. With a realistic fixed cost the trigger (12.8k) sits below the
+    // fixed cost alone, so the tail shrinks to its 2k floor.
+    const { read } = await captureCompactionSettings(32_000, true, 40, 27_619);
+    expect(read()).toEqual({ enabled: true, reserveTokens: 19_200, keepRecentTokens: 2_000 });
+  });
+
+  it('re-derives keepRecentTokens from the live threshold on a threshold change', async () => {
+    // The tail is a function of the TRIGGER, not the window, so a live percentage change must re-derive
+    // it: loosening to 80% on a 64k window restores the 20k cap, tightening to 40% cuts it to 4.6k.
+    const { read, applyCompaction } = await captureCompactionSettings(64_000, true, 80);
+    expect(read()).toEqual({ enabled: true, reserveTokens: 12_800, keepRecentTokens: 20_000 });
+    applyCompaction(true, 40);
+    expect(read()).toEqual({ enabled: true, reserveTokens: 38_400, keepRecentTokens: 4_600 });
+  });
+
+  it('sizes the retained tail from the headroom under the trigger, not the window', async () => {
+    // 200k at 40% (trigger 80k) with the measured ~27.6k fixed cost: the whole default tail fits and the
+    // floor still lands far below the trigger. 128k at 40% (trigger 51.2k): only ~10.6k of headroom
+    // remains, and that — not the window — is what the tail gets. On the 128k capture the derived value
+    // differs from PI's 20k default, so deleting the wiring line turns this test red.
+    const roomy = await captureCompactionSettings(200_000, true, 40, 27_619);
+    expect(roomy.read()).toEqual({ enabled: true, reserveTokens: 120_000, keepRecentTokens: 20_000 });
+    const tight = await captureCompactionSettings(128_000, true, 40, 27_619);
+    expect(tight.read()).toEqual({ enabled: true, reserveTokens: 76_800, keepRecentTokens: 10_581 });
   });
 });
 

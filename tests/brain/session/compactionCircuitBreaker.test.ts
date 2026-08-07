@@ -17,9 +17,11 @@ import {
 import { inMemoryModelRuntime } from '../../../src/brain/providers.js';
 import {
   compactionStoppedMessage,
+  compactionUnreachableMessage,
   createCompactionCircuitBreaker,
   DEFAULT_COMPACTION_FAILURE_LIMIT,
   setCompactionFailureLimit,
+  type CompactionThresholdBudget,
 } from '../../../src/brain/session/compactionCircuitBreaker.js';
 
 const stoppedAtDefault = compactionStoppedMessage(DEFAULT_COMPACTION_FAILURE_LIMIT);
@@ -277,6 +279,139 @@ async function liveFixture(): Promise<{
     setFailSummaries: (fail: boolean) => { failSummaries = fail; },
   };
 }
+
+describe('Compaction circuit breaker unreachable-threshold guard', () => {
+  /** The 32k@40% shape from the review: trigger 12.8k, measured fixed cost ~27.6k — the floor can never
+   *  get below the trigger. */
+  const unreachableBudget: CompactionThresholdBudget = { trigger: 12_800, fixedCostTokens: 27_619, floorMargin: 5_000 };
+
+  /** One successful compaction that kept `keptTokens` of recent tail + summary. */
+  function successfulCompaction(reason: CompactionEnd['reason'], keptTokens: number): AgentSessionEvent {
+    return {
+      type: 'compaction_end',
+      reason,
+      result: { summary: 'summary', firstKeptEntryId: 'entry-1', tokensBefore: 40_000, estimatedTokensAfter: keptTokens },
+      aborted: false,
+      willRetry: false,
+    };
+  }
+
+  /** Register the breaker's real extension on a stub ExtensionAPI and return PI's side of the exchange:
+   *  fire `session_before_compact` and get back the cancel decision. This is the exact production seam,
+   *  so the tests pin WHERE the unreachable condition is reported — at a refusal, not at detection. */
+  function installGate(breaker: { extension: (pi: never) => void }) {
+    let handler: ((event: { reason: CompactionEnd['reason'] }) => { cancel: true } | undefined) | undefined;
+    breaker.extension({ on: (_name: string, fn: typeof handler) => { handler = fn; } } as never);
+    return (reason: CompactionEnd['reason']) => handler?.({ reason });
+  }
+
+  it('stops retrying threshold compaction once a successful one leaves the context above the trigger', () => {
+    const tripped: string[] = [];
+    const breaker = createCompactionCircuitBreaker({ sessionId: 'brain-unreachable', thresholdBudget: unreachableBudget, onTripped: (m) => tripped.push(m) });
+    const gate = installGate(breaker);
+
+    // No compaction has run yet — the gate is open.
+    expect(breaker.blocks('threshold')).toBe(false);
+    expect(gate('threshold')).toBeUndefined();
+
+    // The first threshold compaction SUCCEEDS, but its post-compaction floor (27_619 fixed + 12_000 kept)
+    // still sits at 39_619 — far above the 12_800 trigger. PI would fire again on the next turn.
+    breaker.observe(started('threshold'));
+    breaker.observe(successfulCompaction('threshold', 12_000));
+
+    // The next threshold attempt is provably part of the loop, so the gate cancels it and reports the
+    // condition at that first refusal…
+    expect(breaker.blocks('threshold')).toBe(true);
+    expect(gate('threshold')).toEqual({ cancel: true });
+    expect(tripped).toEqual([compactionUnreachableMessage(39_619, 12_800)]);
+    // …while overflow recovery (the cliff) and manual /compact stay available.
+    expect(breaker.blocks('overflow')).toBe(false);
+    expect(breaker.blocks('manual')).toBe(false);
+    expect(gate('overflow')).toBeUndefined();
+    expect(gate('manual')).toBeUndefined();
+
+    // A later refused attempt must not re-report the condition.
+    expect(gate('threshold')).toEqual({ cancel: true });
+    expect(tripped).toEqual([compactionUnreachableMessage(39_619, 12_800)]);
+  });
+
+  it('blocks threshold compaction from birth when even the smallest floor cannot fit', () => {
+    const tripped: string[] = [];
+    const breaker = createCompactionCircuitBreaker({ sessionId: 'brain-unreachable', thresholdBudget: unreachableBudget, onTripped: (m) => tripped.push(m) });
+    const gate = installGate(breaker);
+
+    // The factory seeds the guard with the smallest achievable floor: fixed cost + summary allowance +
+    // minimal tail (27_619 + 8_000 + 2_000). Even that exceeds the trigger, so the first summarization
+    // request is refused before it is spent.
+    breaker.applyBudget(37_619);
+
+    expect(breaker.blocks('threshold')).toBe(true);
+    expect(breaker.blocks('overflow')).toBe(false);
+    // The seed runs on EVERY respawn, so detection alone must stay silent — a conversation that never
+    // grows near the trigger must not open with a compaction error.
+    expect(tripped).toEqual([]);
+
+    // The report lands at the first refusal, the moment the condition actually bites — and only once.
+    expect(gate('threshold')).toEqual({ cancel: true });
+    expect(gate('threshold')).toEqual({ cancel: true });
+    expect(tripped).toEqual([compactionUnreachableMessage(37_619, 12_800)]);
+  });
+
+  it('re-opens the gate when the trigger moves above the measured floor', () => {
+    // A shared budget holder, mutated exactly as applyCompaction mutates it.
+    const budget: CompactionThresholdBudget = { trigger: 12_800, fixedCostTokens: 27_619, floorMargin: 5_000 };
+    const tripped: string[] = [];
+    const breaker = createCompactionCircuitBreaker({ sessionId: 'brain-live', thresholdBudget: budget, onTripped: (m) => tripped.push(m) });
+    const gate = installGate(breaker);
+
+    breaker.applyBudget(37_619);
+    expect(breaker.blocks('threshold')).toBe(true);
+    expect(gate('threshold')).toEqual({ cancel: true });
+    expect(tripped).toEqual([compactionUnreachableMessage(37_619, 12_800)]);
+
+    // The user raises the auto-compact percentage: the trigger moves to 80k, and the SAME floor now
+    // fits. Re-applying the budget re-evaluates against the trigger in force.
+    budget.trigger = 80_000;
+    breaker.applyBudget();
+
+    expect(breaker.blocks('threshold')).toBe(false);
+    expect(gate('threshold')).toBeUndefined();
+
+    // Tightened back below the floor: a NEW terminal condition, so the user is told again.
+    budget.trigger = 12_800;
+    breaker.applyBudget();
+    expect(gate('threshold')).toEqual({ cancel: true });
+    expect(tripped).toEqual([
+      compactionUnreachableMessage(37_619, 12_800),
+      compactionUnreachableMessage(37_619, 12_800),
+    ]);
+  });
+
+  it('does not weaken the failure counting: a pointless loop and failures trip independently', () => {
+    const breaker = createCompactionCircuitBreaker({ sessionId: 'brain-both', thresholdBudget: unreachableBudget });
+
+    // Unreachable from birth (threshold already blocked), yet the failure counter must still count.
+    breaker.applyBudget(37_619);
+    expect(breaker.blocks('threshold')).toBe(true);
+    expect(breaker.blocks('overflow')).toBe(false);
+
+    for (let i = 0; i < DEFAULT_COMPACTION_FAILURE_LIMIT; i += 1) attempt(breaker, 'threshold', 'failure');
+
+    // The failure trip blocks overflow too — the unreachable guard alone never did.
+    expect(breaker.blocks('overflow')).toBe(true);
+  });
+
+  it('is inert without a budget, so sessions wired before this guard behave exactly as before', () => {
+    const breaker = createCompactionCircuitBreaker({ sessionId: 'brain-legacy' });
+    breaker.applyBudget(37_619);
+    expect(breaker.blocks('threshold')).toBe(false);
+
+    // A successful compaction measures a floor, but with no budget there is nothing to compare it to.
+    breaker.observe(started('threshold'));
+    breaker.observe(successfulCompaction('threshold', 50_000));
+    expect(breaker.blocks('threshold')).toBe(false);
+  });
+});
 
 describe('Compaction circuit breaker on a live session', () => {
   it('stops spending summarization requests once compaction keeps failing', async () => {

@@ -7,7 +7,7 @@ import { applyProviderRequestProfile, isCanonicalThinkingLevel, type ProviderReq
 import type { DelegatedExecutionScope } from '../delegatedScope.js';
 import { installLiveRecall, type LiveRecallOptions } from './liveRecall.js';
 import { createCompactionModelRoute, type CompactionModelRoute } from './compactionModelRoute.js';
-import { createCompactionCircuitBreaker } from './compactionCircuitBreaker.js';
+import { createCompactionCircuitBreaker, type CompactionThresholdBudget } from './compactionCircuitBreaker.js';
 import {
   installTurnBoundaryAutoCompaction,
   type PendingCompactionMessage,
@@ -143,10 +143,71 @@ export interface BrainResourceLoaderOptions {
 /** PI uses the same reserve both as the proactive threshold and as the summary-output budget during
  * overflow recovery. A zero reserve therefore cannot mean "overflow only": it produces a zero-token
  * summary and makes the recovery fail. Keep disabled proactive compaction at a small emergency margin
- * (5% of context, capped at 4k) so it triggers only at the cliff but still has room to summarize. */
+ * (5% of context, capped at 4k) so it triggers only at the cliff but still has room to summarize.
+ *
+ * The dual use also couples the summary budget to the user's percentage: PI caps a summary at
+ * `min(floor(0.8 * reserve), model.maxTokens)`, so a LOW threshold (large reserve) permits a LARGE
+ * summary. The coupling cannot be broken through the settings surface — reserve is a single knob that
+ * the percentage pins exactly, and PI derives both the trigger point and the summary cap from it. The
+ * trigger is the user-visible setting and must win; the budget side effect is bounded in practice by the
+ * compaction model's maxTokens (the summarization prompt also demands a concise structured output, so a
+ * real summary is a few thousand tokens, not 0.8·reserve). */
 export function compactionReserveTokens(contextWindow: number, proactive: boolean, atPercent: number): number {
   if (proactive) return Math.max(2, Math.round(contextWindow * (1 - atPercent / 100)));
   return Math.max(256, Math.min(4_096, Math.round(contextWindow * 0.05)));
+}
+
+/** The recent-message tail PI keeps verbatim after a compaction. PI's default is a CONSTANT 20000 that
+ * Elowen never overrode, so every session silently ran it — 62% of a 32k window but only 10% of a 200k
+ * one, and on small models the floor alone swallowed the room the threshold was supposed to buy. The tail
+ * is the only part of the post-compaction floor Elowen controls through PI's settings surface, so it must
+ * be sized from what actually constrains it: the room left under the compaction TRIGGER once the
+ * never-shrinking parts are paid for. Sizing it from the window instead ignores the trigger, which lands
+ * it on the constant default exactly where the headroom demanded less.
+ *
+ * The floor after a compaction is `fixed cost + summary + tail`, where the fixed cost (system prompt +
+ * tool definitions) is known — or closely estimable — when the session is built, and the summary is NOT:
+ * it starts empty and grows with every compaction because PI's update prompt preserves all previous
+ * content. {@link COMPACTION_SUMMARY_ALLOWANCE} is an honest middle estimate for the summary at tail-sizing
+ * time ("a few thousand tokens" in practice); the guard in the circuit breaker re-measures the real floor
+ * after each compaction and stops the retry loop when the summary has grown past the headroom.
+ * {@link COMPACTION_TRIGGER_MARGIN} keeps the floor comfortably below the trigger rather than at it, so
+ * one summarization request buys a useful amount of working room. */
+export const COMPACTION_TAIL_MIN = 2_000;
+export const COMPACTION_TAIL_MAX = 20_000;
+export const COMPACTION_SUMMARY_ALLOWANCE = 8_000;
+export const COMPACTION_TRIGGER_MARGIN = 5_000;
+
+/** The token room left under the trigger after the fixed cost, the summary allowance and the margin.
+ *  Negative (or smaller than the minimal tail) means the percentage cannot be honored on this session. */
+function compactionTailHeadroom(triggerTokens: number, fixedCostTokens: number): number {
+  return triggerTokens - fixedCostTokens - COMPACTION_SUMMARY_ALLOWANCE - COMPACTION_TRIGGER_MARGIN;
+}
+
+/** Estimate the never-shrinking part of one provider request — system prompt + append chunks + tool
+ *  definitions — with the same chars/4 heuristic PI itself uses (estimateTokens) to decide shouldCompact,
+ *  so the estimate is measured the same way the threshold is. It is an approximation: it counts the raw
+ *  spec strings, not PI's rendered system template or the skills block the loader injects. */
+export function estimateFixedCostTokens(
+  systemPrompt: string, appendSystemPrompt: readonly string[] | undefined, tools: readonly ToolDefinition[] | undefined,
+): number {
+  const toolsChars = tools ? JSON.stringify(tools).length : 0;
+  return Math.ceil((systemPrompt.length + (appendSystemPrompt?.join('\n\n').length ?? 0) + toolsChars) / 4);
+}
+
+/** The retained recent-message tail for one trigger point: everything the trigger does not buy is denied
+ *  to the tail. PI keeps AT LEAST this many tokens (it cuts at the first message boundary past the
+ *  budget), so the tail is a floor on the post-compaction context — sized by the headroom, clamped to a
+ *  coherent minimum and to PI's own default at the top. */
+export function compactionKeepRecentTokens(triggerTokens: number, fixedCostTokens: number): number {
+  return Math.min(COMPACTION_TAIL_MAX, Math.max(COMPACTION_TAIL_MIN, Math.round(compactionTailHeadroom(triggerTokens, fixedCostTokens))));
+}
+
+/** The smallest post-compaction floor this session can be expected to reach: fixed cost + the summary
+ *  allowance + the minimal tail. Seeded into the circuit breaker at spawn so an unreachable threshold is
+ *  caught BEFORE the first summarization request, not after it. */
+export function compactionFloorSeedEstimate(fixedCostTokens: number): number {
+  return fixedCostTokens + COMPACTION_SUMMARY_ALLOWANCE + COMPACTION_TAIL_MIN;
 }
 
 /** Re-applies a live session's compaction threshold: `proactive` is the auto-compact toggle,
@@ -299,8 +360,17 @@ export class BrainSessionFactory {
     // the threshold after every turn — so without this the conversation would pay for a doomed
     // summarization request for the rest of its life. The breaker only refuses attempts; it never
     // changes when compaction triggers or what it summarizes.
+    //
+    // The threshold budget extends the same idea to a threshold that is physically UNREACHABLE: a
+    // compaction whose post-compaction floor (fixed cost + summary + tail) still sits at or above the
+    // trigger "succeeds" by PI's measure, so the failure counter never trips — but the next turn fires
+    // it again, forever, at full summarization cost. The holder is mutated by applyCompaction below so
+    // a live percentage change re-evaluates the guard with the trigger actually in force.
+    const fixedCostTokens = estimateFixedCostTokens(spec.systemPrompt, spec.appendSystemPrompt, spec.tools);
+    const thresholdBudget: CompactionThresholdBudget = { trigger: null, fixedCostTokens, floorMargin: COMPACTION_TRIGGER_MARGIN };
     const compactionBreaker = createCompactionCircuitBreaker({
       sessionId: spec.sessionId,
+      thresholdBudget,
       ...(spec.onCompactionStopped ? { onTripped: spec.onCompactionStopped } : {}),
     });
     const cacheMonitor = spec.model.provider === 'anthropic' ? createCachePayloadMonitor() : undefined;
@@ -394,6 +464,10 @@ export class BrainSessionFactory {
     // conversation hard-erroring on every turn until a manual /compact. "Proactive off" therefore uses
     // only the small emergency reserve described above, rather than PI's normal early threshold.
     //
+    // keepRecentTokens is handed over EXPLICITLY rather than by PI's constant default: it is a floor on
+    // the post-compaction context, so it must fit the room left under THIS session's trigger after its
+    // own fixed cost (see compactionKeepRecentTokens) — not a constant, and not a fraction of the window.
+    //
     // Kept as a re-callable closure (returned to the caller) because PI reads compaction lazily at each
     // check: re-applying it turns a saved threshold change into an immediate effect on a RUNNING
     // conversation, instead of one that only appears after the next respawn.
@@ -402,11 +476,25 @@ export class BrainSessionFactory {
     let proactiveCompaction = spec.autoCompact;
     const applyCompaction = (proactive: boolean, atPercent: number): void => {
       proactiveCompaction = proactive;
+      const reserveTokens = compactionReserveTokens(spec.model.contextWindow, proactive, atPercent);
+      // The trigger the user's percentage actually sets; the tail and the breaker's guard both key off it.
+      const triggerTokens = Math.max(0, spec.model.contextWindow - reserveTokens);
+      thresholdBudget.trigger = triggerTokens;
       settingsManager.applyOverrides({
-        compaction: { enabled: true, reserveTokens: compactionReserveTokens(spec.model.contextWindow, proactive, atPercent) },
+        compaction: {
+          enabled: true,
+          reserveTokens,
+          keepRecentTokens: compactionKeepRecentTokens(triggerTokens, fixedCostTokens),
+        },
       });
+      // The live percentage change moved the trigger, so the unreachable-threshold guard re-evaluates
+      // against the floor it measured last (or the seeded floor, if no compaction has run yet).
+      compactionBreaker.applyBudget();
     };
     applyCompaction(spec.autoCompact, spec.autoCompactAtPct);
+    // Seed the guard with the smallest floor this session can reach, so a threshold that cannot be
+    // honored is refused BEFORE the first summarization request is spent on it.
+    compactionBreaker.applyBudget(compactionFloorSeedEstimate(fixedCostTokens));
     const boundaryCompactionInstalled = installTurnBoundaryAutoCompaction(
       session, sessionManager, () => proactiveCompaction, spec.pendingCompactionMessages,
     );
