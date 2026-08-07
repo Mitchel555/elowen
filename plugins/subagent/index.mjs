@@ -27,6 +27,17 @@ const MAX_READ_CHARS = 50_000;
 // and produce the real conclusion, each waiting at most this long for the session's jobs to go idle.
 const MAX_COLLECT_TURNS = 8;
 const JOB_WAIT_TIMEOUT_MS = 5 * 60_000;
+// How long a delegated turn may go without ANY sign of life from the child before it is aborted as
+// stalled. `run()` itself has no timeout and JOB_WAIT_TIMEOUT_MS only bounds the collect wait, so a
+// child whose provider never answers otherwise holds its slot forever — 64 of those lock delegation
+// permanently, and the only way out is a manual Stop. Liveness is read from the child's own event
+// stream, which a working child feeds constantly (tool starts, step boundaries). Deliberately far above
+// the provider retry/backoff cycles the agent runtime handles by itself, so a slow answer is never
+// mistaken for a wedged one; a stalled verdict is recoverable through DelegateContinue.
+// Overridable so the watchdog can be exercised end to end without a fifteen-minute test, and so an
+// operator with a pathologically slow provider can raise it without a rebuild. Not a user-facing knob.
+const TURN_STALL_MS = Number(process.env.ELOWEN_SUBAGENT_TURN_STALL_MS) || 15 * 60_000;
+const STALL_CHECK_MS = Math.min(30_000, Math.max(50, Math.floor(TURN_STALL_MS / 4)));
 
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
 const errorText = (e) => e instanceof Error ? e.message : String(e);
@@ -469,13 +480,30 @@ export function register(ctx) {
       const push = (status) => pushJob(state, status);
       // Distil the child's live stream into progress updates: which tool it runs, how many so far, its
       // token spend. Low-frequency events only (tool starts + step boundaries) — text deltas are ignored.
+      let lastActivityAt = Date.now();
       const onEvent = (e) => {
+        lastActivityAt = Date.now();
         if (e.type === 'session' && e.sessionId) { state.sessionId = e.sessionId; push('running'); }
         else if (e.type === 'tool' && e.name) { state.tools += 1; state.detail = e.detail ? `${e.name} ${e.detail}` : e.name; push('running'); }
         else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { state.tokens = e.usage.totalTokens; push('running'); }
       };
       const collectSource = { platform: 'subagent', userId: 'subagent', roleIds: [], channelId, access };
+      // See TURN_STALL_MS. Aborting the child session is what unblocks the awaited run() — the rejection
+      // lands in runChild's catch, where the stall verdict replaces the raw abort text. The timer is
+      // created inside the turn, so it inherits the async context ctx.stopSubagent reads the parent from.
+      const watchForStall = () => {
+        const timer = setInterval(() => {
+          if (state.stalledAt || !state.sessionId) return;
+          if (Date.now() - lastActivityAt < TURN_STALL_MS) return;
+          state.stalledAt = Date.now();
+          ctx.logger.warn(`subagent: ${jobId} stalled — no activity for ${Math.round(TURN_STALL_MS / 60_000)}m, aborting`);
+          Promise.resolve(ctx.stopSubagent?.(state.sessionId)).catch(() => {});
+        }, STALL_CHECK_MS);
+        timer.unref?.();
+        return timer;
+      };
       const runChild = async () => {
+        const stallTimer = watchForStall();
         try {
           let raw = await run(collectSource, p.task, onEvent);
           // A child that starts terminal background work is still working. Keep the delegate lifecycle
@@ -524,8 +552,13 @@ export function register(ctx) {
         } catch (e) {
           if (!state.settledByReload) {
             state.status = 'error';
-            state.error = clip(errorText(e), MAX_STORED_RESULT_CHARS);
+            // A stall aborts the child, so what surfaces here is the abort — report the cause instead.
+            state.error = state.stalledAt
+              ? `stalled — no provider or tool activity for ${Math.round(TURN_STALL_MS / 60_000)} minutes`
+              : clip(errorText(e), MAX_STORED_RESULT_CHARS);
           }
+        } finally {
+          clearInterval(stallTimer);
         }
         state.finishedAt = Date.now();
         push(state.status);
