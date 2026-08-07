@@ -78,8 +78,30 @@ describe('ConfigStore brain limits', () => {
     expect(cs.get().brain.limits.toolOutputMaxLines).toBe(200); // upper edge, exactly in range
     cs.update({ brain: { limits: { toolOutputMaxChars: 500_000, memoryRecallChars: 100_000, toolOutputMaxLines: 1 } } });
     expect(cs.get().brain.limits.toolOutputMaxChars).toBe(80000); // explicit ceiling, ~20k tokens
-    expect(cs.get().brain.limits.memoryRecallChars).toBe(20000);  // explicit ceiling, ~5k tokens
+    expect(cs.get().brain.limits.memoryRecallChars).toBe(40000);  // explicit ceiling, ~10k tokens
     expect(cs.get().brain.limits.toolOutputMaxLines).toBe(50);    // 100 − 50%
+  });
+
+  // The three recall ceilings were doubled at the owner's request, and a ceiling the clamp does not
+  // actually honour is worse than none: the slider offers the value, the save reports success, and the
+  // daemon quietly keeps the old one. Each is asserted AT its new ceiling and beyond it.
+  it('honours the raised recall ceilings', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({
+      brain: { limits: { memoryRecallChars: 40_000, memoryLiveRecallChars: 40_000, memoryLiveRecallPasses: 20 } },
+    });
+    expect(cs.get().brain.limits.memoryRecallChars).toBe(40_000);
+    expect(cs.get().brain.limits.memoryLiveRecallChars).toBe(40_000);
+    expect(cs.get().brain.limits.memoryLiveRecallPasses).toBe(20);
+    cs.update({
+      brain: { limits: { memoryRecallChars: 999_999, memoryLiveRecallChars: 999_999, memoryLiveRecallPasses: 999 } },
+    });
+    expect(cs.get().brain.limits.memoryRecallChars).toBe(40_000);
+    expect(cs.get().brain.limits.memoryLiveRecallChars).toBe(40_000);
+    expect(cs.get().brain.limits.memoryLiveRecallPasses).toBe(20);
+    // Switching the passes off outright must stay reachable — the floor is not collateral of the raise.
+    cs.update({ brain: { limits: { memoryLiveRecallPasses: 0 } } });
+    expect(cs.get().brain.limits.memoryLiveRecallPasses).toBe(0);
   });
 
   // The aggregate tool-result budget bands at ±50%, and its floor is the load-bearing part: 100 000 stays

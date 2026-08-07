@@ -272,13 +272,17 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // at the char floor, 20 memories leave ~500 chars each and most get cut mid-sentence. An operator who
   // wants many memories wants the char budget raised with it — hence both ceilings.
   memoryRecallCount: band('memoryRecallCount', 20),
-  memoryRecallChars: band('memoryRecallChars', 20_000),
+  // Ceiling doubled at the instance owner's request: ~10k tokens of recalled memory. The floor still
+  // follows the default, so the extra range is headroom above it rather than a shifted band.
+  memoryRecallChars: band('memoryRecallChars', 40_000),
   // Exempt from the ±50% rule because 0 has to stay reachable: an operator who does not want the agent
   // interrupted mid-turn must be able to switch the passes off outright, which a band around the default
   // would forbid. The count/char ceilings mirror the turn-start ones so raising one does not strand the other.
-  memoryLiveRecallPasses: [0, 10],
+  // The pass ceiling is doubled at the instance owner's request — the default used to sit ON it, which left
+  // the knob with headroom in one direction only.
+  memoryLiveRecallPasses: [0, 20],
   memoryLiveRecallCount: [0, 20],
-  memoryLiveRecallChars: band('memoryLiveRecallChars', 20_000),
+  memoryLiveRecallChars: band('memoryLiveRecallChars', 40_000),
   // Raised past the ±50% rule at the owner's request to ~20k tokens of ceiling. It is bounded by
   // MAX_PROMPT_TOTAL_CHARS (brain/delegatedScope.ts), the budget packDelegatedPromptAppend fair-shares
   // with the child's role prompt — that budget was raised to 120 000 alongside this, so the value here
