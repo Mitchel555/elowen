@@ -5,6 +5,121 @@ All notable changes to Elowen are documented here. The format loosely follows
 
 ## [Unreleased]
 
+## [0.27.81] - 2026-08-07
+
+Sub-agents moved out of the daemon's single thread: delegated turns now run in a self-sizing pool of
+separate worker processes, on by default, so a large fan-out no longer freezes the CLI and the web or
+kills parent turns with provider timeouts. Compaction now genuinely frees context instead of silently
+keeping a fixed tail, a batch of prompt-cache fixes stops long conversations from being re-billed at
+full price, and the agent can finally show you an image instead of only describing one.
+
+### Added
+- **The agent can show you a picture, not just talk about one.** `ShareImage` shares a screenshot it
+  just took, a chart it rendered or an image file from a repo: the web renders it inline, chat
+  platforms upload it as a real attachment, and the terminal names what was shared. It is bounded —
+  only files the conversation may read, four per turn, 10 MB each, and the image type is judged from
+  the file's content rather than its name.
+- **You can see what is filling your context window.** The CLI's `/context` overlay and the web stats
+  modal gained a breakdown of the window right now — categories, free space and the heaviest tool
+  results — so "why is my context full" has an answer instead of a guess.
+- **A conversation can be forked** into a peer that starts with a copy of its history, so you can try
+  a different direction without losing the original thread.
+- **Phone notifications show what Elowen said.** The turn-finished push now carries a readable preview
+  of the actual reply, titled with the conversation name, instead of a generic "finished working" —
+  you can tell from the lock screen whether the answer matters.
+- **Memory shows how it is being used.** Every recall is logged, so the detail drawer can chart a
+  memory's vitality over time and project when it would be evicted; the list gained a sortable "Used"
+  column where the never-recalled memories are easy to find. Mid-turn recall now also works on shared
+  platform channels, scoped strictly to the verified sender — never the channel owner. The memory
+  tuning constants (dedup thresholds, score weights, curator budget) became live runtime settings.
+
+### Changed
+- **Delegated turns run in a worker pool by default.** Sub-agents used to execute on the daemon's one
+  JS thread, so twenty concurrent children pinned a single core while the CLI froze and parent turns
+  died on provider timeouts. They now run in forked worker processes; measured with 20 concurrent
+  children, the daemon's own CPU went from ~45% to ~5%. The pool sizes itself to the machine — a
+  2-core VPS gets one worker, not a herd — and its workers yield CPU to the daemon. A switch in
+  Settings → Runtime turns it off; it is read live, so flipping it applies to the next delegation
+  without a restart, and the health report now shows the mode delegated turns actually take rather
+  than the one the machine would allow.
+- **Fresh installs start at the values a tuned instance actually runs at.** Agent steps per run went
+  from 20 to 200, recalled memories from six to ten, auto-compaction is on, and more of the plugins
+  that work without configuration are enabled. Session retention now ships on at ten days — note this
+  one does delete idle conversations older than that.
+- **The dead web onboarding page is gone.** It was unreachable and left a fresh install staring at a
+  login form no credentials could pass; a visitor on a box with no account now gets a screen naming
+  the installer command to run.
+- **Chat fullscreen was removed** — the `/chat` page is the wide view — and background processes are
+  reported in the telemetry panel only, instead of also being announced above the composer.
+
+### Fixed
+- **A burst of delegations at cold start is queued instead of overflowing.** Firing many delegations
+  before the pool's first worker finished booting made most of them fall back in-process — measured,
+  12 of 20 — stalling the daemon worse than before the pool existed. A full pool now queues; only a
+  pool that genuinely failed to come up still raises.
+- **Delegated results are no longer lost to a database conflict.** Under concurrent load, 1 to 6
+  completed child results were lost in every run to a write-snapshot conflict between processes, and
+  in the worst case a fan-out hung for ten minutes holding a finished child while every health signal
+  said fine. The writes now take the lock up front, so the conflict cannot arise; additive database
+  migrations were made atomic across processes for the same reason.
+- **Sub-agent workers no longer each launch their own browser at boot.** External MCP servers (such as
+  browser automation) are connected on first use instead of at worker start, saving ~2.5 s of boot and
+  the memory of a browser per worker that never browses.
+- **A delegated turn that goes silent is aborted** instead of holding its slot forever, the parent is
+  told it stalled (still recoverable with `DelegateContinue`), and a child's result is no longer
+  delivered to the parent twice when several children finish close together.
+- **The daemon stays responsive even without the pool.** Coalescing a streamed answer was quadratic in
+  its own length — 5083 ms of blocked event loop over 4000 chunks, now 17 ms — and the health endpoint
+  now reports event-loop latency percentiles so saturation is visible instead of inferred.
+- **Compaction actually frees context now.** The retained recent tail was always the runtime's fixed
+  default (20 000 tokens) regardless of your threshold, so setting auto-compact early did not leave
+  you with less context. The tail is now sized from the trigger, so an early threshold genuinely means
+  a smaller context after compaction.
+- **A compaction threshold the model can never reach no longer burns money forever.** On a small
+  window, system prompt and tools alone can sit above the threshold, so every "successful" compaction
+  left the context above its own trigger and the next turn paid for another summarization — every
+  turn, with nothing detecting it. Such a compaction is now refused with one notice, and a breaker
+  trips after three consecutive failures; a manual `/compact` is never blocked.
+- **A compaction cut no longer kills the conversation on the next restart.** A cut landing between a
+  tool call and its result left an orphaned result that made every respawn fail with a provider error;
+  orphans are now skipped on replay, which also heals conversations already carrying one. Tools
+  fetched via `ToolSearch` also survive a compaction instead of silently vanishing from the advertised
+  set.
+- **Switching work modes no longer re-bills the whole conversation.** Entering plan mode narrowed the
+  advertised tool set, which rewrote the cached prompt prefix — measured at ~$2.97 and 287 608
+  re-written tokens per switch, paid again on the way back. The tool set now stays stable and plan
+  restrictions are enforced when a tool is actually called (including built-ins, which the deny list
+  previously never checked at execute time).
+- **Cleared tool results stay cleared across a restart.** The record of already-trimmed results lived
+  only in memory, so a warm conversation's first request after a daemon restart re-sent everything
+  whole and paid a full re-cache — $3.04 measured against ~$0.12 for a normal turn. Results are now
+  also budgeted per group, so eight parallel 30 kB searches cannot add 240 kB to the window just
+  because each is individually under the limit.
+- **Cache diagnostics tell the truth.** Tool registration order is now deterministic across restarts
+  (it used to follow directory listing and MCP connect latency, breaking the cache for no reason),
+  a cache-drop warning names its session and the module that rewrote history, activating a deferred
+  tool is no longer misreported as the cause of a break, and a tool activation that silently failed is
+  reported instead of leaving the model calling a tool that is not there.
+- **An image the provider refuses no longer poisons the conversation.** A refused image was re-sent in
+  every later request, so the conversation returned the same error forever at full cost; it is now
+  dropped with a plain explanation and the chat continues. Phone photos also just work: HEIC/AVIF/BMP
+  are converted, an oversized photo is shrunk instead of refused (providers downscale anyway), an
+  attachment stays visible after a reload, it is served only to its owner, and the vision fallback no
+  longer takes a photo away from a model that reads images itself.
+- **The phone push actually fires.** Two gates each excluded essentially every real turn — in three
+  days of logs, not one of 220 finished turns produced a push. A backgrounded iPhone now reports
+  itself reliably, the device you sent from decides whether you are watching (an idle desktop terminal
+  no longer speaks for a locked phone), and building the preview can no longer freeze the daemon on a
+  long answer.
+- **Smaller fixes.** Daemon lifecycle announcements ("Stopping", "Back online") arrive in your
+  configured language; the web session cookie match is anchored, so a cookie planted by a sibling
+  subdomain can no longer substitute the session; memory dedup thresholds were calibrated against the
+  real embedding model (both sat above every score the store produces, so they had never fired once);
+  whole-word matching is Unicode-aware, so accented category names like "práce" stop misfiling Czech
+  memories; some memory limit settings were silently dropped on save while the UI reported "saved";
+  skill and agent files saved with CRLF line endings or a BOM parse instead of silently disappearing;
+  and the language menu is reachable on a phone again.
+
 ## [0.27.80] - 2026-08-04
 
 Memory grew up in this release: it now belongs to your projects, keeps recalling while a turn is still
