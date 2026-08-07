@@ -8,6 +8,8 @@ import type { RuntimeConfig } from '../../../lib/types';
 const CONFIG: RuntimeConfig = {
   limits: RUNTIME_LIMIT_DEFAULTS,
   toolDeferralEnabled: true,
+  subagentRunnerEnabled: false,
+  subagentRunnerPoolMax: null,
   memoryRetention: {
     enabled: true,
     graceDays: 14,

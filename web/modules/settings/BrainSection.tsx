@@ -374,6 +374,10 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
         // A daemon predating the feature serves the runtime block without the retention group — seed the
         // defaults so the editor always has the full block to edit (mirrors `brain.limits ?? defaults`).
         memoryRetention: config.runtime?.memoryRetention ?? DEFAULT_MEMORY_RETENTION,
+        // Same reasoning for the sub-agent runner: an older daemon omits both fields, and its behaviour
+        // IS the off/auto pair, so seeding them keeps the editor honest about what that daemon is doing.
+        subagentRunnerEnabled: config.runtime?.subagentRunnerEnabled ?? false,
+        subagentRunnerPoolMax: config.runtime?.subagentRunnerPoolMax ?? null,
       });
       setRuntimeSeeded(true);
     }
