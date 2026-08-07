@@ -333,6 +333,17 @@ export interface RuntimeConfig {
    *  loop. OFF by default, and `false` is literally the old in-process path — which is what makes this
    *  the operator's rollback with no redeploy. Read live, so the next delegated turn follows it. */
   subagentRunnerEnabled: boolean;
+  /** THE one knob over the sub-agent runner POOL's size. `null` = auto, and auto is the point: the pool
+   *  measures the machine (cores minus one for the daemon; total memory divided by a live runner's real
+   *  resident size) so the same build sizes itself correctly on a 2-core VPS and a 16-core server without
+   *  being told which it is.
+   *
+   *  `0` disables the pool entirely and every delegated turn runs in-process. `N >= 1` is a HARD CAP and
+   *  can only ever NARROW what the machine allows — it exists for the cases where the machine's own
+   *  numbers lie (a cgroup CPU quota `availableParallelism()` cannot see, a container memory limit
+   *  `totalmem()` reports straight past), or where the operator simply wants Elowen below its fair share.
+   *  `ELOWEN_SUBAGENT_POOL_MAX` overrides it, which is how a lying container is fixed without a DB write. */
+  subagentRunnerPoolMax: number | null;
 }
 
 /** Statusline data for one live conversation: current context fill + session totals. The breakdown

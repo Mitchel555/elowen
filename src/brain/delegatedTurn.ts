@@ -99,6 +99,10 @@ export interface DelegatedTurnRunner {
   release(channelId: string): Promise<{ busy: boolean }>;
   /** Tear the runner down (plugin reload, shutdown). In-flight turns settle as interrupted. */
   reset(reason: string): void;
+  /** Can this runner take work AT ALL right now? The pool answers false when the operator has sized it to
+   *  zero, so the dispatcher reports `in-process` and routes there directly — rather than failing a turn
+   *  per delegation and logging a fallback warning each time. Absent ⇒ assumed usable. */
+  usable?(): boolean;
 }
 
 /** The runner could not be STARTED. Distinct from a turn that failed inside a healthy runner: nothing ran

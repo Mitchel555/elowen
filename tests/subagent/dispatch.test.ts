@@ -88,6 +88,27 @@ describe('SubagentDispatch — where a delegated turn executes', () => {
     expect(runner.calls).toBe(1);
   });
 
+  // A pool the operator has sized to zero is not a runner that might work — it IS the in-process path.
+  // Saying so here is what keeps that config from logging a fallback warning once per delegated turn.
+  it('reports in-process when the runner says it cannot take work at all', async () => {
+    const runner = { ...fakeRunner(async () => 'remote'), usable: () => false };
+    const d = new SubagentDispatch({
+      runTurn: async () => 'local', fenceRemote: passThrough, runner, runnerEnabled: () => true,
+    });
+    expect(d.mode()).toBe('in-process');
+    expect(await d.send(request, 'do it')).toBe('local');
+    expect(runner.calls).toBe(0);
+  });
+
+  it('still routes to a runner that does not implement the usability check', async () => {
+    const runner = fakeRunner(async () => 'remote');
+    const d = new SubagentDispatch({
+      runTurn: async () => 'local', fenceRemote: passThrough, runner, runnerEnabled: () => true,
+    });
+    expect(d.mode()).toBe('runner');
+    expect(await d.send(request, 'do it')).toBe('remote');
+  });
+
   it('relays the child progress stream to the delegating turn', async () => {
     const seen: string[] = [];
     const runner = fakeRunner(async (_req, _text, onEvent) => {

@@ -31,6 +31,20 @@ export interface SubagentRunnerHostDeps {
   /** The fork itself. Injectable ONLY so the handshake and the death path can be exercised without
    *  booting a real brain in a child process; production always takes the default below. */
   fork?: () => ChildProcess;
+  /** The child reported its own state. The POOL uses this for the load signal it cannot observe from
+   *  outside (event-loop p99) and for the measured runner size; absent when this host stands alone. */
+  onHeartbeat?: (beat: RunnerHeartbeat) => void;
+  /** The child is gone — for good. The pool drops this host and every route pointing at it here; nothing
+   *  re-forks in place, because a host is one process for its whole life. */
+  onExit?: () => void;
+}
+
+/** What a runner says about itself, as forwarded to whoever owns this host. */
+export interface RunnerHeartbeat {
+  loopP99Ms: number;
+  activeTurns: number;
+  sessions: number;
+  rssBytes: number;
 }
 
 interface PendingTurn {
@@ -39,15 +53,20 @@ interface PendingTurn {
   onEvent?: (e: BrainEvent) => void;
 }
 
-/** Supervises the ONE forked sub-agent runner: boot handshake, turn correlation, abort/release verbs and
- *  the death path.
+/** Supervises ONE forked sub-agent runner: boot handshake, turn correlation, abort/release verbs and the
+ *  death path.
  *
- *  Deliberately a single child with no pool, no sizing and no admission queue — those are a separate
- *  problem (how much concurrency is right) from this one (does the boundary hold at all). */
+ *  This is the SINGLE construction path for a runner process — {@link SubagentRunnerPool} owns N of these
+ *  and nothing else forks a child. Everything about how many there should be, where a turn is placed and
+ *  what waits when they are all busy lives in the pool: this class knows only about its own child. */
 export class SubagentRunnerHost implements DelegatedTurnRunner {
   private child: ChildProcess | null = null;
   private ready: Promise<ChildProcess> | null = null;
   private readonly pending = new Map<string, PendingTurn>();
+  /** The last thing the child said about itself, for `/health`. Undefined until the first beat. */
+  private lastBeat: RunnerHeartbeat | undefined;
+  /** Set once the exit path has run, so a dead host is never handed a turn or counted as live. */
+  private dead = false;
   /** Nested edges this runner told us about, so a runner death can retract every one of them instead of
    *  leaving the daemon believing work is still running. */
   private readonly mirroredEdges = new Set<string>();
@@ -64,7 +83,24 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
     this.childEdgeSink = sink;
   }
 
+  /** The child's pid once it exists — identity in `/health`, and the only handle an operator can `top`. */
+  get pid(): number | undefined { return this.child?.pid; }
+
+  /** True once this host's process has exited. A dead host is never reused: the pool forks a new one. */
+  get isDead(): boolean { return this.dead; }
+
+  /** The child's own last report. The pool deliberately does NOT admit or route from these numbers (they
+   *  are up to one heartbeat stale); they are what the runner SEES, surfaced so a divergence is visible. */
+  get heartbeat(): RunnerHeartbeat | undefined { return this.lastBeat; }
+
+  /** Fork + handshake now, rather than on the first turn. The pool grows explicitly, so it needs to know
+   *  whether a new runner actually came up before it counts on the capacity. */
+  async start(): Promise<void> { await this.ensure(); }
+
   async run(request: DelegatedTurnRequest, text: string, onEvent?: (e: BrainEvent) => void): Promise<string> {
+    // A host is ONE process for its whole life. Re-forking in place would give a session a different
+    // runner under the same identity, which is exactly the stale route the pool exists to prevent.
+    if (this.dead) throw new SubagentRunnerUnavailable('this sub-agent runner has exited');
     const child = await this.ensure();
     const turnId = randomUUID();
     return new Promise<string>((resolve, reject) => {
@@ -205,6 +241,12 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
             turn?.reject(new Error(msg.message));
             return;
           }
+          case 'heartbeat': {
+            const { loopP99Ms, activeTurns, sessions, rssBytes } = msg;
+            this.lastBeat = { loopP99Ms, activeTurns, sessions, rssBytes };
+            this.d.onHeartbeat?.(this.lastBeat);
+            return;
+          }
           default: return; // `released` is handled by the per-call listener in release()
         }
       });
@@ -229,6 +271,9 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
           this.childEdgeSink?.(parentSessionId, childSessionId, false);
         }
         if (code !== 0 || signal) log.warn(`sub-agent runner exited (code ${code ?? '?'}, signal ${signal ?? 'none'})`);
+        // LAST: the owner drops this host and every route pointing at it. After the settling above, so a
+        // pool that re-places work on hearing this can never race a turn that is still being rejected.
+        if (!this.dead) { this.dead = true; this.d.onExit?.(); }
       });
       this.post(child, {
         type: 'boot', buildId: this.buildId, dbPath: this.d.dbPath, project: this.d.project,

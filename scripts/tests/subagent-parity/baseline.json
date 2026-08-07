@@ -56,7 +56,7 @@
     "Write"
   ],
   "toolCount": 52,
-  "firstUserMessage": "<context placement=\"before-user\">\nCurrent date & time: <WEEKDAY>, <LONGDATE>, <TIME> (Europe/Prague, morning).\n</context>\n\nPARITY-TASK-4c8e1 — answer with anything",
+  "firstUserMessage": "<context placement=\"before-user\">\nCurrent date & time: <WEEKDAY>, <LONGDATE>, <TIME> (Europe/Prague, <DAYPART>).\n</context>\n\nPARITY-TASK-4c8e1 — answer with anything",
   "requestKeys": [
     "max_completion_tokens",
     "messages",

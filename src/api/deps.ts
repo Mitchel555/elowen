@@ -30,11 +30,15 @@ import type { GitReader } from '../git/gitReader.js';
 import type { BrainOAuthManager } from '../brain/oauth.js';
 import type { BrainCredentialAccess } from '../brain/providerUsage.js';
 import type { EmbeddingService } from '../embeddings/embeddingService.js';
+import type { SubagentPoolStats } from '../subagent/poolStats.js';
 
 /** Everything the daemon injects into the REST server. Lives in its own module (rather than server.ts)
  *  so the route context and the route families can depend on the dependency shape without importing
  *  back from server.ts — keeping the module graph acyclic. */
 export interface ServerDeps {
+  /** The sub-agent pool's live state, for `/health`. Absent in a process with no pool (the in-memory test
+   *  database, and the runner itself), which is reported as an absent block rather than a fake empty one. */
+  subagentPool?: () => SubagentPoolStats;
   tasks: TaskStore; readiness: Readiness; missions: MissionStore;
   engine: MissionEngine; spawn: SpawnService; tmux: TmuxDriver; bus: EventBus;
   /** PR-native git lifecycle. Absent (or PR mode off) → phases never commit, no worktree, no PR. */

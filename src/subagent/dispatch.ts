@@ -34,7 +34,11 @@ export class SubagentDispatch {
   constructor(private d: SubagentDispatchDeps) {}
 
   mode(): SubagentDispatchMode {
-    return this.d.runner && this.d.runnerEnabled?.() === true ? 'runner' : 'in-process';
+    const runner = this.d.runner;
+    if (!runner || this.d.runnerEnabled?.() !== true) return 'in-process';
+    // A pool sized to zero by the operator is not a runner that might work — it is the in-process path,
+    // and saying so here is what keeps that config from logging a fallback warning per delegated turn.
+    return runner.usable?.() === false ? 'in-process' : 'runner';
   }
 
   async send(request: DelegatedTurnRequest, text: string, onEvent?: (e: BrainEvent) => void): Promise<string> {

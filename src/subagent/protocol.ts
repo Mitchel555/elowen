@@ -65,7 +65,14 @@ export type RunnerToDaemon =
   | { type: 'child'; parentSessionId: string; childSessionId: string; running: boolean }
   | { type: 'result'; turnId: string; reply: string }
   | { type: 'error'; turnId: string; message: string }
-  | { type: 'released'; releaseId: string; busy: boolean };
+  | { type: 'released'; releaseId: string; busy: boolean }
+  /** What this runner sees of ITSELF, on a fixed interval. The event-loop p99 is the load signal nothing
+   *  outside the process can observe — a busy runner and an idle one look identical from the daemon —
+   *  and the RSS is what turns the memory ceiling from a guess into a measurement (see sizing.ts). The
+   *  turn and session counts are the runner's own view, reported so a divergence from what the daemon
+   *  believes is VISIBLE in /health rather than silent; the pool routes and admits from its own exact
+   *  bookkeeping, never from a value that is one beat stale. */
+  | { type: 'heartbeat'; loopP99Ms: number; activeTurns: number; sessions: number; rssBytes: number };
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 
@@ -137,6 +144,19 @@ export function parseRunnerMessage(raw: unknown): RunnerToDaemon | undefined {
     case 'released': {
       const releaseId = str(v.releaseId);
       return releaseId ? { type: 'released', releaseId, busy: v.busy === true } : undefined;
+    }
+    case 'heartbeat': {
+      // Every field must be a finite non-negative number: these drive spawn decisions, and a NaN sneaking
+      // in would make every comparison false and quietly disable growth for the life of the daemon.
+      const nums = [v.loopP99Ms, v.activeTurns, v.sessions, v.rssBytes];
+      if (nums.some((n) => typeof n !== 'number' || !Number.isFinite(n) || n < 0)) return undefined;
+      return {
+        type: 'heartbeat',
+        loopP99Ms: v.loopP99Ms as number,
+        activeTurns: v.activeTurns as number,
+        sessions: v.sessions as number,
+        rssBytes: v.rssBytes as number,
+      };
     }
     default: return undefined;
   }

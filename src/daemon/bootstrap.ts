@@ -63,7 +63,9 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from '
 import { systemctl } from '../cli/systemd.js';
 import { BrainWorkerService } from '../brain/worker/brainWorker.js';
 import { buildBrainCore } from './brainCore.js';
-import { SubagentRunnerHost } from '../subagent/runnerHost.js';
+import { SubagentRunnerPool } from '../subagent/pool.js';
+import { resolvePoolMax } from '../subagent/sizing.js';
+import type { RuntimeConfig } from '../shared/wireContract.js';
 
 const log = logger('daemon');
 
@@ -380,18 +382,24 @@ export interface BuildOpts {
 
 export async function buildApp(opts: BuildOpts) {
   const tmux = opts.tmux ?? new RealTmuxDriver();
-  // The forked sub-agent runner. Constructed here — never inside buildBrainCore — because it is the one
+  // The sub-agent runner POOL. Constructed here — never inside buildBrainCore — because it is the one
   // thing a runner must NOT have: a process built without it always executes a nested delegation itself,
   // so a runner can never fork a runner. Nothing is forked until a delegated turn is dispatched AND the
-  // operator's switch is on (Settings → runtime.subagentRunnerEnabled, off by default). The in-memory
-  // test database has no file for a second process to attach to, so it never gets one.
+  // operator's switch is on (Settings → runtime.subagentRunnerEnabled, off by default); it then grows
+  // lazily up to a cap it measures off this machine. The in-memory test database has no file for a second
+  // process to attach to, so it never gets one.
+  //
+  // The pool size knob is read through a late-bound getter: the config store is built by buildBrainCore
+  // below, and the knob is only ever consulted on a delegated turn, long after that has returned.
+  let runtimeConfigForPool: (() => RuntimeConfig) | undefined;
   const subagentRunner = opts.dbPath !== ':memory:'
-    ? new SubagentRunnerHost({
+    ? new SubagentRunnerPool({
       dbPath: opts.dbPath,
       project: opts.project,
       // Explicit: a delegated turn's cwd ends in `process.cwd()`, so a child forked with a different
       // one would change what the model is told about where it is running.
       cwd: process.cwd(),
+      poolMax: () => resolvePoolMax(runtimeConfigForPool?.().subagentRunnerPoolMax, process.env.ELOWEN_SUBAGENT_POOL_MAX),
     })
     : undefined;
   // Stores, plugin registry and brain services — the part of the daemon that is NOT the daemon: it holds
@@ -417,6 +425,9 @@ export async function buildApp(opts: BuildOpts) {
     // stores (hence resolved on use, not on wiring) and a process without that transport just omits it.
     notifyTurnComplete: (userId, title, preview) => { void pushSender.sendToUsers([userId], buildTurnDone({ title, preview })); },
   });
+  // Close the late binding opened above the pool: from here the knob resolves against the live store,
+  // so raising or zeroing it takes effect on the next delegated turn with no restart.
+  runtimeConfigForPool = () => config.get().runtime;
   ensureVapidKeys(config); // generate the web-push VAPID keypair on first boot (idempotent thereafter)
   // The overseer relay client, rebuilt per-call so a key set/cleared at runtime takes effect.
   // Overseer decisions use their own model when set, else fall back to the planner model.
@@ -716,7 +727,7 @@ export async function buildApp(opts: BuildOpts) {
   // same systemd path the web/CLI command uses. Built here (needs the units + marker), wired now.
   if (brain && restartDaemon) brain.restartHandler = restartDaemon;
 
-  const app = createServer({ tasks, readiness, missions, engine, missionGit, gitLock, spawn, tmux, bus, events, notes, agents, project: homeProject, fallback: { program: 'claude-code', model: 'sonnet' }, cli, clock: new SystemClock(), config, users, projects, userProjects, pushSubscriptions, userPrompts, userSettings, pluginDirs, pluginDataRoot, brainOauth, brainAuth: brainCreds, prompts, taskUsage, git, avatarsDir, avatarSecret, chatImagesDir, planJobs, decisionQueue, pilot, advisor, brain, brainTerminal, restartDaemon, brainWorkers, brainStore, memoryStore, memoryCategoryStore, memoryCategorizer, embeddings, plugins: pluginProvider, marketplace, pluginLogs, hookAudit, tickets });
+  const app = createServer({ tasks, readiness, missions, engine, missionGit, gitLock, spawn, tmux, bus, events, notes, agents, project: homeProject, fallback: { program: 'claude-code', model: 'sonnet' }, cli, clock: new SystemClock(), config, users, projects, userProjects, pushSubscriptions, userPrompts, userSettings, pluginDirs, pluginDataRoot, brainOauth, brainAuth: brainCreds, prompts, taskUsage, git, avatarsDir, avatarSecret, chatImagesDir, planJobs, decisionQueue, pilot, advisor, brain, brainTerminal, restartDaemon, brainWorkers, brainStore, memoryStore, memoryCategoryStore, memoryCategorizer, embeddings, plugins: pluginProvider, marketplace, pluginLogs, hookAudit, tickets, ...(subagentRunner ? { subagentPool: () => subagentRunner.stats() } : {}) });
 
   // Root-cause recovery: after a daemon crash/restart, tasks left 'in_progress' whose tmux
   // session is gone are zombies — revert them to 'open' so they can be picked up again. No grace

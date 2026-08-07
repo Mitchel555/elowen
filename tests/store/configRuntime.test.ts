@@ -28,6 +28,9 @@ describe('ConfigStore runtime limits', () => {
       // OFF: `false` is literally the pre-runner in-process path, so adding the setting changed nothing
       // until an operator turns it on.
       subagentRunnerEnabled: false,
+      // AUTO: the pool measures the machine it is on, because any hard-coded count would be wrong on
+      // either a 2-core VPS or a 16-core server. An operator only sets a number when those inputs lie.
+      subagentRunnerPoolMax: null,
       memoryRetention: DEFAULT_MEMORY_RETENTION,
     });
   });
@@ -122,6 +125,35 @@ describe('ConfigStore runtime limits', () => {
     expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
     cs.update({ runtime: { subagentRunnerEnabled: false } });
     expect(cs.get().runtime.subagentRunnerEnabled).toBe(false);
+  });
+
+  it('round-trips the pool size knob, including the two values that are not "a number"', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBeNull(); // auto — sized from the machine
+    cs.update({ runtime: { subagentRunnerPoolMax: 3 } });
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBe(3);
+    // 0 is a REAL setting (pool off, everything in-process), not "unset" — it must survive the round trip.
+    cs.update({ runtime: { subagentRunnerPoolMax: 0 } });
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBe(0);
+    // …and null is how an operator hands sizing back to the machine.
+    cs.update({ runtime: { subagentRunnerPoolMax: null } });
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBeNull();
+    // A sibling patch must not resize the pool behind the operator's back.
+    cs.update({ runtime: { subagentRunnerPoolMax: 2 } });
+    cs.update({ runtime: { toolDeferralEnabled: false } });
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBe(2);
+  });
+
+  // Not an answer to "how many runners" — taking it would silently resize the pool from corruption.
+  it('keeps the current pool size when the patch value is not a count', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ runtime: { subagentRunnerPoolMax: 4 } });
+    cs.update({ runtime: { subagentRunnerPoolMax: -2 } });
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBe(4);
+    cs.update({ runtime: { subagentRunnerPoolMax: Number.NaN } });
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBe(4);
+    cs.update({ runtime: { subagentRunnerPoolMax: 2.7 } });
+    expect(cs.get().runtime.subagentRunnerPoolMax).toBe(2); // a count is a whole number
   });
 
   it('leaves the whole runtime block alone when the patch touches another section', () => {

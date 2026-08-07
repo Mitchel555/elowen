@@ -359,6 +359,20 @@ const DEFAULT_TOOL_DEFERRAL_ENABLED = true;
  *  complete rollback with no redeploy. */
 const DEFAULT_SUBAGENT_RUNNER_ENABLED = false;
 
+/** AUTO. The pool sizes itself from the machine, which is the whole point — a hard-coded default would be
+ *  wrong on either a 2-core VPS or a 16-core server, and probably on both. The operator sets a number only
+ *  when the machine's own inputs cannot be trusted (see RuntimeConfig.subagentRunnerPoolMax). */
+const DEFAULT_SUBAGENT_RUNNER_POOL_MAX: number | null = null;
+
+/** Normalize the pool knob off a patch. Anything that is not `null` or a non-negative integer is not an
+ *  answer to "how many runners" — it is corruption or a typo, and taking it would silently resize the
+ *  pool — so the current value is kept instead. */
+function sanitizePoolMax(v: unknown, fallback: number | null): number | null {
+  if (v === null) return null;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return fallback;
+  return Math.floor(v);
+}
+
 /** Every bound here is written out rather than derived from the default (the ±50% `band()` rule the brain
  *  limits use): each of these has a domain range that the default sits inside rather than centres —
  *  a 10s floor is what makes a `!` timeout survivable, and cosine similarity has no meaning past ~0.8. */
@@ -522,7 +536,7 @@ const DEFAULT_CONFIG: ElowenConfig = {
     removed: [],
   },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, subagentRunnerEnabled: DEFAULT_SUBAGENT_RUNNER_ENABLED, memoryRetention: defaultMemoryRetention() },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, subagentRunnerEnabled: DEFAULT_SUBAGENT_RUNNER_ENABLED, subagentRunnerPoolMax: DEFAULT_SUBAGENT_RUNNER_POOL_MAX, memoryRetention: defaultMemoryRetention() },
   embedding: { providerId: '', model: '', baseUrl: '', dimensions: null },
   categorization: { providerId: '', model: '', baseUrl: '' },
 };
@@ -609,7 +623,7 @@ const defaultStored = (): Stored => ({
   webPushContact: '',
   plugins: { enabled: [...DEFAULT_CONFIG.plugins.enabled], removed: [], config: {} },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled, subagentRunnerEnabled: DEFAULT_CONFIG.runtime.subagentRunnerEnabled, memoryRetention: defaultMemoryRetention() },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled, subagentRunnerEnabled: DEFAULT_CONFIG.runtime.subagentRunnerEnabled, subagentRunnerPoolMax: DEFAULT_CONFIG.runtime.subagentRunnerPoolMax, memoryRetention: defaultMemoryRetention() },
   embedding: { ...DEFAULT_CONFIG.embedding },
   categorization: { ...DEFAULT_CONFIG.categorization },
 });
@@ -632,7 +646,7 @@ export interface ConfigPatch {
    *  apiKey KEEPS the currently stored key for that id — the UI never sees (or resends) secrets. */
   brain?: { providers?: unknown; agentName?: unknown; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
   /** Runtime knobs merged per-field (like the brain limits): a patch tuning one slider leaves the rest. */
-  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; subagentRunnerEnabled?: boolean; memoryRetention?: Partial<MemoryRetentionConfig> };
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; subagentRunnerEnabled?: boolean; subagentRunnerPoolMax?: number | null; memoryRetention?: Partial<MemoryRetentionConfig> };
   /** Embedding config is merged per-field (like autopilot); `dimensions: null` clears the width hint. */
   embedding?: { providerId?: string; model?: string; baseUrl?: string; dimensions?: number | null };
   /** Categorization config merged per-field (like embedding). */
@@ -699,6 +713,7 @@ export class ConfigStore {
           limits: clampRuntimeLimits(p.runtime?.limits, d.runtime.limits),
           toolDeferralEnabled: typeof p.runtime?.toolDeferralEnabled === 'boolean' ? p.runtime.toolDeferralEnabled : d.runtime.toolDeferralEnabled,
           subagentRunnerEnabled: typeof p.runtime?.subagentRunnerEnabled === 'boolean' ? p.runtime.subagentRunnerEnabled : d.runtime.subagentRunnerEnabled,
+          subagentRunnerPoolMax: p.runtime?.subagentRunnerPoolMax !== undefined ? sanitizePoolMax(p.runtime.subagentRunnerPoolMax, d.runtime.subagentRunnerPoolMax) : d.runtime.subagentRunnerPoolMax,
           memoryRetention: clampMemoryRetention(p.runtime?.memoryRetention, d.runtime.memoryRetention),
         },
         embedding: {
@@ -854,6 +869,7 @@ export class ConfigStore {
         limits: clampRuntimeLimits(patch.runtime?.limits, cur.runtime.limits),
         toolDeferralEnabled: typeof patch.runtime?.toolDeferralEnabled === 'boolean' ? patch.runtime.toolDeferralEnabled : cur.runtime.toolDeferralEnabled,
         subagentRunnerEnabled: typeof patch.runtime?.subagentRunnerEnabled === 'boolean' ? patch.runtime.subagentRunnerEnabled : cur.runtime.subagentRunnerEnabled,
+        subagentRunnerPoolMax: patch.runtime?.subagentRunnerPoolMax !== undefined ? sanitizePoolMax(patch.runtime.subagentRunnerPoolMax, cur.runtime.subagentRunnerPoolMax) : cur.runtime.subagentRunnerPoolMax,
         memoryRetention: clampMemoryRetention(patch.runtime?.memoryRetention, cur.runtime.memoryRetention),
       },
       embedding: {

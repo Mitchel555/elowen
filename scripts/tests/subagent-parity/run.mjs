@@ -52,6 +52,10 @@ function normalise(text, dataDir) {
     .replace(/\b\d{1,2}:\d{2}(:\d{2})?\b/g, '<TIME>')
     .replace(/\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b/g, '<WEEKDAY>')
     .replace(/\b\d{1,2} (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}\b/g, '<LONGDATE>')
+    // The runtime-context plugin names the daypart (see its DAYPARTS table), so a fingerprint taken in
+    // the morning would not match one taken after lunch — a false alarm that would teach us to ignore
+    // this check, which is the one failure mode a parity harness must never have.
+    .replace(/\b(?:early morning|morning|midday|afternoon|evening|night)\b/g, '<DAYPART>')
     .replace(/127\.0\.0\.1:\d+/g, '<HOST>')
     .replace(/\bdlg-[0-9a-f-]+/g, '<JOB>');
 }

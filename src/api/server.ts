@@ -41,7 +41,15 @@ export function createServer(d: ServerDeps): ElowenApp {
   // daemon keeping up" has no other answer from outside: a starved loop and a slow provider look
   // identical in every other signal, and CPU graphs show a single core busy either way. Reading the
   // histogram is a few arithmetic ops, so the probe stays the ~1 ms round-trip it is today.
-  app.get('/health', c => c.json({ ok: true, version: ELOWEN_VERSION, eventLoop: loopLag.lag() }));
+  // The pool rides along beside it for the same reason: a delegated turn waiting in the admission queue
+  // and a provider being slow are indistinguishable from outside, and "the pool is saturated" is a
+  // diagnosis nobody can reach without the per-runner counts, the queue depth and the oldest wait.
+  app.get('/health', c => c.json({
+    ok: true,
+    version: ELOWEN_VERSION,
+    eventLoop: loopLag.lag(),
+    ...(d.subagentPool ? { subagentPool: d.subagentPool() } : {}),
+  }));
   // Public: lets the web decide whether to show onboarding (no users yet) or the login form.
   app.get('/setup', c => c.json({ needsSetup: d.users ? d.users.count() === 0 : false }));
 

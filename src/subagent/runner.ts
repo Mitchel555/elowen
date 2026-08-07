@@ -20,6 +20,8 @@
  *  read-modify-write across sessions), so abort arrives as an explicit verb and this process only carries
  *  it out. Store writes are its own: it holds its own connection and writes its own sessions' rows. */
 import { logger } from '../shared/logger.js';
+import { startLoopLagMonitor } from '../shared/eventLoopLag.js';
+import { HEARTBEAT_INTERVAL_MS, LAG_WINDOW_MS } from './sizing.js';
 import { buildBrainCore } from '../daemon/brainCore.js';
 import type { TmuxDriver } from '../tmux/types.js';
 import type { BrainService } from '../brain/brainService.js';
@@ -58,6 +60,29 @@ const runningChannels = new Set<string>();
  *  let the runner's own end-of-turn retraction clear an edge the daemon still owns. */
 const dispatchedEdges = new Set<string>();
 const edgeKey = (parentSessionId: string, childSessionId: string): string => `${parentSessionId}\u0000${childSessionId}`;
+
+/** Channels this process still holds a live session record for. Distinct from {@link runningChannels}:
+ *  a channel stays HELD after its turn ends (that is the point — the next turn reuses the warm session)
+ *  and is only let go on release. Reported in the heartbeat so a runner's real session count is visible. */
+const heldChannels = new Set<string>();
+
+/** How late THIS process runs its own timers. The daemon cannot see this from outside — a runner chewing
+ *  through tool results and one idling between provider responses look identical over IPC — so the pool's
+ *  whole "is this runner saturated" question is answered here or not at all. The window is a few
+ *  heartbeats wide so each beat describes the recent past rather than the last minute (see sizing.ts). */
+const loopLag = startLoopLagMonitor(LAG_WINDOW_MS);
+
+const heartbeat = setInterval(() => {
+  send({
+    type: 'heartbeat',
+    loopP99Ms: loopLag.lag().p99,
+    activeTurns: runningChannels.size,
+    sessions: heldChannels.size,
+    rssBytes: process.memoryUsage.rss(),
+  });
+}, HEARTBEAT_INTERVAL_MS);
+// A metric must never be the reason this process outlives the work it was forked for.
+heartbeat.unref();
 
 let brain: BrainService | undefined;
 /** Turns accepted before the core finished booting. Node delivers IPC messages as soon as the channel is
@@ -101,6 +126,7 @@ async function runTurn(turnId: string, rawRequest: unknown, text: string): Promi
   const childSessionId = channelSessionId(request.channelId);
   const edge = edgeKey(request.parentSessionId, childSessionId);
   runningChannels.add(request.channelId);
+  heldChannels.add(request.channelId);
   dispatchedEdges.add(edge);
   try {
     const reply = await service.runDelegatedTurn(request, text, (e) => {
@@ -152,7 +178,12 @@ process.on('message', (raw: unknown) => {
       if (runningChannels.has(msg.channelId)) { send({ type: 'released', releaseId: msg.releaseId, busy: true }); return; }
       void Promise.resolve(brain?.disposeChannel(msg.channelId))
         .catch((e: unknown) => log.warn(`release failed: ${errorText(e)}`))
-        .finally(() => { send({ type: 'released', releaseId: msg.releaseId, busy: false }); });
+        .finally(() => {
+          // Let go of it whether or not the dispose threw: the daemon is about to run this child itself,
+          // and a runner that kept claiming the channel would keep the pool routing turns back here.
+          heldChannels.delete(msg.channelId);
+          send({ type: 'released', releaseId: msg.releaseId, busy: false });
+        });
       return;
     }
     default:
