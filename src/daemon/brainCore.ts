@@ -45,6 +45,8 @@ import { setCompactionFailureLimit } from '../brain/session/compactionCircuitBre
 import { makeToolOutputPolicy } from '../brain/toolOutput.js';
 import { BUILTIN_TOOL_OUTPUT_SHOWN } from '../brain/tools/index.js';
 import type { DelegatedChildBridge } from '../plugins/api.js';
+import type { DelegatedTurnRunner } from '../brain/delegatedTurn.js';
+import type { Policy } from '../plugins/policy.js';
 import { discoverPlugins, loadPlugins } from '../plugins/loader.js';
 import { PluginRegistryProvider } from '../plugins/pluginsProvider.js';
 import { resolvePolicy } from '../plugins/policy.js';
@@ -103,6 +105,13 @@ export interface BrainCoreOpts {
    *  DAEMON-ONLY: web push is a transport the daemon owns (it holds the subscriptions and the VAPID
    *  keys), so a process without that transport omits the hook and its turns notify nobody. */
   notifyTurnComplete?: (userId: number, title: string, preview: string) => void;
+  /** Create the schema and run migrations (default true). The sub-agent runner passes false: it is forked
+   *  only AFTER the daemon's own openDb returned, so the shape is already final and it has no business
+   *  taking the write lock to prove that. */
+  migrate?: boolean;
+  /** The forked sub-agent runner — DAEMON-ONLY (see BrainDeps.subagentRunner). A runner omits it, which
+   *  is what keeps a nested delegation inside the same process instead of forking a runner from a runner. */
+  subagentRunner?: DelegatedTurnRunner;
 }
 
 /** Construct the store + plugin registry + brain services that ANY Elowen process needs, with no HTTP
@@ -118,7 +127,7 @@ export interface BrainCoreOpts {
  *  Those setters have silent defaults: a process that forgets one produces different transcripts with no
  *  error at all, which is the exact failure this factory exists to make impossible. */
 export async function buildBrainCore(opts: BrainCoreOpts) {
-  const db = openDb(opts.dbPath);
+  const db = openDb(opts.dbPath, opts.migrate === false ? { migrate: false } : {});
   db.prepare('INSERT OR IGNORE INTO projects (id,slug,path) VALUES (?,?,?)').run(opts.project.id, opts.project.slug, opts.project.path);
   const tmux = opts.tmux;
   const tasks = new TaskStore(db); const agents = new AgentStore(db);
@@ -205,6 +214,14 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
   // The brain's credential store: OAuth tokens (Anthropic/Copilot/OpenAI accounts) persist here and
   // pi refreshes them in place. Lives next to the brain's cwd, never inside a repo checkout.
   const brainDir = (() => { const p = join(dirname(opts.dbPath), 'brain'); mkdirSync(p, { recursive: true }); return p; })();
+  // Platform channels (Discord, …) and delegated children alike resolve their project scope through THIS
+  // one resolver. Named (rather than inlined into the brain deps below) because the sub-agent runner has
+  // to re-derive a delegated child's Policy from the same expression the daemon used — two copies of it
+  // would be two ways for a child to end up scoped differently in the two processes.
+  const policyForProjects = (ids: number[]): Policy => ({
+    allowedProjectIds: new Set(ids),
+    allowedPaths: () => ids.map((id) => projects.get(id)?.path).filter((p): p is string => !!p),
+  });
   // The brain's model runtime: a file-backed credential store (OAuth tokens persist + pi refreshes them in
   // place) plus the built-in model catalog. A `:memory:` test DB gets an ephemeral in-memory store instead.
   const brainAuthPath = opts.dbPath === ':memory:' ? undefined : join(brainDir, 'auth.json');
@@ -428,11 +445,11 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
         execAllowed: (userId, exec) => isExecAllowedForUser(users.get(userId), config.get().allowedExecs, exec),
         // Platform channels (Discord, …): role mappings resolve to project-scoped policies; the admin's
         // token anchors the channel sessions.
-        policyForProjects: (ids) => ({
-          allowedProjectIds: new Set(ids),
-          allowedPaths: () => ids.map((id) => projects.get(id)?.path).filter((p): p is string => !!p),
-        }),
+        policyForProjects,
         platformOwner: () => users.list().find((u) => u.is_admin)?.id,
+        // Present only in the daemon: a runner builds its core without one and therefore always runs a
+        // nested delegation itself.
+        ...(opts.subagentRunner ? { subagentRunner: opts.subagentRunner } : {}),
         // The typed sub-agent registry, resolved host-side when a delegate call names a subagent_type.
         agents: () => getAgentRegistry(),
         // Private long-term memory: the owner-chat memory tools + per-turn retrieval injection + the

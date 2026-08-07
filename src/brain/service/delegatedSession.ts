@@ -63,6 +63,10 @@ interface DelegatedSessionDeps {
   identity: IdentityResolver;
   users: BrainDeps['users'];
   policyForProjects?: BrainDeps['policyForProjects'];
+  /** Ask the sub-agent runner to drop its live record for a child before this process rehydrates it.
+   *  Every send below runs the turn HERE, so a record still held over there would leave one session live
+   *  in two processes at once. Absent (no runner) ⇒ there is nothing to release. */
+  releaseRemote?: (channelId: string) => Promise<{ busy: boolean }>;
 }
 
 /** The sub-agent delegation half of the brain facade: the durable boot reconcile of restart-zombie
@@ -283,6 +287,18 @@ export class DelegatedSessionService {
     },
   ): Promise<string> {
     const { row, parentSessionId, scope } = this.delegatedContinuation(userId, sessionId);
+    // The child may be living in the sub-agent runner. Reclaim it before rehydrating it here — and refuse
+    // outright while it is still WORKING there, because steering a turn this process cannot see would run
+    // two live sessions on one transcript. (`continueSubagent` already refuses a running child through
+    // the registry; this covers the owner's drill-in, which deliberately steers instead of refusing.)
+    // Guarded rather than `await this.d.releaseRemote?.(…)`: without a runner there is nothing to wait
+    // for, and an await here would still push the send below past a microtask — this path reaches
+    // channelService.send synchronously by design.
+    const release = this.d.releaseRemote;
+    if (release) {
+      const { busy } = await release(channelIdOf(sessionId));
+      if (busy) throw new Error('that sub-agent is running in the sub-agent runner — wait for it to finish before sending it more');
+    }
     const policy = scope.admin
       ? { allowedProjectIds: 'all' as const, allowedPaths: () => [] }
       : this.d.policyForProjects?.(scope.projectIds)

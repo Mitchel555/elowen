@@ -123,6 +123,17 @@ async function main() {
     });
     if (!limits.ok) throw new Error(`config PUT failed: HTTP ${limits.status} ${await limits.text()}`);
 
+    // Optional: run the SAME suite with delegated turns executing in the forked sub-agent runner.
+    if (process.env.ELOWEN_SUBAGENT_RUNNER === '1') {
+      const res = await fetch(`${baseUrl}/config`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ runtime: { subagentRunnerEnabled: true } }),
+      });
+      if (!res.ok) throw new Error(`enabling the sub-agent runner failed: HTTP ${res.status} ${await res.text()}`);
+      console.log('sub-agent runner: ON (delegated turns execute in a forked process)');
+    }
+
     /** Send one turn on `session`, wait for it to settle, and return the slice of model requests that
      *  turn produced (parent AND child requests alike — a delegation drives both). */
     const turnOn = (session, stream) => async (text, mode) => {
@@ -185,6 +196,8 @@ async function main() {
     // parent's. Everything below therefore comes from SQLite or it does not come at all.
     console.log('\n— the daemon restarts: no live session survives, only what SQLite holds —');
     streamA.close();
+    // Grab the log BEFORE the restart clears it — the delegations under test all happened above.
+    const logBeforeRestart = daemon.logText();
     token = await daemon.restart();
     const restarted = await getJson(baseUrl, `/brain/messages?session=${encodeURIComponent(sessionA)}`, token);
     check('the parent conversation is still readable after the restart',
@@ -242,6 +255,14 @@ async function main() {
       otherListing.includes('No sub-agents have run in this conversation yet'), excerpt(otherListing));
     check('…and is shown none of this conversation\'s children',
       !otherListing.includes('brain-ch-subagent-'), excerpt(otherListing));
+
+    // With the runner ON, prove the fork really served these turns: the dispatcher falls back in-process
+    // when it cannot start, which would silently turn this into a run of the old path.
+    if (process.env.ELOWEN_SUBAGENT_RUNNER === '1') {
+      check('the delegated turns were served by the forked runner',
+        logBeforeRestart.includes('sub-agent runner ready') && !logBeforeRestart.includes('running this delegated turn in-process'),
+        excerpt(logBeforeRestart.split('\n').filter((l) => l.includes('subagent')).join('\n')));
+    }
 
     db.close();
     streamB.close();

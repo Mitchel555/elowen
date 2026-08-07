@@ -15,6 +15,7 @@ import type { BrainLimits, RuntimeConfig } from '../store/configStore.js';
 import type { BrainResourceLoaderOptions } from './session/factory.js';
 import type { ProjectModelPreference } from '../store/userSettingStore.js';
 import type { ProjectStore } from '../store/projectStore.js';
+import type { DelegatedTurnRunner } from './delegatedTurn.js';
 
 // The daemon-wiring seam of the brain, in its own module so the service/* units can depend on it
 // without importing the BrainService facade back (keeps the dependency graph acyclic — depcruise
@@ -96,6 +97,11 @@ export interface BrainDeps {
   policyForProjects?: (projectIds: number[]) => Policy;
   /** The Elowen user that anchors platform channel sessions (their token drives the tools) — the admin. */
   platformOwner?: () => number | undefined;
+  /** The forked sub-agent runner, when this process owns one. DAEMON-ONLY by construction: the runner
+   *  itself is built WITHOUT it, which is what keeps a nested delegation inside the same runner instead
+   *  of forking a runner from a runner. Absent ⇒ every delegated turn runs in-process, exactly as before
+   *  the runner existed. Even when present it is used only while the operator's switch is on. */
+  subagentRunner?: DelegatedTurnRunner;
   /** The typed sub-agent registry, resolved host-side when a delegate call names a `subagent_type`.
    *  Returns the SAME rebuildable instance the plugin catalog reads, so both see a reload's fresh set. */
   agents?: () => Map<string, AgentDef>;

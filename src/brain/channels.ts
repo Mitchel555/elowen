@@ -127,6 +127,13 @@ export interface ChannelServiceDeps {
   /** Stop the workflow engine for an aborted origin session (see BrainService.cancelWorkflowsFor) —
    *  a channel `/stop` must halt a DAG started from that channel exactly like the owner's Esc-Esc. */
   cancelWorkflows?: (sessionId: string) => Promise<void>;
+  /** Observe every delegated parent→child edge this service registers. Set only in the sub-agent runner,
+   *  which mirrors its NESTED tree into the daemon's authoritative registry. */
+  onDelegatedEdge?: (parentSessionId: string, childSessionId: string, running: boolean) => void;
+  /** Reach a delegated child whose PI session lives in the sub-agent runner process. The abort TREE stays
+   *  here (its fencing is synchronous in-memory read-modify-write), but only the process actually holding
+   *  the session can interrupt the model call — see SubagentDispatch. No-op without a runner. */
+  abortRemote?: (channelId: string) => void;
 }
 
 const sameScopePolicy = (policy: Policy, scope: DelegatedExecutionScope): boolean => {
@@ -164,6 +171,7 @@ export class ChannelSessionService {
     if (!children) { children = new Map(); this.delegatedCalls.set(parentSessionId, children); }
     children.set(childSessionId, (children.get(childSessionId) ?? 0) + 1);
     this.d.registry.setChildRunning(parentSessionId, childSessionId, true);
+    this.d.onDelegatedEdge?.(parentSessionId, childSessionId, true);
   }
 
   private endDelegatedCall(parentSessionId: string, childSessionId: string): void {
@@ -174,6 +182,7 @@ export class ChannelSessionService {
     if (children?.size === 0) this.delegatedCalls.delete(parentSessionId);
     this.d.registry.setChildRunning(parentSessionId, childSessionId, false);
     this.d.registry.consumePendingAbort(childSessionId);
+    this.d.onDelegatedEdge?.(parentSessionId, childSessionId, false);
   }
 
   /** A child can only execute under the immutable scope minted by its original delegate call. This is
@@ -510,6 +519,38 @@ export class ChannelSessionService {
     }
   }
 
+  /** Run ONE delegated turn whose EXECUTION happens in another process (the sub-agent runner), keeping in
+   *  THIS one everything that cannot leave it. The parent/child edge, the parent-abort fence and the
+   *  pending-abort marker all live in the in-memory LiveSessionRegistry and are used ACROSS sessions —
+   *  `isParentAborting` asks about the parent, which is a daemon session — so their fencing depends on
+   *  synchronous read-modify-write and cannot be distributed.
+   *
+   *  Deliberately the same guards, in the same order, as the delegated half of {@link send}: this is the
+   *  same delegation, only its turn body is somewhere else. */
+  async sendRemote(
+    req: { channelId: string; ownerUserId: number; parentSessionId: string },
+    run: () => Promise<string>,
+  ): Promise<string> {
+    const sessionId = channelSessionId(req.channelId);
+    const parentSessionId = req.parentSessionId;
+    if (this.d.registry.isParentAborting(parentSessionId)) throw new Error('delegation aborted');
+    const parent = this.d.store.getSession(parentSessionId);
+    if (!parent || parent.user_id !== req.ownerUserId || parent.id === sessionId) throw new Error('invalid parent session');
+    // Register before the first async boundary. A background delegate may be stopped immediately after
+    // its tool returns, before the runner has reported anything at all.
+    this.beginDelegatedCall(parentSessionId, sessionId);
+    try {
+      if (this.d.registry.consumePendingAbort(sessionId)) throw new Error('delegation aborted');
+      const reply = await run();
+      // A parent stop that landed while the runner was working must make the child terminally
+      // unsuccessful; otherwise an aborted child's partial answer is mistaken for a successful one.
+      if (this.d.registry.consumePendingAbort(sessionId)) throw new Error('delegation aborted');
+      return reply;
+    } finally {
+      this.endDelegatedCall(parentSessionId, sessionId);
+    }
+  }
+
   /** Mid-run: a SAME-SENDER message that arrives while this channel's turn streams is STEERED into the
    *  running turn — PI delivers it between steps (after the current tool calls, before the next model
    *  call), so the agent folds it in without stalling the Discord handler on the channel lock or spawning
@@ -628,7 +669,12 @@ export class ChannelSessionService {
       await this.d.cancelWorkflows?.(sessionId);
       const ch = this.d.registry.channelGet(channelId);
       if (!ch) {
-        if (this.d.registry.isActiveChild(sessionId)) this.d.registry.requestPendingAbort(sessionId);
+        if (this.d.registry.isActiveChild(sessionId)) {
+          this.d.registry.requestPendingAbort(sessionId);
+          // No live record here, but the session may be running in the sub-agent runner: the marker above
+          // makes the delegation terminal, and this is what actually interrupts the model call.
+          this.d.abortRemote?.(channelId);
+        }
         return;
       }
       // Record cancellation before awaiting PI. The running send consumes this marker immediately after

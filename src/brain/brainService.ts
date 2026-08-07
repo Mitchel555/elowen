@@ -16,6 +16,8 @@ import { enqueueMirrored } from './session/queueMirror.js';
 import { ChannelSessionService } from './channels.js';
 import type { ChannelSendOpts } from './channels.js';
 import { PlatformOrchestrator } from './platforms.js';
+import { delegatedChannelSendOpts, type DelegatedTurnRequest } from './delegatedTurn.js';
+import { SubagentDispatch } from '../subagent/dispatch.js';
 import { lastAssistantTextIn, type BrainMessageView } from './messageView.js';
 import { runCompaction, withDescendantUsage } from './events.js';
 import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
@@ -79,6 +81,10 @@ export class BrainService {
   private identity: IdentityResolver;
   private channelService: ChannelSessionService;
   private platforms: PlatformOrchestrator;
+  /** Where a delegated turn EXECUTES: on this event loop, or in the forked sub-agent runner. */
+  private subagents: SubagentDispatch;
+  /** Set only in the sub-agent runner — see attachDelegatedEdgeReporter. */
+  private delegatedEdgeReporter?: (parentSessionId: string, childSessionId: string, running: boolean) => void;
   /** Post-turn memory curator — built only when the memory deps are wired. Runs fire-and-forget from
    *  send() (owner chat), never awaited. */
   private curator?: MemoryCurator;
@@ -269,10 +275,25 @@ export class BrainService {
       completeWorkflow: (parentSessionId, userId, completion) =>
         this.turnRunner.acceptWorkflowCompletion(parentSessionId, userId, completion),
       cancelWorkflows: (sessionId) => this.teardown.cancelWorkflowsFor(sessionId),
+      onDelegatedEdge: (parentSessionId, childSessionId, running) =>
+        this.delegatedEdgeReporter?.(parentSessionId, childSessionId, running),
+      // A delegated child running in the sub-agent runner has no live record here, so `/stop` can fence
+      // the delegation but not interrupt the model call. This verb reaches the process that holds it.
+      ...(d.subagentRunner ? { abortRemote: (channelId: string) => d.subagentRunner?.abort(channelId) } : {}),
+    });
+    this.subagents = new SubagentDispatch({
+      runTurn: (request, text, onEvent) => this.runDelegatedTurn(request, text, onEvent),
+      fenceRemote: (request, run) => this.channelService.sendRemote(request, run),
+      ...(d.subagentRunner ? { runner: d.subagentRunner } : {}),
+      runnerEnabled: () => d.runtimeConfig?.().subagentRunnerEnabled === true,
     });
     this.delegated = new DelegatedSessionService({
       store: d.store, sessions: this.sessions, channelService: this.channelService, identity: this.identity,
       users: d.users, policyForProjects: d.policyForProjects,
+      // A daemon-side delegated send (an owner drill-in, a DelegateContinue, a durable result delivery)
+      // rehydrates the child from SQLite HERE, so the runner must not still be holding a live record for
+      // it. Asking first is what keeps one child session from being live in two processes at once.
+      ...(d.subagentRunner ? { releaseRemote: (channelId: string) => d.subagentRunner?.release(channelId) ?? Promise.resolve({ busy: false }) } : {}),
     });
     this.platforms = new PlatformOrchestrator({
       plugins: () => this.resolvePlugins(),
@@ -285,6 +306,7 @@ export class BrainService {
       disabledToolsFor: (userId) => d.users.get(userId)?.disabled_tools ?? [],
       identity: this.identity,
       channels: this.channelService,
+      dispatch: this.subagents,
       restart: () => this.restartHandler,
       // Origin-bound platform work (a cron wake-up scheduled from a user conversation): run the prompt
       // as a BOUND send into that conversation — the reply lands, streams and persists exactly where
@@ -1101,6 +1123,11 @@ export class BrainService {
         if (!activeIds.includes(id)) this.sessions.dispose(id);
       }
       await this.channelService.resetChannels('plugins reloaded');
+      // The sub-agent runner loaded the OLD plugin set into a process this reload cannot reach into, so a
+      // surviving one would keep serving delegated turns with the tools that were just replaced. Tear it
+      // down instead; the next delegation forks a fresh one off the new registry. Its in-flight turns
+      // settle as interrupted, which is the same verdict resetChannels above just gave the local ones.
+      this.d.subagentRunner?.reset('plugins reloaded');
       // Platform adapters were built by the old registry — disconnect them and start the fresh set.
       this.platforms.stopAll();
       await this.platforms.startAll();
@@ -1133,9 +1160,53 @@ export class BrainService {
     await this.platforms.notify(text, channelId, notice);
   }
 
-  /** Start every plugin-contributed platform adapter — see PlatformOrchestrator. */
-  async startPlatforms(log?: { info(m: string): void; error(m: string): void }): Promise<void> {
-    await this.platforms.startAll(log);
+  /** Start every plugin-contributed platform adapter — see PlatformOrchestrator. `only` narrows it to
+   *  named platforms: the sub-agent runner starts the `subagent` adapter alone, because that adapter is
+   *  how delegation is wired at all (without `listen` being called its `run` handle stays null and a
+   *  nested delegation fails outright), while a second Discord/WhatsApp gateway from a child process
+   *  would answer the operator's rooms twice. */
+  async startPlatforms(log?: { info(m: string): void; error(m: string): void }, only?: readonly string[]): Promise<void> {
+    await this.platforms.startAll(log, only);
+  }
+
+  /** Execute ONE delegated turn in THIS process. The single delegated entry point: the daemon reaches it
+   *  through the dispatch when the runner is off, and the runner calls it for a turn that arrived over
+   *  IPC — so both compose the child's session from the same builder. */
+  async runDelegatedTurn(request: DelegatedTurnRequest, text: string, onEvent?: (e: BrainEvent) => void): Promise<string> {
+    return this.channelService.send(
+      delegatedChannelSendOpts(request, { policyForProjects: this.d.policyForProjects, identity: this.identity }, onEvent),
+      text,
+    );
+  }
+
+  /** Abort a channel session's in-flight turn and its delegated descendants — the same teardown a
+   *  platform `/stop` does. Used by the sub-agent runner to carry out the daemon's abort verb. */
+  async abortChannel(channelId: string): Promise<void> {
+    await this.channelService.abort(channelId);
+  }
+
+  /** Drop the live record for a channel (its transcript stays in SQLite and rehydrates on the next turn),
+   *  serialized against that channel's own turns. The sub-agent runner does this when the daemon reclaims
+   *  a child so it can run that child's next turn itself. */
+  async disposeChannel(channelId: string): Promise<void> {
+    await this.sessions.withLock(channelSessionId(channelId), async () => {
+      this.sessions.channelDispose(channelId);
+    });
+  }
+
+  /** Report every delegated parent→child edge this process registers, so a runner can mirror its NESTED
+   *  tree into the daemon's authoritative registry. Late-bound because the reporter is the IPC channel,
+   *  which is wired after the brain is built. */
+  attachDelegatedEdgeReporter(report: (parentSessionId: string, childSessionId: string, running: boolean) => void): void {
+    this.delegatedEdgeReporter = report;
+  }
+
+  /** Mirror a NESTED delegated edge reported by the sub-agent runner into this process's registry. The
+   *  abort tree, `/stop` and the graceful-shutdown gate are authoritative here, so they have to see the
+   *  work happening over there. The edge of a dispatched turn itself is NOT reported that way — the
+   *  dispatch registers it synchronously before forwarding (see ChannelSessionService.sendRemote). */
+  mirrorRemoteChildEdge(parentSessionId: string, childSessionId: string, running: boolean): void {
+    this.sessions.setChildRunning(parentSessionId, childSessionId, running);
   }
 
   /** Send one channel message (e.g. a Discord mention) — see ChannelSessionService. */

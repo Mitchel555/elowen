@@ -6,12 +6,12 @@ import type { IdentityResolver } from './identity.js';
 import type { ChannelSessionService } from './channels.js';
 import type { SessionListItem, SessionPage, SessionPageOpts } from './service/statusService.js';
 import {
-  delegatedToolPolicy,
   normalizeDelegatedExecutionScope,
   packDelegatedPromptAppend,
   withDelegatedDeniedTools,
-  type DelegatedExecutionScope,
 } from './delegatedScope.js';
+import type { BrainEvent } from './events.js';
+import type { DelegatedTurnRequest } from './delegatedTurn.js';
 import { resolveAgentTools, READ_ONLY_AGENT_TOOLS, type AgentDef } from './agents/agentRegistry.js';
 import { renderAgentPrompt } from './agents/agentPrompt.js';
 import { buildReadOnlyBoundary } from './agents/readOnlyBoundary.js';
@@ -33,6 +33,10 @@ export interface PlatformOrchestratorDeps {
   disabledToolsFor?: (userId: number) => string[];
   identity: IdentityResolver;
   channels: ChannelSessionService;
+  /** Where a DELEGATED turn actually executes — see SubagentDispatch. Every delegation reaches the host
+   *  through this orchestrator's `run` handle (the Delegate tool and a workflow node alike), so this is
+   *  the one place that decides between running it on this event loop and handing it to the runner. */
+  dispatch: { send(request: DelegatedTurnRequest, text: string, onEvent?: (e: BrainEvent) => void): Promise<string> };
   /** Admin daemon restart for a platform `/restart` slash. Lazily resolved: the handler is built after
    *  the brain (it needs systemd + the marker path), so this returns undefined until it's wired. */
   restart?: () => ((byUserId: number) => Promise<void>) | undefined;
@@ -66,9 +70,10 @@ export class PlatformOrchestrator {
 
   /** Start every platform adapter: wire its messages into channel sessions and let it deliver the
    *  replies. Called once at daemon startup and re-run by reloadPlugins. */
-  async startAll(log?: { info(m: string): void; error(m: string): void }): Promise<void> {
+  async startAll(log?: { info(m: string): void; error(m: string): void }, only?: readonly string[]): Promise<void> {
     const plugins = await this.d.plugins();
     for (const adapter of plugins?.platforms ?? []) {
+      if (only && !only.includes(adapter.name)) continue;
       try {
         adapter.listen(async (src, text, onEvent) => {
           const owner = this.d.platformOwner?.();
@@ -112,17 +117,8 @@ export class PlatformOrchestrator {
               .filter((chunk) => typeof chunk === 'string' && chunk.trim().length > 0),
             ...(src.channelName ? [this.d.channels.fragmentFor(src, owner)] : []),
           ];
-          // ONE unified access decision. A LINKED sender runs fully through their Elowen account — their
-          // own project Policy AND their own tool deny-list — exactly as in their web chat (the role
-          // policy is bypassed for them). An UNLINKED sender falls back to the Role-ID policy: all-project
-          // for an admin role, else the role's projects, plus the role's tool allowlist. Neither ever gets
-          // the owner's Elowen* API tools/token — a shared channel is never the verified owner's own chat.
-          let policy: Policy;
-          let toolPolicy: ToolPolicy | undefined;
-          let identity: TurnIdentity;
-          let verifiedPrefix = '';
-          let linkedUserId: number | undefined;
-          let delegatedAccess: DelegatedExecutionScope | undefined;
+          // ONE unified access decision, in two shapes: a DELEGATED turn runs under the immutable boundary
+          // minted here and dispatched below, while an ordinary platform turn resolves its sender.
           if (src.platform === 'subagent') {
             // Capture one immutable boundary on the very first child spawn. The synthetic platform source
             // is internal but still validated like persisted JSON: a malformed scope must not fall back to
@@ -177,42 +173,70 @@ export class PlatformOrchestrator {
             if (!rawScope) throw new Error('invalid delegated access');
             // The account running the child can only make the captured scope narrower. Persist this union
             // too, so a later settings change that re-enables a tool never widens an already-delegated run.
-            delegatedAccess = withDelegatedDeniedTools(rawScope, this.d.disabledToolsFor?.(sessionOwner) ?? []);
-            toolPolicy = delegatedToolPolicy(delegatedAccess);
-            policy = delegatedAccess.admin
-              ? { allowedProjectIds: 'all' as const, allowedPaths: () => [] }
-              : this.d.policyForProjects?.(delegatedAccess.projectIds)
-                ?? { allowedProjectIds: new Set(delegatedAccess.projectIds), allowedPaths: () => [] };
-            identity = this.d.identity.forDelegatedTurn(delegatedAccess, sessionOwner);
-          } else {
-            const resolved = this.d.identity.forPlatformTurn(src, owner);
-            identity = resolved.identity;
-            verifiedPrefix = resolved.verifiedPrefix;
-            linkedUserId = resolved.linkedUserId;
-            if (linkedUserId != null && this.d.policyForUser) {
-              policy = this.d.policyForUser(linkedUserId);
-              const denied = this.d.disabledToolsFor?.(linkedUserId) ?? [];
-              toolPolicy = denied.length ? { deny: new Set(denied) } : undefined;
-            } else {
-              policy = src.access.admin
-                ? { allowedProjectIds: 'all' as const, allowedPaths: () => [] }
-                : this.d.policyForProjects?.(src.access.projectIds)
-                  ?? { allowedProjectIds: new Set(src.access.projectIds), allowedPaths: () => [] };
-              // Admin role → full plugin toolset (no allowlist). Otherwise the role's tool allowlist — but
-              // the Discord convention (plugins/discord/index.mjs) is that an empty list OR ['*'] means
-              // "everything", so it must map to NO restriction, not an allow-list of the literal "*" (which
-              // would match no real tool name and deny the whole toolset).
-              const roleTools = src.access.tools;
-              const unrestricted = !roleTools?.length || roleTools.includes('*');
-              toolPolicy = !src.access.admin && !unrestricted ? { allow: new Set(roleTools) } : undefined;
-            }
+            const delegatedAccess = withDelegatedDeniedTools(rawScope, this.d.disabledToolsFor?.(sessionOwner) ?? []);
+            // Validated above for the owner lookup; re-checked here so the request below carries the
+            // non-optional parent it actually has.
+            if (!parentSessionId) throw new Error('invalid parent session');
+            // THE DISPATCH SEAM. `policy`, `toolPolicy` and `identity` are deliberately NOT built here any
+            // more: none of the three can cross a process boundary (a closure over the project store, two
+            // Sets, and an identity minted against the live owner check), so they are derived from the
+            // captured scope by delegatedChannelSendOpts — the single builder the daemon and the runner
+            // both use, which is what keeps the child's system prompt byte-identical between them.
+            // `images` and `history` are not carried: a delegated source has neither by construction (the
+            // subagent plugin mints it with only platform/userId/roleIds/channelId/access).
+            return this.d.dispatch.send({
+              channelId: keyOf(src),
+              ownerUserId: sessionOwner,
+              parentSessionId,
+              delegatedAccess,
+              // A scheduled/unattended turn (a plugin sets access.scheduled) uses the focused `scheduled`
+              // system prompt, not the coding-agent base. Core stays agnostic to which plugin fired it.
+              scheduled: src.access.scheduled === true,
+              ...(src.access.model ? { model: src.access.model } : {}),
+              ...(src.access.thinkingLevel !== undefined ? { thinkingLevel: src.access.thinkingLevel } : {}),
+              ...(src.access.fast !== undefined ? { fast: src.access.fast } : {}),
+              // A delegated child inherits the delegating turn's working directory so its tools run in —
+              // and it advertises — the SAME project as the parent, not the daemon's `/`.
+              ...(src.access.cwd !== undefined ? { clientCwd: src.access.cwd } : {}),
+              // Surface-tuned idle cutoff (the delegate plugin pins it so a child's transcript is never
+              // rolled over mid-delegation).
+              ...(src.access.sessionIdleMs !== undefined ? { idleRolloverMs: src.access.sessionIdleMs } : {}),
+            }, text, onEvent);
           }
+          // A LINKED sender runs fully through their Elowen account — their own project Policy AND their
+          // own tool deny-list — exactly as in their web chat (the role policy is bypassed for them). An
+          // UNLINKED sender falls back to the Role-ID policy: all-project for an admin role, else the
+          // role's projects, plus the role's tool allowlist. Neither ever gets the owner's Elowen* API
+          // tools/token — a shared channel is never the verified owner's own chat.
+          const resolved = this.d.identity.forPlatformTurn(src, owner);
+          const identity: TurnIdentity = resolved.identity;
+          const linkedUserId = resolved.linkedUserId;
+          let policy: Policy;
+          let toolPolicy: ToolPolicy | undefined;
+          if (linkedUserId != null && this.d.policyForUser) {
+            policy = this.d.policyForUser(linkedUserId);
+            const denied = this.d.disabledToolsFor?.(linkedUserId) ?? [];
+            toolPolicy = denied.length ? { deny: new Set(denied) } : undefined;
+          } else {
+            policy = src.access.admin
+              ? { allowedProjectIds: 'all' as const, allowedPaths: () => [] }
+              : this.d.policyForProjects?.(src.access.projectIds)
+                ?? { allowedProjectIds: new Set(src.access.projectIds), allowedPaths: () => [] };
+            // Admin role → full plugin toolset (no allowlist). Otherwise the role's tool allowlist — but
+            // the Discord convention (plugins/discord/index.mjs) is that an empty list OR ['*'] means
+            // "everything", so it must map to NO restriction, not an allow-list of the literal "*" (which
+            // would match no real tool name and deny the whole toolset).
+            const roleTools = src.access.tools;
+            const unrestricted = !roleTools?.length || roleTools.includes('*');
+            toolPolicy = !src.access.admin && !unrestricted ? { allow: new Set(roleTools) } : undefined;
+          }
+          // Ordinary platform channels only — every delegated send returned through the dispatch above.
           return this.d.channels.send({
             channelId: keyOf(src),
             ownerUserId: sessionOwner,
             policy,
-            promptAppend: delegatedAccess?.promptAppend ?? (promptAppend.length ? promptAppend : undefined),
-            trusted: delegatedAccess?.admin ?? src.access.admin, // admin role → trusted-channel, never owner-chat
+            promptAppend: promptAppend.length ? promptAppend : undefined,
+            trusted: src.access.admin, // admin role → trusted-channel, never owner-chat
             // A scheduled/unattended turn (a plugin sets access.scheduled — the bundled cronjob does) uses
             // the focused `scheduled` system prompt, not the coding-agent base. Core stays agnostic to which
             // plugin fired it. (An origin-bound wake-up replays into its owner conversation via the bound
@@ -221,12 +245,6 @@ export class PlatformOrchestrator {
             model: src.access.model,
             thinkingLevel: src.access.thinkingLevel,
             fast: src.access.fast,
-            parentSessionId,
-            delegatedAccess,
-            // A delegated child inherits the delegating turn's working directory so its tools run in — and
-            // it advertises — the SAME project as the parent, not the daemon's `/`. Only subagent sends
-            // carry it; ordinary platform channels resolve their cwd from the policy root.
-            clientCwd: src.platform === 'subagent' ? src.access.cwd : undefined,
             // Surface-tuned idle cutoff (cron passes a shorter one; Discord omits it → host default).
             idleRolloverMs: src.access.sessionIdleMs,
             toolPolicy,
@@ -240,7 +258,7 @@ export class PlatformOrchestrator {
             // The identity prefix travels in opts (not concatenated) so channels.send can gate a RAW plugin
             // prompt-command on the un-prefixed text; it is applied to every ordinary message there, exactly
             // reproducing the previous `verifiedPrefix + text`.
-            senderPrefix: verifiedPrefix,
+            senderPrefix: resolved.verifiedPrefix,
           }, text);
         });
         // Out-of-band channel control for slash commands (stop/status/compact/restart). Optional: an

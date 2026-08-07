@@ -63,6 +63,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from '
 import { systemctl } from '../cli/systemd.js';
 import { BrainWorkerService } from '../brain/worker/brainWorker.js';
 import { buildBrainCore } from './brainCore.js';
+import { SubagentRunnerHost } from '../subagent/runnerHost.js';
 
 const log = logger('daemon');
 
@@ -379,6 +380,20 @@ export interface BuildOpts {
 
 export async function buildApp(opts: BuildOpts) {
   const tmux = opts.tmux ?? new RealTmuxDriver();
+  // The forked sub-agent runner. Constructed here — never inside buildBrainCore — because it is the one
+  // thing a runner must NOT have: a process built without it always executes a nested delegation itself,
+  // so a runner can never fork a runner. Nothing is forked until a delegated turn is dispatched AND the
+  // operator's switch is on (Settings → runtime.subagentRunnerEnabled, off by default). The in-memory
+  // test database has no file for a second process to attach to, so it never gets one.
+  const subagentRunner = opts.dbPath !== ':memory:'
+    ? new SubagentRunnerHost({
+      dbPath: opts.dbPath,
+      project: opts.project,
+      // Explicit: a delegated turn's cwd ends in `process.cwd()`, so a child forked with a different
+      // one would change what the model is told about where it is running.
+      cwd: process.cwd(),
+    })
+    : undefined;
   // Stores, plugin registry and brain services — the part of the daemon that is NOT the daemon: it holds
   // no server, no platform gateway, no scheduler and no loop, so a second process can build the identical
   // brain by calling the same factory instead of re-deriving the wiring.
@@ -395,6 +410,7 @@ export async function buildApp(opts: BuildOpts) {
     project: opts.project,
     tmux,
     bootstrap: opts.bootstrap,
+    ...(subagentRunner ? { subagentRunner } : {}),
     // An owner turn finished with the device it was sent from off screen → push it to the user's phone.
     // No subscription registered ⇒ sendToUsers is a no-op, so this needs no separate enable flag. Web push
     // is a daemon transport, so the hook is passed IN: the sender is built below out of the core's own
@@ -584,6 +600,13 @@ export async function buildApp(opts: BuildOpts) {
     terminalDir: (id) => { const p = join(dirname(opts.dbPath), 'terminal', String(id)); mkdirSync(p, { recursive: true }); return p; },
   });
   if (brain && brainTerminal) brain.attachTerminalTeardown((userId, sessionId) => brainTerminal.stopForSession(userId, sessionId));
+  // A delegated child running in the sub-agent runner can delegate FURTHER, inside that same process. The
+  // abort tree, `/stop` and the shutdown gate are authoritative here, so those nested edges are mirrored
+  // into this registry — and retracted wholesale if the runner dies.
+  if (brain && subagentRunner) {
+    subagentRunner.attachChildEdgeSink((parentSessionId, childSessionId, running) =>
+      brain.mirrorRemoteChildEdge(parentSessionId, childSessionId, running));
+  }
   // Wake the operator's conversation when a background command they started finishes ON ITS OWN (a killed
   // one is dropped before its close fires, so it never wakes). Delivered as an INTERNAL turn — no 'you'
   // bubble, and it runs after any in-flight turn — so a completed build/command nudges the agent instead of

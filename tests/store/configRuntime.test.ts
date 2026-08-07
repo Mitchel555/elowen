@@ -25,6 +25,9 @@ describe('ConfigStore runtime limits', () => {
         toastDurationMs: 4_500,           // TOAST_MS
       },
       toolDeferralEnabled: true,
+      // OFF: `false` is literally the pre-runner in-process path, so adding the setting changed nothing
+      // until an operator turns it on.
+      subagentRunnerEnabled: false,
       memoryRetention: DEFAULT_MEMORY_RETENTION,
     });
   });
@@ -105,6 +108,20 @@ describe('ConfigStore runtime limits', () => {
     expect(cs.get().runtime.toolDeferralEnabled).toBe(false);
     cs.update({ runtime: { toolDeferralEnabled: true } });
     expect(cs.get().runtime.toolDeferralEnabled).toBe(true);
+  });
+
+  it('round-trips the sub-agent runner switch and leaves it alone on a limits-only patch', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(false); // OFF by default — the rollback position
+    cs.update({ runtime: { subagentRunnerEnabled: true } });
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
+    // A patch that tunes an unrelated knob must not silently switch delegated execution back.
+    cs.update({ runtime: { limits: { toolDeferThreshold: 12 } } });
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
+    cs.update({ runtime: { toolDeferralEnabled: false } });
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(true);
+    cs.update({ runtime: { subagentRunnerEnabled: false } });
+    expect(cs.get().runtime.subagentRunnerEnabled).toBe(false);
   });
 
   it('leaves the whole runtime block alone when the patch touches another section', () => {

@@ -323,12 +323,16 @@ export interface RuntimeLimits {
   toastDurationMs: number;
 }
 
-/** The runtime block as served/patched: the numeric limits plus the deferral kill switch (its own field
- *  because the group is uniformly numeric — one clamp loop, one slider table). */
+/** The runtime block as served/patched: the numeric limits plus the boolean switches (each its own field
+ *  because the limits group is uniformly numeric — one clamp loop, one slider table). */
 export interface RuntimeConfig {
   limits: RuntimeLimits;
   /** Global kill switch for deferred tools. `false` → nothing is ever withheld from the prompt. */
   toolDeferralEnabled: boolean;
+  /** Execute delegated sub-agent turns in a forked runner process instead of on the daemon's own event
+   *  loop. OFF by default, and `false` is literally the old in-process path — which is what makes this
+   *  the operator's rollback with no redeploy. Read live, so the next delegated turn follows it. */
+  subagentRunnerEnabled: boolean;
 }
 
 /** Statusline data for one live conversation: current context fill + session totals. The breakdown

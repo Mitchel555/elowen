@@ -133,6 +133,7 @@ export const configPatchSchema = z.object({
   runtime: z.object({
     limits: runtimeLimitsPatchSchema.optional(),
     toolDeferralEnabled: z.boolean().optional(),
+    subagentRunnerEnabled: z.boolean().optional(),
     memoryRetention: memoryRetentionPatchSchema.optional(),
   }).optional(),
   embedding: z.object({

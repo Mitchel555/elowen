@@ -29,6 +29,10 @@ const TURN_DEADLINE_MS = 120_000;
 const args = process.argv.slice(2);
 const mode = args[0] === '--check' ? 'check' : 'save';
 const file = args[1] ?? 'scripts/tests/subagent-parity/baseline.json';
+// Run the SAME check with delegated turns executing in the forked sub-agent runner. The fingerprint must
+// not move: the runner composes the child's session through the same builder, and the system prompt is
+// the prompt-cache key — one byte of drift re-bills every delegated turn at full price.
+const useRunner = process.env.ELOWEN_SUBAGENT_RUNNER === '1';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const contentText = (m) => {
@@ -143,6 +147,19 @@ async function main() {
       return res.json();
     };
 
+    if (useRunner) {
+      // The operator's own switch, set the way an operator would — no test-only back door.
+      const res = await fetch(`${daemon.baseUrl}/config`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${daemon.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ runtime: { subagentRunnerEnabled: true } }),
+      });
+      if (!res.ok) throw new Error(`enabling the sub-agent runner failed: ${res.status} ${await res.text()}`);
+      console.log('sub-agent runner: ON (delegated turns execute in a forked process)');
+    } else {
+      console.log('sub-agent runner: OFF (delegated turns execute in-process)');
+    }
+
     const start = await api('/brain/start', { fresh: true });
     const session = start.sessionId;
     const idle = await watchIdle(daemon.baseUrl, daemon.token, session);
@@ -152,6 +169,15 @@ async function main() {
     while (idle.idle === before && Date.now() < until) await sleep(200);
     idle.stop();
     if (!childBody) throw new Error('no delegated child request was captured — the parent never delegated');
+
+    // The dispatcher falls back to in-process when the runner cannot START, which would turn this whole
+    // check into a green run of the code it is meant to be testing. Prove the fork really served the turn.
+    if (useRunner) {
+      const log = daemon.logText();
+      if (!log.includes('sub-agent runner ready')) throw new Error('the sub-agent runner never came up — this run proves nothing');
+      if (log.includes('running this delegated turn in-process')) throw new Error('the dispatcher fell back in-process — this run proves nothing');
+      console.log('  (verified: the delegated turn was served by the forked runner)');
+    }
 
     const systemMessages = (childBody.messages ?? []).filter((m) => m?.role === 'system');
     const fingerprint = {

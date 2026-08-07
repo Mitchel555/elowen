@@ -354,6 +354,11 @@ const MIN_STREAM_SILENCE_MS = 35_000;
  *  MCP surfaces untouched; this is the prod-safety switch that turns the mechanism off wholesale. */
 const DEFAULT_TOOL_DEFERRAL_ENABLED = true;
 
+/** Whether a delegated sub-agent turn executes in the forked runner process instead of on the daemon's
+ *  own event loop. OFF: `false` is literally the pre-runner code path, so flipping this back is a
+ *  complete rollback with no redeploy. */
+const DEFAULT_SUBAGENT_RUNNER_ENABLED = false;
+
 /** Every bound here is written out rather than derived from the default (the ±50% `band()` rule the brain
  *  limits use): each of these has a domain range that the default sits inside rather than centres —
  *  a 10s floor is what makes a `!` timeout survivable, and cosine similarity has no meaning past ~0.8. */
@@ -517,7 +522,7 @@ const DEFAULT_CONFIG: ElowenConfig = {
     removed: [],
   },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, memoryRetention: defaultMemoryRetention() },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, subagentRunnerEnabled: DEFAULT_SUBAGENT_RUNNER_ENABLED, memoryRetention: defaultMemoryRetention() },
   embedding: { providerId: '', model: '', baseUrl: '', dimensions: null },
   categorization: { providerId: '', model: '', baseUrl: '' },
 };
@@ -604,7 +609,7 @@ const defaultStored = (): Stored => ({
   webPushContact: '',
   plugins: { enabled: [...DEFAULT_CONFIG.plugins.enabled], removed: [], config: {} },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled, memoryRetention: defaultMemoryRetention() },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled, subagentRunnerEnabled: DEFAULT_CONFIG.runtime.subagentRunnerEnabled, memoryRetention: defaultMemoryRetention() },
   embedding: { ...DEFAULT_CONFIG.embedding },
   categorization: { ...DEFAULT_CONFIG.categorization },
 });
@@ -627,7 +632,7 @@ export interface ConfigPatch {
    *  apiKey KEEPS the currently stored key for that id — the UI never sees (or resends) secrets. */
   brain?: { providers?: unknown; agentName?: unknown; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
   /** Runtime knobs merged per-field (like the brain limits): a patch tuning one slider leaves the rest. */
-  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; memoryRetention?: Partial<MemoryRetentionConfig> };
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; subagentRunnerEnabled?: boolean; memoryRetention?: Partial<MemoryRetentionConfig> };
   /** Embedding config is merged per-field (like autopilot); `dimensions: null` clears the width hint. */
   embedding?: { providerId?: string; model?: string; baseUrl?: string; dimensions?: number | null };
   /** Categorization config merged per-field (like embedding). */
@@ -693,6 +698,7 @@ export class ConfigStore {
         runtime: {
           limits: clampRuntimeLimits(p.runtime?.limits, d.runtime.limits),
           toolDeferralEnabled: typeof p.runtime?.toolDeferralEnabled === 'boolean' ? p.runtime.toolDeferralEnabled : d.runtime.toolDeferralEnabled,
+          subagentRunnerEnabled: typeof p.runtime?.subagentRunnerEnabled === 'boolean' ? p.runtime.subagentRunnerEnabled : d.runtime.subagentRunnerEnabled,
           memoryRetention: clampMemoryRetention(p.runtime?.memoryRetention, d.runtime.memoryRetention),
         },
         embedding: {
@@ -847,6 +853,7 @@ export class ConfigStore {
       runtime: {
         limits: clampRuntimeLimits(patch.runtime?.limits, cur.runtime.limits),
         toolDeferralEnabled: typeof patch.runtime?.toolDeferralEnabled === 'boolean' ? patch.runtime.toolDeferralEnabled : cur.runtime.toolDeferralEnabled,
+        subagentRunnerEnabled: typeof patch.runtime?.subagentRunnerEnabled === 'boolean' ? patch.runtime.subagentRunnerEnabled : cur.runtime.subagentRunnerEnabled,
         memoryRetention: clampMemoryRetention(patch.runtime?.memoryRetention, cur.runtime.memoryRetention),
       },
       embedding: {

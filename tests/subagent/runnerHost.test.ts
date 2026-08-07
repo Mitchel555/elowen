@@ -1,0 +1,186 @@
+import { describe, it, expect } from 'vitest';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
+import { SubagentRunnerHost } from '../../src/subagent/runnerHost.js';
+import { subagentBuildId, type DaemonToRunner, type RunnerToDaemon } from '../../src/subagent/protocol.js';
+import { SubagentRunnerUnavailable, type DelegatedTurnRequest } from '../../src/brain/delegatedTurn.js';
+
+const request: DelegatedTurnRequest = {
+  channelId: 'subagent-sub-dlg-1',
+  ownerUserId: 1,
+  parentSessionId: 'brain-1',
+  delegatedAccess: { admin: false, projectIds: [3], owner: true, permissionBoundary: null },
+  scheduled: false,
+};
+
+/** A stand-in for the forked child: the same IPC surface the host uses, driven by the test. Lets the
+ *  handshake and the DEATH path be exercised without booting a real brain in a second process. */
+class FakeChild extends EventEmitter {
+  readonly pid = 0; // setPriority(0) would renice this very test process — 0 means "no pid to nice"
+  connected = true;
+  readonly received: DaemonToRunner[] = [];
+  killed: string[] = [];
+  send(message: DaemonToRunner): boolean {
+    this.received.push(message);
+    return true;
+  }
+  kill(signal: string): boolean { this.killed.push(signal); return true; }
+  /** What the runner says back. */
+  reply(message: RunnerToDaemon): void { this.emit('message', message); }
+  die(code = 1, signal: string | null = null): void { this.connected = false; this.emit('exit', code, signal); }
+  asChild(): ChildProcess { return this as unknown as ChildProcess; }
+}
+
+function hostWith(child: FakeChild, edges?: (parent: string, childSessionId: string, running: boolean) => void) {
+  const host = new SubagentRunnerHost({
+    dbPath: '/tmp/elowen-test.db',
+    project: { id: 1, slug: 'e2e', path: '/tmp/project' },
+    cwd: '/tmp/project',
+    fork: () => child.asChild(),
+  });
+  if (edges) host.attachChildEdgeSink(edges);
+  return host;
+}
+
+/** Let the host's own promise chain (fork → handshake → send) settle before asserting on it. */
+const tick = (): Promise<void> => new Promise((r) => { setImmediate(r); });
+
+/** Complete the boot handshake the way a healthy runner does. */
+const ready = (child: FakeChild): void => { child.reply({ type: 'ready', buildId: subagentBuildId() }); };
+
+describe('SubagentRunnerHost — the forked runner as seen from the daemon', () => {
+  it('boots with the database + project it must attach to, then serves the turn', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    expect(child.received[0]).toMatchObject({ type: 'boot', dbPath: '/tmp/elowen-test.db', project: { slug: 'e2e' } });
+    ready(child);
+    await tick();
+    const turn = child.received.find((m) => m.type === 'turn');
+    expect(turn).toMatchObject({ type: 'turn', text: 'do it' });
+    child.reply({ type: 'result', turnId: (turn as { turnId: string }).turnId, reply: 'child done' });
+    expect(await run).toBe('child done');
+  });
+
+  it('replays only the child progress the runner sent, into the delegating turn', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const seen: unknown[] = [];
+    const run = host.run(request, 'do it', (e) => seen.push(e));
+    await tick();
+    ready(child);
+    await tick();
+    const { turnId } = child.received.find((m) => m.type === 'turn') as { turnId: string };
+    child.reply({ type: 'progress', turnId, event: { type: 'tool', name: 'Bash', detail: 'ls' } });
+    child.reply({ type: 'result', turnId, reply: 'ok' });
+    await run;
+    expect(seen).toEqual([{ type: 'tool', name: 'Bash', detail: 'ls' }]);
+  });
+
+  // A runner that dies mid-turn leaves parents waiting for ever unless the daemon settles them itself.
+  it('settles every in-flight turn as INTERRUPTED when the runner dies', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const first = host.run(request, 'a');
+    await tick();
+    ready(child);
+    await tick();
+    const second = host.run({ ...request, channelId: 'subagent-sub-dlg-2' }, 'b');
+    await tick();
+    child.die(139, 'SIGSEGV');
+    await expect(first).rejects.toThrow('the sub-agent runner exited — this delegated turn was interrupted');
+    await expect(second).rejects.toThrow('interrupted');
+  });
+
+  // The daemon's registry is the authoritative abort tree. A nested edge left behind by a dead runner
+  // would make it believe work is still live: `/stop` would wait on it and shutdown would never drain.
+  it('retracts every mirrored nested edge when the runner dies', async () => {
+    const child = new FakeChild();
+    const edges: [string, string, boolean][] = [];
+    const host = hostWith(child, (parent, childSessionId, running) => edges.push([parent, childSessionId, running]));
+    const run = host.run(request, 'a');
+    await tick();
+    ready(child);
+    await tick();
+    child.reply({ type: 'child', parentSessionId: 'brain-ch-subagent-sub-dlg-1', childSessionId: 'brain-ch-subagent-sub-dlg-9', running: true });
+    child.die();
+    await expect(run).rejects.toThrow('interrupted');
+    expect(edges).toEqual([
+      ['brain-ch-subagent-sub-dlg-1', 'brain-ch-subagent-sub-dlg-9', true],
+      ['brain-ch-subagent-sub-dlg-1', 'brain-ch-subagent-sub-dlg-9', false],
+    ]);
+  });
+
+  // An in-place rebuild under a live daemon forks a child from code the parent is not running.
+  it('refuses a runner reporting a different build, and kills it', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    child.reply({ type: 'ready', buildId: 'elowen-from-another-build' });
+    await expect(run).rejects.toBeInstanceOf(SubagentRunnerUnavailable);
+    expect(child.killed).toContain('SIGKILL');
+  });
+
+  it('reports a runner that refused to boot as unavailable (so the caller may run the turn itself)', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    child.reply({ type: 'fatal', reason: 'the brain is not available for this database' });
+    await expect(run).rejects.toThrow(/refused to start/);
+  });
+
+  it('does not fork again for a while after a failed boot — one failure must not become a fork storm', async () => {
+    const child = new FakeChild();
+    let forks = 0;
+    const host = new SubagentRunnerHost({
+      dbPath: '/tmp/elowen-test.db',
+      project: { id: 1, slug: 'e2e', path: '/tmp/project' },
+      cwd: '/tmp/project',
+      fork: () => { forks += 1; return child.asChild(); },
+    });
+    const first = host.run(request, 'a');
+    await tick();
+    child.reply({ type: 'fatal', reason: 'boom' });
+    await expect(first).rejects.toThrow();
+    await expect(host.run(request, 'b')).rejects.toBeInstanceOf(SubagentRunnerUnavailable);
+    expect(forks).toBe(1);
+  });
+
+  it('release answers `busy` for a channel the runner is still working on, and frees an idle one', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    const pending = host.release('subagent-sub-dlg-1');
+    await tick();
+    const asked = child.received.find((m) => m.type === 'release') as { releaseId: string };
+    child.reply({ type: 'released', releaseId: asked.releaseId, busy: true });
+    expect(await pending).toEqual({ busy: true });
+    const { turnId } = child.received.find((m) => m.type === 'turn') as { turnId: string };
+    child.reply({ type: 'result', turnId, reply: 'ok' });
+    await run;
+  });
+
+  it('treats a runner that is not running as holding nothing (release resolves free)', async () => {
+    const host = hostWith(new FakeChild());
+    expect(await host.release('subagent-sub-dlg-1')).toEqual({ busy: false });
+  });
+
+  it('reset kills the child and settles what it was running', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    host.reset('plugins reloaded');
+    expect(child.killed).toContain('SIGTERM');
+    child.die(0, 'SIGTERM'); // the child exits in response, as a real one does
+    await expect(run).rejects.toThrow('interrupted');
+  });
+});

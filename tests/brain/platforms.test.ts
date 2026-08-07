@@ -5,6 +5,8 @@ import type { Policy } from '../../src/plugins/policy.js';
 import type { ChannelSendOpts } from '../../src/brain/channels.js';
 import { READ_ONLY_AGENT_TOOLS, type AgentDef } from '../../src/brain/agents/agentRegistry.js';
 import { normalizeDelegatedExecutionScope, PROMPT_TRUNCATION_MARKER } from '../../src/brain/delegatedScope.js';
+import { delegatedChannelSendOpts, type DelegatedTurnRequest } from '../../src/brain/delegatedTurn.js';
+import type { BrainEvent } from '../../src/brain/events.js';
 
 // A linked sender resolves to Elowen account #2 (non-admin); everyone else is unlinked.
 const users = { get: (id: number) => ({ username: `u${id}` }) };
@@ -13,6 +15,21 @@ const linkedResolver = (linked: boolean) =>
 
 const userPolicy: Policy = { allowedProjectIds: new Set([7]), allowedPaths: () => ['/repo/7'] };
 const rolePolicy: Policy = { allowedProjectIds: new Set([3]), allowedPaths: () => ['/repo/3'] };
+
+/** The IN-PROCESS dispatch, wired exactly as BrainService wires it: the orchestrator hands over the
+ *  delegated REQUEST and the shared builder composes the ChannelSendOpts the channel service receives.
+ *  The delegated assertions below still read a real ChannelSendOpts — it is simply built one layer down
+ *  now, in the single place the sub-agent runner builds it too. */
+const dispatchInto = (
+  channels: { send(o: ChannelSendOpts, text: string): Promise<string> },
+  identity: IdentityResolver,
+  policyForProjects?: (ids: number[]) => Policy,
+) => ({
+  send: (request: DelegatedTurnRequest, text: string, onEvent?: (e: BrainEvent) => void) =>
+    channels.send(delegatedChannelSendOpts(request, { identity, ...(policyForProjects ? { policyForProjects } : {}) }, onEvent), text),
+});
+/** For a test whose platform never delegates: reaching the dispatch at all would be the bug. */
+const noDispatch = { send: (): Promise<string> => Promise.reject(new Error('this test must not delegate')) };
 
 /** Drive one inbound message through the orchestrator and capture the ChannelSendOpts it produces. */
 async function runTurn(opts: { linked: boolean; access: Record<string, unknown> }): Promise<ChannelSendOpts> {
@@ -27,6 +44,7 @@ async function runTurn(opts: { linked: boolean; access: Record<string, unknown> 
     disabledToolsFor: () => ['DiscordApi'], // Amy disabled this tool in her Elowen account
     identity: linkedResolver(opts.linked),
     channels: { send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; }, fragmentFor: () => '' } as never,
+    dispatch: noDispatch,
   });
   await orch.startAll();
   await handler!({ platform: 'discord', userId: 'D9', channelId: 'c1', roleIds: [], access: opts.access } as never, 'hi');
@@ -70,12 +88,14 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
       send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
       fragmentFor: () => '',
     };
+    const resolver = linkedResolver(false);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
-      identity: linkedResolver(false),
+      identity: resolver,
       channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
 
@@ -95,16 +115,19 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
     const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const channels = {
+      sessionOwnerUserId: () => 1,
+      send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+      fragmentFor: () => '',
+    };
+    const resolver = linkedResolver(false);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
-      identity: linkedResolver(false),
-      channels: {
-        sessionOwnerUserId: () => 1,
-        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
-        fragmentFor: () => '',
-      } as never,
+      identity: resolver,
+      channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
 
@@ -125,16 +148,19 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
     const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const channels = {
+      sessionOwnerUserId: () => 1,
+      send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+      fragmentFor: () => '',
+    };
+    const resolver = linkedResolver(false);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
-      identity: linkedResolver(false),
-      channels: {
-        sessionOwnerUserId: () => 1,
-        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
-        fragmentFor: () => '',
-      } as never,
+      identity: resolver,
+      channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
 
@@ -155,16 +181,19 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
     const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const channels = {
+      sessionOwnerUserId: () => 1,
+      send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+      fragmentFor: () => fragment,
+    };
+    const resolver = linkedResolver(false);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
-      identity: linkedResolver(false),
-      channels: {
-        sessionOwnerUserId: () => 1,
-        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
-        fragmentFor: () => fragment,
-      } as never,
+      identity: resolver,
+      channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
     await handler!({
@@ -216,16 +245,19 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
     const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const channels = {
+      sessionOwnerUserId: () => 1,
+      send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+      fragmentFor: () => '',
+    };
+    const resolver = linkedResolver(false);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
-      identity: linkedResolver(false),
-      channels: {
-        sessionOwnerUserId: () => 1, // shared Discord parent rows are anchored to the operator
-        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
-        fragmentFor: () => '',
-      } as never,
+      identity: resolver,
+      channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
 
@@ -251,17 +283,20 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
     const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const channels = {
+      sessionOwnerUserId: () => 1,
+      send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+      fragmentFor: () => '',
+    };
+    const resolver = linkedResolver(false);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
       disabledToolsFor: () => ['terminal_exec'],
-      identity: linkedResolver(false),
-      channels: {
-        sessionOwnerUserId: () => 1,
-        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
-        fragmentFor: () => '',
-      } as never,
+      identity: resolver,
+      channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
 
@@ -286,18 +321,21 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
       rules: [{ scope: 'tools' as const, pattern: 'Write', action: 'deny' as const }],
       unattendedAsks: 'deny' as const,
     };
+    const channels = {
+      sessionOwnerUserId: () => 1,
+      send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
+      fragmentFor: () => '',
+    };
+    // The parent row belongs to the platform owner, while the original linked Discord participant is
+    // a different account. The boundary must therefore travel in source access, not be inferred later.
+    const resolver = linkedResolver(true);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
-      // The parent row belongs to the platform owner, while the original linked Discord participant is
-      // a different account. The boundary must therefore travel in source access, not be inferred later.
-      identity: linkedResolver(true),
-      channels: {
-        sessionOwnerUserId: () => 1,
-        send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; },
-        fragmentFor: () => '',
-      } as never,
+      identity: resolver,
+      channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
 
@@ -325,13 +363,16 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
     let sent: ChannelSendOpts | undefined;
     let handler: ((src: never, text: string) => Promise<unknown>) | undefined;
     const adapter = { name: 'subagent', listen: (fn: never) => { handler = fn as never; }, connect: async () => {} };
+    const channels = { sessionOwnerUserId: () => 1, send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; }, fragmentFor: () => '' };
+    const resolver = linkedResolver(false);
     const orch = new PlatformOrchestrator({
       plugins: async () => ({ platforms: [adapter] }) as never,
       platformOwner: () => 1,
       policyForProjects: () => rolePolicy,
-      identity: linkedResolver(false),
+      identity: resolver,
       agents: exploreDef,
-      channels: { sessionOwnerUserId: () => 1, send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; }, fragmentFor: () => '' } as never,
+      channels: channels as never,
+      dispatch: dispatchInto(channels, resolver, () => rolePolicy),
     });
     await orch.startAll();
     await handler!({ platform: 'subagent', userId: 'subagent', channelId: 'sub-typed', roleIds: [], access } as never, 'inspect');
@@ -401,6 +442,7 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
       platformOwner: () => 1,
       identity: linkedResolver(false),
       channels: { send: async (o: ChannelSendOpts) => { sent = o; return 'channel reply'; }, fragmentFor: () => '' } as never,
+      dispatch: noDispatch,
       originSend: async (userId, sessionId, text) => { originCalls.push([userId, sessionId, text]); return 'bound reply'; },
     });
     await orch.startAll();
@@ -420,6 +462,7 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
       platformOwner: () => 1,
       identity: linkedResolver(false),
       channels: { send: async (o: ChannelSendOpts) => { sent = o; return 'channel reply'; }, fragmentFor: () => '' } as never,
+      dispatch: noDispatch,
       originSend: async () => null, // ownership check failed host-side
     });
     await orch.startAll();
@@ -438,6 +481,7 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
         platformOwner: () => 1,
         identity: linkedResolver(false),
         channels: { send: async () => 'ok', fragmentFor: () => '' } as never,
+        dispatch: noDispatch,
       });
       await orch.startAll();
       return orch;
@@ -500,6 +544,7 @@ describe('PlatformOrchestrator — unified per-turn access', () => {
       disabledToolsFor: () => [], // nothing disabled
       identity: linkedResolver(true),
       channels: { send: async (o: ChannelSendOpts) => { sent = o; return 'ok'; }, fragmentFor: () => '' } as never,
+      dispatch: noDispatch,
     });
     await orch.startAll();
     await handler!({ platform: 'discord', userId: 'D9', channelId: 'c1', roleIds: [], access: { admin: false, projectIds: [3] } } as never, 'hi');

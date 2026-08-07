@@ -181,7 +181,9 @@ export async function spawnRealDaemon(opts) {
     });
     if (!cfgRes.ok) throw new Error(`config PUT failed: HTTP ${cfgRes.status} ${await cfgRes.text()}`);
 
-    return { baseUrl, token, dataDir, port, providerId, model, stop, restart };
+    // Everything the daemon wrote so far. A harness that flips a runtime switch needs to prove the
+    // daemon actually took that path instead of silently falling back to the old one.
+    return { baseUrl, token, dataDir, port, providerId, model, stop, restart, logText: () => logs.join('') };
   } catch (e) {
     const tail = logs.join('').split('\n').slice(-40).join('\n');
     await stop();
