@@ -165,10 +165,22 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
     // to a straight answer — the dispatcher falls back in-process when the runner cannot be brought up,
     // and swallowing that into an unbounded wait would replace a working delegation with a hang.
     if (this.runners.length === 0) {
+      // A failure HERE is the real "unavailable": no runner could be brought up, so the dispatcher running
+      // this turn in-process is the difference between a slower delegation and a broken one.
       await this.spawn();
       const cold = this.place(request);
-      if (!cold) throw new SubagentRunnerUnavailable('the sub-agent runner pool could not place this turn');
-      return this.dispatch(cold, request, text, onEvent);
+      if (cold) return this.dispatch(cold, request, text, onEvent);
+      // A reset landing mid-boot discards the runner we just waited for. Queueing then would park this
+      // turn behind a pool that no longer has anything to drain it, so the honest answer is the same one
+      // a failed boot gives — there is no runner to be had.
+      if (this.stopped || !this.runners.some((r) => !r.host.isDead)) {
+        throw new SubagentRunnerUnavailable('the sub-agent runner pool has no live runner for this turn');
+      }
+      // The runner DID come up and merely has no slot left for this particular turn. That is congestion,
+      // not unavailability, so it falls through to the queue below. A burst arriving at a cold pool is
+      // exactly when this matters: every turn passes the "no runners yet" test before the first spawn
+      // resolves, so refusing here dumped a whole burst minus one runner's worth straight back onto the
+      // daemon's event loop — measured as 12 of 20 turns in-process, and the loop stalling for 8s.
     }
     // Runners exist and are all full: QUEUE, never refuse. Growth (if the machine allows it) happens
     // beside this, not in front of it — a turn must not wait on a cold plugin boot to be admitted.

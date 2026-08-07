@@ -130,6 +130,29 @@ describe('SubagentRunnerPool — cold start and the operator knob', () => {
     h.pool.reset('test over');
   });
 
+  // MEASURED IN PRODUCTION: 20 delegations arriving together at an empty pool. Every one of them passes
+  // the "no runners yet" test before the first spawn resolves, so all 20 land in the cold-start branch —
+  // and the ones that do not fit the first runner used to be told the pool was UNAVAILABLE. The
+  // dispatcher believed it and ran them on the daemon's own loop: 12 of 20 in-process, the loop stalled
+  // for 8s, /health timed out. Congestion must queue; only a runner that cannot boot is unavailable.
+  it('queues a cold-start burst instead of refusing what does not fit', async () => {
+    const h = poolWith();
+    // Record refusals as they land instead of awaiting the burst: the turns that queue are SUPPOSED to
+    // stay pending here (nothing completes them), so awaiting them would hang the test by design.
+    const refused: unknown[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      h.pool.run(request(`subagent-sub-dlg-${i}`, `brain-${i}`), `t${i}`).catch((e: unknown) => { refused.push(e); });
+    }
+    await settle();
+    h.children[0]?.boot();
+    await settle(8);
+    // Not one of them may have been refused — the whole point is that the daemon's loop stays free.
+    expect(refused.filter((e) => e instanceof SubagentRunnerUnavailable)).toHaveLength(0);
+    expect(h.children[0]!.turns()).toHaveLength(MAX_TURNS_PER_RUNNER);
+    expect(h.pool.stats().queueDepth).toBe(20 - MAX_TURNS_PER_RUNNER);
+    h.pool.reset('test over');
+  });
+
   // A cold start that cannot boot must be reported, not waited on: the dispatcher's whole fallback to
   // in-process depends on getting a straight answer here.
   it('reports a runner that refuses to boot as unavailable', async () => {
