@@ -9,7 +9,7 @@ import { BrainService, type BrainDeps } from '../../src/brain/brainService.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { openDb } from '../../src/store/db.js';
 import { inMemoryModelRuntime } from '../../src/brain/providers.js';
-import { createDelegatedChildren } from '../../src/daemon/bootstrap.js';
+import { createDelegatedChildren } from '../../src/daemon/brainCore.js';
 import type { DelegatedExecutionScope } from '../../src/brain/delegatedScope.js';
 import type { DelegatedChildBridge, SubagentProgressEvent } from '../../src/plugins/api.js';
 import type { SubagentUpdate } from '../../src/brain/events.js';
