@@ -538,6 +538,82 @@ describe('BrainService', () => {
     expect(d.store.getSubagentRuns(sessionId)[0]).toMatchObject({ resultDelivery: 'acknowledged' });
   });
 
+  it('does not steer the same result twice when a second child finishes behind it', async () => {
+    // A steered row stays pending on purpose, and the transcript check cannot see a message PI is still
+    // holding in its queue. So the drain the SECOND child triggers used to re-send the first one, and the
+    // model read the same sub-agent result twice — duplicate edits from one delegation. Under fan-out two
+    // children finishing close together is the ordinary case, not a rare race.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    const runner = (svc as unknown as { turnRunner: { acceptSubagentCompletion(parent: string, userId: number, result: unknown): void; resultDrains: Set<string> } }).turnRunner;
+    for (const n of ['one', 'two']) {
+      const child = `brain-ch-subagent-${n}`;
+      d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId });
+      d.store.upsertSubagentRun(sessionId, { id: `call-${n}`, sessionId: child, status: 'done', task: n, tools: 1, seconds: 1, background: true, autoDeliver: true });
+    }
+
+    d.session.isStreaming = true;
+    runner.acceptSubagentCompletion(sessionId, 1, { id: 'res-one', toolCallId: 'call-one', sessionId: 'brain-ch-subagent-one', status: 'done', task: 'one', result: 'first', tools: 1, seconds: 1 });
+    await vi.waitFor(() => expect(d.session.sendCustomMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runner.resultDrains.has(sessionId)).toBe(false));
+
+    // The second child lands while the first is still queued inside PI, untouched by the transcript.
+    runner.acceptSubagentCompletion(sessionId, 1, { id: 'res-two', toolCallId: 'call-two', sessionId: 'brain-ch-subagent-two', status: 'done', task: 'two', result: 'second', tools: 1, seconds: 1 });
+    await vi.waitFor(() => expect(d.session.sendCustomMessage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(runner.resultDrains.has(sessionId)).toBe(false));
+
+    // Exactly one steer per result, and the second one carried the second result.
+    expect(d.session.sendCustomMessage).toHaveBeenCalledTimes(2);
+    const bodies = d.session.sendCustomMessage.mock.calls.map((c: [{ content: string }]) => c[0].content);
+    expect(bodies.filter((b: string) => b.includes('res-one'))).toHaveLength(1);
+    expect(bodies.filter((b: string) => b.includes('res-two'))).toHaveLength(1);
+
+    // Both are still pending (PI holding them is not the parent having read them), and once the turn ends
+    // with the queue dropped, both are delivered for real rather than being held back for ever.
+    expect(d.store.pendingSubagentResults(sessionId)).toHaveLength(2);
+    d.session.__steeredCustom.length = 0;
+    d.session.isStreaming = false;
+    await svc.send({ userId: 1, text: 'anything', session: sessionId });
+    await vi.waitFor(() => expect(d.store.pendingSubagentResults(sessionId)).toEqual([]));
+  });
+
+  it('re-steers a result the finished turn dropped, rather than holding it back for ever', async () => {
+    // The other half of the de-duplication: an id is only "in flight" for the turn it was steered into.
+    // PI's queue does not survive that turn, so if the parent goes straight into another one, the result
+    // must be sent again — remembering it past its turn would turn a duplicate into a silent loss.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    const child = 'brain-ch-subagent-dropped';
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: sessionId });
+    d.store.upsertSubagentRun(sessionId, { id: 'call-dropped', sessionId: child, status: 'done', task: 'inspect', tools: 1, seconds: 1, background: true, autoDeliver: true });
+    const runner = (svc as unknown as { turnRunner: { acceptSubagentCompletion(parent: string, userId: number, result: unknown): void; resultDrains: Set<string>; steeredInFlight: Map<string, Set<string>> } }).turnRunner;
+
+    d.session.isStreaming = true;
+    runner.acceptSubagentCompletion(sessionId, 1, { id: 'res-dropped', toolCallId: 'call-dropped', sessionId: child, status: 'done', task: 'inspect', result: 'all clear', tools: 1, seconds: 1 });
+    await vi.waitFor(() => expect(d.session.sendCustomMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runner.resultDrains.has(sessionId)).toBe(false));
+
+    // In flight while the turn runs — that is what stops a second drain re-sending it.
+    expect(runner.steeredInFlight.get(sessionId)?.has('res-dropped')).toBe(true);
+
+    // A stop cleared PI's queue, so the steer never reached the transcript. Once the turn settles the
+    // queue is gone, so nothing may still be considered in flight: were the id remembered past its own
+    // turn, a later drain (with the parent streaming again) would skip a result that never arrived, and
+    // a duplicate would have become a silent loss. Asserted on the record itself because the delivery
+    // that would expose it needs a failed post-turn drain first — the same reason resultDrains is read
+    // directly a few tests above.
+    d.session.__steeredCustom.length = 0;
+    d.session.isStreaming = false;
+    await svc.send({ userId: 1, text: 'next', session: sessionId });
+
+    expect(runner.steeredInFlight.has(sessionId)).toBe(false);
+    // ...and it was delivered for real rather than acknowledged unseen.
+    await vi.waitFor(() => expect(d.store.pendingSubagentResults(sessionId)).toEqual([]));
+    expect(d.session.sendCustomMessage.mock.calls.at(-1)?.[1]).toEqual({ triggerTurn: true, deliverAs: 'followUp' });
+  });
+
   it('re-delivers a steered result the parent never received', async () => {
     // The flip side of steering without waiting: a stop clears PI's queue, so the steered message never
     // reaches the context. The row must still be pending, and the post-turn drain must deliver it for real

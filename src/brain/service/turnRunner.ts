@@ -95,6 +95,13 @@ export class BrainTurnRunner {
   private contextBuilder: TurnContextBuilder;
   private readonly resultDrains = new Set<string>();
   private readonly resultRetryTimers = new Map<string, NodeJS.Timeout>();
+  /** Results steered into a still-running turn, per parent session: handed to PI but not yet visible in
+   *  the transcript. A steered row stays pending on purpose (PI's queue can still be cleared by a stop),
+   *  so the next drain would otherwise re-send it and the model would read the same result twice. The
+   *  transcript check alone cannot see this window. Cleared the moment the turn is no longer streaming,
+   *  because PI's queue does not survive it — from then on the transcript is the only truth, and holding
+   *  an id back any longer would strand a result instead of merely duplicating it. */
+  private readonly steeredInFlight = new Map<string, Set<string>>();
 
   constructor(private d: TurnRunnerDeps) {
     this.contextBuilder = new TurnContextBuilder({
@@ -141,12 +148,21 @@ export class BrainTurnRunner {
       // so taking them would mean waiting for exactly the turn we want to reach — which is the behaviour
       // this path replaces. Same reasoning as ChannelService.trySteerIntoRunningTurn.
       if (resultId && resultInContext(running.session.messages as CustomResultMessage[], resultId)) return 'landed';
+      // Already handed to PI by an earlier drain and still queued (see steeredInFlight). Two children
+      // finishing close together is the ordinary case under fan-out, not a rare race.
+      if (resultId && this.steeredInFlight.get(target)?.has(resultId)) return 'steered';
       // triggerTurn is off for the one race the isStreaming read above cannot close: were the turn to end in
       // between, PI would start a whole turn from here, outside the lock that serializes prompts on this
       // session. Off, it appends the message to the transcript instead and the agent reads it next turn.
       await running.session.sendCustomMessage(message, { triggerTurn: false, deliverAs: 'steer' });
+      if (resultId) {
+        const queued = this.steeredInFlight.get(target) ?? new Set<string>();
+        queued.add(resultId);
+        this.steeredInFlight.set(target, queued);
+      }
       return 'steered';
     }
+
     // The bare session lock (inner) is nested under the outer `send-` lock, matching a user turn's own
     // ordering (send-<id> → <id>), so this never deadlocks against a concurrent send()/compact/stop.
     await this.serial(sendLockKey(target), () => this.serial(target, async () => {
@@ -499,6 +515,10 @@ export class BrainTurnRunner {
       // Safety net: if the turn threw before it started (rollover/preflight rejection), its pending
       // compaction chip is still up — drop it so a rejected send never leaves a phantom waiting chip.
       if (pendingCompactionEchoId) this.dropPendingCompactionEcho(active, pendingCompactionEchoId);
+      // The turn is over, so PI's steering queue is gone with it and nothing steered into it is still in
+      // flight. Forget them BEFORE the re-drain: an id held back past the turn it belonged to would make
+      // the next drain skip a result that never arrived, turning a duplicate into a loss.
+      this.steeredInFlight.delete(completedSessionId);
       // A sub-agent result that arrived while this turn was streaming was STEERED into it and left durable +
       // pending, because PI accepting a steer is not yet proof the context holds it. Now that the turn has
       // settled, re-drain: this pass finds the message in the transcript and acknowledges it — or, if a stop
