@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { openDb } from '../../src/store/db.js';
 import { UserStore } from '../../src/store/userStore.js';
@@ -580,4 +582,59 @@ describe('openDb — monotonic user ids (v7)', () => {
     expect(db.prepare('SELECT COUNT(*) AS n FROM users').get()).toEqual({ n: 3 });
     expect(addUser(db, 'dave')).toBe(4); // counter survived the reopen, so it did not restart at max(id)
   });
+});
+
+describe('concurrent openDb', () => {
+  it('arms busy_timeout before switching the journal, so a concurrent WAL switch waits instead of throwing', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const db = openDb(join(dir, 'fresh.db'));
+    // Both must hold: a timeout of 0 means the loser of a first-open race fails instantly, and the
+    // ordering that guarantees it is armed first is only observable through the race test below.
+    expect(db.pragma('busy_timeout', { simple: true })).toBe(5000);
+    expect(db.pragma('journal_mode', { simple: true })).toBe('wal');
+  });
+
+  it('opens without migrating when asked, leaving the file untouched for the migrating process', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'unmigrated.db');
+    const plain = openDb(path, { migrate: false });
+    // A runner process must not create the schema: it opens a database the daemon already migrated.
+    const tables = plain.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
+    expect(tables).toEqual([]);
+    plain.close();
+    // ...and the migrating open still works on that same file afterwards.
+    const migrated = openDb(path);
+    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='projects'").get()).toBeTruthy();
+  });
+
+  it('survives many processes migrating one database at the same time', async () => {
+    // The real failure this guards: addColumn reads the table shape and then ALTERs it, so without a
+    // single write-locked transaction two processes both see the column missing and the loser dies on
+    // "duplicate column name". Needs REAL processes — one thread cannot hold a lock against itself.
+    const compiled = fileURLToPath(new URL('../../dist/store/db.js', import.meta.url));
+    if (!existsSync(compiled)) return; // built artefacts only; skipped until `npm run build` has run
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'race.db');
+    // A CURRENT schema missing exactly one additive column. A fresh database would not reproduce this:
+    // schema.sql creates every column, so each addColumn is a no-op, and the racers serialize harmlessly
+    // on that long batch anyway. Removing one column puts all of them on the same single ALTER.
+    const seeded = openDb(path);
+    seeded.exec('ALTER TABLE projects DROP COLUMN notes');
+    seeded.close();
+    // Each racer imports first, then spins to a shared wall-clock instant, so the import cost (tens of
+    // milliseconds, and uneven) cannot stagger them past the window being tested.
+    const startAt = Date.now() + 800;
+    const src = `const m = await import('${pathToFileURL(compiled).href}');\nwhile (Date.now() < ${startAt}) {}\ntry { m.openDb(process.argv[1]); process.exit(0); } catch (e) { console.error(e.message); process.exit(1); }`;
+    const racers = Array.from({ length: 8 }, () =>
+      spawn(process.execPath, ['--input-type=module', '-e', src, path], { stdio: ['ignore', 'ignore', 'pipe'] }));
+    const failures = await Promise.all(racers.map((p) => new Promise<string>((resolve) => {
+      let err = '';
+      p.stderr.on('data', (d) => { err += String(d); });
+      p.on('close', (code) => resolve(code === 0 ? '' : err.trim()));
+    })));
+    expect(failures.filter(Boolean)).toEqual([]);
+    // ...and the column is there once, so the winner's work is complete rather than half-applied.
+    const db = openDb(path);
+    expect(db.prepare('PRAGMA table_info(projects)').all().filter((r: any) => r.name === 'notes')).toHaveLength(1);
+  }, 30_000);
 });

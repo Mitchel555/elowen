@@ -16,9 +16,20 @@ function addColumn(db: Db, table: string, column: string, decl: string): void {
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }
 
-export function openDb(path: string): Db {
+export interface OpenDbOptions {
+  /** Create the schema and run migrations (default true). A process that is NOT the migrator — a pooled
+   *  sub-agent runner, forked only after the daemon's own openDb returned — passes false: it then opens a
+   *  database whose shape is already final, so it neither races the migrator nor needs the write lock. */
+  migrate?: boolean;
+}
+
+export function openDb(path: string, opts: OpenDbOptions = {}): Db {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
+  // BEFORE journal_mode: switching a database into WAL takes an exclusive lock, so when two processes
+  // open a fresh file at the same moment the loser throws SQLITE_BUSY instantly unless the timeout is
+  // already armed. Setting it first is what makes that race wait a few milliseconds instead of failing.
+  db.pragma('busy_timeout = 5000');
   db.pragma('journal_mode = WAL');
   // better-sqlite3 is synchronous, so every commit's fsync happens ON the event loop — and at SQLite's
   // default FULL that is a disk round-trip per stored message, with every other session and the whole
@@ -26,12 +37,57 @@ export function openDb(path: string): Db {
   // cannot corrupt or lose committed data, only a power cut or kernel panic can drop the most recent
   // commits, which for a conversation transcript is the right trade for keeping the loop free.
   db.pragma('synchronous = NORMAL');
-  // Several processes legitimately open this file (see the runOnce comment further down), and WAL lets a
-  // reader and a writer proceed at once — but with no timeout a writer that finds the lock held fails
-  // INSTANTLY with SQLITE_BUSY rather than waiting the milliseconds it would take to clear.
-  db.pragma('busy_timeout = 5000');
   // Enforce foreign keys so any REFERENCES added to the schema actually cascade/reject.
+  // Must stay OUTSIDE the migration transaction below — SQLite ignores this pragma inside one.
   db.pragma('foreign_keys = ON');
+  if (opts.migrate === false) return db;
+  migrate(db);
+  return db;
+}
+
+/** Bring the schema up to date. Split out of {@link openDb} so a non-migrating process can skip it.
+ *
+ *  The additive block runs as ONE `BEGIN IMMEDIATE` transaction because `addColumn` reads the table shape
+ *  and then ALTERs it: outside a transaction two processes opening a fresh database both see the column
+ *  missing and the loser dies on "duplicate column name". IMMEDIATE takes the write lock up front, so the
+ *  check and the ALTER are atomic and the loser simply waits and then finds the column already there.
+ *
+ *  The versioned `runOnce` migrations stay OUTSIDE it — each already opens its own IMMEDIATE transaction
+ *  (nesting would demote them to savepoints and lose that fencing). */
+function migrate(db: Db): void {
+  withWriteLock(db, () => { applyAdditiveMigrations(db); });
+  migrateToolNames(db);
+  migrateMcpToolNames(db);
+  migrateRegistryToolNames(db);
+  repairImageToolNames(db);
+  widenSessionEventKinds(db);
+  dropPersonalityTables(db);
+  makeUserIdsMonotonic(db);
+  repairUserSequenceBelowReferences(db);
+  widenSessionEventKindsForSubagent(db);
+  widenSessionEventKindsForWorkflow(db);
+}
+
+/** Run `apply` in an IMMEDIATE transaction, retrying while another process holds the write lock.
+ *
+ *  `busy_timeout` covers a lock held by a writer that is making progress, but not SQLITE_BUSY_SNAPSHOT —
+ *  raised when our read snapshot cannot be upgraded — which no timeout resolves and only a fresh attempt
+ *  can clear. Bounded: a lock still held after this many tries is a genuine fault and must surface. */
+function withWriteLock(db: Db, apply: () => void): void {
+  const attempts = 5;
+  for (let i = 1; ; i++) {
+    try {
+      db.transaction(apply).immediate();
+      return;
+    } catch (e) {
+      const code = (e as { code?: string }).code ?? '';
+      if (i >= attempts || !code.startsWith('SQLITE_BUSY')) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50 * i);
+    }
+  }
+}
+
+function applyAdditiveMigrations(db: Db): void {
   db.exec(readFileSync(join(here, 'schema.sql'), 'utf-8'));
   // Additive migrations for DBs created before a column existed. Idempotent: a column that already
   // exists is skipped via PRAGMA table_info, so we never rely on swallowing arbitrary ALTER errors
@@ -157,17 +213,6 @@ export function openDb(path: string): Db {
   // Rename prompt template keys to match the elowen/elowen-platform rename (advisor → elowen, advisor-channel → elowen-platform).
   db.exec("UPDATE user_prompts SET name = 'elowen' WHERE name = 'advisor'");
   db.exec("UPDATE user_prompts SET name = 'elowen-platform' WHERE name = 'advisor-channel'");
-  migrateToolNames(db);
-  migrateMcpToolNames(db);
-  migrateRegistryToolNames(db);
-  repairImageToolNames(db);
-  widenSessionEventKinds(db);
-  dropPersonalityTables(db);
-  makeUserIdsMonotonic(db);
-  repairUserSequenceBelowReferences(db);
-  widenSessionEventKindsForSubagent(db);
-  widenSessionEventKindsForWorkflow(db);
-  return db;
 }
 
 /** v8 — re-seed `sqlite_sequence` for `users` on a database that already ran v7.
