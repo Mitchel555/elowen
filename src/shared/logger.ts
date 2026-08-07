@@ -32,6 +32,17 @@ export function setLogSink(s: LogSink | undefined): void {
   sink = s;
 }
 
+let scopePrefix = '';
+
+/** Prefix every scope THIS process emits (`[runner:1234 daemon]` instead of `[daemon]`). A forked
+ *  sub-agent runner appends to the SAME daily log file as the daemon and builds the same brain core, so
+ *  without this its `[daemon] plugin loaded: …` lines are indistinguishable from the daemon's own — an
+ *  incident spent real time on 36 identical `plugin loaded:` lines that nothing attributed to a process.
+ *  Process-wide and set once at startup by whoever is NOT the daemon; the daemon leaves it empty. */
+export function setLogScopePrefix(prefix: string): void {
+  scopePrefix = prefix;
+}
+
 const MIN: LogLevel = ((): LogLevel => {
   const v = ((process.env.ELOWEN_LOG_LEVEL) ?? '').toLowerCase();
   return v in ORDER ? (v as LogLevel) : 'info';
@@ -72,7 +83,11 @@ function fmtExtra(extra: unknown): string {
 function emit(level: LogLevel, scope: string, message: string, extra?: unknown): void {
   if (ORDER[level] < ORDER[MIN]) return;
   const now = new Date();
-  const line = `${stamp(now)}  ${level.toUpperCase().padEnd(5)}  [${scope}]  ${message}${fmtExtra(extra)}`;
+  // Read live rather than baked into the logger: every module-level `logger('daemon')` already exists by
+  // the time a runner can announce itself, so a prefix captured at creation would miss exactly the lines
+  // (plugin loading, brain construction) that motivated it.
+  const tag = `${scopePrefix}${scope}`;
+  const line = `${stamp(now)}  ${level.toUpperCase().padEnd(5)}  [${tag}]  ${message}${fmtExtra(extra)}`;
   // Console first — the durable channel (systemd journal). Match severity to the right stream.
   // Guarded like the file sink below: a closed/broken pipe makes this throw, and since the daemon's
   // uncaughtException handler logs, an unguarded throw here turns one dead pipe into an endless
@@ -86,7 +101,7 @@ function emit(level: LogLevel, scope: string, message: string, extra?: unknown):
   // break logging. Fed the logical message + extra so downstream matching sees the full record.
   if (sink) {
     try {
-      sink.push({ ts: now.getTime(), level, scope, message: `${message}${fmtExtra(extra)}` });
+      sink.push({ ts: now.getTime(), level, scope: tag, message: `${message}${fmtExtra(extra)}` });
     } catch {
       /* sink is a pure side-observer — the console line already carried the record */
     }

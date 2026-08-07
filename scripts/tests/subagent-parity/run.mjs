@@ -17,18 +17,36 @@
 //
 // Volatile values (temp paths, dates, session ids, ports) are normalised, so two runs of the SAME code
 // produce identical fingerprints and anything left over is real drift.
+//
+// ELOWEN_PARITY_MCP=1 adds a scripted stdio MCP server (mock-mcp-server.mjs) to the daemon it boots and
+// fingerprints against `baseline-mcp.json` instead. WHY a second baseline rather than more tools in the
+// first: `baseline.json` is the contract for the NATIVE tool set, and it contains zero `mcp__*` tools —
+// so on its own this harness cannot see drift in BRIDGED tools at all. The MCP variant closes exactly
+// that hole and asserts the bridged tools are present, so an MCP set that silently came up empty can
+// never pass as parity.
 
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnRealDaemon } from '../brain-e2e/spawn-daemon.mjs';
 
 const TASK_MARKER = 'PARITY-TASK-4c8e1';
 const SUBAGENT_PROMPT = 'You are a focused sub-agent';
 const TURN_DEADLINE_MS = 120_000;
 
+const here = dirname(fileURLToPath(import.meta.url));
+const MOCK_MCP_SERVER = join(here, 'mock-mcp-server.mjs');
+/** The scripted server's name, and the bridged names the `mcp` plugin must derive from it
+ *  (`mcp__<server>__<tool>`). Spelled out rather than counted: a check that only counted would stay green
+ *  if a rename silently replaced one bridged tool with another. */
+const MCP_SERVER_NAME = 'parity';
+const EXPECTED_MCP_TOOLS = ['mcp__parity__echo_text', 'mcp__parity__sum_numbers'];
+
 const args = process.argv.slice(2);
 const mode = args[0] === '--check' ? 'check' : 'save';
-const file = args[1] ?? 'scripts/tests/subagent-parity/baseline.json';
+const useMcp = process.env.ELOWEN_PARITY_MCP === '1';
+const file = args[1] ?? `scripts/tests/subagent-parity/${useMcp ? 'baseline-mcp.json' : 'baseline.json'}`;
 // Run the SAME check with delegated turns executing in the forked sub-agent runner. The fingerprint must
 // not move: the runner composes the child's session through the same builder, and the system prompt is
 // the prompt-cache key — one byte of drift re-bills every delegated turn at full price.
@@ -164,6 +182,32 @@ async function main() {
       console.log('sub-agent runner: OFF (delegated turns execute in-process)');
     }
 
+    if (useMcp) {
+      // The operator's own path: PATCH the mcp plugin's config, which hot-reloads the plugin registry and
+      // connects the server before returning. No test-only back door, and no sleep — when this resolves,
+      // the bridged tools either exist or the status below says why.
+      const res = await fetch(`${daemon.baseUrl}/plugins/mcp/config`, {
+        method: 'PATCH',
+        headers: { authorization: `Bearer ${daemon.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          values: {
+            servers: [{
+              name: MCP_SERVER_NAME, enabled: true, transport: 'stdio',
+              command: process.execPath, args: [MOCK_MCP_SERVER],
+            }],
+          },
+        }),
+      });
+      if (!res.ok) throw new Error(`configuring the scripted MCP server failed: ${res.status} ${await res.text()}`);
+      const statusRes = await fetch(`${daemon.baseUrl}/plugins/mcp/servers`, { headers: { authorization: `Bearer ${daemon.token}` } });
+      const servers = statusRes.ok ? await statusRes.json() : [];
+      const scripted = (Array.isArray(servers) ? servers : servers?.servers ?? []).find((s) => s?.name === MCP_SERVER_NAME);
+      if (scripted?.status !== 'connected') {
+        throw new Error(`the scripted MCP server did not connect: ${JSON.stringify(scripted ?? servers)}`);
+      }
+      console.log(`scripted MCP server: connected (${scripted.toolCount} tools)`);
+    }
+
     const start = await api('/brain/start', { fresh: true });
     const session = start.sessionId;
     const idle = await watchIdle(daemon.baseUrl, daemon.token, session);
@@ -193,6 +237,18 @@ async function main() {
       requestKeys: Object.keys(childBody).sort(),
     };
 
+    // The hole this variant exists to close: a fingerprint with NO bridged tools would compare clean
+    // against a baseline that also has none, and report parity for a tool set that never arrived. Assert
+    // presence on BOTH sides — the captured run and, below, the baseline it is compared with.
+    if (useMcp) {
+      const missing = EXPECTED_MCP_TOOLS.filter((t) => !fingerprint.toolNames.includes(t));
+      if (missing.length) {
+        throw new Error(`the delegated child received no bridged MCP tools for ${missing.join(', ')} — `
+          + `this run proves nothing about MCP parity (mcp__ tools seen: ${fingerprint.toolNames.filter((t) => t.startsWith('mcp__')).join(', ') || 'none'})`);
+      }
+      console.log(`  (verified: the child received ${EXPECTED_MCP_TOOLS.length} bridged MCP tools)`);
+    }
+
     if (mode === 'save') {
       writeFileSync(file, `${JSON.stringify(fingerprint, null, 2)}\n`);
       console.log(`saved fingerprint → ${file}`);
@@ -203,6 +259,10 @@ async function main() {
 
     if (!existsSync(file)) throw new Error(`no baseline at ${file} — run with --save first`);
     const baseline = JSON.parse(readFileSync(file, 'utf-8'));
+    if (useMcp) {
+      const missing = EXPECTED_MCP_TOOLS.filter((t) => !baseline.toolNames.includes(t));
+      if (missing.length) throw new Error(`${file} carries no bridged MCP tools (${missing.join(', ')}) — recapture it with --save`);
+    }
     const diffs = [];
     if (baseline.systemPrompt !== fingerprint.systemPrompt) {
       let at = 0;

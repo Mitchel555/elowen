@@ -19,7 +19,7 @@
  *  The abort tree stays authoritative in the DAEMON (its fencing is synchronous in-memory
  *  read-modify-write across sessions), so abort arrives as an explicit verb and this process only carries
  *  it out. Store writes are its own: it holds its own connection and writes its own sessions' rows. */
-import { logger } from '../shared/logger.js';
+import { logger, setLogScopePrefix } from '../shared/logger.js';
 import { startLoopLagMonitor } from '../shared/eventLoopLag.js';
 import { HEARTBEAT_INTERVAL_MS, LAG_WINDOW_MS } from './sizing.js';
 import { buildBrainCore } from '../daemon/brainCore.js';
@@ -29,7 +29,24 @@ import { parseDelegatedTurnRequest, toDelegatedProgress } from '../brain/delegat
 import { SUBAGENT_PLATFORM, channelSessionId } from '../brain/sessionId.js';
 import { parseDaemonMessage, subagentBuildId, type RunnerToDaemon } from './protocol.js';
 
+// A runner writes into the daemon's own log file and builds the same brain core, so its lines carry the
+// same scopes the daemon's do (`[daemon] plugin loaded: …`). The pid is what makes them attributable —
+// and with several runners live, tells them apart from each other.
+setLogScopePrefix(`runner:${process.pid} `);
+
 const log = logger('subagent-runner');
+
+/** Boot trace: one INFO line per phase, carrying both the phase's own cost and the total since node
+ *  started (`process.uptime()`, so the FIRST phase includes node's own start plus the import of every
+ *  module above — 2.1 s cold, measured, and invisible to anything started later). The daemon can only see
+ *  fork→ready from outside, so where those seconds went is either recorded here or not recorded at all. */
+let phaseAtMs = 0;
+function phase(name: string, note?: string): void {
+  const now = Math.round(process.uptime() * 1000);
+  log.info(`boot: ${name} +${now - phaseAtMs}ms (${now}ms total)${note ? ` — ${note}` : ''}`);
+  phaseAtMs = now;
+}
+phase('entry', 'node start + module import');
 
 /** The runner has no business launching tmux panes: agent spawning, the advisor terminal and mission
  *  workers all belong to the daemon. buildBrainCore takes the driver from its caller precisely so a
@@ -102,6 +119,12 @@ async function boot(dbPath: string, project: { id: number; slug: string; path: s
     // subscriptions and the VAPID keys), and a delegated turn has nobody to notify anyway.
   });
   if (!core.brain) throw new Error('the brain is not available for this database');
+  phase('core built');
+  // Loading is lazy, and `startPlatforms` below would trigger it anyway — pulled forward ONLY so the
+  // plugin load (every plugin, every MCP server) is a phase of its own in the log instead of being
+  // charged to platform startup.
+  await core.pluginProvider.get();
+  phase('plugins loaded');
   brain = core.brain;
   // Report NESTED delegated edges upward. The daemon's LiveSessionRegistry is the authoritative abort
   // tree, so it has to see work happening over here — but never the edge of the dispatched turn itself,
@@ -159,7 +182,7 @@ process.on('message', (raw: unknown) => {
         process.exit(2);
       }
       booting = boot(msg.dbPath, msg.project).then(
-        () => { send({ type: 'ready', buildId: own }); },
+        () => { phase('ready'); send({ type: 'ready', buildId: own }); },
         (e: unknown) => { send({ type: 'fatal', reason: errorText(e) }); process.exit(3); },
       );
       return;

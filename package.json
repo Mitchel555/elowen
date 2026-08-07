@@ -81,7 +81,9 @@
     "check": "npm run lint && npm run deadcode && npm run depcruise && npm run typecheck && npm run languages-check",
     "serve": "node --experimental-strip-types src/daemon/index.ts",
     "test:e2e:parity": "node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline.json",
-    "test:e2e:parity:runner": "ELOWEN_SUBAGENT_RUNNER=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline.json"
+    "test:e2e:parity:runner": "ELOWEN_SUBAGENT_RUNNER=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline.json",
+    "test:e2e:parity:mcp": "ELOWEN_PARITY_MCP=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline-mcp.json",
+    "test:e2e:parity:mcp:runner": "ELOWEN_PARITY_MCP=1 ELOWEN_SUBAGENT_RUNNER=1 node scripts/tests/subagent-parity/run.mjs --check scripts/tests/subagent-parity/baseline-mcp.json"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.0",

@@ -273,7 +273,12 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
     if (this.spawning) return this.spawning;
     const gen = this.generation;
     const attempt = (async (): Promise<void> => {
-      this.lastSpawnAt = Date.now();
+      const startedAt = Date.now();
+      this.lastSpawnAt = startedAt;
+      // The START of the fork, not only its outcome: a runner's own boot trace is written from the child,
+      // so without this line the daemon's log has no timestamp to measure fork→ready against — and a
+      // spawn that never reports ready leaves no trace at all that one was attempted.
+      log.info(`sub-agent pool: forking a runner (${this.runners.length} live, cap ${this.cap()})`);
       // The callbacks close over `entry`, which is assigned on the next line — safe because a host never
       // invokes them from its constructor, only from IPC frames that cannot arrive before the fork.
       let entry: PooledRunner;
@@ -302,7 +307,7 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
       }
       this.runners.push(entry);
       this.startMaintenance();
-      log.info(`sub-agent pool: ${this.runners.length} runner(s) live (cap ${this.cap()})`);
+      log.info(`sub-agent pool: runner up in ${Date.now() - startedAt}ms — ${this.runners.length} runner(s) live (cap ${this.cap()})`);
       this.drain();
     })();
     this.spawning = attempt.finally(() => { this.spawning = null; });
