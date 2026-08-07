@@ -400,6 +400,9 @@ export async function buildApp(opts: BuildOpts) {
       // one would change what the model is told about where it is running.
       cwd: process.cwd(),
       poolMax: () => resolvePoolMax(runtimeConfigForPool?.().subagentRunnerPoolMax, process.env.ELOWEN_SUBAGENT_POOL_MAX),
+      // The same predicate the dispatcher routes on, so /health reports what delegated turns ACTUALLY do
+      // rather than what the machine would allow them to do.
+      enabled: () => runtimeConfigForPool?.().subagentRunnerEnabled === true,
     })
     : undefined;
   // Stores, plugin registry and brain services — the part of the daemon that is NOT the daemon: it holds

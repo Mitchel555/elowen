@@ -49,7 +49,7 @@ interface Harness {
   children: FakeChild[];
 }
 
-function poolWith(opts: { machine?: MachineInputs; poolMax?: () => number | null } = {}): Harness {
+function poolWith(opts: { machine?: MachineInputs; poolMax?: () => number | null; enabled?: () => boolean } = {}): Harness {
   const children: FakeChild[] = [];
   const pool = new SubagentRunnerPool({
     dbPath: '/tmp/elowen-test.db',
@@ -58,6 +58,7 @@ function poolWith(opts: { machine?: MachineInputs; poolMax?: () => number | null
     fork: () => { const c = new FakeChild(); children.push(c); return c.asChild(); },
     machine: opts.machine ?? machine(16, 64),
     ...(opts.poolMax ? { poolMax: opts.poolMax } : {}),
+    ...(opts.enabled ? { enabled: opts.enabled } : {}),
   });
   return { pool, children };
 }
@@ -104,6 +105,18 @@ describe('SubagentRunnerPool — cold start and the operator knob', () => {
     await expect(h.pool.run(request('subagent-sub-dlg-1'), 'x')).rejects.toBeInstanceOf(SubagentRunnerUnavailable);
     expect(h.children).toHaveLength(0);
     expect(h.pool.stats().mode).toBe('in-process');
+  });
+
+  // /health is where an operator confirms a rollback took effect. Reporting `runner` because the MACHINE
+  // allows one, while the switch routes every delegated turn in-process, tells them their rollback failed
+  // when it worked — the one lie this block must never tell.
+  it('reports in-process while the switch is off, however roomy the machine', () => {
+    let on = false;
+    const h = poolWith({ enabled: () => on });
+    expect(h.pool.stats().cap).toBeGreaterThan(0);
+    expect(h.pool.stats().mode).toBe('in-process');
+    on = true;
+    expect(h.pool.stats().mode).toBe('runner');
   });
 
   // The knob is read LIVE, so an operator can widen or close the pool without a restart.

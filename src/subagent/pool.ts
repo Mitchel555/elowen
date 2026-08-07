@@ -94,6 +94,11 @@ export interface SubagentRunnerPoolDeps extends Omit<SubagentRunnerHostDeps, 'on
   /** The operator's knob, read LIVE: `null` = auto (size from the machine), 0 = pool off (every delegated
    *  turn stays in-process), N >= 1 = hard cap. Live so raising it takes effect on the next turn. */
   poolMax?: () => number | null;
+  /** The operator's switch, as the DISPATCHER reads it. `/health` exists to answer "is the runner
+   *  actually carrying my delegated turns", and a pool that only knows its own cap cannot answer that:
+   *  it would keep reporting `runner` after the switch was flipped off, which is exactly the moment an
+   *  operator is staring at this block to confirm their rollback took. */
+  enabled?: () => boolean;
   /** Machine facts. Injected so the sizing rule can be tested at 1/2/16/64 cores and against a container
    *  whose numbers lie, without needing such a box. */
   machine?: MachineInputs;
@@ -430,7 +435,7 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
     for (const entry of this.routes.values()) sessions.set(entry, (sessions.get(entry) ?? 0) + 1);
     const oldest = this.oldestQueuedAt();
     return {
-      mode: sizing.cap > 0 ? 'runner' : 'in-process',
+      mode: this.d.enabled?.() !== false && sizing.cap > 0 ? 'runner' : 'in-process',
       cap: sizing.cap,
       cpuCap: sizing.cpuCap,
       memCap: sizing.memCap,
