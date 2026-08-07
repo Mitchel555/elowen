@@ -18,9 +18,23 @@ export function freshUserSessionId(userId: number): string {
  *  silently stops matching (a task session leaking into personal-chat search, an ownership gate misfiring). */
 export const CHANNEL_PREFIX = 'brain-ch-';
 export const TASK_PREFIX = 'brain-task-';
+/** The platform name the subagent plugin registers itself under. A channel session id is built as
+ *  CHANNEL_PREFIX + `<platform>-<channelId>` (see `keyOf` in platforms.ts), so this string is the ONLY
+ *  thing tying a delegated session to {@link isSubagentSession} — and the plugin mints the channelId
+ *  half itself. Renaming the platform on one side alone would silently reclassify every sub-agent as an
+ *  ordinary channel: recall gating, the delegation listing and the retention janitor all key off that
+ *  predicate. `subagentSessionIdParity.test.ts` holds both sides together. */
+export const SUBAGENT_PLATFORM = 'subagent';
 /** Delegated sub-agent sessions are a sub-family of channel sessions (internal — reached via
  *  {@link isSubagentSession}). */
-const SUBAGENT_PREFIX = 'brain-ch-subagent-';
+const SUBAGENT_PREFIX = `${CHANNEL_PREFIX}${SUBAGENT_PLATFORM}-`;
+
+/** The session id a delegated turn lands on, given the channelId the subagent plugin minted for it.
+ *  Mirrors what platforms.ts builds — the one place a test can ask "does the router still recognise
+ *  what the plugin mints?" without reaching into either. */
+export function subagentSessionId(channelId: string): string {
+  return `${CHANNEL_PREFIX}${SUBAGENT_PLATFORM}-${channelId}`;
+}
 
 export function channelSessionId(channelId: string): string {
   return `${CHANNEL_PREFIX}${channelId}`;
