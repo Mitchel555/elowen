@@ -21,6 +21,11 @@ export const CACHE_DROP_MIN_TOKENS = 2000;
 const CACHE_DROP_MIN_RATIO = 0.05;
 /** The provider request can contain thousands of messages. Tracking its stable prefix is enough to catch
  * egress rewrites while bounding both hashing work and retained digests. */
+/** Anthropic's automatic prefix checking scans roughly this many content blocks back from a breakpoint
+ * when looking for a hit. A step that appends more than this can miss a segment that IS cached — the
+ * fan-out failure mode `cacheBreakpoints` exists to prevent. Approximate by nature: it describes their
+ * matcher, and is used here only to name the likely cause rather than to decide anything. */
+const BLOCK_LOOKBACK = 20;
 const MAX_TRACKED_HISTORY_SEGMENTS = 512;
 const MAX_TRACKED_TOOL_SEGMENTS = 256;
 const MAX_PENDING_SNAPSHOTS = 2;
@@ -41,6 +46,8 @@ interface CachePayloadSnapshot {
   deferredToolCount: number;
   history: HashedSegment[];
   historyCount: number;
+  /** Content blocks across all messages — see {@link countBlocks}. */
+  blockCount: number;
   /** Work mode of the turn that sent this request, captured while the prompt scope is still active. */
   turnMode?: TurnWorkMode;
 }
@@ -53,6 +60,37 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+/** Strip every `cache_control` marker before hashing. The marker is CACHING POLICY, not conversation
+ *  content, and pi-ai moves it onto the payload's last user message on every request — so the message that
+ *  carried it last time no longer does, its hash differs, and the comparison reports the previous tail as
+ *  "rewritten in place" on every single step of a tool loop. That false positive is not cosmetic: it named
+ *  an innocent module as the culprit for a real cost defect and sent an investigation the wrong way for
+ *  hours. Hashing the canonical content makes "rewritten" mean what it says. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  const object = record(value);
+  if (!object) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(object)) {
+    if (key === 'cache_control') continue;
+    out[key] = canonical(item);
+  }
+  return out;
+}
+
+/** Total content blocks across the payload's messages. Anthropic resolves a cache hit by scanning back a
+ *  limited window of blocks from a breakpoint, so the number of blocks a single step ADDED is what decides
+ *  whether the previous cached segment is still reachable — the one figure that separates a fan-out miss
+ *  from every other cause, and the reason it is recorded here rather than inferred later. */
+function countBlocks(messages: readonly unknown[]): number {
+  let total = 0;
+  for (const message of messages) {
+    const content = record(message)?.content;
+    total += Array.isArray(content) ? content.length : 1;
+  }
+  return total;
 }
 
 function safeToolLabel(value: unknown, index: number): string {
@@ -78,19 +116,20 @@ function snapshotPayload(value: unknown, turnMode: TurnWorkMode | undefined): Ca
   const tools = Array.isArray(payload?.tools) ? payload.tools : [];
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
   return {
-    systemHash: hash(payload?.system),
-    toolsHash: hash(tools),
+    systemHash: hash(canonical(payload?.system)),
+    toolsHash: hash(canonical(tools)),
     tools: tools.slice(0, MAX_TRACKED_TOOL_SEGMENTS).map((tool, index) => ({
-      hash: hash(tool),
+      hash: hash(canonical(tool)),
       label: safeToolLabel(tool, index),
       ...(isDeferredTool(tool) ? { deferred: true as const } : {}),
     })),
     toolCount: tools.length,
     deferredToolCount: tools.filter(isDeferredTool).length,
     history: messages.slice(0, MAX_TRACKED_HISTORY_SEGMENTS).map((message, index) => ({
-      hash: hash(message), label: historyLabel(message, index),
+      hash: hash(canonical(message)), label: historyLabel(message, index),
     })),
     historyCount: messages.length,
+    blockCount: countBlocks(messages),
     ...(turnMode ? { turnMode } : {}),
   };
 }
@@ -286,10 +325,57 @@ function attributePayloadChange(
   if (changes.length > 0) return `${changes.join('; ')}${suffix}`;
   const tracked = Math.min(previous.history.length, current.history.length);
   const prefix = notes.length > 0 ? 'cached prefix unchanged' : 'tracked payload prefix unchanged';
-  return `${prefix} (system, tools, first ${tracked} history messages); likely provider eviction or routing${suffix}`;
+  const unchanged = `${prefix} (system, tools, first ${tracked} history messages)`;
+  // Nothing in the payload changed, so the prefix was still THERE — it just could not be found from the
+  // breakpoint. Naming that explicitly is the difference between an actionable warning and "eviction,
+  // shrug": one says which code to fix, the other says the provider had a bad day.
+  const added = current.blockCount - previous.blockCount;
+  if (added > BLOCK_LOOKBACK) {
+    return `${unchanged}; this step appended ${added} content blocks, past the ~${BLOCK_LOOKBACK} Anthropic `
+      + `scans back from a breakpoint — a FAN-OUT MISS, not a rewrite${suffix}`;
+  }
+  return `${unchanged}; likely provider eviction or routing${suffix}`;
 }
 
-type SessionEvent = { type?: string; message?: { role?: string; timestamp?: number; stopReason?: string; usage?: { cacheRead?: number } }; aborted?: boolean; result?: unknown };
+interface DropReport {
+  sessionId?: string;
+  from: number;
+  to: number;
+  wrote?: number;
+  gapMs: number;
+  previous?: CachePayloadSnapshot;
+  current?: CachePayloadSnapshot;
+}
+
+/** The whole incident, on its own lines.
+ *
+ *  A prompt-cache break is diagnosed hours later, from a log file, by someone who cannot reproduce it. So
+ *  everything needed to tell the causes apart has to be IN the record: which conversation it happened in,
+ *  what was actually read and written (the write IS the cost), how much this one step appended, and the
+ *  payload verdict. The previous one-line form carried none of the payload shape — and that omission cost
+ *  a whole investigation, because the block delta is the single figure that separates a fan-out miss from
+ *  a genuine rewrite, and it simply was not written down. */
+function formatDropReport(r: DropReport): string {
+  const lines = [
+    `prompt cache read dropped within a warm window${r.sessionId ? ` — session ${r.sessionId}` : ''}`,
+    `  read     ${r.from} → ${r.to} tokens (lost ${r.from - r.to})`
+    + `${typeof r.wrote === 'number' ? `, wrote ${r.wrote}` : ''}`,
+    `  gap      ${Math.round(r.gapMs / 1000)}s since the previous response`,
+  ];
+  if (r.previous && r.current) {
+    const added = r.current.blockCount - r.previous.blockCount;
+    lines.push(
+      `  payload  ${r.previous.historyCount} → ${r.current.historyCount} messages, `
+      + `${r.previous.blockCount} → ${r.current.blockCount} content blocks (${added >= 0 ? '+' : ''}${added} this step)`,
+    );
+    const deferred = r.current.deferredToolCount > 0 ? ` (${r.current.deferredToolCount} deferred)` : '';
+    lines.push(`  tools    ${r.current.toolCount}${deferred}`);
+  }
+  lines.push(`  verdict  ${attributePayloadChange(r.previous, r.current)}`);
+  return lines.join('\n');
+}
+
+type SessionEvent = { type?: string; message?: { role?: string; timestamp?: number; stopReason?: string; usage?: { cacheRead?: number; cacheWrite?: number } }; aborted?: boolean; result?: unknown };
 type Subscribable = { subscribe?: (listener: (event: SessionEvent) => void) => unknown };
 
 export interface CacheWatchOptions {
@@ -337,11 +423,15 @@ export function installCacheWatch(
         && drop / previous.cacheRead > CACHE_DROP_MIN_RATIO
         && at - previous.at < ttlMs
       ) {
-        log.warn(
-          `${options.sessionId ? `[session ${options.sessionId}] ` : ''}`
-          + `prompt cache read dropped within a warm window: ${previous.cacheRead} → ${cacheRead} tokens `
-          + `(${Math.round((at - previous.at) / 1000)}s apart) — ${attributePayloadChange(previous.snapshot, snapshot)}`,
-        );
+        log.warn(formatDropReport({
+          sessionId: options.sessionId,
+          from: previous.cacheRead,
+          to: cacheRead,
+          wrote: message.usage?.cacheWrite,
+          gapMs: at - previous.at,
+          previous: previous.snapshot,
+          current: snapshot,
+        }));
       }
     }
     previous = { cacheRead, at, ...(snapshot ? { snapshot } : {}) };

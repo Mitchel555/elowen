@@ -394,3 +394,84 @@ describe('installCacheWatch — warning context', () => {
     expect(warnings()[0]?.message).toContain('tracked payload prefix unchanged');
   });
 });
+
+describe('installCacheWatch — the cache_control marker is caching policy, not content', () => {
+  const EPHEMERAL = { type: 'ephemeral', ttl: '1h' };
+
+  /** pi-ai marks the last block of the payload's LAST user message, so every step moves the marker onto a
+   *  message that did not have it before — and off the one that did. */
+  const conversation = (steps: number): unknown[] => {
+    const messages: unknown[] = [{ role: 'user', content: [{ type: 'text', text: 'do work' }] }];
+    for (let step = 0; step < steps; step += 1) {
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: `step ${step}` }] });
+      messages.push({ role: 'user', content: [{ type: 'tool_result', content: `result ${step}` }] });
+    }
+    const last = messages[messages.length - 1] as { content: Record<string, unknown>[] };
+    last.content[last.content.length - 1]!.cache_control = EPHEMERAL;
+    return messages;
+  };
+
+  // The false positive this removes accused an innocent module of rewriting history and sent a whole
+  // investigation the wrong way. Nothing about the conversation changes between these two requests — only
+  // where pi-ai put its marker.
+  it('does not call a moved marker a rewrite of already-sent history', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, sessionId: 'brain-1-test' });
+    capture(providerPayload({ messages: conversation(1) }));
+    fire(assistantUsage(300_000, T0));
+    capture(providerPayload({ messages: conversation(2) }));
+    fire(assistantUsage(50_000, T0 + 1_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).not.toContain('REWRITTEN IN PLACE');
+  });
+
+  // A drop with an unchanged prefix is not a shrug: when the step appended more blocks than Anthropic
+  // scans back from a breakpoint, the cached segment was there and simply could not be reached. Saying so
+  // is what tells the next reader which code to look at.
+  it('names a fan-out miss when a wide step appended past the lookback window', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, sessionId: 'brain-1-test' });
+    const base = conversation(1);
+    capture(providerPayload({ messages: base }));
+    fire(assistantUsage(347_282, T0));
+    // One round of an 18-way fan-out: one assistant message plus a user message of 18 tool_result blocks.
+    const fanned = [
+      ...base,
+      { role: 'assistant', content: Array.from({ length: 18 }, (_, i) => ({ type: 'tool_use', id: `t${i}` })) },
+      {
+        role: 'user',
+        content: Array.from({ length: 18 }, (_, i) => ({ type: 'tool_result', content: `r${i}` })),
+      },
+    ];
+    capture(providerPayload({ messages: fanned }));
+    fire(assistantUsage(55_766, T0 + 43_000));
+
+    const [warning] = warnings();
+    expect(warning?.message).toContain('FAN-OUT MISS');
+    expect(warning?.message).not.toContain('REWRITTEN IN PLACE');
+  });
+
+  // Everything an investigation needs, in the record itself: which conversation, the cost, and the block
+  // delta that separates a fan-out miss from a genuine rewrite.
+  it('records the session, the write and the block delta', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, sessionId: 'brain-1-mrxd90yxh2rh' });
+    capture(providerPayload({ messages: conversation(1) }));
+    fire(assistantUsage(300_000, T0));
+    capture(providerPayload({ messages: conversation(2) }));
+    fire({
+      type: 'message_end',
+      message: { role: 'assistant', timestamp: T0 + 1_000, usage: { cacheRead: 50_000, cacheWrite: 60_558 } },
+    });
+
+    const message = warnings()[0]?.message ?? '';
+    expect(message).toContain('session brain-1-mrxd90yxh2rh');
+    expect(message).toContain('wrote 60558');
+    expect(message).toContain('content blocks');
+    expect(message).toContain('lost 250000');
+  });
+});

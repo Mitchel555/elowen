@@ -16,6 +16,7 @@ import { installHistoryImageStripping } from './historyImageStripping.js';
 import { imagesRejected } from './imageRejection.js';
 import { installToolResultClearing } from './toolResultClearing.js';
 import { createCachePayloadMonitor, installCacheWatch, type CachePayloadMonitor } from './cacheWatch.js';
+import { installCacheBreakpoints } from './cacheBreakpoints.js';
 import { seedActivatedFromHistory, type ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 import { logger } from '../../shared/logger.js';
 
@@ -136,6 +137,10 @@ export interface BrainResourceLoaderOptions {
   liveRecall?: LiveRecallOptions;
   /** Anthropic provider-payload hashes consumed by cacheWatch after each response. */
   cacheMonitor?: CachePayloadMonitor;
+  /** Add the trailing prompt-cache breakpoint (Anthropic only). Deliberately independent of
+   *  `cacheMonitor`: that one only watches, this one changes the request, so switching observability off
+   *  must not switch the fix off with it. */
+  cacheBreakpoints?: boolean;
   requestProfile?: ProviderRequestProfile;
   settingsManager: SettingsManager;
 }
@@ -295,7 +300,8 @@ function defaultResourceLoaderFactory(o: BrainResourceLoaderOptions): ResourceLo
     // ($1/$@/$ARGUMENTS/${N:-default}) itself in prompt()/steer()/followUp() — no daemon-side expansion.
     promptsOverride: () => ({ prompts, diagnostics: [] }),
     ...(o.codexReasoningFix || o.kimiHeaderProbe || o.compactionModelRouteExtension
-      || o.compactionCircuitBreakerExtension || o.requestProfile || o.liveRecall || o.cacheMonitor ? {
+      || o.compactionCircuitBreakerExtension || o.requestProfile || o.liveRecall || o.cacheMonitor
+      || o.cacheBreakpoints ? {
       extensionFactories: [
         ...(o.codexReasoningFix ? [codexReasoningSummary] : []),
         ...(o.kimiHeaderProbe ? [kimiHeaderProbe] : []),
@@ -304,6 +310,10 @@ function defaultResourceLoaderFactory(o: BrainResourceLoaderOptions): ResourceLo
         ...(o.requestProfile ? [providerRequestProfile(o.requestProfile)] : []),
         ...(o.liveRecall ? [((recall) => (pi: ExtensionAPI): void => { installLiveRecall(pi, recall); })(o.liveRecall)] : []),
         ...(o.cacheMonitor ? [o.cacheMonitor.extension] : []),
+        // AFTER the monitor, so the snapshot it takes is the payload as pi-ai built it. The monitor hashes
+        // canonically (markers stripped), so the order does not change what it reports — it keeps the
+        // snapshot honest about what this code did or did not touch.
+        ...(o.cacheBreakpoints ? [installCacheBreakpoints] : []),
       ],
     } : {}),
   });
@@ -384,6 +394,7 @@ export class BrainSessionFactory {
       requestProfile: spec.requestProfile, settingsManager,
       ...(spec.liveRecall ? { liveRecall: spec.liveRecall } : {}),
       ...(cacheMonitor ? { cacheMonitor } : {}),
+      ...(spec.model.provider === 'anthropic' ? { cacheBreakpoints: true } : {}),
     });
     // A resource loader passed to createAgentSession is NOT auto-reloaded (only one it builds itself
     // is), so its system prompt stays empty unless we reload it here. Without this the brain falls
