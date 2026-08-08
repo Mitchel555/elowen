@@ -276,7 +276,7 @@ export class LiveSessionSpawner {
     // Built before the session so the compaction circuit breaker (installed inside the factory) has a
     // channel to report on; nothing publishes until the session actually runs.
     const replay = new LiveEventReplay(listeners);
-    const { session, applyCompaction, assessIdleCompaction } = await this.d.factory.create({
+    const { session, applyCompaction, assessColdCompaction } = await this.d.factory.create({
       sessionId, ownerUserId, parentSessionId: opts.parentSessionId, delegatedAccess: opts.delegatedAccess,
       runtime: this.d.runtime, model, providerId, compactionFallbackModel: route.compactionFallback, cwd,
       systemPrompt: persona, appendSystemPrompt: append, skills, promptTemplates,
@@ -379,7 +379,7 @@ export class LiveSessionSpawner {
       session, sessionId, model: model.id, providerId, provider: model.provider, thinkingLevel: opts.thinkingLevel,
       requestProfile, fastAvailable: capabilities.fast,
       thinkingLabels: Object.fromEntries(capabilities.levels.map((level) => [level, capabilities.labels[level] ?? level])),
-      policy: opts.policy, applyCompaction, assessIdleCompaction, listeners, replay, turnContext,
+      policy: opts.policy, applyCompaction, assessColdCompaction, listeners, replay, turnContext,
       pluginToolNames: new Set(pluginTools.map((t) => t.name)),
       // The deferred-tool handle (undefined when nothing is deferred). Carried on the live so each turn's
       // visibility pass keeps already-fetched tools advertised and withheld ones hidden.

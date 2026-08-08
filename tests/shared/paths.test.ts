@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dataDir, dbPath, fsSafeSegment, logDir, runFile, toolResultSpillDir } from '../../src/shared/paths.js';
+import { dataDir, dbPath, fsSafeSegment, logDir, runFile, sessionToolResultSpillDir, setSpillNamespaceResolver, toolResultSpillDir } from '../../src/shared/paths.js';
 
 describe('shared/paths', () => {
   const env = { HOME: '/h' } as NodeJS.ProcessEnv;
@@ -26,6 +26,23 @@ describe('shared/paths', () => {
     expect(toolResultSpillDir(env, 'a/b')).toBe('/h/.config/elowen/tool-results/a%2Fb');
     expect(toolResultSpillDir(env, '..')).toBe('/h/.config/elowen/tool-results/%..');
     expect(toolResultSpillDir(env, 'x%y')).toBe('/h/.config/elowen/tool-results/x%25y');
+  });
+
+  it('sessionToolResultSpillDir resolves the immutable namespace, falling back to the id', () => {
+    try {
+      // Unwired (tests, standalone processes): the id itself, the pre-namespace layout.
+      expect(sessionToolResultSpillDir(env, 'sess-1')).toBe('/h/.config/elowen/tool-results/sess-1');
+      setSpillNamespaceResolver((id) => (id === 'sess-1' ? 'sess-1-abc12345' : undefined));
+      expect(sessionToolResultSpillDir(env, 'sess-1')).toBe('/h/.config/elowen/tool-results/sess-1-abc12345');
+      // A session the resolver does not know keeps the id fallback rather than losing its dir.
+      expect(sessionToolResultSpillDir(env, 'other')).toBe('/h/.config/elowen/tool-results/other');
+      // An empty resolution (a pre-backfill row) falls back too — '' would collapse every such
+      // session onto one shared directory.
+      setSpillNamespaceResolver(() => '');
+      expect(sessionToolResultSpillDir(env, 'legacy')).toBe('/h/.config/elowen/tool-results/legacy');
+    } finally {
+      setSpillNamespaceResolver(undefined);
+    }
   });
 
   it('fsSafeSegment is injective even at the guard boundary', () => {

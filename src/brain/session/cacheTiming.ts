@@ -6,10 +6,14 @@ interface TimedMessage {
   timestamp?: unknown;
 }
 
+/** The longest prompt-cache TTL pi-ai ever uses (PI_CACHE_RETENTION=long). Exported as the fail-closed
+ * fallback for gates that need the TTL of a request they did not witness (see coldCompactionGateMs). */
+export const LONG_CACHE_TTL_MS = 60 * 60_000;
+
 /** pi-ai's short cache TTL is 5 minutes, long (PI_CACHE_RETENTION=long) is 1 hour; the daemon defaults
  * to long. Resolved from the same env var pi-ai reads, so Elowen and pi-ai never disagree. */
 export function cacheTtlMs(env: NodeJS.ProcessEnv): number {
-  return env.PI_CACHE_RETENTION === 'long' ? 60 * 60_000 : 5 * 60_000;
+  return env.PI_CACHE_RETENTION === 'long' ? LONG_CACHE_TTL_MS : 5 * 60_000;
 }
 
 /** Destructive egress transforms need the cache to be DEFINITELY cold, so the shared gate rounds the TTL

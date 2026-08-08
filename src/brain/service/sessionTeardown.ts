@@ -15,6 +15,7 @@ import type { ClientAttachments } from './attachments.js';
 import type { GoalLoopService } from './goalLoop.js';
 import type { ConversationLifecycle } from './lifecycle.js';
 import type { IdleSessionClock } from './liveSessionReaper.js';
+import { sessionHasWorkInFlight, sparedChildSessionIds } from './sessionQuiescence.js';
 
 type TerminalTeardownFn = (userId: number, sessionId: string) => Promise<void>;
 
@@ -104,28 +105,10 @@ export class SessionTeardownService {
     }
   }
 
-  /** The direct children of `parentSessionId` that a parent abort (Esc / interruptQueued / stopSession)
-   *  must SPARE: still-running detached/background delegates. Their results are durable in the inbox and
-   *  are delivered independently of the parent's live turn (ensureLive respawns the parent if needed;
-   *  restart reconcile sweeps any that die), so tearing them down on a parent stop would silently kill work
-   *  the contract promised keeps running. Foreground blocking delegates are NOT spared — they belong to the
-   *  interrupted turn. Same predicate the start() reconcile uses to decide auto-delivery. */
+  /** Delegates to the shared helper — see sessionQuiescence.ts. Kept as a method because the facade
+   *  (isBindQuiescent) and the abort cascade below both reach it through this service. */
   sparedChildSessionIds(parentSessionId: string): Set<string> {
-    const spared = new Set(
-      this.store.getSubagentRuns(parentSessionId)
-        .filter((run) => run.status === 'running' && (run.background === true || run.autoDeliver === true))
-        .map((run) => run.sessionId),
-    );
-    // A background workflow makes the same promise a detached delegate does, so its still-running NODE
-    // sessions are spared on the same terms. Without this the engine correctly declined to cancel the
-    // workflow while the abort cascade tore down the very children it was running in.
-    for (const run of this.store.getWorkflowRuns(parentSessionId)) {
-      if (run.status !== 'running' || run.background !== true) continue;
-      for (const node of run.nodes) {
-        if (node.status === 'running' && node.sessionId) spared.add(node.sessionId);
-      }
-    }
-    return spared;
+    return sparedChildSessionIds(this.store, parentSessionId);
   }
 
   /** Stop the workflow engine for an aborted origin BEFORE its children are torn down: the engine would
@@ -183,27 +166,15 @@ export class SessionTeardownService {
       : this.attachments.attachedCount(sessionId) === 0;
   }
 
-  /** Whether this conversation has WORK in flight — a running turn, anything queued behind it, a parked
-   *  question, a still-running child/workflow/background job, or an armed goal continuation. Deliberately
-   *  FAIL-CLOSED: every uncertain signal counts as busy, because the two callers (a detach-only stop and
-   *  the idle reaper) both destroy a live runtime when it answers false, and the cost of a false "idle" is
-   *  killed work while the cost of a false "busy" is a runtime that lives one sweep longer. */
+  /** Whether this conversation has no work in flight — the shared fail-closed predicate (see
+   *  sessionQuiescence.ts), also consulted by the turn runner's cold-start compaction so "safe to
+   *  destroy" and "safe to rewrite the context" can never drift apart. A missing live record is idle
+   *  here: there is nothing live for the teardown to protect. */
   private sessionIsIdle(sessionId: string): boolean {
-    const live = this.sessions.get(sessionId);
-    if (!live) return true; // nothing live to protect
-    if (live.session.isStreaming) return false;
-    if (this.sessions.isParentAborting(sessionId) || this.sessions.hasPendingAbort(sessionId)) return false;
-    if (live.session.getSteeringMessages().length > 0 || live.session.getFollowUpMessages().length > 0) return false;
-    if (live.queuedSteer?.length || live.queuedFollowUp?.length) return false;
-    if (live.pendingCompactionEchoes?.length || live.deliveringUserEchoes?.length) return false;
-    if (this.elicitation.pendingForSession(sessionId) !== null) return false;
-    // Foreground children plus the detached/background delegates and workflow nodes that deliver their
-    // results back INTO this conversation — tearing the parent down would strand every one of them.
-    if (this.sessions.hasActiveChildren(sessionId) || this.sparedChildSessionIds(sessionId).size > 0) return false;
-    if (processRegistry.runningJobCountForSession(sessionId) > 0) return false;
-    // An active goal re-prompts this very session from a timer, so it is work in flight even between turns.
-    if (this.store.getGoal(sessionId)?.status === 'active') return false;
-    return true;
+    return !sessionHasWorkInFlight(
+      { store: this.store, sessions: this.sessions, elicitation: this.elicitation },
+      sessionId,
+    );
   }
 
   /** Final teardown of one live conversation, shared by the last-watcher stop and the idle reaper. The

@@ -1,0 +1,113 @@
+import { parseDbTs } from '../../shared/time.js';
+import { LONG_CACHE_TTL_MS } from './cacheTiming.js';
+
+/** Cold-start auto-compaction policy: the pure decision pieces behind the turn runner's
+ *  pre-turn compaction (BrainTurnRunner.maybeColdStartCompaction).
+ *
+ *  A conversation resumed after its prompt cache expired is compacted at the START of that turn,
+ *  before its first provider request. The timing carries both halves of the argument:
+ *
+ *  - The cache is provably cold, so the summarization rewrite throws away no warm prefix — the same
+ *    reason toolResultClearing waits for the cold gate before rewriting history.
+ *  - The user is provably CONTINUING the conversation: the payment buys a cheaper request that is
+ *    actually about to be made. A preventive timer-driven compaction of an idle conversation spends the
+ *    full summarization price on a return that may never happen — for an abandoned 400k-token context
+ *    that is $2+ of pure loss — which is why this deliberately is NOT a background sweep.
+ *
+ *  Firing earlier (while the cache is warm) buys nothing either: PI's summarization request never reads
+ *  the conversation's cache at any time (pi-coding-agent `completeSummarization` sends the serialized
+ *  history as a standalone request with `cacheRetention: "none"` and a fresh sessionId), so it always
+ *  pays full input price on the whole history.
+ *
+ *  No latch or once-per-epoch bookkeeping is needed here, unlike the retired 60 s sweep: the trigger IS
+ *  the turn, the turn appends fresh messages, and the gate closes with them. A failed attempt is not
+ *  retried within the turn either — the turn just runs on the full context, and the circuit breaker
+ *  counts the failure through its own session subscription. */
+
+/** Anthropic prices every model in fixed ratios of its plain input price: a cache WRITE costs 1.25×
+ *  input and OUTPUT costs 5× input (Opus: $5 / $6.25 / $25 per Mtok input/cacheWrite/output; Sonnet:
+ *  $3 / $3.75 / $15). The break-even below is expressed purely in these ratios, so it holds across the
+ *  family without per-model price tables. */
+const CACHE_WRITE_PER_INPUT = 1.25;
+const OUTPUT_PER_INPUT = 5;
+
+/** Whether compacting BEFORE the turn's first provider request beats running the turn on the full
+ *  history. With context C, post-compaction floor F, summary output S (all tokens), in input-price units:
+ *
+ *  - skip:    the turn's first request re-caches the full cold history       → 1.25·C
+ *  - compact: the summarization reads the history at FULL input price (see the module doc — it never
+ *             reads the conversation's cache), emits the summary as output, and the turn then re-caches
+ *             only the floor                                                 → 1·C + 5·S + 1.25·F
+ *
+ *  Compact iff 1.25·C ≥ C + 5·S + 1.25·F  ⇔  0.25·C ≥ 1.25·F + 5·S  ⇔  C ≥ 5·F + 20·S.
+ *
+ *  This counts a single cold return only. Every later turn favors the compacted side further (cache
+ *  reads at 0.1× over a smaller prefix), so the bound is conservative — the right direction for an
+ *  irreversible rewrite that also loses conversational detail. The predecessor of this check used
+ *  C ≥ 2·F, which loses money on every context smaller than five times its floor. */
+export function coldCompactionWorthwhile(
+  contextTokens: number, floorTokens: number, summaryOutputTokens: number,
+): boolean {
+  return (CACHE_WRITE_PER_INPUT - 1) * contextTokens
+    >= CACHE_WRITE_PER_INPUT * floorTokens + OUTPUT_PER_INPUT * summaryOutputTokens;
+}
+
+/** How long a conversation must have been quiet before its prompt cache is DEFINITELY cold — the TTL of
+ *  the last provider request plus a 1-minute buffer (the same buffer idleThresholdMs uses).
+ *
+ *  Deliberately NOT derived from the CURRENT env: `PI_CACHE_RETENTION` can differ between the process
+ *  that made the last request and this one (a daemon restart that switched long → short), and gating on
+ *  the current value would open the gate over a still-warm hour-long cache. The turn runner stamps
+ *  `cacheTtlMs(process.env)` onto the live session after each prompt it runs, so a known value is the
+ *  TTL the requests were actually made under; a session whose history predates this process has no
+ *  stamp and falls back to the LONGEST TTL pi-ai ever uses — fail-closed, at worst delaying the
+ *  compaction, never rewriting a warm prefix. */
+export function coldCompactionGateMs(lastRequestCacheTtlMs: number | undefined): number {
+  return (lastRequestCacheTtlMs ?? LONG_CACHE_TTL_MS) + 60_000;
+}
+
+export type ColdCompactionAssessment =
+  | { eligible: true; contextTokens: number; floorTokens: number }
+  | { eligible: false; reason: 'auto-compact-off' | 'breaker' | 'not-worthwhile' };
+
+/** The per-session facts the assessment needs, provided as thunks by the session factory (which owns
+ *  the live proactive flag, the circuit breaker and the token estimates). Read at assessment time, not
+ *  captured — a live settings change or a breaker trip must reach the very next turn. */
+export interface ColdCompactionInputs {
+  /** The session's auto-compact toggle. A cold-start compaction is an AUTOMATIC compaction, so a user
+   *  who switched auto-compact off must not get one from a turn trigger either. */
+  proactive(): boolean;
+  /** Whether the compaction circuit breaker currently refuses automatic compaction — the same
+   *  `blocks('threshold')` rule PI's own threshold attempts are gated on, so this trigger can never
+   *  sneak past a tripped or provably-pointless state. */
+  breakerBlocks(): boolean;
+  /** Estimated current context tokens (provider-usage based, so it includes the fixed cost). */
+  contextTokens(): number;
+  /** Estimated post-compaction floor: fixed cost + summary allowance + retained tail. */
+  floorTokens(): number;
+  /** Expected summary size in OUTPUT tokens — the factory's summary allowance, the same number the
+   *  post-compaction floor already budgets for the summary's presence in context. */
+  summaryOutputTokens(): number;
+}
+
+export type AssessColdCompaction = () => ColdCompactionAssessment;
+
+export function assessColdCompaction(inputs: ColdCompactionInputs): ColdCompactionAssessment {
+  if (!inputs.proactive()) return { eligible: false, reason: 'auto-compact-off' };
+  if (inputs.breakerBlocks()) return { eligible: false, reason: 'breaker' };
+
+  const contextTokens = inputs.contextTokens();
+  const floorTokens = inputs.floorTokens();
+  if (!coldCompactionWorthwhile(contextTokens, floorTokens, inputs.summaryOutputTokens())) {
+    return { eligible: false, reason: 'not-worthwhile' };
+  }
+  return { eligible: true, contextTokens, floorTokens };
+}
+
+/** A session's last activity in epoch ms — the newest stored message vs the user's last explicit
+ *  interaction, the same pair rolloverDue keys on. `interactedAt` moves on resume, model switch and
+ *  manual compact even without a provider request, which can only DELAY the gate — the safe direction.
+ *  0 means no activity on record (never cold-compact). */
+export function lastActivityMs(lastMessageAt: string | undefined, interactedAt: number | undefined): number {
+  return Math.max(parseDbTs(lastMessageAt), interactedAt ?? 0);
+}

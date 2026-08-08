@@ -26,7 +26,6 @@ import { lastAssistantText } from './goal.js';
 import { ClientAttachments } from './service/attachments.js';
 import { DelegatedSessionService } from './service/delegatedSession.js';
 import { IdleSessionClock } from './service/liveSessionReaper.js';
-import { IdleCompactionSweep } from './service/idleCompactionSweep.js';
 import { PermissionApprovalService } from './service/permissionApproval.js';
 import { GoalLoopService } from './service/goalLoop.js';
 import { LiveSessionSpawner } from './service/spawner.js';
@@ -128,8 +127,6 @@ export class BrainService {
   private processSvc: SessionProcessService;
   /** The mid-turn message backlog (list/remove/recall) — see SessionQueueService. */
   private queue: SessionQueueService;
-  /** Idle post-cache-expiry compaction of open-terminal conversations — see IdleCompactionSweep. */
-  private idleCompaction: IdleCompactionSweep;
   /** A plugin (e.g. the skills plugin's CreateSkill) asked for a plugin reload from INSIDE a running
    *  turn. Reloading there would dispose the very session executing the tool, so the request is coalesced
    *  onto this flag and drained once the turn settles (see drainDeferredPluginReload). */
@@ -351,17 +348,6 @@ export class BrainService {
     });
     this.processSvc = new SessionProcessService({ store: d.store, attachments: this.attachments, identity: this.identity });
     this.queue = new SessionQueueService({ sessions: this.sessions, lifecycle: this.lifecycle });
-    // Idle compaction (daemon 60 s tick): compact an open-terminal conversation once its prompt cache
-    // has provably expired, so the next turn re-caches the compacted context instead of the full history.
-    this.idleCompaction = new IdleCompactionSweep({
-      liveEntries: () => this.sessions.liveEntries(),
-      live: (sessionId) => this.sessions.get(sessionId),
-      lastMessageAt: (sessionId) => d.store.lastMessageAt(sessionId),
-      hasLiveStableClient: (sessionId) => this.attachments.hasLiveStableClient(sessionId),
-      hasActiveChildren: (sessionId) => this.sessions.hasActiveChildren(sessionId),
-      hasPendingElicitation: (sessionId) => this.elicitation.pendingForSession(sessionId) !== null,
-      withLock: (key, fn) => this.sessions.withLock(key, fn),
-    });
   }
 
   /** Admin daemon-restart handler for a platform `/restart` slash. Late-bound: it's built after the brain
@@ -552,13 +538,6 @@ export class BrainService {
    *  client is still on this conversation — see SessionTeardownService.stopSession. */
   async stopSession(userId: number, session?: string, clientId?: string, clientGeneration?: number, opts?: { detachOnly?: boolean }): Promise<{ stopped: boolean; disposed: boolean }> {
     return this.teardown.stopSession(userId, session, clientId, clientGeneration, opts);
-  }
-
-  /** Periodic sweep: compact open-terminal conversations whose prompt cache has provably expired, so
-   *  their next turn re-caches the compacted context instead of the full history — see IdleCompactionSweep.
-   *  Returns the ids compacted. */
-  async compactIdleLiveSessions(now: number = Date.now()): Promise<string[]> {
-    return this.idleCompaction.run(now);
   }
 
   /** Periodic sweep: dispose live PI sessions unwatched and idle for a full SESSION_IDLE_ROLLOVER_MS —

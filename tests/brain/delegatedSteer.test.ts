@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { randomUUID } from 'node:crypto';
 import { ChannelSessionService } from '../../src/brain/channels.js';
 import { DelegatedSessionService } from '../../src/brain/service/delegatedSession.js';
 import { channelSessionId } from '../../src/brain/sessionId.js';
 import { LiveSessionRegistry } from '../../src/brain/session/liveRegistry.js';
-import type { QueuedMsg } from '../../src/brain/session/liveBrain.js';
+import type { LiveBrain, QueuedMsg } from '../../src/brain/session/liveBrain.js';
+import { deliverQueuedUserEcho, stageDeliveredUserEchoes } from '../../src/brain/session/queueMirror.js';
 import { BrainStore } from '../../src/store/brainStore.js';
 import { openDb } from '../../src/store/db.js';
 import type { DelegatedExecutionScope } from '../../src/brain/delegatedScope.js';
@@ -29,6 +29,7 @@ function fakeLive(sessionId: string) {
     queuedFollowUp: undefined as QueuedMsg[] | undefined,
     deliveringUserEchoes: undefined as QueuedMsg[] | undefined,
     listeners: new Set(),
+    replay: { publish: vi.fn(), journal: vi.fn() },
   };
   return live;
 }
@@ -47,14 +48,14 @@ function setup(opts: { parent?: boolean } = {}) {
   const live = fakeLive(sessionId);
   registry.channelTouch(channelId, live);
   const svc = new ChannelSessionService({ registry, store, users: { get: () => ({ username: 'o' }) }, spawn: vi.fn() } as never);
-  /** Simulate PI delivering one queued steer: the queue_update reconcile splices the mirror, then
-   *  message_start persists the durable user row — the exact signal steerDelegatedTurn waits for. */
+  /** Simulate PI delivering one queued steer through the REAL production seam: queue_update splices the
+   *  mirror and stages the removed item, then message_start persists the durable user row and stamps the
+   *  item's echo (deliverQueuedUserEcho) — the exact signal steerDelegatedTurn waits for. */
   const deliver = (item: QueuedMsg): void => {
     live.queuedSteer = (live.queuedSteer ?? []).filter((m) => m !== item);
-    store.appendMessage({
-      id: randomUUID(), sessionId, parentId: null, role: 'user',
-      content: { role: 'user', content: item.echo?.persistText ?? item.text },
-    });
+    if (item.queuedText === undefined) item.queuedText = item.text;
+    stageDeliveredUserEchoes(live as unknown as LiveBrain, [item]);
+    deliverQueuedUserEcho(store, live as unknown as LiveBrain, item.queuedText);
   };
   return { store, registry, svc, channelId, sessionId, live, deliver };
 }
@@ -74,17 +75,64 @@ describe('ChannelSessionService.steerDelegatedTurn — delivery-confirmed mid-tu
   });
 
   it('resolves delivered only once the message shows up as a durable row in the child transcript', async () => {
-    const { svc, channelId, live, deliver } = setup();
+    const { store, svc, channelId, sessionId, live, deliver } = setup();
     const pending = svc.steerDelegatedTurn(channelId, 'also check the docs');
+    let settled: string | undefined;
+    void pending.then((outcome) => { settled = outcome; });
     await sleep(20);
     // Enqueued into PI's steering queue with the persistable owner-echo, but NOT yet confirmed.
     expect(live.session.steer).toHaveBeenCalledWith('also check the docs', undefined);
     const item = (live.queuedSteer ?? [])[0];
     expect(item).toMatchObject({ text: 'also check the docs', echo: expect.objectContaining({ persistText: 'also check the docs', publish: true }) });
-    // Two poll beats with the message still queued: the call must keep waiting, not claim delivery.
+    // Two poll beats with the message still queued: the call must STILL BE PENDING — a steer that reports
+    // success at enqueue time, before anything durable exists, must fail here.
     await sleep(220);
+    expect(settled).toBeUndefined();
     deliver(item!);
     expect(await pending).toBe('delivered');
+    // The confirmation was the real durable user row, not a bookkeeping shortcut.
+    expect(store.getMessages(sessionId).filter((m) => m.role === 'user')).toHaveLength(1);
+  });
+
+  it('confirms each of two same-text steers only against its OWN delivery, never its twin\'s', async () => {
+    const { store, svc, channelId, sessionId, live, deliver } = setup();
+    const first = svc.steerDelegatedTurn(channelId, 'same follow-up');
+    const second = svc.steerDelegatedTurn(channelId, 'same follow-up');
+    let secondSettled: string | undefined;
+    void second.then((outcome) => { secondSettled = outcome; });
+    await sleep(20);
+    const [itemA, itemB] = live.queuedSteer ?? [];
+    expect(itemB).toBeDefined();
+    // PI delivers the FIRST copy; its durable row matches the second steer's text byte for byte.
+    deliver(itemA!);
+    expect(await first).toBe('delivered');
+    // The twin must NOT be confirmed by that row — it is still queued, still pending.
+    await sleep(220);
+    expect(secondSettled).toBeUndefined();
+    // The turn ends with the twin still queued: it is removed and reported idle for the caller's fallback.
+    live.session.isStreaming = false;
+    expect(await second).toBe('idle');
+    expect(live.queuedSteer ?? []).toEqual([]);
+    // Exactly ONE durable user row: the fallback re-sends as a fresh turn, never from a stale queue copy.
+    const rows = store.getMessages(sessionId).filter((m) => m.role === 'user'
+      && (JSON.parse(m.content) as { content?: unknown }).content === 'same follow-up');
+    expect(rows).toHaveLength(1);
+  });
+
+  it('keeps concurrent strand cleanups addressable across the clear-and-requeue — no copy survives to double-deliver', async () => {
+    const { svc, channelId, live } = setup();
+    live.queuedSteer = [{ text: 'bystander' }];
+    const first = svc.steerDelegatedTurn(channelId, 'alpha');
+    const second = svc.steerDelegatedTurn(channelId, 'beta');
+    await sleep(20);
+    expect((live.queuedSteer ?? []).map((m) => m.text)).toEqual(['bystander', 'alpha', 'beta']);
+    // The turn ends with both steers still queued; both waiters clean up concurrently. The first cleanup
+    // rebuilds the queue with FRESH wrapper objects, so the second must find its message by its durable
+    // identity (the echo) — or its copy stays queued and the fallback re-send delivers the text twice.
+    live.session.isStreaming = false;
+    expect(await first).toBe('idle');
+    expect(await second).toBe('idle');
+    expect((live.queuedSteer ?? []).map((m) => m.text)).toEqual(['bystander']);
   });
 
   it('removes a steer the ending turn never drained and reports idle — no loss, no double delivery', async () => {

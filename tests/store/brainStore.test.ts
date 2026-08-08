@@ -1582,19 +1582,33 @@ describe('BrainStore', () => {
   });
 
   describe('tool-result spill latch rows', () => {
-    const latch = (toolCallId: string, over: Partial<{ mode: 'time' | 'preview'; bytes: number; preview: string | null; path: string }> = {}) => ({
-      toolCallId, mode: 'preview' as const, bytes: 50_007,
+    const latch = (toolCallId: string, over: Partial<{ occurredAt: number; mode: 'time' | 'preview'; bytes: number; preview: string | null; path: string; placeholder: string | null }> = {}) => ({
+      toolCallId, occurredAt: 1_754_600_000_000, mode: 'preview' as const, bytes: 50_007,
       preview: 'head 😀 of the output', path: `/data/tool-results/s1/${toolCallId}.v1-preview-50007.txt`,
+      placeholder: `[Large tool result…] head 😀 of the output`,
       ...over,
     });
+    const stored = (row: ReturnType<typeof latch>) => ({ ...row, createdAt: expect.any(String) as unknown as string });
 
     it('round-trips a row exactly, including a multi-byte preview, and upserts on the same key', () => {
       store.createSession({ id: 's1', userId: 7, model: 'm' });
       store.upsertToolResultSpill('s1', latch('call-1'));
-      expect(store.toolResultSpills('s1')).toEqual([latch('call-1')]);
-      // Upsert: an EEXIST re-latch writes the same key again — one row, latest values.
-      store.upsertToolResultSpill('s1', latch('call-1', { mode: 'time', preview: null, bytes: 4_196 }));
-      expect(store.toolResultSpills('s1')).toEqual([latch('call-1', { mode: 'time', preview: null, bytes: 4_196 })]);
+      expect(store.toolResultSpills('s1')).toEqual([stored(latch('call-1'))]);
+      // Upsert: an EEXIST re-latch writes the same occurrence key again — one row, latest values.
+      store.upsertToolResultSpill('s1', latch('call-1', { mode: 'time', preview: null, bytes: 4_196, placeholder: '[cleared]' }));
+      expect(store.toolResultSpills('s1')).toEqual([stored(latch('call-1', { mode: 'time', preview: null, bytes: 4_196, placeholder: '[cleared]' }))]);
+    });
+
+    it('two occurrences of one reused toolCallId hold two independent rows', () => {
+      // Sequential id styles (`call_0`) reuse ids across turns; each cleared occurrence needs its own
+      // latch row or the newer one overwrites (and later swallows) the older one's placeholder.
+      store.createSession({ id: 's1', userId: 7, model: 'm' });
+      store.upsertToolResultSpill('s1', latch('call_0', { occurredAt: 1_000 }));
+      store.upsertToolResultSpill('s1', latch('call_0', { occurredAt: 2_000, placeholder: '[second occurrence]' }));
+      expect(store.toolResultSpills('s1').map((row) => row.occurredAt)).toEqual([1_000, 2_000]);
+      // Deleting by occurrence key removes exactly one of them.
+      store.deleteToolResultSpill('s1', 'call_0', 1_000);
+      expect(store.toolResultSpills('s1').map((row) => row.occurredAt)).toEqual([2_000]);
     });
 
     it('deleteSession removes the session\'s latch rows and only those', () => {
@@ -1604,32 +1618,45 @@ describe('BrainStore', () => {
       store.upsertToolResultSpill('s2', latch('call-2'));
       store.deleteSession('s1');
       expect(store.toolResultSpills('s1')).toEqual([]);
-      expect(store.toolResultSpills('s2')).toEqual([latch('call-2')]);
+      expect(store.toolResultSpills('s2')).toEqual([stored(latch('call-2'))]);
     });
 
-    it('reassignSession moves the latch rows and re-points their paths at the moved spill dir', async () => {
-      const { mkdtempSync } = await import('node:fs');
-      const { join } = await import('node:path');
-      const { tmpdir } = await import('node:os');
-      const home = mkdtempSync(join(tmpdir(), 'elowen-latch-move-'));
-      dirs.push(home);
-      vi.stubEnv('HOME', home);
-      try {
-        const oldDir = join(home, '.config/elowen/tool-results/chan-x');
-        const newDir = join(home, '.config/elowen/tool-results/arch-1');
-        store.createSession({ id: 'chan-x', userId: 7, model: 'm' });
-        store.upsertToolResultSpill('chan-x', latch('call-1', { path: join(oldDir, 'call-1.v1-preview-50007.txt') }));
-        store.reassignSession('chan-x', 'arch-1');
-        expect(store.toolResultSpills('chan-x')).toEqual([]);
-        // The spill FILES move to the new session dir in the same operation, so a verbatim path would
-        // name a directory the file just left; rollover targets an idle (cache-cold) conversation, so
-        // the placeholder change is free.
-        expect(store.toolResultSpills('arch-1')).toEqual([
-          latch('call-1', { path: join(newDir, 'call-1.v1-preview-50007.txt') }),
-        ]);
-      } finally {
-        vi.unstubAllEnvs();
-      }
+    it('reassignSession moves the latch rows with their paths VERBATIM', () => {
+      store.createSession({ id: 'chan-x', userId: 7, model: 'm' });
+      const path = `/data/tool-results/${store.spillNamespace('chan-x')}/call-1.v1-preview-50007.txt`;
+      store.upsertToolResultSpill('chan-x', latch('call-1', { path }));
+      store.reassignSession('chan-x', 'arch-1');
+      expect(store.toolResultSpills('chan-x')).toEqual([]);
+      // The path is the one already embedded in placeholders the provider cached: rewriting a single
+      // byte of it would invalidate the cached prefix of a conversation `/context` may have moved while
+      // WARM. The spill dir is keyed by the immutable namespace, so the verbatim path stays true.
+      expect(store.toolResultSpills('arch-1')).toEqual([stored(latch('call-1', { path }))]);
+    });
+  });
+
+  describe('spill namespace', () => {
+    it('is minted unique per conversation and never equals the reusable id', () => {
+      store.createSession({ id: 'brain-ch-general', userId: 7, model: 'm' });
+      const ns = store.spillNamespace('brain-ch-general');
+      // Prefixed by the creation id for on-disk readability, suffixed for uniqueness: channel-slot ids
+      // are deterministic and reused across generations, and two generations must never share a dir.
+      expect(ns.startsWith('brain-ch-general-')).toBe(true);
+      expect(ns).not.toBe('brain-ch-general');
+    });
+
+    it('falls back to the id for unknown sessions and pre-namespace rows', () => {
+      expect(store.spillNamespace('never-created')).toBe('never-created');
+      // A row minted by an older build (empty spill_ns, before the boot backfill froze it).
+      store.createSession({ id: 'legacy', userId: 7, model: 'm' });
+      store['db'].prepare("UPDATE brain_sessions SET spill_ns = '' WHERE id = 'legacy'").run();
+      expect(store.spillNamespace('legacy')).toBe('legacy');
+    });
+
+    it('a fork gets its own namespace, never the source\'s', () => {
+      store.createSession({ id: 'src', userId: 7, model: 'm' });
+      store.forkSession('src', 'copy');
+      expect(store.spillNamespace('copy')).not.toBe(store.spillNamespace('src'));
+      expect(store.spillNamespace('copy').startsWith('copy-')).toBe(true);
     });
   });
 
@@ -1644,8 +1671,8 @@ describe('BrainStore', () => {
       try {
         store.createSession({ id: 's1', userId: 7, model: 'm' });
         store.createSession({ id: 's2', userId: 7, model: 'm' });
-        const spill1 = join(home, '.config/elowen/tool-results/s1');
-        const spill2 = join(home, '.config/elowen/tool-results/s2');
+        const spill1 = join(home, '.config/elowen/tool-results', store.spillNamespace('s1'));
+        const spill2 = join(home, '.config/elowen/tool-results', store.spillNamespace('s2'));
         mkdirSync(spill1, { recursive: true });
         mkdirSync(spill2, { recursive: true });
         writeFileSync(join(spill1, 'call-1.txt'), 'x');
@@ -1661,7 +1688,7 @@ describe('BrainStore', () => {
   });
 
   describe('reassignSession', () => {
-    it('moves the tool-result spill dir along with the re-keyed conversation', async () => {
+    it('keeps the spill dir in place — the namespace moves with the row, the files never do', async () => {
       const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } = await import('node:fs');
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
@@ -1670,16 +1697,19 @@ describe('BrainStore', () => {
       vi.stubEnv('HOME', home);
       try {
         store.createSession({ id: 'chan-x', userId: 7, model: 'm' });
-        const oldDir = join(home, '.config/elowen/tool-results/chan-x');
-        const newDir = join(home, '.config/elowen/tool-results/arch-1');
-        mkdirSync(oldDir, { recursive: true });
-        writeFileSync(join(oldDir, 'call-1.txt'), 'spilled');
+        const ns = store.spillNamespace('chan-x');
+        const dir = join(home, '.config/elowen/tool-results', ns);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'call-1.txt'), 'spilled');
         store.reassignSession('chan-x', 'arch-1');
-        expect(existsSync(oldDir)).toBe(false);
-        expect(readFileSync(join(newDir, 'call-1.txt'), 'utf8')).toBe('spilled');
-        // …so a later delete of the archived conversation actually cleans its spills up.
+        // No rename, no rewrite: placeholders already on the wire embed paths under this exact dir, and
+        // a /context bind can move a WARM conversation — moving the files would both invalidate its
+        // cached prefix and (on a failed rename) strand them under the freed slot id.
+        expect(store.spillNamespace('arch-1')).toBe(ns);
+        expect(readFileSync(join(dir, 'call-1.txt'), 'utf8')).toBe('spilled');
+        // …and a later delete of the archived conversation still cleans the same dir up.
         store.deleteSession('arch-1');
-        expect(existsSync(newDir)).toBe(false);
+        expect(existsSync(dir)).toBe(false);
       } finally {
         vi.unstubAllEnvs();
       }

@@ -262,20 +262,31 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       }
       agentType = node.subagentType;
     }
-    const restricted = resolveDelegateTools(wf.parentAccess.toolPolicy?.allow, node.tools, ctx.toolNames());
-    if (restricted.error) throw new Error(restricted.error);
-    const toolPolicy = restricted.allow
-      ? { ...(wf.parentAccess.toolPolicy?.deny ? { deny: wf.parentAccess.toolPolicy.deny } : {}), allow: restricted.allow }
-      : wf.parentAccess.toolPolicy;
-    // A node that keeps full access (no read_only, no explicit toolset) may extend the DAG; a narrowed
-    // node cannot (it may not even hold WorkflowAddNodes), so it is never invited to.
-    //
-    // A node whose turn the host dispatches to a forked runner PROCESS cannot expand either, no matter
+    // A node whose turn the host dispatches to a forked runner PROCESS cannot expand the DAG, no matter
     // what it holds: this map of workflows is process-local, and the runner registers its own empty
     // instance — its WorkflowAddNodes can never reach this DAG and fails with "no running workflow".
-    // Extending the invitation there is a promise the tool cannot keep, so it is withheld. Read live
-    // per node launch, mirroring the dispatch decision it predicts.
-    const canExpand = !node.readOnly && !node.tools && ctx.delegatedTurnsOutOfProcess?.() !== true;
+    //
+    // ONE read decides the whole expansion contract for this node: the briefing below (no invitation)
+    // AND the tool policy (WorkflowAddNodes denied) both derive from this value, and both travel inside
+    // the delegated access to wherever the turn actually executes. That is what keeps the contract
+    // consistent across the dispatcher's fork-failure fallback: a turn predicted remote that ends up
+    // running in-process still carries the deny, so the node can never hold a tool its briefing never
+    // promised — expansion is conservatively withheld, not silently broken. Read live per node launch,
+    // the same expression the dispatcher itself evaluates (predictsRunnerDispatch).
+    const remoteDispatch = ctx.delegatedTurnsOutOfProcess?.() === true;
+    const restricted = resolveDelegateTools(wf.parentAccess.toolPolicy?.allow, node.tools, ctx.toolNames());
+    if (restricted.error) throw new Error(restricted.error);
+    const narrowedPolicy = restricted.allow
+      ? { ...(wf.parentAccess.toolPolicy?.deny ? { deny: wf.parentAccess.toolPolicy.deny } : {}), allow: restricted.allow }
+      : wf.parentAccess.toolPolicy;
+    // Silence in the briefing is not protection: without this deny a remote node still holds the full
+    // toolset, calls WorkflowAddNodes, and gets "no running workflow" from the runner's empty engine.
+    const toolPolicy = remoteDispatch && !narrowedPolicy?.deny?.includes('WorkflowAddNodes')
+      ? { ...(narrowedPolicy ?? {}), deny: [...(narrowedPolicy?.deny ?? []), 'WorkflowAddNodes'] }
+      : narrowedPolicy;
+    // A node that keeps full access (no read_only, no explicit toolset) may extend the DAG; a narrowed
+    // node cannot (it may not even hold WorkflowAddNodes), so it is never invited to.
+    const canExpand = !node.readOnly && !node.tools && !remoteDispatch;
     // Read live (Settings → Elowen AI → Limits), so raising the budget applies to the next node without a
     // daemon restart.
     const contextTotal = resolveContextTotalChars(ctx.delegateContextChars?.());
@@ -576,6 +587,14 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   ctx.registerControl('workflow', {
     cancelForSession: ({ sessionId }) => cancelForSession(sessionId),
     detachForeground: ({ sessionId, principal }) => detachForeground(sessionId, principal),
+    // Does THIS engine still hold the DAG? The durable row alone cannot answer that: when a terminal
+    // snapshot fails to persist (or boot reconcile misses one), the row claims `running` forever while
+    // the engine dropped the workflow long ago. Status reads consult this instead of inferring liveness
+    // from the origin PI session, which outlives — and is outlived by — the DAG independently.
+    isWorkflowLive: ({ workflowId }) => {
+      const wf = workflows.get(workflowId);
+      return !!wf && !wf.finished;
+    },
   });
 
   /** A plugin reload replaces THIS closure: the fresh instance registers its own empty `workflows` map,

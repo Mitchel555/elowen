@@ -190,8 +190,11 @@ describe('SubagentRunnerPool — cold start and the operator knob', () => {
     };
 
     await refuse('subagent-sub-dlg-1', 0);
-    expect(h.pool.stats().spawnFailure?.reason).toContain('build mismatch');
+    expect(h.pool.stats().spawnFailure?.code).toBe('build_mismatch');
     expect(h.pool.stats().spawnFailure?.consecutive).toBe(1);
+    // The stats block feeds the unauthenticated /health verbatim, so the raw reason — which quotes
+    // build ids, and for other failures internal paths and configuration — must never appear in it.
+    expect(JSON.stringify(h.pool.stats())).not.toContain('0.27.80');
 
     // Consecutive refusals are what separate a one-off hiccup from a pool that cannot work at all.
     await refuse('subagent-sub-dlg-2', 1);
@@ -203,6 +206,37 @@ describe('SubagentRunnerPool — cold start and the operator knob', () => {
     await settle();
     expect(h.pool.stats().runners).toHaveLength(1);
     expect(h.pool.stats().spawnFailure).toBeNull();
+  });
+
+  // A refusal describes ONE epoch of the pool. Kept past a reset it becomes an alarm that can never
+  // turn off: `agoMs` grows forever after the environment is fixed, and the next epoch's first failure
+  // would count `consecutive` on top of a run that was not consecutive at all.
+  it('reset() clears the spawn failure — the next epoch starts clean', async () => {
+    const h = poolWith();
+    const run = fire(h.pool.run(request('subagent-sub-dlg-1'), 'x'));
+    await settle();
+    h.children[0]!.reply({ type: 'fatal', reason: 'build mismatch (daemon 0.27.80, runner 0.27.81)' });
+    await expect(run).rejects.toBeInstanceOf(SubagentRunnerUnavailable);
+    expect(h.pool.stats().spawnFailure?.code).toBe('build_mismatch');
+    h.pool.reset('plugin reload');
+    expect(h.pool.stats().spawnFailure).toBeNull();
+  });
+
+  // Same epoch rule for the operator's switch: a pool that no longer forks anything has no CURRENT
+  // spawn failure, and the stale one must not resurface when the switch comes back on.
+  it('switching runner mode off retires the spawn failure', async () => {
+    let on = true;
+    const h = poolWith({ enabled: () => on });
+    const run = fire(h.pool.run(request('subagent-sub-dlg-1'), 'x'));
+    await settle();
+    h.children[0]!.reply({ type: 'fatal', reason: 'build mismatch (daemon 0.27.80, runner 0.27.81)' });
+    await expect(run).rejects.toBeInstanceOf(SubagentRunnerUnavailable);
+    expect(h.pool.stats().spawnFailure?.code).toBe('build_mismatch');
+    on = false;
+    expect(h.pool.stats().spawnFailure).toBeNull();
+    on = true;
+    expect(h.pool.stats().spawnFailure).toBeNull();
+    h.pool.reset('test over');
   });
 });
 

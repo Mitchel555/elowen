@@ -21,6 +21,9 @@ interface SubagentPoolRunnerStats {
   saturated: boolean;
 }
 
+/** The public shape of a fork refusal: which KIND of failure, nothing of its text. */
+export type SpawnFailureCode = 'build_mismatch' | 'boot_timeout' | 'boot_failed' | 'fork_failed';
+
 export interface SubagentPoolStats {
   /** `in-process` when the cap is 0 — the pool is off and every delegated turn runs on the daemon. */
   mode: 'runner' | 'in-process';
@@ -38,13 +41,18 @@ export interface SubagentPoolStats {
   queueDepth: number;
   /** How long the longest-waiting turn has been queued, in ms. 0 when nothing is queued. */
   oldestQueuedMs: number;
-  /** Why the most recent fork failed, cleared as soon as one succeeds — null in the healthy case.
+  /** Why the most recent fork failed, as a stable CATEGORY, cleared as soon as one succeeds (or the
+   *  epoch ends — a reset or the operator switching runner mode off) — null in the healthy case.
    *
    *  `mode` alone cannot express this: it reports the CONFIGURATION, so a pool whose every spawn is being
    *  refused still reads `runner` with an empty `runners` list, which is byte for byte what an idle pool
    *  with nothing to do looks like. That is not hypothetical — a daemon running an older build than the
    *  one in `dist/` has every fork rejected on the build-id handshake and silently serves every delegated
-   *  turn in-process, which is precisely the state an operator comes to `/health` to rule out. */
-  spawnFailure: { reason: string; agoMs: number; consecutive: number } | null;
+   *  turn in-process, which is precisely the state an operator comes to `/health` to rule out.
+   *
+   *  A code, never the raw failure message: `/health` is unauthenticated by design, and a boot exception
+   *  quotes whatever it hit — internal paths, build ids, configuration. The full text is in the daemon
+   *  log, written at the moment the fork failed. */
+  spawnFailure: { code: SpawnFailureCode; agoMs: number; consecutive: number } | null;
   runners: SubagentPoolRunnerStats[];
 }

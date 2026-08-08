@@ -42,6 +42,7 @@ import { loadAgentRegistry, agentCatalog, type AgentDef } from '../brain/agents/
 import { listBrainModels } from '../brain/models.js';
 import { setToolOutputCaps, setToolOutputPolicy } from '../brain/messageView.js';
 import { setSpillMaxResultBytes, setToolResultGroupBudget } from '../brain/session/toolResultClearing.js';
+import { setSpillNamespaceResolver } from '../shared/paths.js';
 import { setCompactionFailureLimit } from '../brain/session/compactionCircuitBreaker.js';
 import { makeToolOutputPolicy } from '../brain/toolOutput.js';
 import { BUILTIN_TOOL_OUTPUT_SHOWN } from '../brain/tools/index.js';
@@ -50,7 +51,10 @@ import type { DelegatedTurnRunner } from '../brain/delegatedTurn.js';
 import type { Policy } from '../plugins/policy.js';
 import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 import { discoverPlugins, loadPlugins } from '../plugins/loader.js';
+import type { PluginRegistry } from '../plugins/registry.js';
 import { PluginRegistryProvider } from '../plugins/pluginsProvider.js';
+import { predictsRunnerDispatch } from '../subagent/dispatch.js';
+import { setWorkflowLivenessProbe, workflowEngineProbeFrom } from '../brain/service/statusService.js';
 import { resolvePolicy } from '../plugins/policy.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -220,7 +224,9 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
     (agentRegistry ??= loadAgentRegistry({ builtinDir: agentsBuiltinDir, userDir: agentsUserDir, logger: log }));
   // The brain's credential store: OAuth tokens (Anthropic/Copilot/OpenAI accounts) persist here and
   // pi refreshes them in place. Lives next to the brain's cwd, never inside a repo checkout.
-  const brainDir = (() => { const p = join(dirname(opts.dbPath), 'brain'); mkdirSync(p, { recursive: true }); return p; })();
+  // 0700: this directory holds auth.json (OAuth secrets), and the directory is the outer permission
+  // wall — the credential store hardens an existing dir itself, but a fresh one must not be born open.
+  const brainDir = (() => { const p = join(dirname(opts.dbPath), 'brain'); mkdirSync(p, { recursive: true, mode: 0o700 }); return p; })();
   // Platform channels (Discord, …) and delegated children alike resolve their project scope through THIS
   // one resolver. Named (rather than inlined into the brain deps below) because the sub-agent runner has
   // to re-derive a delegated child's Policy from the same expression the daemon used — two copies of it
@@ -259,6 +265,11 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
   // provider credentials via the same resolver plugins get. Pure network service, no DB access.
   const embeddings = new EmbeddingService({ resolveProvider });
   const brainStore = new BrainStore(db);
+  // Session id → immutable spill namespace, for pathGuard's spill-dir allowance and the
+  // toolResultClearing default dir. Wired HERE because this is the single construction path every
+  // process shares (daemon and forked sub-agent runner alike) — an unwired process would fall back to
+  // id-keyed directories and stop seeing spills of conversations that were ever re-keyed.
+  setSpillNamespaceResolver((sessionId) => brainStore.spillNamespace(sessionId));
   const memoryStore = new MemoryStore(db);
   const memoryCategoryStore = new MemoryCategoryStore(db);
   // ONE embedding-config mapper shared by the retrieval service AND the background embed queue, so both
@@ -284,6 +295,13 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
   // like the caps above.
   let pluginOutputShowPatterns: readonly string[] = [];
   setToolOutputPolicy(makeToolOutputPolicy(() => [...BUILTIN_TOOL_OUTPUT_SHOWN, ...pluginOutputShowPatterns]));
+  // The most recently loaded plugin registry, for the SYNC consumers below (the workflow liveness probe).
+  // The provider's own memo is a Promise, which a synchronous status read cannot await; refreshed by the
+  // same `.then` that refreshes the output-show snapshot, so it can never lag behind a reload.
+  let loadedPluginRegistry: PluginRegistry | undefined;
+  // Status reads verify a `running` workflow row against the ENGINE (the subagent plugin's `workflow`
+  // control) instead of trusting the row + origin-session liveness — see statusService.workflowRuns.
+  setWorkflowLivenessProbe(workflowEngineProbeFrom(() => loadedPluginRegistry));
   const embeddingConfig = () => toEmbeddingConfig(config.embeddingConfig());
   // Vector retrieval + anti-duplication over the memory store (owner chat only — the caller gates it).
   const memoryService = new MemoryService({
@@ -395,18 +413,19 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
       // Present only in a sub-agent runner (see BrainCoreOpts). Captured once, at fork time, and reused
       // across this process's plugin reloads: it describes the tool SET, which a reload does not change.
       ...(opts.mcpBridgeSnapshot ? { mcpBridgeSnapshot: opts.mcpBridgeSnapshot } : {}),
-      // Mirrors SubagentDispatch.mode(): only the daemon holds a runner, the toggle is read live, and a
-      // pool sized to zero routes in-process. A runner process has no `subagentRunner` by construction
-      // (no nested forking), so there this is structurally false and workflow self-expansion stays open.
-      delegatedTurnsOutOfProcess: () => opts.subagentRunner !== undefined
-        && config.get().runtime.subagentRunnerEnabled === true
-        && opts.subagentRunner.usable?.() !== false,
+      // THE dispatch prediction, shared verbatim with SubagentDispatch.mode() so the two cannot drift:
+      // only the daemon holds a runner, the toggle is read live, and a pool sized to zero routes
+      // in-process. A runner process has no `subagentRunner` by construction (no nested forking), so
+      // there this is structurally false and workflow self-expansion stays open.
+      delegatedTurnsOutOfProcess: () => predictsRunnerDispatch(
+        opts.subagentRunner, config.get().runtime.subagentRunnerEnabled === true),
       logger: log,
     }).then((registry) => {
       // Snapshot the merged plugin output-show patterns so the (sync) messageView policy above reads the
       // current set — refreshed on every reload (a plugin toggle invalidates this provider), so a newly
       // enabled plugin's `showOutput` applies without a daemon restart.
       pluginOutputShowPatterns = [...registry.toolShowOutput];
+      loadedPluginRegistry = registry;
       return registry;
     });
   });

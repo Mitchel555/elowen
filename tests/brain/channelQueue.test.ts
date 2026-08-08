@@ -141,6 +141,42 @@ describe('ChannelSessionService — mid-turn steering (Discord double-message)',
     })]);
   });
 
+  it('keeps a running delegated child claimed when a steered continuation settles its progress row mid-turn', async () => {
+    const store = new BrainStore(openDb(':memory:'));
+    const registry = new LiveSessionRegistry<Brain>();
+    const childId = 'brain-ch-subagent-child';
+    let activeAfterDone: boolean | undefined;
+    const spawn = vi.fn(async (o: { sessionId: string; ownerUserId: number }) => {
+      store.createSession({ id: o.sessionId, userId: o.ownerUserId, model: 'kimi' });
+      store.createSession({ id: childId, userId: o.ownerUserId, model: 'kimi', parentSessionId: o.sessionId });
+      return fakeBrain('moonshot', 'kimi', () => {
+        // The child's ORIGINAL delegated run holds its lifecycle claim, exactly as beginDelegatedCall
+        // registers it when the delegation's send is admitted...
+        registry.setChildRunning(o.sessionId, childId, true);
+        const emit = currentSubagentEmitter()!;
+        // ...while a DelegateContinue that STEERED into the running child raises and settles ITS OWN
+        // progress row inside the delegating turn. The terminal update must not un-claim the child.
+        emit({ id: 'continue-1', sessionId: childId, status: 'running', task: 'steer', tools: 0, seconds: 0 });
+        emit({ id: 'continue-1', sessionId: childId, status: 'done', task: 'steer', tools: 0, seconds: 0 });
+        activeAfterDone = registry.isActiveChild(childId);
+      }, o.sessionId);
+    });
+    const svc = new ChannelSessionService({ registry, store, users: { get: () => ({ username: 'o' }) }, spawn } as never);
+    await svc.send({
+      channelId: 'discord-steering', ownerUserId: 1, policy: { allowedProjectIds: 'all' as const, allowedPaths: () => [] },
+      identity: { platform: 'discord', userId: '7', admin: false, owner: false },
+    }, 'continue the child');
+
+    // DelegateStop, the parent abort tree and the shutdown gate all read this claim — the child's
+    // original run is still in flight, so it must still be registered.
+    expect(activeAfterDone).toBe(true);
+    const live = registry.channelGet('discord-steering')!;
+    expect(registry.childrenOf(live.sessionId)).toEqual([childId]);
+    // Once the original run really ends (endDelegatedCall), the child deregisters cleanly.
+    registry.setChildRunning(live.sessionId, childId, false);
+    expect(registry.isActiveChild(childId)).toBe(false);
+  });
+
   it('requires a delegated child owner to match its durable parent owner', async () => {
     const store = new BrainStore(openDb(':memory:'));
     const registry = new LiveSessionRegistry<Brain>();

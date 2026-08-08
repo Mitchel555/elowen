@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createTrailingCacheBreakpoint } from '../../../src/brain/session/cacheBreakpoints.js';
+import type { TrailingCacheBreakpoint } from '../../../src/brain/session/cacheBreakpoints.js';
 
 const EPHEMERAL = { type: 'ephemeral', ttl: '1h' };
 
@@ -32,14 +33,22 @@ function markerPositions(value: unknown): string[] {
   return out;
 }
 
+/** Run one request through the breakpoint and report its provider outcome — the shape the extension
+ *  wiring produces (before_provider_request, then after_provider_response). */
+function send(bp: TrailingCacheBreakpoint, value: unknown, status = 200): unknown {
+  const result = bp.request(value);
+  bp.response(status);
+  return result;
+}
+
 describe('createTrailingCacheBreakpoint', () => {
   // The whole point: pi-ai's single marker MOVES to the new tail every request, and the previous
   // request's cache write happened exactly where it sat THEN. Re-marking that remembered position makes
   // the next lookup an exact hit, whatever the step appended in between.
   it('marks, on the next request, the message that carried the marker on the previous one', () => {
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([userMessage(marked('ask'))]));
-    const result = addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))]));
+    const result = send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('calling tools'),
       userMessage({ type: 'tool_result', content: 'a' }, marked('done')),
@@ -53,13 +62,13 @@ describe('createTrailingCacheBreakpoint', () => {
   // deliveries), so "the user message before the marked one" was a NEWLY APPENDED message no request had
   // ever written a cache entry at. Only the remembered position is a real write.
   it('pins the remembered position, not a guess, when a step appended several user messages', () => {
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage(marked('turn tail')),
     ]));
-    const result = addTrailing(payload([
+    const result = send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage(plain('turn tail')),
@@ -80,12 +89,12 @@ describe('createTrailingCacheBreakpoint', () => {
       { type: 'text', text: 'You are Claude Code', cache_control: EPHEMERAL },
       { type: 'text', text: 'the real system prompt', cache_control: EPHEMERAL },
     ];
-    const addTrailing = createTrailingCacheBreakpoint();
-    const first = addTrailing(payload([userMessage(marked('ask'))], { system: oauthSystem() }));
+    const bp = createTrailingCacheBreakpoint();
+    const first = send(bp, payload([userMessage(marked('ask'))], { system: oauthSystem() }));
     // Deduplicated from the very first request, so cache write positions never flicker.
     expect((first as MarkedPayload).system?.[0]?.cache_control).toBeUndefined();
     expect((first as MarkedPayload).system?.[1]?.cache_control).toEqual(EPHEMERAL);
-    const result = addTrailing(payload([
+    const result = send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage(marked('next')),
@@ -97,19 +106,51 @@ describe('createTrailingCacheBreakpoint', () => {
   });
 
   // Anthropic rejects a request carrying more than four breakpoints, so a payload already at the limit
-  // with nothing to strip must be left exactly as it is — an outage is worse than a cache miss.
-  it('never takes the payload past four breakpoints', () => {
+  // with nothing to strip must be left exactly as it is — an outage is worse than a cache miss. The
+  // follow-up request proves the module was LIVE and tracking all along (a disabled module would also
+  // leave the at-limit payload alone, which is why that assertion cannot stand by itself).
+  it('never takes the payload past four breakpoints, and resumes the moment a slot frees up', () => {
     const twoMarkedTools = (): Record<string, unknown>[] => [
       { name: 'Read', input_schema: {}, cache_control: EPHEMERAL },
       { name: 'Write', input_schema: {}, cache_control: EPHEMERAL },
     ];
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([userMessage(marked('ask'))], { tools: twoMarkedTools() }));
-    const result = addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))], { tools: twoMarkedTools() }));
+    const atLimit = send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage(marked('next')),
     ], { tools: twoMarkedTools() }));
+    expect(markerPositions(atLimit)).toEqual(['2']);
+    // Same conversation and the SAME tool list, but only one tool marker: a slot is free. Markers are
+    // caching metadata outside the canonical prefix (canonical() strips cache_control), so the
+    // remembered position (the previous request's mark at index 2) is still valid and gets pinned.
+    const oneMarkedOfTwo = (): Record<string, unknown>[] => [
+      { name: 'Read', input_schema: {} },
+      { name: 'Write', input_schema: {}, cache_control: EPHEMERAL },
+    ];
+    const freed = send(bp, payload([
+      userMessage(plain('ask')),
+      assistantMessage('working'),
+      userMessage(plain('next')),
+      assistantMessage('more'),
+      userMessage(marked('newest')),
+    ], { tools: oneMarkedOfTwo() }));
+    expect(markerPositions(freed)).toEqual(['2', '4']);
+  });
+
+  // The four-slot budget is per REQUEST, and a top-level payload marker (the automatic-breakpoint form)
+  // is one of the four even though it sits on no system/tools/messages block. Under-counting it would
+  // add a fifth marker — an HTTP 400 on every such request.
+  it('counts a top-level payload marker toward the four-breakpoint budget', () => {
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))], { cache_control: EPHEMERAL }));
+    const result = send(bp, payload([
+      userMessage(plain('ask')),
+      assistantMessage('working'),
+      userMessage(marked('next')),
+    ], { cache_control: EPHEMERAL }));
+    // system + tools + last-user + root = four markers already: adding the trailing one is forbidden.
     expect(markerPositions(result)).toEqual(['2']);
   });
 
@@ -118,9 +159,9 @@ describe('createTrailingCacheBreakpoint', () => {
   // of the payload the first time that setting changed.
   it('reuses the exact marker value pi-ai used on this request', () => {
     const FIVE_MINUTE = { type: 'ephemeral' };
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([userMessage(marked('ask'))]));
-    const result = addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))]));
+    const result = send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage({ type: 'text', text: 'next', cache_control: FIVE_MINUTE }),
@@ -133,15 +174,15 @@ describe('createTrailingCacheBreakpoint', () => {
   // write that may never have happened, so it must be forgotten, not carried across.
   it('adds nothing across an uncached request, and forgets what it knew before it', () => {
     const bare = { system: [{ type: 'text', text: 'system' }], tools: [{ name: 'Read', input_schema: {} }] };
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([userMessage(marked('ask'))]));
-    const gap = addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))]));
+    const gap = send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage(plain('next')),
     ], bare));
     expect(markerPositions(gap)).toEqual([]);
-    const after = addTrailing(payload([
+    const after = send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage(plain('next')),
@@ -151,32 +192,98 @@ describe('createTrailingCacheBreakpoint', () => {
     expect(markerPositions(after)).toEqual(['4']);
   });
 
-  // Live recall inserts messages mid-history, shifting everything behind them — the remembered INDEX goes
-  // stale but the message itself is still in the payload, one position later, and still worth pinning.
-  it('finds the remembered message by content after a mid-history insertion shifted it', () => {
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([
+  // The lookback only ever finds positions a request actually WROTE, and a request that died on a
+  // 429/529/400 (or was cancelled before the provider took the input) wrote nothing. Remembering its
+  // mark would pin exactly such a phantom position on the next request — which then follows a wide
+  // fan-out often enough (an overload error right before the fan-out's delivery) that the protection
+  // failed precisely when it was needed.
+  it('remembers only a position whose request actually succeeded', () => {
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))])); // succeeded → position 0 is a real write
+    send(bp, payload([
+      userMessage(plain('ask')),
+      assistantMessage('working'),
+      userMessage(marked('doomed')),
+    ]), 429); // the provider never processed this input — position 2 was never written
+    const result = send(bp, payload([
+      userMessage(plain('ask')),
+      assistantMessage('working'),
+      userMessage(plain('doomed')),
+      assistantMessage('retrying'),
+      userMessage(marked('newest')),
+    ]));
+    // The pin lands on the LAST SUCCESSFUL request's mark (index 0), not the failed one's (index 2).
+    expect(markerPositions(result)).toEqual(['0', '4']);
+  });
+
+  it('a request whose response never arrived is not remembered either', () => {
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))]));
+    bp.request(payload([
+      userMessage(plain('ask')),
+      assistantMessage('working'),
+      userMessage(marked('vanished')),
+    ])); // aborted before any response event — no confirmation ever comes
+    const result = send(bp, payload([
+      userMessage(plain('ask')),
+      assistantMessage('working'),
+      userMessage(plain('vanished')),
+      assistantMessage('recovered'),
+      userMessage(marked('newest')),
+    ]));
+    expect(markerPositions(result)).toEqual(['0', '4']);
+  });
+
+  // Anthropic keys cache entries by the CUMULATIVE prefix. After a mid-history insertion the remembered
+  // message still exists one position later, but every entry at or past the insertion point is
+  // unreachable regardless of what is marked — so re-finding the message by its own content and marking
+  // its shifted position (the previous design) could only ever spend the freed slot on a dead position.
+  // The module abstains instead; the next successful request re-remembers and protection resumes.
+  it('abstains after a mid-history insertion instead of marking a position whose prefix changed', () => {
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([
       userMessage(plain('ask')),
       assistantMessage('working'),
       userMessage(marked('turn tail')),
     ]));
-    const result = addTrailing(payload([
+    const result = send(bp, payload([
       userMessage(plain('ask')),
-      userMessage(plain('recalled memory')), // inserted
+      userMessage(plain('recalled memory')), // inserted — the prefix diverges from here on
       assistantMessage('working'),
-      userMessage(plain('turn tail')), // shifted from 2 to 3
+      userMessage(plain('turn tail')), // shifted from 2 to 3; its cache entry is unreachable now
       assistantMessage('more'),
       userMessage(marked('newest')),
     ]));
-    expect(markerPositions(result)).toEqual(['3', '5']);
+    expect(markerPositions(result)).toEqual(['5']);
+  });
+
+  // The strongest reason the identity is the PREFIX hash and not the message hash: the remembered
+  // message can sit at the remembered index with byte-identical content while something EARLIER
+  // changed — after a compaction producing a lookalike tail, or an upstream egress rewrite. The cache
+  // entry is keyed on the whole prefix, so it is gone, and marking the position would be a false pin.
+  it('abstains when the remembered index still matches but the history before it changed', () => {
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([
+      userMessage(plain('original opening')),
+      assistantMessage('working'),
+      userMessage(marked('turn tail')),
+    ]));
+    const result = send(bp, payload([
+      userMessage(plain('REWRITTEN opening')), // same position, same length history — different prefix
+      assistantMessage('working'),
+      userMessage(plain('turn tail')), // identical message at the identical index
+      assistantMessage('more'),
+      userMessage(marked('newest')),
+    ]));
+    expect(markerPositions(result)).toEqual(['4']);
   });
 
   // After a compaction the remembered message is simply gone; marking any other position would pin a
   // spot no request ever wrote a cache entry at.
   it('adds nothing when the remembered message no longer exists', () => {
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([userMessage(marked('original opening'))]));
-    const result = addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('original opening'))]));
+    const result = send(bp, payload([
       userMessage(plain('compaction summary')),
       assistantMessage('working'),
       userMessage(marked('fresh')),
@@ -187,9 +294,9 @@ describe('createTrailingCacheBreakpoint', () => {
   // A marker on a block type Anthropic does not accept one on would make the whole request invalid.
   it('refuses to mark a block type that cannot carry a marker', () => {
     const oddTail = { type: 'something_new', value: 1 };
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([userMessage(marked('ask'), { ...oddTail })]));
-    const result = addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'), { ...oddTail })]));
+    const result = send(bp, payload([
       userMessage(plain('ask'), { ...oddTail }),
       assistantMessage('working'),
       userMessage(marked('next')),
@@ -204,9 +311,9 @@ describe('createTrailingCacheBreakpoint', () => {
     // Unmarked tools keep the payload below the four-marker budget, so this test exercises the
     // overwrite refusal itself rather than hiding behind the budget guard.
     const bareTools = { tools: [{ name: 'Read', input_schema: {} }] };
-    const addTrailing = createTrailingCacheBreakpoint();
-    addTrailing(payload([userMessage(marked('ask'))], bareTools));
-    const result = addTrailing(payload([
+    const bp = createTrailingCacheBreakpoint();
+    send(bp, payload([userMessage(marked('ask'))], bareTools));
+    const result = send(bp, payload([
       userMessage({ type: 'text', text: 'ask', cache_control: STALE }),
       assistantMessage('working'),
       userMessage(marked('next')),
@@ -215,9 +322,10 @@ describe('createTrailingCacheBreakpoint', () => {
   });
 
   it('survives a payload that is not shaped like one', () => {
-    const addTrailing = createTrailingCacheBreakpoint();
-    expect(() => addTrailing(undefined)).not.toThrow();
-    expect(() => addTrailing({ messages: 'nope' })).not.toThrow();
-    expect(() => addTrailing({ messages: [] })).not.toThrow();
+    const bp = createTrailingCacheBreakpoint();
+    expect(() => send(bp, undefined)).not.toThrow();
+    expect(() => send(bp, { messages: 'nope' })).not.toThrow();
+    expect(() => send(bp, { messages: [] })).not.toThrow();
+    expect(() => bp.response(200)).not.toThrow(); // a stray response with no request staged
   });
 });

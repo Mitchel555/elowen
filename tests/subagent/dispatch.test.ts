@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SubagentDispatch } from '../../src/subagent/dispatch.js';
+import { SubagentDispatch, predictsRunnerDispatch } from '../../src/subagent/dispatch.js';
 import { SubagentRunnerUnavailable, type DelegatedTurnRequest, type DelegatedTurnRunner } from '../../src/brain/delegatedTurn.js';
 
 const request: DelegatedTurnRequest = {
@@ -125,10 +125,44 @@ describe('SubagentDispatch — where a delegated turn executes', () => {
 
   it('falls back to in-process when the runner cannot be STARTED — nothing ran anywhere yet', async () => {
     const runner = fakeRunner(async () => { throw new SubagentRunnerUnavailable('fork failed'); });
+    const handed: DelegatedTurnRequest[] = [];
     const d = new SubagentDispatch({
-      runTurn: async () => 'local', fenceRemote: passThrough, runner, runnerEnabled: () => true,
+      runTurn: async (req) => { handed.push(req); return 'local'; },
+      fenceRemote: passThrough, runner, runnerEnabled: () => true,
     });
     expect(await d.send(request, 'do it')).toBe('local');
+    // The fallback executes the SAME request, delegated access included: a workflow node predicted
+    // remote carries its WorkflowAddNodes deny inside that access, so the capability contract survives
+    // the degradation instead of silently widening in-process.
+    expect(handed).toEqual([request]);
+    expect(handed[0]).toBe(request);
+  });
+
+  // The plugin wiring (ctx.delegatedTurnsOutOfProcess in brainCore) and this dispatcher share ONE
+  // predicate, so the prediction a plugin bakes into a child's briefing/tool policy and the routing
+  // decision here cannot drift. This pins that the two answers agree over the whole input matrix.
+  describe('predictsRunnerDispatch — the shared prediction', () => {
+    const cases: { runner: DelegatedTurnRunner | undefined; enabled: boolean; expected: boolean }[] = [
+      { runner: undefined, enabled: true, expected: false },
+      { runner: fakeRunner(async () => 'remote'), enabled: false, expected: false },
+      { runner: fakeRunner(async () => 'remote'), enabled: true, expected: true },
+      { runner: { ...fakeRunner(async () => 'remote'), usable: () => false }, enabled: true, expected: false },
+      { runner: { ...fakeRunner(async () => 'remote'), usable: () => true }, enabled: true, expected: true },
+    ];
+
+    it('answers the routing matrix', () => {
+      for (const c of cases) expect(predictsRunnerDispatch(c.runner, c.enabled)).toBe(c.expected);
+    });
+
+    it('agrees with mode() on every combination — the drift the prediction API existed to prevent', () => {
+      for (const c of cases) {
+        const d = new SubagentDispatch({
+          runTurn: async () => 'local', fenceRemote: passThrough,
+          ...(c.runner ? { runner: c.runner } : {}), runnerEnabled: () => c.enabled,
+        });
+        expect(d.mode()).toBe(predictsRunnerDispatch(c.runner, c.enabled) ? 'runner' : 'in-process');
+      }
+    });
   });
 
   it('does NOT retry a turn that failed inside a healthy runner — that would duplicate its side effects', async () => {

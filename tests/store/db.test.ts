@@ -96,6 +96,57 @@ describe('openDb', () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_brain_sessions_parent'").get()).toBeTruthy();
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='brain_subagent_runs'").get()).toBeTruthy();
   });
+
+  it('backfills spill_ns with the CURRENT id, freezing where the spill files already sit', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'old.db');
+    const old = new Database(path);
+    old.exec(`CREATE TABLE brain_sessions (
+      id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '', work_dir TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    old.prepare("INSERT INTO brain_sessions (id, user_id, model) VALUES ('brain-ch-general', 1, 'm')").run();
+    old.close();
+
+    const db = openDb(path);
+    // A pre-namespace conversation's files sit under its current id; the backfill must freeze exactly
+    // that — a fresh mint here would strand every existing spill dir and its already-sent placeholders.
+    expect((db.prepare("SELECT spill_ns FROM brain_sessions WHERE id='brain-ch-general'").get() as any).spill_ns)
+      .toBe('brain-ch-general');
+  });
+
+  it('v11 re-keys brain_tool_result_spills by occurrence, carrying old rows over as legacy', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'old.db');
+    const old = new Database(path);
+    // The deployed pre-v11 shape: keyed by (session_id, tool_call_id) alone.
+    old.exec(`CREATE TABLE brain_tool_result_spills (
+      session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, mode TEXT NOT NULL,
+      bytes INTEGER NOT NULL, preview TEXT, path TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (session_id, tool_call_id))`);
+    old.prepare(
+      "INSERT INTO brain_tool_result_spills (session_id, tool_call_id, mode, bytes, preview, path) VALUES ('s1', 'call_0', 'time', 9000, NULL, '/spills/s1/call_0.v1-time-9000.txt')"
+    ).run();
+    old.close();
+
+    const db = openDb(path);
+    const cols = db.prepare('PRAGMA table_info(brain_tool_result_spills)').all().map((r: any) => r.name);
+    expect(cols).toContain('occurred_at');
+    expect(cols).toContain('placeholder');
+    // The deployed row survives as a LEGACY row: occurrence unknown (0), placeholder unrecorded (NULL).
+    const row = db.prepare("SELECT * FROM brain_tool_result_spills WHERE session_id='s1'").get() as any;
+    expect(row.occurred_at).toBe(0);
+    expect(row.placeholder).toBeNull();
+    expect(row.path).toBe('/spills/s1/call_0.v1-time-9000.txt');
+    // The widened key is the point: the same tool_call_id may now latch a SECOND occurrence — the old
+    // PK made that an insert conflict, which forced one row to swallow both occurrences.
+    db.prepare(
+      "INSERT INTO brain_tool_result_spills (session_id, tool_call_id, occurred_at, mode, bytes, preview, path, placeholder) VALUES ('s1', 'call_0', 1754600000000, 'time', 5000, NULL, '/spills/s1/call_0.v1-time-5000.txt', '[cleared]')"
+    ).run();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM brain_tool_result_spills WHERE tool_call_id='call_0'").get()).toEqual({ n: 2 });
+  });
 });
 
 describe('openDb — snake_case → TitleCase tool rename', () => {
@@ -185,7 +236,7 @@ describe('openDb — snake_case → TitleCase tool rename', () => {
     mid.close();
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools).toBe('run_command');
-    expect(db.pragma('user_version', { simple: true })).toBe(10); // every one-shot migration is done
+    expect(db.pragma('user_version', { simple: true })).toBe(11); // every one-shot migration is done
   });
 
   it("rewrites a platform role's tool allow-list, keeping the unrestricted markers intact", () => {
@@ -226,7 +277,7 @@ describe('openDb — snake_case → TitleCase tool rename', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('mcp__chrome_devtools__click,mcp__chrome_devtools__performance_analyze_insight,mcp_ghost_thing,Bash');
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
   });
 
   it('prefers the longest matching server, so one name cannot be split by another\'s prefix', () => {
@@ -250,7 +301,7 @@ describe('openDb — snake_case → TitleCase tool rename', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('mcp_chrome_devtools_click');
-    expect(db.pragma('user_version', { simple: true })).toBe(10); // still marked done — there was nothing to do
+    expect(db.pragma('user_version', { simple: true })).toBe(11); // still marked done — there was nothing to do
   });
 
   it('leaves a corrupt permissions blob exactly as found', () => {
@@ -335,7 +386,7 @@ describe('openDb — registry plugin tool rename (v3)', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('Bash,todo_write');
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
   });
 
   it('names the image tools verb-first, the way a one-tool plugin is named', () => {
@@ -359,7 +410,7 @@ describe('openDb — registry plugin tool rename (v3)', () => {
     const db = openDb(path);
     expect((db.prepare('SELECT disabled_tools FROM users WHERE id = 1').get() as { disabled_tools: string }).disabled_tools)
       .toBe('GenerateImage,EditImage,Bash');
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
   });
 });
 
@@ -393,7 +444,7 @@ describe('openDb — session-event kinds (v5)', () => {
   it('accepts a cwd marker on a database that predates the kind, carrying the old markers across', () => {
     const path = seedPre5();
     const db = openDb(path);
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
 
     expect(() => insertCwd(db)).not.toThrow();
     expect(db.prepare('SELECT event_id, kind, detail, created_at FROM brain_session_events ORDER BY event_id').all())
@@ -413,7 +464,7 @@ describe('openDb — session-event kinds (v5)', () => {
     const path = seedPre5();
     openDb(path).close();     // v5 runs here
     const db = openDb(path);  // ...and must not rebuild the table a second time
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
     expect(() => insertCwd(db)).not.toThrow();
     expect(db.prepare('SELECT COUNT(*) AS n FROM brain_session_events').get()).toEqual({ n: 2 });
   });
@@ -441,7 +492,7 @@ describe('openDb — drop personality tables (v6)', () => {
   it('drops both personality tables (and their indexes) on a database that predates the collapse', () => {
     const path = seedPre6();
     const db = openDb(path);
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
     expect(hasTable(db, 'personality_profiles')).toBe(false);
     expect(hasTable(db, 'personality_active_profiles')).toBe(false);
     // The index went with its table — no orphan left behind.
@@ -450,7 +501,7 @@ describe('openDb — drop personality tables (v6)', () => {
 
   it('is a no-op on a fresh database that never had the tables (idempotent)', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
     expect(hasTable(db, 'personality_profiles')).toBe(false);
     expect(hasTable(db, 'personality_active_profiles')).toBe(false);
   });
@@ -501,7 +552,7 @@ describe('openDb — monotonic user ids (v7)', () => {
 
   it('rebuilds a legacy table, preserving every row, id and column value', () => {
     const db = openDb(seedPre7());
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
     expect(db.prepare('SELECT id, username, password_hash, is_admin, email, created_at FROM users ORDER BY id').all())
       .toEqual([
         { id: 1, username: 'alice', password_hash: 'h1', is_admin: 1, email: 'a@x', created_at: '2026-01-01 09:00:00' },
@@ -562,13 +613,13 @@ describe('openDb — monotonic user ids (v7)', () => {
     seeded.close();
 
     const db = openDb(path);
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
     expect(addUser(db, 'dave')).toBe(10); // clears the orphaned 9 rather than reissuing it
   });
 
   it('leaves a fresh database alone — already monotonic, nothing to rebuild', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
     const a = addUser(db, 'alice');
     db.prepare('DELETE FROM users WHERE id = ?').run(a);
     expect(addUser(db, 'bob')).toBe(a + 1);
@@ -578,7 +629,7 @@ describe('openDb — monotonic user ids (v7)', () => {
     const path = seedPre7();
     openDb(path).close();      // v7 runs here
     const db = openDb(path);   // ...and must not rebuild a second time
-    expect(db.pragma('user_version', { simple: true })).toBe(10);
+    expect(db.pragma('user_version', { simple: true })).toBe(11);
     expect(db.prepare('SELECT COUNT(*) AS n FROM users').get()).toEqual({ n: 3 });
     expect(addUser(db, 'dave')).toBe(4); // counter survived the reopen, so it did not restart at max(id)
   });

@@ -94,6 +94,32 @@ export interface ManagedSessionView {
   tokens: number;
 }
 
+/** Answers "does the workflow ENGINE still hold this DAG?" — true/false from the engine, undefined when
+ *  the engine cannot be asked (registry not loaded yet, control absent, unwired test harness). */
+export type WorkflowLivenessProbe = (workflowId: string) => boolean | undefined;
+
+/** Module-level like the messageView caps setters, because the status service is constructed deep inside
+ *  BrainService while the plugin registry lives beside it in the daemon core — threading the probe through
+ *  every intermediate constructor would touch each of them for one read-only lookup. */
+let workflowEngineHolds: WorkflowLivenessProbe = () => undefined;
+export function setWorkflowLivenessProbe(probe: WorkflowLivenessProbe): void { workflowEngineHolds = probe; }
+
+/** The CURRENT probe's answer for one workflow — the single read path `workflowRuns` consults, exported
+ *  so the daemon wiring test can observe what buildBrainCore actually installed (the setter alone is
+ *  write-only, and a deleted production call would otherwise be invisible to every test). */
+export function probeWorkflowLiveness(workflowId: string): boolean | undefined { return workflowEngineHolds(workflowId); }
+
+/** The daemon wiring for the probe: ask the loaded plugin registry's `workflow` control whether the
+ *  engine still holds the DAG. `registry` is a live getter (the registry is loaded lazily and replaced on
+ *  every plugin reload); before the first load it yields undefined and the probe honestly answers "cannot
+ *  tell" instead of guessing. Kept here, next to its consumer, so the closure is a testable unit rather
+ *  than an inline lambda in brainCore no test can reach. */
+export function workflowEngineProbeFrom(
+  registry: () => { control(name: 'workflow'): { isWorkflowLive(input: { workflowId: string }): boolean } | undefined } | undefined,
+): WorkflowLivenessProbe {
+  return (workflowId) => registry()?.control('workflow')?.isWorkflowLive({ workflowId });
+}
+
 /** Take the `limit` views ending just before `before` (default: the tail = newest). `start` is clamped so
  *  an out-of-range `before` still yields a valid window, and `nextBefore` points at this window's start so
  *  the next fetch continues seamlessly older. */
@@ -142,14 +168,24 @@ export class BrainStatusService {
    *  a filter: a workflow row is the only thing that renders its transcript marker, so hiding it would lose
    *  the record of what ran — it is terminalized for display instead.
    *
-   *  Keyed on the ORIGIN's liveness, not childrenOf: a genuinely running workflow has real windows with
-   *  zero live children (between one node ending and tick() launching the next), which a children-based
-   *  check would misread as an orphan and flicker. */
+   *  A `running` row is verified against the ENGINE first (the workflow control's liveness probe): the
+   *  row is not authoritative — a failed terminal snapshot or missed boot reconcile leaves it claiming
+   *  `running` while the engine dropped the DAG long ago, and with a live origin session that stale row
+   *  would keep synthesizing a phantom anchor until the next restart. The engine's answer wins in BOTH
+   *  directions (a background DAG keeps running after its origin session is reaped).
+   *
+   *  Only when the engine cannot be asked (registry not loaded, unwired tests) does this fall back to the
+   *  origin session's liveness — and deliberately not childrenOf: a genuinely running workflow has real
+   *  windows with zero live children (between one node ending and tick() launching the next), which a
+   *  children-based check would misread as an orphan and flicker. */
   private workflowRuns(sessionId: string): BrainWorkflowRun[] {
-    const live = this.d.sessions.has(sessionId)
+    const sessionLive = this.d.sessions.has(sessionId)
       || (isChannelSession(sessionId) && !!this.d.sessions.channelGet(channelIdOf(sessionId)));
-    return this.d.store.getWorkflowRuns(sessionId)
-      .map((run) => (live || run.status !== 'running' ? run : terminalizeWorkflow(run)));
+    return this.d.store.getWorkflowRuns(sessionId).map((run) => {
+      if (run.status !== 'running') return run;
+      const live = probeWorkflowLiveness(run.id) ?? sessionLive;
+      return live ? run : terminalizeWorkflow(run);
+    });
   }
 
   /** The one place a conversation's durable history is shaped: rows plus every sidecar. Callers pass rows

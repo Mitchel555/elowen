@@ -90,11 +90,13 @@ export type BrainSegment =
 export interface BrainMessageImage { url: string; mimeType: string }
 
 /** A durable display row (the `GET /brain/messages` payload). `id` is the SQLite message UUID when the
- *  source is a real store row (the only case served over HTTP); structural callers may omit it. `text` is
- *  the flat reply; `segments` preserve the true order. `kind`/`detail` mark a non-message system row (a
- *  model/mode/rename/cwd event) rather than an assistant/user turn. `images` are a user row's surviving
- *  attachments. */
-export interface BrainMessageView { id?: string; role: string; text: string; segments?: BrainSegment[]; kind?: string; detail?: string; images?: BrainMessageImage[] }
+ *  source is a real store row; structural callers may omit it. The ONE non-row view served over HTTP is a
+ *  synthetic workflow anchor (see withWorkflowAnchors), whose derived `wf-anchor-<toolCallId>` id is
+ *  stable across refetches and marked with `synthetic: true` so a client can tell it from — and drop it
+ *  in favour of — the real anchor row once paging loads that row. `text` is the flat reply; `segments`
+ *  preserve the true order. `kind`/`detail` mark a non-message system row (a model/mode/rename/cwd event)
+ *  rather than an assistant/user turn. `images` are a user row's surviving attachments. */
+export interface BrainMessageView { id?: string; synthetic?: boolean; role: string; text: string; segments?: BrainSegment[]; kind?: string; detail?: string; images?: BrainMessageImage[] }
 
 /** The mode a turn runs in: `build` (the default), `plan` (planning only, tools clamped) or `workflow`.
  *  Part of the wire contract because a surface stamps it per send AND reads it back off the daemon: the

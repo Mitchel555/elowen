@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { openDb } from '../../src/store/db.js';
 import { BrainStore } from '../../src/store/brainStore.js';
-import { BrainStatusService } from '../../src/brain/service/statusService.js';
+import { BrainStatusService, setWorkflowLivenessProbe } from '../../src/brain/service/statusService.js';
 import { ConversationLifecycle } from '../../src/brain/service/lifecycle.js';
 import { LiveSessionRegistry } from '../../src/brain/session/liveRegistry.js';
 import { ClientAttachments } from '../../src/brain/service/attachments.js';
@@ -147,5 +147,55 @@ describe('status reads pin a synthetic anchor for a running workflow', () => {
     seedCompactedTail(store, 2);
     store.upsertWorkflowRun(SESSION, runningRun);
     expect(anchorItems(status.messagesPage(1, SESSION, { limit: 50 }).items)).toHaveLength(0);
+  });
+
+  // history() is the channel-connect read — the fourth endpoint that must pin. Its own positive test,
+  // because removing just its withWorkflowAnchors call would leave every other endpoint's test green.
+  it('history (the active-conversation read) carries the anchor too', () => {
+    const { store, sessions, status } = harness();
+    seedCompactedTail(store, 3);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    liveOrigin(sessions);
+    const anchors = anchorItems(status.history(1));
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]?.wf).toMatchObject({ id: 'wf-1', status: 'running' });
+  });
+});
+
+// "Running" must mean the ENGINE still holds the DAG, not merely that the origin PI session is alive:
+// when a terminal snapshot fails to persist (or boot reconcile misses one), the row claims `running`
+// forever, and a session-liveness check would synthesize a phantom anchor until the next restart.
+describe('the engine liveness probe overrides session-liveness guessing', () => {
+  afterEach(() => { setWorkflowLivenessProbe(() => undefined); });
+
+  it('a running row the engine disowns is terminalized despite a live origin session', () => {
+    const { store, sessions, status } = harness();
+    seedCompactedTail(store, 2);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    liveOrigin(sessions);
+    setWorkflowLivenessProbe((id) => (id === 'wf-1' ? false : undefined));
+    expect(anchorItems(status.messagesPage(1, SESSION, { limit: 50 }).items)).toHaveLength(0);
+    expect(anchorItems(status.history(1))).toHaveLength(0);
+  });
+
+  it('a running row the engine confirms stays pinned even without a live origin session', () => {
+    // The origin PI session can be reaped while a BACKGROUND workflow keeps running — the engine's
+    // answer must win in this direction too, or the running DAG vanishes exactly like the incident.
+    const { store, status } = harness();
+    seedCompactedTail(store, 2);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    setWorkflowLivenessProbe((id) => (id === 'wf-1' ? true : undefined));
+    const anchors = anchorItems(status.messagesPage(1, SESSION, { limit: 50 }).items);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]?.wf).toMatchObject({ id: 'wf-1', status: 'running' });
+  });
+
+  it('an unanswerable probe falls back to origin-session liveness (boot window, unwired tests)', () => {
+    const { store, sessions, status } = harness();
+    seedCompactedTail(store, 2);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    liveOrigin(sessions);
+    setWorkflowLivenessProbe(() => undefined);
+    expect(anchorItems(status.messagesPage(1, SESSION, { limit: 50 }).items)).toHaveLength(1);
   });
 });

@@ -101,6 +101,24 @@ describe('shapeBrainMessages: durable workflow state', () => {
     expect(view?.segments?.[0]).toMatchObject({ kind: 'tool', id: 'call-1', name: 'WorkflowStart', wf: run });
     expect(view?.segments?.[1]).not.toHaveProperty('wf');
   });
+
+  // An id collision must not decorate a foreign tool with workflow state: the DAG belongs to its
+  // WorkflowStart row only, so attachment is gated on the tool NAME as well as the call id.
+  it('never attaches the DAG to a non-WorkflowStart call that happens to carry the same id', () => {
+    const rows = [{
+      role: 'assistant',
+      content: JSON.stringify({
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'call-1', name: 'Read', arguments: { path: 'src/a.ts' } }],
+      }),
+    }];
+    const run = {
+      id: 'wf-1', toolCallId: 'call-1', status: 'running' as const,
+      nodes: [{ id: 'gather', task: 'gather facts', status: 'running' as const, deps: [] }],
+    };
+    const [view] = shapeBrainMessages(rows, [], [], [run]);
+    expect(view?.segments?.[0]).not.toHaveProperty('wf');
+  });
 });
 
 describe('withWorkflowAnchors: orphaned running workflows', () => {
@@ -121,12 +139,29 @@ describe('withWorkflowAnchors: orphaned running workflows', () => {
     expect(views).toHaveLength(3);
     expect(views[0]).toEqual({
       id: 'wf-anchor-call-wf',
+      // The one HTTP-served view whose id is NOT a SQLite row UUID — marked so a client can tell it
+      // from, and drop it in favour of, the real anchor row once paging loads that row.
+      synthetic: true,
       role: 'assistant',
       text: '',
       segments: [{ kind: 'tool', name: 'WorkflowStart', id: 'call-wf', detail: 'Ship it', wf: runningRun }],
     });
     // The tail is untouched and keeps its order.
     expect(views.slice(1)).toEqual(tailViews());
+  });
+
+  // The latent collision case: a foreign tool segment carrying the same call id must not count as the
+  // anchor — suppressing the synthesis over it would key the panel and every later live snapshot to a
+  // row that is not a workflow anchor at all.
+  it('still synthesizes when only a NON-WorkflowStart segment carries the anchor id', () => {
+    const collided = [{
+      role: 'assistant' as const, text: '',
+      segments: [{ kind: 'tool' as const, name: 'Read', id: 'call-wf' }],
+    }];
+    const views = withWorkflowAnchors(collided, [runningRun]);
+    expect(views).toHaveLength(2);
+    expect(views[0]).toMatchObject({ id: 'wf-anchor-call-wf', synthetic: true });
+    expect(views[0]?.segments?.[0]).toMatchObject({ name: 'WorkflowStart', id: 'call-wf', wf: runningRun });
   });
 
   it('does nothing when the real anchor row is among the views', () => {

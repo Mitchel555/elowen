@@ -916,12 +916,6 @@ export async function buildApp(opts: BuildOpts) {
     const stopIdleSessionReap = clock.setInterval(() => {
       void brain?.reapIdleLiveSessions().catch((e) => log.error('idle live-session reap failed', e));
     }, 60_000);
-    // Compact open-terminal conversations whose prompt cache has provably expired (idle past the shared
-    // cold-cache gate): the cached prefix is gone either way, so summarizing now costs nothing extra and
-    // the user's next message re-caches the compacted context instead of the full stale history.
-    const stopIdleCompaction = clock.setInterval(() => {
-      void brain?.compactIdleLiveSessions().catch((e) => log.error('idle compaction sweep failed', e));
-    }, 60_000);
     // PR feedback loop (no-op unless PR mode + open PRs): poll each open PR for fresh actionable review
     // feedback and, within the fix budget, route it through the pilot (1..N fix phases on the mission's
     // exec) then re-engage the mission so an agent applies them. Relay-only (no agent pilot) degrades to
@@ -961,7 +955,7 @@ export async function buildApp(opts: BuildOpts) {
     const stopEmbedQueue = clock.setInterval(() => {
       void embedQueue.drain().catch((e) => log.error('embed queue drain failed', e));
     }, 30_000);
-    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopMemoryRetentionSweep(); stopChatImageSweep(); stopTicketSweep(); stopTerminalSweep(); stopIdleSessionReap(); stopIdleCompaction(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
+    return () => { stopDeriver(); stopOverseer(); stopScheduler(); stopJanitor(); stopStuck(); stopOverseerWatchdog(); stopDecisionSweep(); stopTokenPurge(); stopEventPurge(); stopSessionPurge(); stopMemoryRetentionSweep(); stopChatImageSweep(); stopTicketSweep(); stopTerminalSweep(); stopIdleSessionReap(); stopPrFeedback(); stopBrainWorkerWatchdog(); stopEmbedQueue(); };
   };
   return { app, startLoops, tickets, tmux };
 }

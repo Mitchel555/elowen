@@ -28,9 +28,9 @@ import { globalMemoryRecallScope } from './memoryRecallScope.js';
 import type { MemoryCurator } from './memoryCurator.js';
 import type { ConversationTitler } from './conversationTitler.js';
 import type { LiveSessionRegistry } from './session/liveRegistry.js';
-import type { LiveBrain, QueuedMsg, SpawnOpts } from './session/liveBrain.js';
+import type { LiveBrain, QueuedUserEcho, SpawnOpts } from './session/liveBrain.js';
 import { DEFAULT_AUTO_COMPACT_PCT } from './session/liveBrain.js';
-import { clearDeliveredUserEchoes, enqueueMirrored } from './session/queueMirror.js';
+import { clearDeliveredUserEchoes, echoDeliveredId, enqueueMirrored } from './session/queueMirror.js';
 import { abortSessionWork } from './session/abortSessionWork.js';
 
 /** How a delegated steer ended: `delivered` = the message provably reached the child's context (its
@@ -415,7 +415,10 @@ export class ChannelSessionService {
             ? this.d.store.getSubagentRuns(ch.sessionId).find((run) => run.sessionId === u.sessionId)?.status
             : undefined;
           if (!this.d.store.upsertSubagentRun(ch.sessionId, u)) return;
-          this.d.registry.setChildRunning(ch.sessionId, u.sessionId, u.status === 'running');
+          // 'progress' source, mirroring turnContextBuilder.emitSubagent: the plugin's terminal row for a
+          // steered continuation must not release the claim begin/endDelegatedCall holds for the child's
+          // still-running original call.
+          this.d.registry.setChildRunning(ch.sessionId, u.sessionId, u.status === 'running', 'progress');
           ch.replay.publish({ type: 'subagent', ...u });
           recordSubagentFinishMarker(this.d.store, ch.sessionId, (event) => ch.replay.publish(event), prevStatus, u);
         };
@@ -566,12 +569,15 @@ export class ChannelSessionService {
    *  turn that ends first leaves the message stranded in an in-memory queue that dies with the live record
    *  (LRU eviction, release to the runner) — silently. The transcript is the only honest confirmation
    *  (the same reasoning as BrainTurnRunner's resultInContext): a delivered queue item is persisted as a
-   *  durable user row at message_start, so this method enqueues and then waits for that row. A turn that
-   *  ends with the item still queued gets it REMOVED — the caller's fallback turn re-sends the text, and
-   *  the next prompt's queue drain would otherwise deliver the stale copy alongside it, putting the same
-   *  message in front of the model twice. The wait is bounded by the child's own turn: it ends at
-   *  delivery, at turn end, or with the delegation's abort fences (the stall watchdog aborts a wedged
-   *  child, so this can never hang past it).
+   *  durable user row at message_start, and deliverQueuedUserEcho stamps THIS steer's echo object in the
+   *  same beat — so the wait below is correlated per message, never by text. Matching the transcript by
+   *  text would let one durable row confirm TWO concurrent steers that happen to carry the same words,
+   *  leaving the second falsely confirmed and its copy stranded in the queue. A turn that ends with the
+   *  item still queued gets it REMOVED — the caller's fallback turn re-sends the text, and the next
+   *  prompt's queue drain would otherwise deliver the stale copy alongside it, putting the same message
+   *  in front of the model twice. The wait is bounded by the child's own turn: it ends at delivery, at
+   *  turn end, or with the delegation's abort fences (the stall watchdog aborts a wedged child, so this
+   *  can never hang past it).
    *
    *  Authorization stays with the caller (DelegatedSessionService.continueSubagent's ownership + scope
    *  guards; the runner invokes this only for a steer verb the daemon already guarded). The parent-link
@@ -585,15 +591,13 @@ export class ChannelSessionService {
     const ch = this.d.registry.channelGet(channelId);
     if (!ch?.session.isStreaming) return 'idle';
     if (aborted()) throw new Error('delegation aborted');
-    // Everything at or past this index is "new since this steer" — the only rows its delivery can produce.
-    const baseline = this.d.store.getMessages(sessionId).length;
-    const item = await enqueueMirrored(ch, 'steer', text, undefined, {
-      persistText: text, displayText: text, sourceText: text, publish: true,
-    });
-    const landed = (): boolean => this.d.store.getMessages(sessionId).slice(baseline).some((m) => {
-      if (m.role !== 'user') return false;
-      try { return (JSON.parse(m.content) as { content?: unknown }).content === text; } catch { return false; }
-    });
+    // This FRESH echo object is the steer's whole identity: deliverQueuedUserEcho stamps the durable row
+    // id onto exactly this object at message_start, and every clear-and-requeue path re-enqueues the same
+    // echo reference — so the checks below survive a concurrent cleanup rebuilding the queue's wrapper
+    // objects, and can never be satisfied by another steer's row.
+    const echo: QueuedUserEcho = { persistText: text, displayText: text, sourceText: text, publish: true };
+    await enqueueMirrored(ch, 'steer', text, undefined, echo);
+    const landed = (): boolean => echoDeliveredId(echo) !== undefined;
     while (true) {
       // Same fence as the ownerSteer fast path, re-checked every beat: a stop clears PI's queue, and the
       // copy enqueued after that clear must be cleared again before rejecting.
@@ -607,22 +611,24 @@ export class ChannelSessionService {
       // The live record died under us (eviction, release to the runner) — the queue died with it.
       if (!live) return 'idle';
       if (!live.session.isStreaming) {
-        if ((live.queuedSteer ?? []).includes(item)) { this.removeQueuedItem(live, item); return 'idle'; }
-        // Gone from the queue with no durable row yet: one final read decides between "persisted in the
-        // same beat the turn ended" and "erased by an abort/clear".
+        if ((live.queuedSteer ?? []).some((m) => m.echo === echo)) { this.removeQueuedSteer(live, echo); return 'idle'; }
+        // Gone from the queue with no delivery stamp yet: one final read decides between "delivered in
+        // the same beat the turn ended" and "erased by an abort/clear".
         return landed() ? 'delivered' : 'idle';
       }
       await new Promise((resolve) => setTimeout(resolve, STEER_POLL_MS));
     }
   }
 
-  /** Drop ONE mirror item from PI's queue while keeping every other queued message (with its images) —
-   *  the same clear-and-requeue dance as SessionQueueService.queueRemove, targeted by identity instead of
-   *  position. */
-  private removeQueuedItem(live: LiveBrain, item: QueuedMsg): void {
+  /** Drop the steer carrying `echo` from PI's queue while keeping every other queued message (with its
+   *  images) — the same clear-and-requeue dance as SessionQueueService.queueRemove. Targeted by ECHO
+   *  identity because the wrapper objects do NOT survive a concurrent clear-and-requeue (each requeue
+   *  builds fresh QueuedMsg wrappers around the same echoes): matching wrappers would let another
+   *  waiter's cleanup hide this steer from its own, leaving a stale copy queued for double delivery. */
+  private removeQueuedSteer(live: LiveBrain, echo: QueuedUserEcho): void {
     const survivors = [
-      ...(live.queuedSteer ?? []).filter((m) => m !== item).map((m) => ({ kind: 'steer' as const, m })),
-      ...(live.queuedFollowUp ?? []).filter((m) => m !== item).map((m) => ({ kind: 'followUp' as const, m })),
+      ...(live.queuedSteer ?? []).filter((m) => m.echo !== echo).map((m) => ({ kind: 'steer' as const, m })),
+      ...(live.queuedFollowUp ?? []).map((m) => ({ kind: 'followUp' as const, m })),
     ];
     live.session.clearQueue();
     clearDeliveredUserEchoes(live);

@@ -13,13 +13,13 @@ describe('event loop lag monitor', () => {
   it('reports a low reading on an idle loop', async () => {
     const monitor = startLoopLagMonitor();
     await tick(120);
-    const { p50, max, stalledMs, windowMs } = monitor.lag();
+    const { p50, max, severeStalledMs, windowMs } = monitor.lag();
     monitor.stop();
     // The sampler's own resolution is the floor of every reading, so this is "small", not "zero".
     expect(p50).toBeLessThan(5);
     expect(max).toBeLessThan(100);
     // An idle loop must not accumulate fabricated stall time out of scheduler jitter.
-    expect(stalledMs).toBeLessThan(50);
+    expect(severeStalledMs).toBeLessThan(50);
     expect(windowMs).toBeGreaterThan(0);
     expect(windowMs).toBeLessThanOrEqual(60_000);
   });
@@ -67,30 +67,58 @@ describe('event loop lag monitor', () => {
   });
 
   // The production discrepancy this metric exists for: /health measured 19.9 s from the client while
-  // `max` said 4.1 s — a request queues through the SUM of stalls, and only `stalledMs` shows that sum.
-  it('stalledMs accumulates the sum of stalls while max holds only the worst single one', async () => {
+  // `max` said 4.1 s — a request queues through the SUM of stalls, and only `severeStalledMs` shows that sum.
+  it('severeStalledMs accumulates the sum of stalls while max holds only the worst single one', async () => {
     const monitor = startLoopLagMonitor(2000); // long window: no roll interferes with the sequence
     await tick(150);
     blockLoop(200); await tick(30);
     blockLoop(200); await tick(30);
     blockLoop(200); await tick(100);
-    const { max, stalledMs } = monitor.lag();
+    const { max, severeStalledMs } = monitor.lag();
     monitor.stop();
     expect(max).toBeLessThan(450); // no single stall was anywhere near the sum
-    expect(stalledMs).toBeGreaterThan(250);
-    expect(stalledMs).toBeGreaterThan(max); // the sum is the bigger — and the truer — queueing bound
+    expect(severeStalledMs).toBeGreaterThan(250);
+    expect(severeStalledMs).toBeGreaterThan(max); // the sum is the bigger — and the truer — queueing bound
   });
 
-  // Sub-floor pauses are scheduler noise, not stalls: summing them over a 60 s window would fabricate
-  // seconds of "stall" on a healthy loop, which is exactly why stalledMs has a floor.
-  it('does not count sub-floor pauses as stall time', async () => {
+  // Sub-floor pauses are excluded from the SEVERE sum by design (summing scheduler jitter over a 60 s
+  // window would fabricate seconds of "stall" on a healthy loop) — the name carries the floor. The
+  // pattern is NOT invisible though: dense sub-floor lateness saturates the delay histogram, so the
+  // percentiles are where a client's cumulative wait behind many small stalls shows up.
+  it('excludes sub-floor pauses from severeStalledMs but keeps them visible in the percentiles', async () => {
     const monitor = startLoopLagMonitor(4000);
     // A dense stream of pauses, each safely below the 50 ms floor: individually they are the jitter the
-    // floor exists to ignore, but without the floor their gaps sum to hundreds of ms of fake "stall".
+    // floor exists to ignore, but together they are hundreds of ms a queued request really waited.
     for (let i = 0; i < 14; i++) { blockLoop(35); await tick(55); }
-    const { stalledMs } = monitor.lag();
+    const { severeStalledMs, p99 } = monitor.lag();
     monitor.stop();
-    expect(stalledMs).toBeLessThan(50);
+    expect(severeStalledMs).toBeLessThan(50);
+    // ~40 % of histogram samples sit inside a ~35 ms block, so the tail percentile must be well above
+    // the idle floor — this is the half of the contract the severe sum deliberately does not carry.
+    expect(p99).toBeGreaterThan(10);
+  });
+
+  // Regression for a reproduced accounting bug: a stall spanning a window roll was credited in FULL to
+  // both halves, so a reader could be told "351 ms stalled" about a 120 ms window. The intervals must
+  // be clipped to the window actually reported.
+  it('clips a stall spanning a window roll — severeStalledMs never exceeds windowMs', async () => {
+    // 150 ms window → halves roll every 75 ms. The phases matter: when the block ends, the overdue
+    // roll (due at 150) fires BEFORE the overdue stall tick (due at 200), so the recorded stall
+    // interval straddles the new window edge — the exact shape the old per-half accounting credited
+    // in full to both windows ("351 ms stalled" reported about a 120 ms window, reproduced).
+    const monitor = startLoopLagMonitor(150);
+    await tick(130); // baseline stall tick at ~100, first roll at ~75 — both halves in rotation
+    blockLoop(400);
+    await tick(30);
+    const fresh = monitor.lag(); // this window still reaches back before the stall: all of it counts
+    expect(fresh.severeStalledMs).toBeGreaterThan(250);
+    expect(fresh.severeStalledMs).toBeLessThanOrEqual(fresh.windowMs);
+    // Past the next roll the read window STARTS just after the stall interval's end: only the sliver
+    // inside the window may count, however long the interval itself was.
+    await tick(70);
+    const rolled = monitor.lag();
+    monitor.stop();
+    expect(rolled.severeStalledMs).toBeLessThanOrEqual(rolled.windowMs);
   });
 
   it('stops sampling when stopped', async () => {
@@ -109,8 +137,8 @@ describe('loop lag watchdog', () => {
     let i = 0;
     return { lag: () => readings[Math.min(i++, readings.length - 1)], stop: () => { /* nothing */ } };
   };
-  const quiet: LoopLag = { p50: 1, p99: 1, max: 2, stalledMs: 0, windowMs: 45_000 };
-  const busy: LoopLag = { p50: 40, p99: 400, max: 900, stalledMs: 3000, windowMs: 45_000 };
+  const quiet: LoopLag = { p50: 1, p99: 1, max: 2, severeStalledMs: 0, windowMs: 45_000 };
+  const busy: LoopLag = { p50: 40, p99: 400, max: 900, severeStalledMs: 3000, windowMs: 45_000 };
 
   const collect = async (readings: LoopLag[], checks: number) => {
     const lines: string[] = [];
@@ -132,7 +160,7 @@ describe('loop lag watchdog', () => {
     expect(lines.filter((l) => l.startsWith('WARN'))).toHaveLength(1);
     expect(lines[0]).toContain('p99 400ms');
     // The sum of stalls is the number that explains client-observed latency; the warning must carry it.
-    expect(lines[0]).toContain('stalled 3000ms of the last 45s');
+    expect(lines[0]).toContain('severe stalls 3000ms of the last 45s');
   });
 
   it('reports recovery, and warns again if it degrades a second time', async () => {

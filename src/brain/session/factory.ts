@@ -14,7 +14,7 @@ import {
   latestCompaction,
   type PendingCompactionMessage,
 } from './turnBoundaryCompaction.js';
-import { assessIdleCompaction, type AssessIdleCompaction } from './idleCompaction.js';
+import { assessColdCompaction, type AssessColdCompaction } from './coldStartCompaction.js';
 import { installHistoryImageStripping } from './historyImageStripping.js';
 import { imagesRejected } from './imageRejection.js';
 import { installToolResultClearing } from './toolResultClearing.js';
@@ -331,10 +331,10 @@ export class BrainSessionFactory {
   async create(spec: SessionSpec): Promise<{
     session: AgentSession;
     applyCompaction: ApplyCompaction;
-    /** Live idle-compaction eligibility for THIS session, consulted by the daemon's idle sweep. Built
-     *  here because only the factory closure holds the pieces together: the live proactive flag, the
-     *  circuit breaker and the fixed-cost/tail estimates. */
-    assessIdleCompaction: AssessIdleCompaction;
+    /** Live cold-start-compaction eligibility for THIS session, consulted by the turn runner on the
+     *  first turn after the prompt cache expired. Built here because only the factory closure holds the
+     *  pieces together: the live proactive flag, the circuit breaker and the fixed-cost/tail estimates. */
+    assessColdCompaction: AssessColdCompaction;
   }> {
     // Ensure the store row (sole source of truth) exists before rehydration.
     const existing = this.d.store.getSession(spec.sessionId);
@@ -476,6 +476,7 @@ export class BrainSessionFactory {
       latchStore: {
         load: () => this.d.store.toolResultSpills(spec.sessionId),
         save: (entry) => { this.d.store.upsertToolResultSpill(spec.sessionId, entry); },
+        remove: (toolCallId, occurredAt) => { this.d.store.deleteToolResultSpill(spec.sessionId, toolCallId, occurredAt); },
       },
     });
     // cacheWatch is the tripwire that logs whether a warm drop came from system, tools, a history segment,
@@ -544,20 +545,23 @@ export class BrainSessionFactory {
     session.subscribe(createSessionPersistenceProjector(
       this.d.store, session, spec.sessionId, spec.model.contextWindow, this.d.chatImagesDir,
     ));
-    // Idle-compaction eligibility, read live at every sweep tick: the proactive flag and the breaker
+    // Cold-start-compaction eligibility, read live at every check: the proactive flag and the breaker
     // state may change during the session's life, and the context/floor estimates must reflect the
     // history as it stands. `contextTokens` measures the same way PI's own shouldCompact does (newest
     // provider usage + estimated unseen tail); the floor mirrors the breaker budget's shape but with the
-    // REAL retained tail for the trigger currently in force, not the minimal seed.
-    const assessIdle: AssessIdleCompaction = () => assessIdleCompaction({
+    // REAL retained tail for the trigger currently in force, not the minimal seed. The summary allowance
+    // doubles as the break-even's expected summary OUTPUT size — the same "a few thousand tokens in
+    // practice" estimate the floor already budgets for the summary's presence in context.
+    const assessCold: AssessColdCompaction = () => assessColdCompaction({
       proactive: () => proactiveCompaction,
       breakerBlocks: () => compactionBreaker.blocks('threshold'),
       contextTokens: () => estimatedContextTokens(session.messages, latestCompaction(sessionManager)?.timestamp),
       floorTokens: () => fixedCostTokens + COMPACTION_SUMMARY_ALLOWANCE
         + compactionKeepRecentTokens(thresholdBudget.trigger ?? spec.model.contextWindow, fixedCostTokens),
+      summaryOutputTokens: () => COMPACTION_SUMMARY_ALLOWANCE,
     });
     // Last, so observers see the finished session — and before the caller can run a turn on it.
     await spec.onSpawned?.({ sessionId: spec.sessionId, messages: session.messages });
-    return { session, applyCompaction, assessIdleCompaction: assessIdle };
+    return { session, applyCompaction, assessColdCompaction: assessCold };
   }
 }

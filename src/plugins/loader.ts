@@ -115,8 +115,14 @@ export interface LoadPluginsOptions {
    *  daemon, which connects at boot exactly as before. */
   mcpBridgeSnapshot?: McpBridgeSnapshot;
   /** Whether a delegated child turn dispatched from this process may run in a forked runner process,
-   *  exposed to plugins as ctx.delegatedTurnsOutOfProcess() (read live per delegation). Absent → false. */
-  delegatedTurnsOutOfProcess?: () => boolean;
+   *  exposed to plugins as ctx.delegatedTurnsOutOfProcess() (read live per delegation).
+   *
+   *  Deliberately REQUIRED, unlike its optional siblings: the workflow engine derives a node's whole
+   *  expansion contract (briefing + WorkflowAddNodes deny) from this answer, and a caller that silently
+   *  fell back to the registry's `false` default would re-invite remote nodes to call a tool that can
+   *  only answer "no running workflow" in the runner. A process with no runner states that explicitly
+   *  (`() => false`); dropping the wiring in brainCore now fails the typecheck instead of shipping. */
+  delegatedTurnsOutOfProcess: () => boolean;
   logger: PluginLogger;
 }
 

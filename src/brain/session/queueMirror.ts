@@ -36,9 +36,9 @@ export function queuedWithPending(live: LiveBrain): { id: string; text: string }
  *  and its clearQueue() drops image attachments (they live on the lower-level agent queue, not the text
  *  arrays). A positional queue-remove drains the queue and re-queues the survivors, so without an
  *  image-carrying copy every kept message would lose its image. `steer` interrupts the running turn;
- *  `followUp` waits for it. Returns the mirror item: reconcileMirrors keeps object identity, so a caller
- *  that must know whether ITS message was delivered (a delegated steer) can watch for this exact item
- *  leaving the mirror instead of matching by text. */
+ *  `followUp` waits for it. Returns the mirror item. A caller that must know whether ITS message was
+ *  delivered (a delegated steer) watches its ECHO's delivery stamp (echoDeliveredId) — the echo is the
+ *  identity that survives clear-and-requeue, wrappers and text are not. */
 export async function enqueueMirrored(
   live: LiveBrain,
   kind: 'steer' | 'followUp',
@@ -92,6 +92,22 @@ function reconcileOne(mirror: QueuedMsg[], piTexts: readonly string[]): QueuedMs
   return removed;
 }
 
+/** Delivery stamps for queued user messages, keyed on the ECHO object rather than the QueuedMsg wrapper.
+ *  Every clear-and-requeue path (positional queue-remove, the delegated steer's strand cleanup) rebuilds
+ *  the wrapper objects but re-enqueues the SAME echo, so the echo is the one identity that survives a
+ *  requeue — and each enqueue mints a fresh echo, so a stamp can never confirm any message but its own
+ *  (two concurrent steers carrying identical text stay distinguishable). A WeakMap keeps the stamp out
+ *  of the LiveBrain shape and lets it die with its echo. */
+const deliveredEchoes = new WeakMap<QueuedUserEcho, string>();
+
+/** The durable user-row id PI's delivery produced for this echo, or undefined while it is still queued
+ *  (or was removed/cleared instead of delivered). Written by deliverQueuedUserEcho in the same beat as
+ *  the durable row itself, so a defined value IS the transcript-level delivery confirmation a delegated
+ *  steer waits for. */
+export function echoDeliveredId(echo: QueuedUserEcho): string | undefined {
+  return deliveredEchoes.get(echo);
+}
+
 /** Stage only echo-bearing queue entries that PI just removed immediately before user message_start. */
 export function stageDeliveredUserEchoes(live: LiveBrain, removed: readonly QueuedMsg[]): void {
   const delivered = removed.filter((item) => item.echo);
@@ -113,6 +129,7 @@ export function deliverQueuedUserEcho(store: BrainStore, live: LiveBrain, delive
   const echo = item?.echo;
   if (!echo) return false;
   const durableId = projectUserTurn(store, live.sessionId, echo.persistText, echo.images);
+  deliveredEchoes.set(echo, durableId);
   // A second user message now sits AFTER the admitted one, and Esc-discard deletes from the admitted row to
   // the end of the session. Leaving the discard claim armed would take this message with it while restoring
   // only the first — a silent loss of text the user typed. Once the turn has grown a second user row, the

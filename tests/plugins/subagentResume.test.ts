@@ -8,6 +8,7 @@ import type { PluginRegistry } from '../../src/plugins/registry.js';
 import type { DelegatedChildSummary } from '../../src/store/brainDelegationStore.js';
 import type { SubagentProgressEvent } from '../../src/plugins/api.js';
 import type { SubagentUpdate } from '../../src/brain/events.js';
+import { LiveSessionRegistry } from '../../src/brain/session/liveRegistry.js';
 
 const log = { info() {}, warn() {}, error() {} };
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -30,15 +31,20 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
   /** Progress the host feeds back through the callback the plugin now passes down — a test sets it to
    *  drive one tool + token update before the continuation resolves. */
   let continueProgress: ((onEvent?: (e: SubagentProgressEvent) => void) => void) | undefined;
-  /** Children the host currently considers live. In production this is LiveRegistry's child map, and the
-   *  SAME map a `running` progress update writes to — which is exactly how a continuation could end up
-   *  steering into its own progress row. The mock host below steers into a live child just as the real
-   *  one does (resolving {status:'steered'} instead of running a fresh turn). */
-  let liveChildren: Set<string>;
+  /** Children the host currently considers live. The REAL LiveSessionRegistry, not a lookalike Set: the
+   *  registry is the SAME structure a `running` progress update writes to — which is exactly how a
+   *  continuation could end up steering into its own progress row, and how a steered continuation's
+   *  terminal row could deregister a child whose original run is still in flight. The mock host below
+   *  steers into a live child just as the real one does (resolving {status:'steered'} instead of running
+   *  a fresh turn). */
+  let registry: LiveSessionRegistry<{ sessionId: string; session: { dispose(): void; isStreaming: boolean } }>;
   let readResult: string | Error;
   let reply: string | Error;
   let stopped: { parent: string; child: string }[];
   let stopResult: { stopped: boolean } | Error;
+  /** When true, the stop mock answers from the registry exactly like DelegatedSessionService.stopSubagent
+   *  ({stopped:false} for a child no longer registered) instead of the fixed stopResult. */
+  let stopFromRegistry: boolean;
 
   beforeEach(async () => {
     byParent = new Map();
@@ -47,11 +53,12 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
     continued = [];
     steeredInto = [];
     continueProgress = undefined;
-    liveChildren = new Set();
+    registry = new LiveSessionRegistry();
     stopped = [];
     readResult = 'the stored final answer';
     reply = 'the sub-agent answered';
     stopResult = { stopped: true };
+    stopFromRegistry = false;
     reg = await loadPlugins({
       dirs: [join(repoRoot, 'plugins')], enabled: ['subagent'], logger: log,
       delegatedChildren: {
@@ -65,7 +72,7 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
           // The real host STEERS a child with a turn in flight (the message rides PI's steering queue
           // inside that turn) and resolves {status:'steered'} with no reply. Its guards run synchronously
           // before the first await, so this mock checks synchronously too.
-          if (liveChildren.has(childSessionId)) {
+          if (registry.isActiveChild(childSessionId)) {
             steeredInto.push({ parent, child: childSessionId, text });
             return { status: 'steered' };
           }
@@ -77,6 +84,8 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
         stop: async (parent, childSessionId) => {
           stopped.push({ parent, child: childSessionId });
           if (stopResult instanceof Error) throw stopResult;
+          // Mirrors DelegatedSessionService.stopSubagent: a child no longer registered is nothing to stop.
+          if (stopFromRegistry) return { stopped: registry.isActiveChild(childSessionId) };
           return stopResult;
         },
       },
@@ -98,12 +107,13 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
     );
   };
 
-  /** The production emitter's one relevant effect: a `running` update marks the child live, a terminal one
-   *  clears it. Without an emitter bound (most tests here) the plugin's progress pushes are no-ops, which
-   *  is precisely why the self-refusal never showed up in this suite before. */
+  /** The production emitter's one relevant effect, with production semantics: a progress update writes
+   *  the registry under the 'progress' source (see turnContextBuilder/channels emitSubagent) — a
+   *  `running` update raises the emitter's claim, a terminal one releases ONLY that claim, never the
+   *  delegated call's own. Without an emitter bound (most tests here) the plugin's progress pushes are
+   *  no-ops, which is precisely why the self-refusal never showed up in this suite before. */
   const registerLive = (u: SubagentUpdate): void => {
-    if (u.status === 'running') liveChildren.add(u.sessionId);
-    else liveChildren.delete(u.sessionId);
+    registry.setChildRunning('brain-1', u.sessionId, u.status === 'running', 'progress');
   };
 
   describe('DelegateList', () => {
@@ -263,14 +273,16 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
 
       expect(order).toEqual(['host-asked', 'row:running', 'row:done']);
       // The row still gets raised, so a live continuation is visible in the rail rather than running blind.
-      expect(liveChildren.has('brain-ch-subagent-sub-dlg-abc')).toBe(false);
+      expect(registry.isActiveChild('brain-ch-subagent-sub-dlg-abc')).toBe(false);
     });
 
     // The new mid-turn behavior: a busy child is steered, not refused. The tool must say plainly that no
     // separate reply exists (the result rides the delegation's own result path), so the parent does not
     // sit polling for an answer that will never come through this call.
     it('steers into a child whose turn is in flight and reports there is no separate reply', async () => {
-      liveChildren.add('brain-ch-subagent-busy');
+      // The child's ORIGINAL delegated run holds its lifecycle claim — the default 'call' source, exactly
+      // as beginDelegatedCall registers it. It is what makes the mock host steer instead of running a turn.
+      registry.setChildRunning('brain-1', 'brain-ch-subagent-busy', true);
       const res = await call('DelegateContinue', { id: 'brain-ch-subagent-busy', message: 'also check the docs' }, 'brain-1', registerLive);
 
       expect(steeredInto).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-busy', text: 'also check the docs' }]);
@@ -278,6 +290,13 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       expect(res.content[0]!.text).toMatch(/steered into its RUNNING turn/);
       expect(res.content[0]!.text).toMatch(/no separate reply/);
       expect(res.details).toMatchObject({ steered: true });
+      // The continuation settled its own progress row ('done'), but the child's original run is STILL in
+      // flight — its claim must survive, or the child becomes unstoppable and invisible to abort/shutdown.
+      expect(registry.isActiveChild('brain-ch-subagent-busy')).toBe(true);
+      stopFromRegistry = true;
+      const stop = await call('DelegateStop', { id: 'brain-ch-subagent-busy' }, 'brain-1');
+      expect(stopped).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-busy' }]);
+      expect(stop.content[0]!.text).toBe('Stopped.');
     });
 
     // The narrow remaining refusal (child active but not steerable anywhere — turn queued for a runner

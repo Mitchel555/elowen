@@ -765,6 +765,43 @@ describe('BrainService', () => {
     expect(svc.queueList(1).at(-1)?.text).toBe('Steer right now');
   });
 
+  it('keeps a running delegated child claimed when a steered continuation settles its progress row (owner chat)', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    const { sessionId } = await svc.start(1);
+    const childId = 'brain-ch-subagent-steered';
+    d.store.createSession({ id: childId, userId: 1, model: 'm', parentSessionId: sessionId });
+    const sessions = (svc as unknown as {
+      sessions: {
+        setChildRunning(parent: string, child: string, running: boolean): void;
+        isActiveChild(child: string): boolean;
+        busy(): { turns: number; children: number };
+      };
+    }).sessions;
+    // The child's ORIGINAL delegated run holds its lifecycle claim (beginDelegatedCall).
+    sessions.setChildRunning(sessionId, childId, true);
+    let activeAfterDone: boolean | undefined;
+    d.session.prompt.mockImplementationOnce(async (t: string, options?: { preflightResult?: (success: boolean) => void }) => {
+      options?.preflightResult?.(true);
+      const emit = currentSubagentEmitter();
+      // A DelegateContinue that STEERED into the running child raises and settles its own progress row
+      // inside the delegating turn — the terminal update must not deregister the still-running child.
+      emit?.({ id: 'continue-1', sessionId: childId, status: 'running', task: 'steer', tools: 0, seconds: 0 });
+      emit?.({ id: 'continue-1', sessionId: childId, status: 'done', task: 'steer', tools: 0, seconds: 0 });
+      activeAfterDone = sessions.isActiveChild(childId);
+      d.session.messages.push({ role: 'user', content: t }, { role: 'assistant', content: 'ok' });
+    });
+
+    await svc.send({ userId: 1, text: 'continue the child', mode: 'build', session: sessionId });
+
+    // DelegateStop, the abort tree and the shutdown gate all read this claim — the original run is
+    // still in flight, so the drain accounting must still count it.
+    expect(activeAfterDone).toBe(true);
+    expect(sessions.busy().children).toBe(1);
+    sessions.setChildRunning(sessionId, childId, false); // endDelegatedCall — the run really finished
+    expect(sessions.isActiveChild(childId)).toBe(false);
+  });
+
   // The wake a finished background command sends. Two adjacent guards in the runner used to contradict
   // each other — drop-when-busy, then a steer branch that also named systemNudge and could never be
   // reached — so pin the behaviour that actually runs, in both session states.
@@ -1535,11 +1572,12 @@ describe('BrainService', () => {
     const reg = new PluginRegistry();
     const ctx = reg.contextFor('subagent', {}, { info() {}, warn() {}, error() {} });
     const cancelledFor: string[] = [];
-    // Both methods: the registry verifies the WHOLE contract before narrowing, so a control that
-    // registered only half of it is rejected outright rather than throwing at the call site.
+    // The FULL contract: the registry verifies every declared method before narrowing, so a control
+    // that registered only part of it is rejected outright rather than throwing at the call site.
     ctx.registerControl('workflow', {
       cancelForSession: ({ sessionId }: { sessionId: string }) => { cancelledFor.push(sessionId); return { cancelled: 1 }; },
       detachForeground: () => ({ detached: 0 }),
+      isWorkflowLive: () => false,
     });
     (d as unknown as { plugins: unknown }).plugins = new PluginRegistryProvider(async () => reg);
     const svc = new BrainService(d as never);
@@ -5912,5 +5950,109 @@ describe('BrainService.stopSubagent (targeted teardown of one runaway or finishe
     await expect(svc.stopSubagent(sessionId, 'brain-ch-discord-stop'))
       .rejects.toThrow(/unknown sub-agent for this conversation/);
     expect(abort).not.toHaveBeenCalled();
+  });
+});
+
+describe('cold-start compaction (the first turn after the prompt cache expired)', () => {
+  // The production activation chain this exercises END TO END through the real BrainService: the
+  // factory builds assessColdCompaction → the spawner carries it onto the LiveBrain → the turn runner
+  // consults the cold gate and the shared busy predicate inside send() → runCompaction fires BEFORE
+  // the turn's provider call. A regression anywhere in that chain (dropping the seam, not consulting
+  // the gate, compacting after the prompt, ignoring the verdict) turns exactly one of these red.
+
+  /** ≈350k estimated tokens of user text (chars/4) — with the echoed assistant reply the fake session
+   *  holds ~700k, far past the C ≥ 5·F + 20·S break-even over the harness floor (~28k) and summary
+   *  allowance (8k). */
+  const BIG = 'x'.repeat(1_400_000);
+  const originalRetention = process.env.PI_CACHE_RETENTION;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (originalRetention === undefined) delete process.env.PI_CACHE_RETENTION;
+    else process.env.PI_CACHE_RETENTION = originalRetention;
+    for (const p of processRegistry.list()) processRegistry.remove(p.id);
+  });
+
+  async function seedCold(text = BIG, autoCompact = true) {
+    process.env.PI_CACHE_RETENTION = 'short'; // anything but 'long': 5-min TTL → 6-min cold gate
+    const d = fakeDeps();
+    (d as Record<string, unknown>).userSettings = () => ({ autoCompact });
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text, session: 'brain-1' });
+    expect(d.session.compact).not.toHaveBeenCalled(); // a fresh conversation has nothing cold
+    return { d, svc };
+  }
+
+  /** Jump Date.now() forward without faking timers — locks and retries keep their real clocks. The
+   *  stored rows keep their REAL insert time (SQLite CURRENT_TIMESTAMP), so the jump IS the idle gap. */
+  const jumpMinutes = (minutes: number) =>
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + minutes * 60_000 });
+
+  it('compacts BEFORE the first provider call of the turn that follows an expired cache', async () => {
+    const { d, svc } = await seedCold();
+    jumpMinutes(10);
+    await svc.send({ userId: 1, text: 'continuing', session: 'brain-1' });
+    expect(d.session.compact).toHaveBeenCalledOnce();
+    // Before, not after: a compaction after the prompt would have already paid the full re-cache.
+    expect(d.session.compact.mock.invocationCallOrder[0]!)
+      .toBeLessThan(d.session.prompt.mock.invocationCallOrder[1]!);
+  });
+
+  it('never fires while the cache could still be warm', async () => {
+    const { d, svc } = await seedCold();
+    jumpMinutes(3); // under the 6-min short-retention gate
+    await svc.send({ userId: 1, text: 'continuing', session: 'brain-1' });
+    expect(d.session.compact).not.toHaveBeenCalled();
+  });
+
+  it('keys the gate on the TTL of the LAST request, not the current env (long → short switch)', async () => {
+    process.env.PI_CACHE_RETENTION = 'long';
+    const d = fakeDeps();
+    (d as Record<string, unknown>).userSettings = () => ({ autoCompact: true });
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: BIG, session: 'brain-1' }); // cached under the 1-hour TTL
+    process.env.PI_CACHE_RETENTION = 'short';
+    jumpMinutes(10); // cold by the CURRENT env, warm by the TTL the cache was actually written with
+    await svc.send({ userId: 1, text: 'continuing', session: 'brain-1' });
+    expect(d.session.compact).not.toHaveBeenCalled();
+  });
+
+  it('assumes the longest TTL for history this process never made a request for (respawn)', async () => {
+    const { d, svc } = await seedCold();
+    await svc.stopSession(1, 'brain-1'); // dispose the live runtime; history stays in the store
+    jumpMinutes(10);
+    await svc.send({ userId: 1, text: 'continuing', session: 'brain-1' });
+    // The respawned session cannot know which retention the pre-respawn requests ran under, so ten
+    // minutes is not PROVABLY cold — no compaction, even though the current env's TTL is 5 minutes.
+    expect(d.session.compact).not.toHaveBeenCalled();
+    expect(d.session.prompt.mock.calls.length).toBe(2); // the turn itself still ran
+  });
+
+  it('defers to the shared busy predicate — a running background job blocks the rewrite', async () => {
+    const { d, svc } = await seedCold();
+    processRegistry.register({
+      id: 'cold-job-1', command: 'sleep 1000', cwd: process.cwd(), startedAt: new Date().toISOString(),
+      userId: 1, sessionId: 'brain-1', completionMode: 'job',
+      running: () => true, exitCode: () => null, readAll: () => '', kill: () => {},
+    });
+    jumpMinutes(10);
+    await svc.send({ userId: 1, text: 'continuing', session: 'brain-1' });
+    expect(d.session.compact).not.toHaveBeenCalled();
+  });
+
+  it('refuses a context below the break-even instead of paying more than it saves', async () => {
+    const { d, svc } = await seedCold('a short exchange'); // summarizing this costs more than it buys
+    jumpMinutes(10);
+    await svc.send({ userId: 1, text: 'continuing', session: 'brain-1' });
+    expect(d.session.compact).not.toHaveBeenCalled();
+  });
+
+  it('honors the user’s auto-compact toggle — a cold start is still an automatic compaction', async () => {
+    const { d, svc } = await seedCold(BIG, false);
+    jumpMinutes(10);
+    await svc.send({ userId: 1, text: 'continuing', session: 'brain-1' });
+    expect(d.session.compact).not.toHaveBeenCalled();
   });
 });

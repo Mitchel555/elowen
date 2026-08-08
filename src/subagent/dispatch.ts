@@ -21,6 +21,25 @@ export interface SubagentDispatchDeps {
   runnerEnabled?: () => boolean;
 }
 
+/** ONE source of truth for "does the next delegated turn leave this process?". Shared by
+ *  {@link SubagentDispatch.mode} (the actual routing) and the daemon's plugin wiring
+ *  (ctx.delegatedTurnsOutOfProcess — the workflow engine's expansion gate), so the prediction a plugin
+ *  bakes into a child's briefing and tool policy can never drift from the decision this dispatcher makes:
+ *  both read the same expression over the same live inputs.
+ *
+ *  A pool sized to zero by the operator is not a runner that might work — it is the in-process path, and
+ *  saying so here is what keeps that config from logging a fallback warning per delegated turn.
+ *
+ *  The one residual divergence is the async fork-failure fallback in {@link SubagentDispatch.send}: a
+ *  turn this predicted as 'runner' may still end up running here. That is safe by construction on the
+ *  consumer side — the workflow engine derives the node's briefing AND its WorkflowAddNodes deny from
+ *  this SAME prediction and carries both inside the delegated access, so a fallback turn arrives
+ *  conservatively narrowed, never with a capability its briefing does not match. */
+export function predictsRunnerDispatch(runner: DelegatedTurnRunner | undefined, runnerEnabled: boolean): boolean {
+  if (!runner || !runnerEnabled) return false;
+  return runner.usable?.() !== false;
+}
+
 /** THE routing decision for one delegated turn: run it on this event loop, or hand it to the sub-agent
  *  runner process.
  *
@@ -34,11 +53,7 @@ export class SubagentDispatch {
   constructor(private d: SubagentDispatchDeps) {}
 
   mode(): SubagentDispatchMode {
-    const runner = this.d.runner;
-    if (!runner || this.d.runnerEnabled?.() !== true) return 'in-process';
-    // A pool sized to zero by the operator is not a runner that might work — it is the in-process path,
-    // and saying so here is what keeps that config from logging a fallback warning per delegated turn.
-    return runner.usable?.() === false ? 'in-process' : 'runner';
+    return predictsRunnerDispatch(this.d.runner, this.d.runnerEnabled?.() === true) ? 'runner' : 'in-process';
   }
 
   async send(request: DelegatedTurnRequest, text: string, onEvent?: (e: BrainEvent) => void): Promise<string> {

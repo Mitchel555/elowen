@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { hashCanonical } from './cacheWatch.js';
 
@@ -16,11 +17,29 @@ import { hashCanonical } from './cacheWatch.js';
  *  The documented remedy is a second breakpoint at a position a prior request actually WROTE — the
  *  lookback finds prior writes, not stable content, so a guessed position is worthless. The only such
  *  position below the moving mark is wherever that mark sat on the PREVIOUS request of this session,
- *  which this extension remembers (index + content hash) and re-marks: an exact hit at the first
- *  position of that breakpoint's window, whatever the step appended in between. The first deployment of
- *  this idea guessed "the user message before the marked one" instead of remembering, which is only
- *  right when a step appends a single user message — steering mode "all" and background delegation
- *  deliveries routinely append several.
+ *  which this extension remembers and re-marks: an exact hit at the first position of that breakpoint's
+ *  window, whatever the step appended in between. The first deployment of this idea guessed "the user
+ *  message before the marked one" instead of remembering, which is only right when a step appends a
+ *  single user message — steering mode "all" and background delegation deliveries routinely append
+ *  several.
+ *
+ *  Two refinements keep "a position a prior request actually wrote" TRUE rather than approximate:
+ *
+ *  1. The remembered position is only trusted once its request SUCCEEDED. `before_provider_request`
+ *     fires for requests that then die on a 429/529/400 or are cancelled before the provider processed
+ *     the input — no cache entry exists for those, and marking their position would pin a spot nothing
+ *     wrote while the lookback only ever finds real writes. So each request stores a CANDIDATE, and
+ *     only `after_provider_response` with a 2xx status promotes it (cache entries are written when the
+ *     INPUT is processed, so a stream that dies later does not un-write them).
+ *
+ *  2. The remembered position is identified by the hash of the ENTIRE canonical prefix up to and
+ *     including it — system, tools and every message — not by the marked message's own content.
+ *     Anthropic keys cache entries by cumulative prefix: after a mid-history insertion (live recall)
+ *     the remembered message still exists one position later, but every entry at or past the insertion
+ *     is unreachable no matter what is marked, so re-finding the message by content and marking its
+ *     shifted position (what the first version did) could only ever spend the slot on a position whose
+ *     entry can no longer match. With the prefix hash the module abstains instead — and in the
+ *     append-only common case the check degenerates to one comparison at the remembered index.
  *
  *  Anthropic allows four breakpoints per request and rejects a fifth outright. With an OAuth token
  *  pi-ai already spends all four (Claude Code identity block, system prompt, last tool, last user —
@@ -67,9 +86,11 @@ function stripDuplicateSystemMarkers(payload: Record<string, unknown>): void {
   for (const block of marked.slice(0, -1)) delete block.cache_control;
 }
 
-/** Count every marker in the payload — system, tools and messages alike. The budget is per REQUEST, so
- *  counting only the messages would let the total pass four whenever the system or tool markers are
- *  present, which is always. */
+/** Count every marker in the payload — the WHOLE payload, root included. The budget is per REQUEST: a
+ *  top-level `cache_control` (the automatic breakpoint form) consumes one of the four slots exactly
+ *  like a block-level marker, so a walk that only visited system/tools/messages would under-count and
+ *  let this module add a fifth — an HTTP 400 on every such request. Walking the full object also keeps
+ *  any future carrier position counted without another edit here. */
 function countBreakpoints(payload: Record<string, unknown>): number {
   let total = 0;
   const walk = (value: unknown): void => {
@@ -79,9 +100,7 @@ function countBreakpoints(payload: Record<string, unknown>): number {
     if (object.cache_control !== undefined) total += 1;
     for (const item of Object.values(object)) walk(item);
   };
-  walk(payload.system);
-  walk(payload.tools);
-  walk(payload.messages);
+  walk(payload);
   return total;
 }
 
@@ -102,58 +121,83 @@ function currentMarker(messages: readonly unknown[]): { value: unknown; messageI
   return undefined;
 }
 
-/** Where the previous request's marked message sat, so the next request can pin the exact position its
- *  write landed on. Identified by canonical content, not index alone: live recall inserts messages
- *  mid-history and shifts everything after them. */
-interface PreviousWrite { index: number; hash: string }
+/** Where the previous SUCCESSFUL request's marked message sat, identified by the hash of the whole
+ *  canonical prefix ending there (system + tools + messages 0..index). Cumulative on purpose — see the
+ *  module comment's refinement 2: Anthropic keys cache entries by cumulative prefix, so a message-local
+ *  hash can match while the entry is unreachable. */
+interface PreviousWrite { index: number; prefixHash: string }
 
-/** Find the remembered message in this payload. The remembered index is the append-only fast path; on a
- *  mismatch the scan walks forward toward the current mark, which is where an insertion pushes it. A
- *  message the cold-cache egress rewrote (image stripping, tool-result clearing) matches nothing — and
- *  should not, because its cache entry no longer matches either. A retry (nothing appended) and a
- *  compacted, shorter history leave the scan range empty, which is the correct answer for both. */
-function locatePreviousWrite(messages: readonly unknown[], previous: PreviousWrite, before: number): number | undefined {
-  const limit = Math.min(before, messages.length);
-  for (let index = previous.index; index < limit; index += 1) {
-    if (hashCanonical(messages[index]) === previous.hash) return index;
-  }
-  return undefined;
+/** Fold one more segment into a running prefix digest. Chained sha256 over the segments' canonical
+ *  hashes: deterministic, order-sensitive, and each request costs one linear pass (the same order of
+ *  work cacheWatch already spends hashing its payload snapshot). */
+function chainHash(prefix: string, segment: string): string {
+  return createHash('sha256').update(prefix).update(segment).digest('hex');
+}
+
+export interface TrailingCacheBreakpoint {
+  /** `before_provider_request`: possibly mark the previous confirmed write position, and stage this
+   *  request's own mark as the next candidate. Returns the payload to send (mutated in place). */
+  request(payload: unknown): unknown;
+  /** `after_provider_response`: a 2xx promotes the staged candidate to the confirmed write position;
+   *  anything else discards it (the previous confirmed write, if any, remains valid — a failed request
+   *  does not un-write an existing cache entry). */
+  response(status: number): void;
 }
 
 /** One per session — the memory of where the previous request's mark sat IS the mechanism, so a shared
- *  instance would cross-wire sessions. Returns the payload it wants sent: the same object, mutated in
- *  place, or unchanged when there is nothing safe to do. Exported for tests. */
-export function createTrailingCacheBreakpoint(): (payload: unknown) => unknown {
-  let previous: PreviousWrite | undefined;
-  return (payload) => {
-    const object = record(payload);
-    if (!object) return payload;
-    stripDuplicateSystemMarkers(object);
-    const messages = Array.isArray(object.messages) ? object.messages : undefined;
-    if (!messages || messages.length === 0) return payload;
-    const marker = currentMarker(messages);
-    if (!marker) {
-      // A remembered position from before a no-cache request describes a write that may never have
-      // happened; carrying it across the gap would pin a position nothing wrote.
-      previous = undefined;
+ *  instance would cross-wire sessions. Exported for tests. */
+export function createTrailingCacheBreakpoint(): TrailingCacheBreakpoint {
+  /** The last position a SUCCEEDED request marked — the only kind the lookback can find. */
+  let confirmed: PreviousWrite | undefined;
+  /** The position the in-flight request marked, awaiting its outcome. */
+  let candidate: PreviousWrite | undefined;
+  return {
+    request(payload) {
+      candidate = undefined;
+      const object = record(payload);
+      if (!object) return payload;
+      stripDuplicateSystemMarkers(object);
+      const messages = Array.isArray(object.messages) ? object.messages : undefined;
+      if (!messages || messages.length === 0) return payload;
+      const marker = currentMarker(messages);
+      if (!marker) {
+        // A remembered position from before a no-cache request describes a write this module can no
+        // longer reason about; carrying it across the gap would pin a position on trust alone.
+        confirmed = undefined;
+        return payload;
+      }
+      // One forward pass builds the candidate's prefix hash AND checks the confirmed position's prefix
+      // is still byte-identical in this payload. Any insertion, removal or rewrite at or before the
+      // confirmed index changes the chain and makes `stillThere` false — which is correct, because the
+      // cache entry written there is keyed on the old prefix and can no longer be hit.
+      const remembered = confirmed;
+      let chain = chainHash(hashCanonical(object.system), hashCanonical(object.tools));
+      let stillThere = false;
+      for (let index = 0; index <= marker.messageIndex; index += 1) {
+        chain = chainHash(chain, hashCanonical(messages[index]));
+        if (remembered && index === remembered.index && chain === remembered.prefixHash) stillThere = true;
+      }
+      candidate = { index: marker.messageIndex, prefixHash: chain };
+      if (!remembered || !stillThere) return payload;
+      // A retry (nothing appended) re-marks the same position pi-ai already marks; nothing to add.
+      if (remembered.index >= marker.messageIndex) return payload;
+      if (countBreakpoints(object) >= BREAKPOINT_MAX) return payload;
+      const blocks = blocksOf(messages[remembered.index]);
+      const last = blocks?.[blocks.length - 1];
+      if (!last || typeof last.type !== 'string' || !MARKABLE.has(last.type)) return payload;
+      if (last.cache_control !== undefined) return payload;
+      last.cache_control = marker.value;
       return payload;
-    }
-    const remembered = previous;
-    previous = { index: marker.messageIndex, hash: hashCanonical(messages[marker.messageIndex]) };
-    if (!remembered) return payload;
-    if (countBreakpoints(object) >= BREAKPOINT_MAX) return payload;
-    const target = locatePreviousWrite(messages, remembered, marker.messageIndex);
-    if (target === undefined) return payload;
-    const blocks = blocksOf(messages[target]);
-    const last = blocks?.[blocks.length - 1];
-    if (!last || typeof last.type !== 'string' || !MARKABLE.has(last.type)) return payload;
-    if (last.cache_control !== undefined) return payload;
-    last.cache_control = marker.value;
-    return payload;
+    },
+    response(status) {
+      if (status >= 200 && status < 300 && candidate) confirmed = candidate;
+      candidate = undefined;
+    },
   };
 }
 
 export function installCacheBreakpoints(pi: ExtensionAPI): void {
-  const addTrailingBreakpoint = createTrailingCacheBreakpoint();
-  pi.on('before_provider_request', (event) => addTrailingBreakpoint(event.payload));
+  const trailing = createTrailingCacheBreakpoint();
+  pi.on('before_provider_request', (event) => trailing.request(event.payload));
+  pi.on('after_provider_response', (event) => { trailing.response(event.status); });
 }

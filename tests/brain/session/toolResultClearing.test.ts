@@ -20,10 +20,11 @@ import {
   setSpillMaxResultBytes,
   setToolResultGroupBudget,
   toolResultSpillPath,
+  toolResultOccurrenceKey,
   parseSpillDescriptor,
 } from '../../../src/brain/session/toolResultClearing.js';
 import type { PersistedToolResultLatch, ToolResultLatchStore } from '../../../src/brain/session/toolResultClearing.js';
-import { toolResultSpillDir } from '../../../src/shared/paths.js';
+import { setSpillNamespaceResolver, toolResultSpillDir } from '../../../src/shared/paths.js';
 import { openDb } from '../../../src/store/db.js';
 import { BrainStore } from '../../../src/store/brainStore.js';
 import { HISTORY_IMAGE_PLACEHOLDER } from '../../../src/brain/session/historyImageStripping.js';
@@ -133,11 +134,17 @@ describe('selectClearableToolResults / clearingCutIndex', () => {
     expect(selectClearableToolResults(messages, new Set())).toEqual([]);
   });
 
-  it('skips already-latched ids', () => {
+  it('skips already-latched occurrences, but never a fresh result that merely reuses the id', () => {
     const messages: PiAgentMessage[] = [
       user('one', T0), toolResult('old-big', big, T0 + 1), user('two', T0 + 2), user('three', T0 + 3),
     ];
-    expect(selectClearableToolResults(messages, new Set(['old-big']))).toEqual([]);
+    expect(selectClearableToolResults(messages, new Set([toolResultOccurrenceKey('old-big', T0 + 1)]))).toEqual([]);
+    // The latch of a DIFFERENT occurrence of the same id (another timestamp) masks nothing here:
+    // sequential id styles reuse ids, and the reused result must be judged on its own.
+    expect(
+      selectClearableToolResults(messages, new Set([toolResultOccurrenceKey('old-big', T0 + 999)]))
+        .map((s) => s.toolCallId),
+    ).toEqual(['old-big']);
   });
 });
 
@@ -154,7 +161,7 @@ describe('selectOversizedToolResults', () => {
     const selected = selectOversizedToolResults(messages, new Set());
     expect(selected.map((s) => s.toolCallId)).toEqual(['fresh-oversized']);
     expect(selected[0]?.bytes).toBe(oversized.length);
-    expect(selectOversizedToolResults(messages, new Set(['fresh-oversized']))).toEqual([]);
+    expect(selectOversizedToolResults(messages, new Set([toolResultOccurrenceKey('fresh-oversized', T0 + 4)]))).toEqual([]);
   });
 
   it('does not select a result exactly at the threshold', () => {
@@ -188,6 +195,8 @@ const GROUP_BYTES = [49_000, 48_000, 47_000, 46_000, 45_000, 15_000];
 const groupTotal = GROUP_BYTES.reduce((sum, bytes) => sum + bytes, 0);
 const groupResult = (index: number, timestamp: number): PiAgentMessage =>
   toolResult(`g-${index}`, String.fromCharCode(97 + index).repeat(GROUP_BYTES[index]), timestamp);
+/** The occurrence key of groupResult(index, timestamp) — selections speak in occurrence keys now. */
+const gKey = (index: number, timestamp: number): string => toolResultOccurrenceKey(`g-${index}`, timestamp);
 /** A whole over-budget group delivered in one turn, at indices 2..7. */
 const overBudgetTurn = (): PiAgentMessage[] => [
   user('one', T0), assistant('calling', T0 + 1_000),
@@ -209,7 +218,9 @@ describe('selectBudgetedToolResults', () => {
     expect(selected.spill).toEqual([]);
     // Decided even though nothing spilled: these bytes are on their way to the provider, so the layer
     // must never revisit them.
-    expect([...selected.decided].sort()).toEqual(['g-3', 'g-4', 'g-5']);
+    expect([...selected.decided].sort()).toEqual(
+      [gKey(3, T0 + 2_000), gKey(4, T0 + 3_000), gKey(5, T0 + 4_000)].sort(),
+    );
   });
 
   it('spills the largest members first, only until the group is back under budget', () => {
@@ -219,7 +230,9 @@ describe('selectBudgetedToolResults', () => {
     expect(remaining).toBeLessThanOrEqual(TOOL_RESULT_GROUP_BUDGET_BYTES);
     // One spill fewer would NOT have been enough — nothing is spilled beyond need.
     expect(remaining + (selected.spill.at(-1)?.bytes ?? 0)).toBeGreaterThan(TOOL_RESULT_GROUP_BUDGET_BYTES);
-    expect([...selected.decided].sort()).toEqual(['g-0', 'g-1', 'g-2', 'g-3', 'g-4', 'g-5']);
+    expect([...selected.decided].sort()).toEqual(
+      GROUP_BYTES.map((_, index) => gKey(index, T0 + 2_000 + index)).sort(),
+    );
   });
 
   it('budgets each wire-level group separately — an assistant message between results splits them', () => {
@@ -261,17 +274,17 @@ describe('selectBudgetedToolResults', () => {
 
   it('charges nothing for an already-spilled member', () => {
     // g-0 spilled by the per-result layer: the group now costs 201k, one member over budget.
-    const selected = selectBudgetedToolResults(overBudgetTurn(), new Set(['g-0']), new Set());
+    const selected = selectBudgetedToolResults(overBudgetTurn(), new Set([gKey(0, T0 + 2_000)]), new Set());
     expect(selected.spill.map((item) => item.toolCallId)).toEqual(['g-1']);
-    expect(selected.decided).not.toContain('g-0');
+    expect(selected.decided).not.toContain(gKey(0, T0 + 2_000));
   });
 
   it('counts a decided member at full size but never spills it again', () => {
     // g-0 is the largest and would be the first pick, but it has already been ruled on — it went to the
     // provider whole, so the spilling has to come out of the members below it instead.
-    const selected = selectBudgetedToolResults(overBudgetTurn(), new Set(), new Set(['g-0']));
+    const selected = selectBudgetedToolResults(overBudgetTurn(), new Set(), new Set([gKey(0, T0 + 2_000)]));
     expect(selected.spill.map((item) => item.toolCallId)).toEqual(['g-1', 'g-2']);
-    expect(selected.decided).not.toContain('g-0');
+    expect(selected.decided).not.toContain(gKey(0, T0 + 2_000));
   });
 });
 
@@ -346,11 +359,11 @@ describe('applyToolResultClearing', () => {
     ];
     const snapshot = structuredClone(messages);
     const placeholder = clearedToolResultPlaceholder('/tmp/spill/sess-1/old-big.v1-time-9.txt', big.length);
-    const once = applyToolResultClearing(messages, new Map([['old-big', { index: 1, placeholder }]]));
+    const once = applyToolResultClearing(messages, new Map([[1, placeholder]]));
     expect(messages).toEqual(snapshot);
     expect(once[1]).toEqual({ ...messages[1], content: [{ type: 'text', text: placeholder }] });
     expect(once[0]).toBe(messages[0]);
-    expect(applyToolResultClearing(once, new Map([['old-big', { index: 1, placeholder }]]))).toBe(once);
+    expect(applyToolResultClearing(once, new Map([[1, placeholder]]))).toBe(once);
   });
 });
 
@@ -698,27 +711,31 @@ describe('installToolResultClearing', () => {
     expect(writes.size).toBe(1);
   });
 
-  it('spills into the real per-session dir, and the existing session cleanup removes it', async () => {
+  it('spills into the real namespace dir, and the existing session cleanup removes it', async () => {
     const home = mkdtempSync(join(tmpdir(), 'elowen-size-spill-'));
     dirs.push(home);
     vi.stubEnv('HOME', home);
     try {
-      // Real fs writer and real spill dir — no injection, so this exercises the path the daemon uses.
+      // Production wiring end to end: the store mints the conversation's immutable spill namespace, the
+      // resolver (exactly what buildBrainCore installs) hands it to the module's default spill dir, and
+      // the store's delete sweeps the SAME directory — so re-keying the session id can never separate
+      // the files from the conversation that owns them.
+      const store = new BrainStore(openDb(':memory:'));
+      store.createSession({ id: 'sess-fs', userId: 7, model: 'm' });
+      setSpillNamespaceResolver((id) => store.spillNamespace(id));
       const session: Harness['session'] = { agent: {} };
       installToolResultClearing(session, 'sess-fs', { idleMs: IDLE });
       const messages: PiAgentMessage[] = [user('one', T0), toolResult('fresh', oversized, T0 + 1_000)];
       const result = await session.agent.transformContext!(messages);
       const text = (result[1] as { content: { type: string; text?: string }[] }).content[0]?.text ?? '';
       const spilled = /Full output at: (\S+) — read it/.exec(text)?.[1];
-      expect(spilled).toBe(join(toolResultSpillDir(process.env, 'sess-fs'), `fresh.v1-preview-${Buffer.byteLength(oversized, 'utf8')}.txt`));
+      expect(spilled).toBe(join(toolResultSpillDir(process.env, store.spillNamespace('sess-fs')), `fresh.v1-preview-${Buffer.byteLength(oversized, 'utf8')}.txt`));
       expect(readFileSync(spilled!, 'utf8')).toBe(oversized);
 
-      // The spill lands inside the per-session directory the store already sweeps on delete.
-      const store = new BrainStore(openDb(':memory:'));
-      store.createSession({ id: 'sess-fs', userId: 7, model: 'm' });
       store.deleteSession('sess-fs');
       expect(existsSync(spilled!)).toBe(false);
     } finally {
+      setSpillNamespaceResolver(undefined);
       vi.unstubAllEnvs();
     }
   });
@@ -932,6 +949,7 @@ describe('durable latch across a respawn (store-backed)', () => {
   const storeAdapter = (store: BrainStore): ToolResultLatchStore => ({
     load: () => store.toolResultSpills('sess-1'),
     save: (entry: PersistedToolResultLatch) => { store.upsertToolResultSpill('sess-1', entry); },
+    remove: (toolCallId, occurredAt) => { store.deleteToolResultSpill('sess-1', toolCallId, occurredAt); },
   });
 
   /** An oversized fresh tool result CARRYING AN IMAGE, as PI delivers it live: the image block
@@ -1014,9 +1032,14 @@ describe('durable latch across a respawn (store-backed)', () => {
     const store = new BrainStore(openDb(':memory:'));
     store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
     await restartOver(disk, storeAdapter(store), () => T0 + IDLE + 4_000)(timeHistory);
-    expect(store.toolResultSpills('sess-1')).toEqual([
-      { toolCallId: 'old-big', mode: 'time', bytes: big.length, preview: null, path: `/tmp/spill/sess-1/old-big.v1-time-${big.length}.txt` },
-    ]);
+    const path = `/tmp/spill/sess-1/old-big.v1-time-${big.length}.txt`;
+    expect(store.toolResultSpills('sess-1')).toEqual([{
+      toolCallId: 'old-big',
+      occurredAt: T0 + 1_000, // the graduated row adopts the occurrence's own timestamp
+      mode: 'time', bytes: big.length, preview: null, path,
+      placeholder: clearedToolResultPlaceholder(path, big.length),
+      createdAt: expect.any(String) as unknown as string,
+    }]);
 
     const drifted: PiAgentMessage[] = [
       user('one', T0),
@@ -1030,6 +1053,171 @@ describe('durable latch across a respawn (store-backed)', () => {
     ];
     const after = await restartOver(disk, storeAdapter(store), () => T0 + IDLE + 5_000)(drifted);
     expect((after[1] as { content: { text: string }[] }).content[0]!.text).toBe(placeholder);
+  });
+
+  // THE deployed defect this occurrence keying exists to end (critical): the latch used to be keyed by
+  // toolCallId alone, so once a compaction removed the cleared occurrence, its surviving row captured a
+  // brand-new result that merely reused the id (sequential styles like `call_0` reset every turn on
+  // deepseek/qwen/kimi) — the model never saw its own tool output, only a placeholder pointing at
+  // another call's spill.
+  it('a stale row never captures a fresh result that reuses the id after a compaction', async () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    const disk = new Map<string, string>();
+    const timeHistory: PiAgentMessage[] = [
+      user('one', T0), toolResult('call_0', big, T0 + 1_000),
+      user('two', T0 + 2_000),
+      user('three', T0 + IDLE + 3_000),
+    ];
+    const before = await restartOver(disk, storeAdapter(store))(timeHistory);
+    expect(JSON.stringify(before[1])).toContain('Older tool result cleared');
+    expect(store.toolResultSpills('sess-1')).toHaveLength(1);
+
+    // A new process wakes to a COMPACTED history in which the model has minted `call_0` again.
+    const fresh = toolResult('call_0', 'brand new output the model must actually see', T0 + IDLE + 60_000);
+    const compacted: PiAgentMessage[] = [
+      user('summary of the earlier conversation', T0 + IDLE + 50_000),
+      assistant('calling', T0 + IDLE + 55_000),
+      fresh,
+    ];
+    const after = await restartOver(disk, storeAdapter(store), () => T0 + IDLE + 61_000)(compacted);
+    expect(after[2]).toBe(fresh); // its own full content — not the old occurrence's placeholder
+    // …and the stale row is pruned, so it cannot ambush any later pass or respawn either.
+    expect(store.toolResultSpills('sess-1')).toEqual([]);
+  });
+
+  it('prunes the durable row the moment its occurrence left the history, without touching live ones', async () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    const disk = new Map<string, string>();
+    const timeHistory: PiAgentMessage[] = [
+      user('one', T0), toolResult('call_0', big, T0 + 1_000), toolResult('keeper', big, T0 + 1_500),
+      user('two', T0 + 2_000),
+      user('three', T0 + IDLE + 3_000),
+    ];
+    await restartOver(disk, storeAdapter(store))(timeHistory);
+    expect(store.toolResultSpills('sess-1')).toHaveLength(2);
+    // Compaction keeps `keeper`'s occurrence but drops `call_0`'s.
+    const compacted: PiAgentMessage[] = [
+      user('summary', T0 + IDLE + 50_000),
+      toolResult('keeper', big, T0 + 1_500),
+      user('next', T0 + IDLE + 51_000),
+    ];
+    const after = await restartOver(disk, storeAdapter(store), () => T0 + IDLE + 52_000)(compacted);
+    expect(store.toolResultSpills('sess-1').map((row) => row.toolCallId)).toEqual(['keeper']);
+    // The surviving occurrence still goes out as its byte-stable placeholder.
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toContain('Older tool result cleared');
+  });
+
+  it('re-sends the STORED placeholder verbatim — a renderer wording change must not rewrite history', async () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    // A row written by a (hypothetical) earlier build whose renderer worded the placeholder differently.
+    // What the provider cached is THESE bytes; restoring anything else re-caches the whole conversation.
+    const oldWording = '[v0 wording: big tool output parked at /tmp/spill/sess-1/old-big.v1-time-4196.txt]';
+    store.upsertToolResultSpill('sess-1', {
+      toolCallId: 'old-big', occurredAt: T0 + 1_000, mode: 'time', bytes: big.length,
+      preview: null, path: `/tmp/spill/sess-1/old-big.v1-time-${big.length}.txt`, placeholder: oldWording,
+    });
+    const history: PiAgentMessage[] = [
+      user('one', T0), toolResult('old-big', big, T0 + 1_000),
+      user('two', T0 + 2_000),
+      assistant('working', T0 + 3_000),
+      user('three', T0 + 4_000), // warm — restoration is the only path to a placeholder
+    ];
+    const after = await restartOver(new Map(), storeAdapter(store), () => T0 + 5_000)(history);
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toBe(oldWording);
+  });
+});
+
+describe('occurrence keying within one process', () => {
+  // The in-process half of the critical defect: no respawn needed — the latch map itself used to be
+  // keyed by id, so a compaction followed by an id reuse inside the same daemon lifetime swapped the
+  // fresh result for the old placeholder on the very next pass.
+  it('a fresh result reusing a cleared id after an in-memory compaction keeps its own content', async () => {
+    const h = harness();
+    const before: PiAgentMessage[] = [
+      user('one', T0), toolResult('call_0', big, T0 + 1_000),
+      user('two', T0 + 2_000),
+      user('three', T0 + IDLE + 3_000),
+    ];
+    const cleared = await h.transform(before);
+    expect(JSON.stringify(cleared[1])).toContain('Older tool result cleared');
+
+    const fresh = toolResult('call_0', 'fresh content the model must still see', T0 + IDLE + 5_000);
+    const compacted: PiAgentMessage[] = [
+      user('summary of the earlier conversation', T0 + IDLE + 3_000),
+      assistant('calling', T0 + IDLE + 4_000),
+      fresh,
+    ];
+    const after = await h.transform(compacted);
+    expect(after[2]).toBe(fresh);
+  });
+});
+
+describe('legacy rows (occurred_at 0) written by the deployed pre-occurrence build', () => {
+  const legacyRestart = (store: BrainStore, now: () => number) => {
+    const session: Harness['session'] = { agent: {} };
+    installToolResultClearing(session, 'sess-1', {
+      idleMs: IDLE,
+      now,
+      spillDir: '/tmp/spill/sess-1',
+      writeSpill: async () => { throw new Error('nothing may be spilled in these tests'); },
+      readSpill: async () => null,
+      listSpill: async () => [],
+      latchStore: {
+        load: () => store.toolResultSpills('sess-1'),
+        save: (entry) => { store.upsertToolResultSpill('sess-1', entry); },
+        remove: (toolCallId, occurredAt) => { store.deleteToolResultSpill('sess-1', toolCallId, occurredAt); },
+      },
+    });
+    return (m: PiAgentMessage[]) => session.agent.transformContext!(m);
+  };
+  const legacyRow = (toolCallId: string): PersistedToolResultLatch => ({
+    toolCallId, occurredAt: 0, mode: 'time', bytes: big.length, preview: null,
+    path: `/tmp/spill/sess-1/${toolCallId}.v1-time-${big.length}.txt`, placeholder: null,
+  });
+
+  // Legacy rows carry no occurrence timestamp, so they are matched by AGE against the row's own write
+  // time: the occurrence a row was written for necessarily existed before the row did.
+  it('still restores the occurrence it was written for, and graduates the row', async () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    store.upsertToolResultSpill('sess-1', legacyRow('old-big'));
+    const start = Date.now(); // real clock: the heuristic compares against the row's created_at
+    const occurredAt = start - 3 * 3_600_000 + 1_000;
+    const history: PiAgentMessage[] = [
+      user('one', start - 3 * 3_600_000), toolResult('old-big', big, occurredAt),
+      user('two', start - 3 * 3_600_000 + 2_000),
+      assistant('working', start - 2_000),
+      user('three', start - 1_000), // warm gate — only restoration can produce the placeholder
+    ];
+    const after = await legacyRestart(store, () => start)(history);
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text)
+      .toBe(clearedToolResultPlaceholder(`/tmp/spill/sess-1/old-big.v1-time-${big.length}.txt`, big.length));
+    // The legacy row graduated to the occurrence's real key; the 0-key row is gone.
+    expect(store.toolResultSpills('sess-1').map((row) => row.occurredAt)).toEqual([occurredAt]);
+  });
+
+  // The deployed data hazard, replayed against the deployed rows themselves: the occurrence was
+  // compacted away, the id came back on a NEW result. Trusting the row (the old behaviour) would hand
+  // the model a placeholder for output it never produced.
+  it('never captures a fresh result stamped after the row itself, and prunes the row', async () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    store.upsertToolResultSpill('sess-1', legacyRow('call_0'));
+    const start = Date.now();
+    // Minted well after the row was written (+10 min > the matching slack) — a reused id, not the
+    // occurrence the row describes.
+    const fresh = toolResult('call_0', 'fresh output of a brand new call', start + 600_000);
+    const compacted: PiAgentMessage[] = [
+      user('summary', start + 590_000),
+      assistant('calling', start + 595_000),
+      fresh,
+    ];
+    const after = await legacyRestart(store, () => start + 601_000)(compacted);
+    expect(after[2]).toBe(fresh);
+    expect(store.toolResultSpills('sess-1')).toEqual([]);
   });
 });
 

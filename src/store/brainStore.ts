@@ -30,18 +30,24 @@ export interface BrainSessionRow {
   id: string; user_id: number; title: string; model: string; provider: string; work_dir: string; parent_session_id: string | null;
   delegated_access: string | null;
   forked_from_session_id: string | null;
+  /** Immutable spill namespace (see schema.sql). '' on rows minted by older builds = "use the id". */
+  spill_ns: string;
   created_at: string; updated_at: string;
 }
 export interface BrainMessageRow {
   id: string; session_id: string; parent_id: string | null; role: string; content: string; created_at: string;
 }
 /** One persisted tool-result clearing latch entry (brain_tool_result_spills): everything needed to
- *  rebuild a cleared result's placeholder byte-identically after a respawn. `preview` is the exact text
- *  the placeholder quotes (null for time-mode entries); `path` is the spill path exactly as embedded in
- *  the placeholder already sent — stored verbatim, never recomputed, because reproducing those bytes is
- *  the whole point. Shaped for toolResultClearing's `ToolResultLatchStore` seam (structural match). */
+ *  re-send a cleared occurrence's placeholder byte-identically after a respawn. `placeholder` is that
+ *  exact text (null on legacy rows predating the column — those re-render with the current renderer);
+ *  `occurredAt` is the tool-result message's own timestamp, the second half of the occurrence key (0 =
+ *  legacy row, matched heuristically); `preview`/`path` are the placeholder's ingredients, stored
+ *  verbatim, never recomputed, because reproducing already-sent bytes is the whole point. `createdAt`
+ *  is supplied on read for the legacy-row heuristic and ignored on save. Shaped for
+ *  toolResultClearing's `ToolResultLatchStore` seam (structural match). */
 export interface ToolResultSpillRecord {
-  toolCallId: string; mode: 'time' | 'preview'; bytes: number; preview: string | null; path: string;
+  toolCallId: string; occurredAt: number; mode: 'time' | 'preview'; bytes: number; preview: string | null;
+  path: string; placeholder: string | null; createdAt?: string;
 }
 /** Durable binding for an admin's interactive `elowen chat` terminal (BrainTerminalService): the tmux
  *  session name → the brain conversation it resumes + the per-terminal auth token minted for it. */
@@ -83,6 +89,16 @@ export interface BrainSessionEvent {
 }
 /** Radius of context kept around a search match in its snippet. */
 const SNIPPET_RADIUS = 60;
+
+/** Mint a conversation's immutable spill namespace: the creation-time id for on-disk readability, plus
+ *  a random suffix for uniqueness. The suffix is NOT decoration — channel-slot ids are deterministic
+ *  and REUSED across generations (`brain-ch-<key>` frees up whenever its occupant is archived), so a
+ *  namespace equal to the bare id would make every generation share one spill directory: the new
+ *  occupant could read the archived conversation's spills through its pathGuard allowance, and
+ *  deleting either conversation would sweep the other's files. */
+function mintSpillNamespace(sessionId: string): string {
+  return `${sessionId}-${randomUUID().slice(0, 8)}`;
+}
 
 /** Persistence for the embedded brain's conversations — the SOLE authoritative store (design D1).
  *  The PI agent session runs in-memory; every settled turn is projected here, and history is
@@ -126,13 +142,14 @@ export class BrainStore {
         if (parent.user_id !== input.userId) throw new Error('parent brain session belongs to another user');
       }
       this.db.prepare(
-        `INSERT INTO brain_sessions (id, user_id, title, model, provider, parent_session_id, delegated_access)
-         VALUES (@id, @user_id, @title, @model, @provider, @parent_session_id, @delegated_access)`
+        `INSERT INTO brain_sessions (id, user_id, title, model, provider, parent_session_id, delegated_access, spill_ns)
+         VALUES (@id, @user_id, @title, @model, @provider, @parent_session_id, @delegated_access, @spill_ns)`
       ).run({
         id: input.id, user_id: input.userId, title: input.title ?? '', model: input.model,
         provider: input.provider ?? '',
         parent_session_id: parentSessionId,
         delegated_access: delegatedAccess ? JSON.stringify(delegatedAccess) : null,
+        spill_ns: mintSpillNamespace(input.id),
       });
     })();
     return this.getSession(input.id)!;
@@ -165,11 +182,15 @@ export class BrainStore {
       const source = this.getSession(sourceId);
       if (!source) throw new Error(`brain session not found: ${sourceId}`);
       this.db.prepare(
-        `INSERT INTO brain_sessions (id, user_id, title, model, provider, work_dir, forked_from_session_id)
-         VALUES (@id, @user_id, @title, @model, @provider, @work_dir, @forked_from_session_id)`
+        `INSERT INTO brain_sessions (id, user_id, title, model, provider, work_dir, forked_from_session_id, spill_ns)
+         VALUES (@id, @user_id, @title, @model, @provider, @work_dir, @forked_from_session_id, @spill_ns)`
       ).run({
         id: newId, user_id: source.user_id, title: source.title, model: source.model,
         provider: source.provider, work_dir: source.work_dir, forked_from_session_id: sourceId,
+        // A fork gets its OWN namespace: it copies the transcript, never the source's latch rows, so it
+        // has no placeholders pointing into the source's spill dir — and sharing one would let either
+        // session's deletion sweep the other's files.
+        spill_ns: mintSpillNamespace(newId),
       });
       this.db.prepare(
         `INSERT INTO brain_messages (id, session_id, parent_id, role, content, created_at, pending)
@@ -344,33 +365,51 @@ export class BrainStore {
     ).run({ id: input.id, session_id: input.sessionId, role: input.role, content: JSON.stringify(input.content) });
   }
 
-  /** Persist one cleared tool result's placeholder metadata (see brain_tool_result_spills in
-   *  schema.sql). Upsert, because an EEXIST reconciliation legitimately re-latches the same key. */
+  /** Persist one cleared tool result's placeholder state (see brain_tool_result_spills in schema.sql).
+   *  Upsert, because an EEXIST reconciliation legitimately re-latches the same occurrence key. */
   upsertToolResultSpill(sessionId: string, spill: ToolResultSpillRecord): void {
     this.db.prepare(
-      `INSERT INTO brain_tool_result_spills (session_id, tool_call_id, mode, bytes, preview, path)
-       VALUES (@session_id, @tool_call_id, @mode, @bytes, @preview, @path)
-       ON CONFLICT(session_id, tool_call_id) DO UPDATE SET
-         mode = excluded.mode, bytes = excluded.bytes, preview = excluded.preview, path = excluded.path`
+      `INSERT INTO brain_tool_result_spills (session_id, tool_call_id, occurred_at, mode, bytes, preview, path, placeholder)
+       VALUES (@session_id, @tool_call_id, @occurred_at, @mode, @bytes, @preview, @path, @placeholder)
+       ON CONFLICT(session_id, tool_call_id, occurred_at) DO UPDATE SET
+         mode = excluded.mode, bytes = excluded.bytes, preview = excluded.preview,
+         path = excluded.path, placeholder = excluded.placeholder`
     ).run({
-      session_id: sessionId, tool_call_id: spill.toolCallId, mode: spill.mode,
-      bytes: spill.bytes, preview: spill.preview, path: spill.path,
+      session_id: sessionId, tool_call_id: spill.toolCallId, occurred_at: spill.occurredAt, mode: spill.mode,
+      bytes: spill.bytes, preview: spill.preview, path: spill.path, placeholder: spill.placeholder,
     });
+  }
+
+  /** Drop one latch row by its occurrence key — toolResultClearing prunes a row whose occurrence a
+   *  compaction removed from the history, so it can never capture a later reuse of the same id. */
+  deleteToolResultSpill(sessionId: string, toolCallId: string, occurredAt: number): void {
+    this.db.prepare(
+      'DELETE FROM brain_tool_result_spills WHERE session_id = ? AND tool_call_id = ? AND occurred_at = ?'
+    ).run(sessionId, toolCallId, occurredAt);
   }
 
   /** Every persisted latch row of one session, oldest first (insertion order — the order they were
    *  cleared in, though restoration does not depend on it). */
   toolResultSpills(sessionId: string): ToolResultSpillRecord[] {
     const rows = this.db.prepare(
-      'SELECT tool_call_id, mode, bytes, preview, path FROM brain_tool_result_spills WHERE session_id = ? ORDER BY rowid ASC'
-    ).all(sessionId) as { tool_call_id: string; mode: string; bytes: number; preview: string | null; path: string }[];
+      'SELECT tool_call_id, occurred_at, mode, bytes, preview, path, placeholder, created_at FROM brain_tool_result_spills WHERE session_id = ? ORDER BY rowid ASC'
+    ).all(sessionId) as { tool_call_id: string; occurred_at: number; mode: string; bytes: number; preview: string | null; path: string; placeholder: string | null; created_at: string }[];
     return rows.map((row) => ({
       toolCallId: row.tool_call_id,
+      occurredAt: row.occurred_at,
       // Only the daemon writes this table, so anything but the two known modes means manual DB surgery;
       // 'time' (no preview in the placeholder) is the conservative reading of an unknown value.
       mode: row.mode === 'preview' ? 'preview' : 'time',
-      bytes: row.bytes, preview: row.preview, path: row.path,
+      bytes: row.bytes, preview: row.preview, path: row.path, placeholder: row.placeholder,
+      createdAt: row.created_at,
     }));
+  }
+
+  /** The session's immutable spill namespace — '' (older rows before backfill, unknown ids) falls back
+   *  to the id itself, which is exactly where a pre-namespace build put the files. */
+  spillNamespace(sessionId: string): string {
+    const row = this.db.prepare('SELECT spill_ns FROM brain_sessions WHERE id = ?').get(sessionId) as { spill_ns: string } | undefined;
+    return row?.spill_ns || sessionId;
   }
 
   /** The session's provisional mid-turn rows, oldest first. */
@@ -713,6 +752,9 @@ export class BrainStore {
   /** Delete one conversation and its goal + messages atomically — a crash between the DELETEs would
    *  otherwise orphan goal/message rows against a gone session (no FK CASCADE here). */
   deleteSession(id: string): void {
+    // Resolved BEFORE the row disappears: the spill dir is keyed by the immutable namespace, and after
+    // the DELETE below there is nothing left to resolve it from.
+    const spillNs = this.spillNamespace(id);
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM brain_subagent_results WHERE parent_session_id = ? OR child_session_id = ?').run(id, id);
       this.db.prepare('DELETE FROM brain_subagent_runs WHERE parent_session_id = ? OR child_session_id = ?').run(id, id);
@@ -728,9 +770,10 @@ export class BrainStore {
       this.db.prepare('DELETE FROM brain_messages WHERE session_id = ?').run(id);
       this.db.prepare('DELETE FROM brain_sessions WHERE id = ?').run(id);
     })();
-    // Cleared tool-result spills live outside the DB, one directory per session — remove them with
-    // their conversation. Best-effort: a missing or unwritable spill dir must not fail the delete.
-    try { rmSync(toolResultSpillDir(process.env, id), { recursive: true, force: true }); }
+    // Cleared tool-result spills live outside the DB, one directory per conversation (keyed by its
+    // immutable namespace) — remove them with it. Best-effort: a missing or unwritable spill dir must
+    // not fail the delete.
+    try { rmSync(toolResultSpillDir(process.env, spillNs), { recursive: true, force: true }); }
     catch (e) { logger('brain-store').warn(`failed to remove tool-result spills for ${id}`, e); }
     // The plan file is outside the DB for the same reason and needs the same sweep — and a leftover one
     // is worse than a leftover spill: nothing reads a stale spill, but a plan is re-injected into the
@@ -776,19 +819,14 @@ export class BrainStore {
       this.db.prepare('UPDATE brain_subagent_results SET parent_session_id = ? WHERE parent_session_id = ?').run(newId, oldId);
       this.db.prepare('UPDATE brain_subagent_results SET child_session_id = ? WHERE child_session_id = ?').run(newId, oldId);
       this.db.prepare('UPDATE brain_messages SET session_id = ? WHERE session_id = ?').run(newId, oldId);
-      // The latch rows follow the conversation like the spill files below do — left behind they would
-      // resurrect another conversation's placeholders in the next session minted onto the freed id.
-      // `path` is rewritten with the files: rollover only happens to an IDLE conversation, so its cache
-      // is already cold and re-pointing the placeholder costs nothing, while a verbatim path would keep
-      // naming a directory the files just left.
-      this.db.prepare(
-        `UPDATE brain_tool_result_spills SET session_id = @new_id, path = replace(path, @old_dir, @new_dir)
-         WHERE session_id = @old_id`
-      ).run({
-        new_id: newId, old_id: oldId,
-        old_dir: `${toolResultSpillDir(process.env, oldId)}/`,
-        new_dir: `${toolResultSpillDir(process.env, newId)}/`,
-      });
+      // The latch rows follow the conversation — left behind they would resurrect another
+      // conversation's placeholders in the next session minted onto the freed id. `path` moves
+      // VERBATIM: the spill dir is keyed by the immutable spill_ns (which travels inside the session
+      // row), so the files never move and the stored path stays true. The old code rewrote old-dir →
+      // new-dir here and renamed the directory, which silently invalidated the cached prefix of every
+      // WARM conversation a /context bind moved (reassignment is NOT only cold idle rollover) — one
+      // changed placeholder byte re-caches the entire history.
+      this.db.prepare('UPDATE brain_tool_result_spills SET session_id = ? WHERE session_id = ?').run(newId, oldId);
       this.db.prepare('UPDATE brain_goals SET session_id = ? WHERE session_id = ?').run(newId, oldId);
       this.db.prepare('UPDATE brain_cards SET session_id = ? WHERE session_id = ?').run(newId, oldId);
       this.db.prepare('UPDATE brain_session_events SET session_id = ? WHERE session_id = ?').run(newId, oldId);
@@ -797,15 +835,10 @@ export class BrainStore {
       // so a node can never be `oldId`. getWorkflowRuns re-validates them on read regardless.
       this.db.prepare('UPDATE brain_workflows SET parent_session_id = ? WHERE parent_session_id = ?').run(newId, oldId);
     })();
-    // Tool-result spills are keyed by session id too — move them with the conversation, or they stay
-    // under the freed old id: orphaned forever (nothing would ever delete them) and readable by the
-    // NEXT session minted onto that id. Best-effort: ENOENT just means there was nothing to move.
-    try { renameSync(toolResultSpillDir(process.env, oldId), toolResultSpillDir(process.env, newId)); }
-    catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logger('brain-store').warn(`failed to move tool-result spills ${oldId} → ${newId}`, e);
-      }
-    }
+    // Tool-result spills need NO filesystem move: their directory is keyed by the immutable spill_ns,
+    // which just travelled with the session row. That also removes the old failure mode where the DB
+    // move committed but renameSync failed, stranding the files under the freed id — readable (and
+    // deletable) by whatever conversation was minted onto it next.
     // The plan follows the conversation for the same reason: left under the freed old id it would be
     // orphaned forever AND would surface in the next session minted onto that id.
     try { renameSync(planFilePath(process.env, oldId), planFilePath(process.env, newId)); }

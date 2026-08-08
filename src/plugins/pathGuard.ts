@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import { resolve, sep, dirname, basename, join } from 'node:path';
 import { currentIdentity, currentPolicy, currentSessionId, currentToolPolicy, currentTurnMode, currentTurnPermissions, currentWorkDir } from './policyContext.js';
 import { noninteractivePermissionBoundary, type NoninteractivePermissionBoundary } from '../brain/toolPermissions.js';
-import { planFilePath, toolResultSpillDir } from '../shared/paths.js';
+import { planFilePath, sessionToolResultSpillDir } from '../shared/paths.js';
 
 /** The repo roots the current session may operate in. Empty for an admin (all-access) or outside a
  *  prompt turn. A tool uses this to default a working directory. */
@@ -142,7 +142,10 @@ export function assertPathAllowed(path: string): string {
   const sessionId = currentSessionId();
   if (sessionId) {
     if (isSessionPlanPath(sessionId, path)) return realAbs(path);
-    const spill = realPathWithin(path, [toolResultSpillDir(process.env, sessionId)]);
+    // Resolved through the session's immutable spill NAMESPACE, not its re-keyable id: after a channel
+    // rollover or a /context bind the conversation keeps reading the directory its placeholders already
+    // name, and a fresh conversation minted onto the freed id never inherits access to them.
+    const spill = realPathWithin(path, [sessionToolResultSpillDir(process.env, sessionId)]);
     if (spill) return spill;
   }
   throw new Error(`path not allowed: "${path}" is outside your accessible repositories`);

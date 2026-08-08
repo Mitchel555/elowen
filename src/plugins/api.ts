@@ -366,6 +366,15 @@ export interface WorkflowCancelControl {
   cancelForSession(input: { sessionId: string }): { cancelled: number };
 }
 
+/** The workflow engine's liveness seam: whether the in-plugin engine still holds this DAG (running, not
+ *  finished). The durable workflow row is not authoritative for "running" — a failed terminal snapshot or
+ *  a missed boot reconcile leaves it claiming `running` while the engine dropped the workflow long ago —
+ *  and the origin PI session's liveness proves nothing about one specific DAG. Status reads consult this
+ *  to decide whether a `running` row still deserves a synthetic transcript anchor. */
+export interface WorkflowLivenessControl {
+  isWorkflowLive(input: { workflowId: string }): boolean;
+}
+
 /** One MCP server as the plugin's live table reports it. Core reads only the two fields a chat client's
  *  telemetry rail renders; the plugin's own admin surface serves the full record (tools, last error). */
 export interface McpServerState { name: string; status: string }
@@ -387,7 +396,7 @@ export interface KnownControls {
   subagent: DetachControl;
   terminal: DetachControl & KillForegroundControl;
   cron: PendingWakeupControl;
-  workflow: WorkflowCancelControl & DetachControl;
+  workflow: WorkflowCancelControl & DetachControl & WorkflowLivenessControl;
   mcp: McpListControl;
 }
 

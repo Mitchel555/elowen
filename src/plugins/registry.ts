@@ -51,7 +51,7 @@ const KNOWN_CONTROL_METHODS: { [K in keyof KnownControls]: readonly (keyof Known
   subagent: ['detachForeground'],
   terminal: ['detachForeground', 'killForeground'],
   cron: ['pendingWakeupOriginSessionIds'],
-  workflow: ['cancelForSession', 'detachForeground'],
+  workflow: ['cancelForSession', 'detachForeground', 'isWorkflowLive'],
   mcp: ['listServers', 'bridgeSnapshot'],
 };
 

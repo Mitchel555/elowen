@@ -173,6 +173,14 @@ CREATE TABLE IF NOT EXISTS brain_sessions (
   -- eviction guard for parents with running children. Recorded as provenance only: never joined on (so
   -- no index) and never dereferenced, because deleting the source leaves this pointing at a gone row.
   forked_from_session_id TEXT,
+  -- IMMUTABLE spill namespace: the fs-safe directory segment this conversation's cleared tool results
+  -- live under (<dataDir>/tool-results/<spill_ns>). Minted once at creation and NEVER rewritten — the
+  -- session id is re-keyed by channel rollover and /context binds, but the placeholders already sent to
+  -- the provider embed spill paths, and moving the directory (or rewriting the stored paths) would
+  -- rewrite an already-cached prefix and strand files under a slot id the next conversation inherits.
+  -- Empty on rows minted by older builds; db.ts backfills those to their then-current id, freezing the
+  -- layout the files already sit in. Read through BrainStore.spillNamespace ('' falls back to the id).
+  spill_ns TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -194,23 +202,36 @@ CREATE TABLE IF NOT EXISTS brain_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_brain_messages_session ON brain_messages(session_id);
 -- The persisted egress latch of tool-result clearing (brain/session/toolResultClearing.ts). A row means
--- "this session already replaced tool_call_id's result with a spill placeholder on the wire", and holds
--- everything needed to rebuild that placeholder BYTE-IDENTICALLY after a respawn: `bytes` and `preview`
--- go into its wording, `path` is embedded verbatim. Restoring from here instead of comparing the live
--- message text against the spill file is what keeps a restart free even when rehydration changed that
--- text (an externalized tool image comes back as a placeholder text block — persistence.ts
--- `withoutExternalizedImages`). The spill FILES keep the full output for the model to Read; this table
--- carries only the placeholder metadata. No foreign keys, same lifecycle policy as brain_subagent_runs:
--- sessions are re-keyed during channel rollover, so BrainStore moves/deletes these rows itself.
+-- "this session already replaced one tool-result OCCURRENCE with a spill placeholder on the wire", and
+-- holds that placeholder VERBATIM (`placeholder`) so a respawn re-sends the exact bytes the provider
+-- already cached — never a re-render, which a wording change would silently drift. `mode`/`bytes`/
+-- `preview`/`path` remain as the placeholder's ingredients for observability and for legacy rows
+-- (placeholder NULL) written before the column existed. Restoring from here instead of comparing the
+-- live message text against the spill file is what keeps a restart free even when rehydration changed
+-- that text (an externalized tool image comes back as a placeholder text block — persistence.ts
+-- `withoutExternalizedImages`).
+--
+-- `occurred_at` is the tool-result MESSAGE's own timestamp (epoch ms) and is part of the key on
+-- purpose: tool_call_id alone is not an identity — sequential id styles (`call_0`) reset every turn, so
+-- once a compaction removes the cleared occurrence the same id can return on a brand-new result, and a
+-- row keyed by id alone would swallow it (the model would get a placeholder pointing at another call's
+-- spill instead of its own output). 0 marks a legacy row from before this column; toolResultClearing
+-- restores those through a created_at heuristic and prunes/graduates them. The spill FILES keep the
+-- full output for the model to Read; this table carries only placeholder state. No foreign keys, same
+-- lifecycle policy as brain_subagent_runs: sessions are re-keyed during channel rollover, so BrainStore
+-- moves/deletes these rows itself (`path` moves with the row VERBATIM — the spill dir is keyed by the
+-- immutable spill_ns, so the files never move and the path stays true).
 CREATE TABLE IF NOT EXISTS brain_tool_result_spills (
   session_id TEXT NOT NULL,
   tool_call_id TEXT NOT NULL,
+  occurred_at INTEGER NOT NULL DEFAULT 0,
   mode TEXT NOT NULL,
   bytes INTEGER NOT NULL,
   preview TEXT,
   path TEXT NOT NULL,
+  placeholder TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  PRIMARY KEY (session_id, tool_call_id)
+  PRIMARY KEY (session_id, tool_call_id, occurred_at)
 );
 -- Latest durable UI state for each delegated tool call. The parent assistant message remains the
 -- canonical transcript row; this sidecar supplies the child session id + rolling status that PI's

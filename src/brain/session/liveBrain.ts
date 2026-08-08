@@ -7,7 +7,7 @@ import type { DelegatedExecutionScope } from '../delegatedScope.js';
 import type { TurnMode } from '../service/turnRequest.js';
 import type { ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 import type { ApplyCompaction } from './factory.js';
-import type { AssessIdleCompaction } from './idleCompaction.js';
+import type { AssessColdCompaction } from './coldStartCompaction.js';
 import type { StoredChatImage } from '../chatImages.js';
 
 /** A queued mid-turn message's image attachments, in PI's ImageContent shape. */
@@ -72,10 +72,17 @@ export interface LiveBrain {
    *  check, so a saved Account change takes effect on the running conversation instead of waiting for the
    *  next respawn (model switch, rollover, daemon restart). See BrainService.applyAutoCompactSettings. */
   applyCompaction: ApplyCompaction;
-  /** Live idle-compaction eligibility (proactive flag, breaker state, context vs floor estimate) —
-   *  consulted by the daemon's IdleCompactionSweep once this session's prompt cache has provably
-   *  expired. Optional so tests and hand-built fakes without the factory seam simply never idle-compact. */
-  assessIdleCompaction?: AssessIdleCompaction;
+  /** Live cold-start-compaction eligibility (proactive flag, breaker state, break-even estimate) —
+   *  consulted by the turn runner before the first provider call of a turn that follows a provably
+   *  expired prompt cache. Optional so tests and hand-built fakes without the factory seam simply never
+   *  cold-compact. */
+  assessColdCompaction?: AssessColdCompaction;
+  /** cacheTtlMs(process.env) at the last prompt THIS process ran on this session — the TTL its provider
+   *  requests were actually cached under. The cold-start gate keys on it instead of the current env, so
+   *  a retention switch across a restart (long → short) cannot open the gate over a still-warm hour-long
+   *  cache. Unset until this process runs a turn (rehydrated history): the gate then assumes the longest
+   *  TTL, which can only delay the compaction. */
+  lastRequestCacheTtlMs?: number;
   listeners: Set<(e: BrainEvent) => void>;
   /** Bounded current-run event journal + the canonical fan-out seam. Used by opt-in sub-agent stream
    *  snapshots to reconstruct output emitted before the user opened the drill-in view. */

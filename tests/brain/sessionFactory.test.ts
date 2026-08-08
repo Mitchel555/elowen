@@ -401,11 +401,11 @@ describe('BrainSessionFactory deferred-tool wiring', () => {
   });
 });
 
-describe('BrainSessionFactory idle-compaction assessment', () => {
+describe('BrainSessionFactory cold-start-compaction assessment', () => {
   async function createWithHistory(messages: unknown[], autoCompact = true) {
     const listeners: ((e: unknown) => void)[] = [];
     const session = {
-      sessionId: 'sess-idle-assess',
+      sessionId: 'sess-cold-assess',
       agent: {} as Record<string, unknown>,
       subscribe: (l: (e: unknown) => void) => { listeners.push(l); return () => {}; },
       messages,
@@ -416,26 +416,29 @@ describe('BrainSessionFactory idle-compaction assessment', () => {
       createSession: vi.fn(async () => ({ session })) as never,
       resourceLoaderFactory: () => undefined,
     });
-    const { assessIdleCompaction, applyCompaction } = await factory.create({
+    const { assessColdCompaction, applyCompaction } = await factory.create({
       sessionId: session.sessionId, ownerUserId: 1, runtime: undefined,
       model: { id: 'test-model', provider: 'kimi-coding', contextWindow: 200_000 },
       cwd: process.cwd(), systemPrompt: 'sp', appendSystemPrompt: [], skills: [], tools: [],
       autoCompact, autoCompactAtPct: 80,
     } as never);
-    return { assess: assessIdleCompaction, applyCompaction, listeners };
+    return { assess: assessColdCompaction, applyCompaction, listeners };
   }
 
-  // 300k chars ≈ 75k estimated tokens: far above the floor (1 fixed + 8k allowance + 20k tail).
-  const bigHistory = [{ role: 'user', content: 'x'.repeat(300_000), timestamp: 1 }];
+  // 1.4M chars ≈ 350k estimated tokens: past the break-even C ≥ 5·F + 20·S for the floor here
+  // (1 fixed + 8k allowance + 20k tail = 28 001 → 300 005 tokens).
+  const bigHistory = [{ role: 'user', content: 'x'.repeat(1_400_000), timestamp: 1 }];
 
-  it('reports a large idle context as eligible, with the estimates PI’s own check would see', async () => {
+  it('reports a large cold context as eligible, with the estimates PI’s own check would see', async () => {
     const { assess } = await createWithHistory(bigHistory);
-    expect(assess()).toEqual({ eligible: true, contextTokens: 75_000, floorTokens: 28_001 });
+    expect(assess()).toEqual({ eligible: true, contextTokens: 350_000, floorTokens: 28_001 });
   });
 
-  it('refuses a conversation with nothing worth summarizing', async () => {
-    const { assess } = await createWithHistory([{ role: 'user', content: 'short', timestamp: 1 }]);
-    expect(assess()).toEqual({ eligible: false, reason: 'too-small' });
+  it('refuses a context below the break-even — a 4× reduction still loses money', async () => {
+    // 300k chars ≈ 75k tokens: 2.7× the floor, which the retired 2×-floor rule would have accepted,
+    // but well under 5·28k + 20·8k.
+    const { assess } = await createWithHistory([{ role: 'user', content: 'x'.repeat(300_000), timestamp: 1 }]);
+    expect(assess()).toEqual({ eligible: false, reason: 'not-worthwhile' });
   });
 
   it('reads the auto-compact toggle LIVE, exactly like the boundary check does', async () => {

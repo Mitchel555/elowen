@@ -31,7 +31,7 @@ function pendingQueueTokens(
 /** PI's zero/error-usage fallback, kept local because estimateContextTokens is not part of the public
  * coding-agent export. Start from the newest valid provider usage and estimate only its unseen tail;
  * when no valid usage exists, conservatively estimate the whole visible message context. Also reused by
- * the factory's idle-compaction assessment, which needs the same number shouldCompact would see. */
+ * the factory's cold-start-compaction assessment, which needs the same number shouldCompact would see. */
 export function estimatedContextTokens(
   messages: readonly Parameters<typeof estimateTokens>[0][],
   compactionTimestamp?: string,

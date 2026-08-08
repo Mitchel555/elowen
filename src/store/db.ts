@@ -66,6 +66,7 @@ function migrate(db: Db): void {
   repairUserSequenceBelowReferences(db);
   widenSessionEventKindsForSubagent(db);
   widenSessionEventKindsForWorkflow(db);
+  keyToolResultSpillsByOccurrence(db);
 }
 
 /** Run `apply` in an IMMEDIATE transaction, retrying while another process holds the write lock.
@@ -188,6 +189,13 @@ function applyAdditiveMigrations(db: Db): void {
   // before this column existed — and deliberately separate from parent_session_id, which means "delegated
   // child" to the usage roll-up, the retention janitor and the sub-agent listing.
   addColumn(db, 'brain_sessions', 'forked_from_session_id', 'TEXT');
+  // Immutable spill namespace (see schema.sql). The backfill FREEZES every pre-existing conversation's
+  // namespace at its current id — exactly the directory its spill files and already-sent placeholders
+  // point at today — so nothing on disk moves. It must stay idempotent and re-run every boot: a row
+  // minted by an older build during a rolling update lands with '' and is frozen at the next start,
+  // before any runtime re-key could change what "current id" means.
+  addColumn(db, 'brain_sessions', 'spill_ns', "TEXT NOT NULL DEFAULT ''");
+  db.exec("UPDATE brain_sessions SET spill_ns = id WHERE spill_ns = ''");
   // The delegated-result inbox now serves two producers (see brain_subagent_results in schema.sql):
   // `kind` discriminates them and `workflow_id` links a workflow row to its brain_workflows DAG. Old
   // rows are all sub-agent completions, so the 'subagent' default reads the whole back catalogue right.
@@ -419,6 +427,46 @@ function widenSessionEventKindsForWorkflow(db: Db): void {
       DROP TABLE brain_session_events;
       ALTER TABLE brain_session_events_new RENAME TO brain_session_events;
       CREATE INDEX IF NOT EXISTS idx_brain_session_events_session ON brain_session_events(session_id);
+    `);
+  });
+}
+
+/** v11 — re-key `brain_tool_result_spills` by OCCURRENCE: (session_id, tool_call_id, occurred_at), plus
+ *  the verbatim `placeholder` column (see schema.sql for why both exist).
+ *
+ *  A table rebuild, because the primary key widens and SQLite cannot alter one in place — same
+ *  rationale as v5/v7. Existing rows are carried over with occurred_at = 0 ("legacy row, occurrence
+ *  unknown") and placeholder = NULL ("render with the current renderer"); toolResultClearing restores
+ *  those through a created_at heuristic that refuses any occurrence stamped AFTER the row was written —
+ *  ending the deployed defect where a row whose occurrence a compaction had removed would capture a
+ *  brand-new result reusing the same tool call id.
+ *
+ *  Guarded by shape, not just version: a database created fresh off the current schema.sql already has
+ *  the new table (and nothing to migrate), so the rebuild only runs where `occurred_at` is missing.
+ *
+ *  NUMBERED 11: versions 1-10 are all spent (see the runners above) — a migration numbered ≤10 would be
+ *  skipped in silence on exactly the databases that need it. */
+function keyToolResultSpillsByOccurrence(db: Db): void {
+  runOnce(db, 11, () => {
+    const cols = db.prepare('PRAGMA table_info(brain_tool_result_spills)').all() as { name: string }[];
+    if (cols.some((c) => c.name === 'occurred_at')) return;
+    db.exec(`
+      CREATE TABLE brain_tool_result_spills_new (
+        session_id TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL DEFAULT 0,
+        mode TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        preview TEXT,
+        path TEXT NOT NULL,
+        placeholder TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (session_id, tool_call_id, occurred_at)
+      );
+      INSERT INTO brain_tool_result_spills_new (session_id, tool_call_id, mode, bytes, preview, path, created_at)
+        SELECT session_id, tool_call_id, mode, bytes, preview, path, created_at FROM brain_tool_result_spills;
+      DROP TABLE brain_tool_result_spills;
+      ALTER TABLE brain_tool_result_spills_new RENAME TO brain_tool_result_spills;
     `);
   });
 }

@@ -249,7 +249,11 @@ export class TurnContextBuilder {
         ? this.d.store.getSubagentRuns(live.sessionId).find((run) => run.sessionId === update.sessionId)?.status
         : undefined;
       if (!this.d.store.upsertSubagentRun(live.sessionId, enriched)) return;
-      this.d.sessions.setChildRunning(live.sessionId, update.sessionId, update.status === 'running');
+      // As the 'progress' source: this emitter tracks the plugin's progress ROW, not the child's actual
+      // run (that claim belongs to begin/endDelegatedCall). A DelegateContinue that steered into a
+      // running child settles its row while the original call still runs — its terminal update must
+      // release only the emitter's own claim, or the live child vanishes from DelegateStop/abort/shutdown.
+      this.d.sessions.setChildRunning(live.sessionId, update.sessionId, update.status === 'running', 'progress');
       live.replay.publish({ type: 'subagent', ...enriched });
       recordSubagentFinishMarker(this.d.store, live.sessionId, (event) => live.replay.publish(event), prevStatus, update);
     };

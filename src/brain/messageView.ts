@@ -537,7 +537,10 @@ export function shapeBrainMessages(
           ...(command ? { command } : {}),
           ...(plan ? { plan } : {}),
           ...(p.id && subagents.has(p.id) ? { sub: subagents.get(p.id) } : {}),
-          ...(p.id && workflows.has(p.id) ? { wf: workflows.get(p.id) } : {}),
+          // Gated on the tool NAME, not just the call id: workflow state must only ever ride its own
+          // WorkflowStart row — on an id collision it would otherwise decorate an unrelated tool call,
+          // and withWorkflowAnchors (same name gate) would suppress the real anchor's synthesis over it.
+          ...(p.id && p.name === 'WorkflowStart' && workflows.has(p.id) ? { wf: workflows.get(p.id) } : {}),
         });
       }
     }
@@ -588,23 +591,30 @@ export function shapeBrainMessages(
  *  transcript, and resurrecting every finished DAG of a long conversation at the top of each page would
  *  be noise, not recovered state.
  *
- *  The synthetic view's id is derived (stable across refetches, so client turn-dedup works) and its tool
- *  item carries the run's REAL toolCallId — that is what re-attaches subsequent live snapshots. Prepended
- *  because the missing anchor is by construction older than every loaded view; when paging later reaches
- *  the real anchor row, both render, which is a mild cosmetic duplication in a rare path. */
+ *  The synthetic view's id is derived (stable across refetches, so client turn-dedup works — and NOT a
+ *  SQLite row UUID, the one exception to the wire contract's id rule, which is why the view carries
+ *  `synthetic: true`) and its tool item carries the run's REAL toolCallId — that is what re-attaches
+ *  subsequent live snapshots. Prepended because the missing anchor is by construction older than every
+ *  loaded view; when paging later reaches the real anchor row, both render — the `synthetic` mark is what
+ *  lets a client drop the synthetic copy by toolCallId once the real row arrives.
+ *
+ *  A view counts as an existing anchor only when it is a WorkflowStart call: any other tool segment that
+ *  happens to carry the same id (an id collision) must not suppress the synthesis — the workflow state
+ *  would then hang off a foreign tool row instead of an anchor of its own. */
 export function withWorkflowAnchors(views: BrainMessageView[], workflowRuns: readonly BrainWorkflowView[]): BrainMessageView[] {
   const running = workflowRuns.filter((run) => run.status === 'running');
   if (running.length === 0) return views;
   const anchored = new Set<string>();
   for (const view of views) {
     for (const segment of view.segments ?? []) {
-      if (segment.kind === 'tool' && segment.id) anchored.add(segment.id);
+      if (segment.kind === 'tool' && segment.id && segment.name === 'WorkflowStart') anchored.add(segment.id);
     }
   }
   const synthetic = running
     .filter((run) => !anchored.has(run.toolCallId))
     .map((run): BrainMessageView => ({
       id: `wf-anchor-${run.toolCallId}`,
+      synthetic: true,
       role: 'assistant',
       text: '',
       segments: [{ kind: 'tool', name: 'WorkflowStart', id: run.toolCallId, ...(run.title ? { detail: run.title } : {}), wf: run }],

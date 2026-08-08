@@ -22,11 +22,16 @@ import { flushReasoningMarker, recordSessionEvent } from './sessionEvents.js';
 import type { TurnImage, TurnMode, TurnRequest } from './turnRequest.js';
 import { hasActiveNativeCompactionCheck } from '../session/compactionCheckCoordinator.js';
 import { queuedWithPending } from '../session/queueMirror.js';
-import type { SubagentCompletion, WorkflowCompletion } from '../events.js';
+import { cacheTtlMs } from '../session/cacheTiming.js';
+import { coldCompactionGateMs, lastActivityMs } from '../session/coldStartCompaction.js';
+import { sessionHasWorkInFlight } from './sessionQuiescence.js';
+import { runCompaction, type SubagentCompletion, type WorkflowCompletion } from '../events.js';
 import { randomUUID } from 'node:crypto';
 import { isNonUserSession } from '../sessionId.js';
 import { xmlEscape } from '../../shared/xml.js';
 import { logger } from '../../shared/logger.js';
+
+const coldLog = logger('brain-compaction');
 
 /** A durable sub-agent result is retried at most this many times before the drain gives up (leaves the
  *  row pending, no further timer). A later user turn on the parent re-triggers one more attempt. */
@@ -320,6 +325,44 @@ export class BrainTurnRunner {
     live.replay.publish({ type: 'queue', items: queuedWithPending(live) });
   }
 
+  /** Compact the conversation at the START of a turn that follows a provably expired prompt cache —
+   *  before its first provider request, under the session lock the turn already holds.
+   *
+   *  This is the ONLY automatic cold-context compaction trigger; the previous 60 s idle sweep is gone.
+   *  Timing it to the turn keeps the one genuine advantage of the idle timing (the cache is cold, so
+   *  the rewrite forfeits no warm prefix) and removes the sweep's two losses: nothing is ever paid for
+   *  a conversation nobody returns to, and the decision is made at the moment the user is provably
+   *  continuing — the moment the compacted re-cache is actually about to be bought. See
+   *  coldStartCompaction.ts for the timing and break-even reasoning.
+   *
+   *  Never throws and never blocks the turn on failure: a context that cannot be summarized still
+   *  answers on its full history, and the circuit breaker counts the failure through its own session
+   *  subscription. No loop guard is needed — the turn that follows appends fresh messages, which closes
+   *  the gate until the next full idle-past-TTL epoch. */
+  private async maybeColdStartCompaction(live: LiveBrain): Promise<void> {
+    const assess = live.assessColdCompaction;
+    if (!assess) return;
+    if (live.session.isStreaming || live.session.isCompacting) return;
+    const lastActivity = lastActivityMs(this.d.store.lastMessageAt(live.sessionId), live.interactedAt);
+    if (lastActivity === 0 || Date.now() - lastActivity < coldCompactionGateMs(live.lastRequestCacheTtlMs)) return;
+    // The shared fail-closed predicate (also the teardown's): a queued message, parked question,
+    // running child/background job or armed goal means the context is not this turn's to rewrite.
+    if (sessionHasWorkInFlight({ store: this.d.store, sessions: this.d.sessions, elicitation: this.d.elicitation }, live.sessionId)) return;
+    const verdict = assess();
+    if (!verdict.eligible) {
+      coldLog.info(`cold-start compaction skipped on ${live.sessionId}: ${verdict.reason}`);
+      return;
+    }
+    try {
+      const result = await runCompaction(live.session);
+      if (result.compacted) {
+        coldLog.info(`cold-start compacted ${live.sessionId} (cache cold; est. ${verdict.contextTokens} → floor ~${verdict.floorTokens} tokens)`);
+      }
+    } catch (error) {
+      coldLog.warn(`cold-start compaction failed on ${live.sessionId} — running the turn on the full context`, error);
+    }
+  }
+
   async send(request: TurnRequest): Promise<void> {
     const {
       userId, text, images, internal, clientCwd, session, display, client,
@@ -399,6 +442,11 @@ export class BrainTurnRunner {
       // Serialized per conversation: concurrent prompt() calls on one PI session corrupt turn state.
       await this.serial(live.sessionId, async () => {
       assertClientCurrent(live.sessionId);
+      // First turn after the prompt cache expired: shrink the context BEFORE the provider re-caches it
+      // (see maybeColdStartCompaction). Runs before admission so the user's new message is never part
+      // of what gets summarized — it follows the compacted context instead.
+      await this.maybeColdStartCompaction(live);
+
       // Lock acquired means the compaction that was blocking this turn has released: the message is running
       // now, not waiting, so drop its pending chip before the turn's own user echo lands.
       if (pendingCompactionEchoId) {
@@ -436,6 +484,11 @@ export class BrainTurnRunner {
         // the provider call even though this send had already entered its turn callback.
         assertClientCurrent(live.sessionId);
         await live.session.prompt(prompted, options);
+        // Requests provably went out under THIS process's cache retention — record the TTL they were
+        // cached with for the cold-start gate. Stamped only after a successful prompt: a rejected
+        // preflight may have made no request at all, and an unstamped session just falls back to the
+        // conservative longest TTL.
+        live.lastRequestCacheTtlMs = cacheTtlMs(process.env);
         // Thinking-only guard (#115): reasoning models sometimes end a 'stop' turn with ONLY a thinking
         // block — no text, no tool call — so the user sees nothing. ONE automatic nudge re-prompts the
         // same session; the nudge itself is never persisted as a user message (agent_end persists only

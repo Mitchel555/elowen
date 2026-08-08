@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
 import { openDb } from '../../src/store/db.js';
+import { SubagentRunnerPool } from '../../src/subagent/pool.js';
 import { TaskStore } from '../../src/store/taskStore.js';
 import { Readiness } from '../../src/store/readiness.js';
 import { MissionStore } from '../../src/store/missionStore.js';
@@ -48,24 +51,39 @@ describe('api', () => {
     expect(body.ok).toBe(true);
     expect(typeof body.version).toBe('string'); // surfaced for the web footer
   });
-  it('GET /health reports the event loop window including the stall sum', async () => {
+  it('GET /health reports the event loop window including the severe-stall sum', async () => {
     const { app } = makeApp();
     const res = await app.request('/health');
     const body = await res.json() as { eventLoop: Record<string, unknown> };
-    // stalledMs is the number that explains client-observed latency when `max` cannot (a request queues
-    // through the SUM of stalls); windowMs says how much history the figures describe.
-    for (const key of ['p50', 'p99', 'max', 'stalledMs', 'windowMs']) {
+    // severeStalledMs is the number that explains client-observed latency when `max` cannot (a request
+    // queues through the SUM of stalls); windowMs says how much history the figures describe.
+    for (const key of ['p50', 'p99', 'max', 'severeStalledMs', 'windowMs']) {
       expect(typeof body.eventLoop[key], key).toBe('number');
     }
+  });
+  // The block must be LIVE data, not shape: a constant-zero eventLoop would pass every type check while
+  // telling an operator mid-incident that the loop is healthy.
+  it('GET /health eventLoop reflects a genuine stall of this process', async () => {
+    const { app } = makeApp();
+    await new Promise((r) => setTimeout(r, 40)); // let the sampler take a baseline reading first
+    const until = Date.now() + 160; while (Date.now() < until) { /* deliberately hog the loop */ }
+    await new Promise((r) => setTimeout(r, 40)); // let the monitor's own timers observe the stall
+    const body = await (await app.request('/health')).json() as { eventLoop: { max: number; severeStalledMs: number; windowMs: number } };
+    expect(body.eventLoop.max).toBeGreaterThan(100);
+    expect(body.eventLoop.severeStalledMs).toBeGreaterThanOrEqual(45);
+    expect(body.eventLoop.severeStalledMs).toBeLessThanOrEqual(body.eventLoop.windowMs);
   });
   // The server-side half of the latency split: client total minus this duration is time the request
   // spent WAITING to be served (kernel backlog + event-loop queueing), which no in-process histogram
   // can attribute to a single request. Without the header, a 19.9 s /health round-trip measured during
-  // a stall storm was indistinguishable from a slow handler.
-  it('responses carry a Server-Timing header with the handler duration', async () => {
+  // a stall storm was indistinguishable from a slow handler. ONLY on /health: a per-route duration on
+  // public and error responses is a small timing side-channel nothing needs.
+  it('only /health carries the Server-Timing header', async () => {
     const { app } = makeApp();
     const res = await app.request('/health');
     expect(res.headers.get('server-timing')).toMatch(/^app;dur=\d+(\.\d+)?$/);
+    expect((await app.request('/setup')).headers.get('server-timing')).toBeNull();
+    expect((await app.request('/tasks')).headers.get('server-timing')).toBeNull();
   });
   it('GET /health includes CORS header', async () => {
     const { app } = makeApp();
@@ -639,6 +657,49 @@ it('returns 400 on a malformed JSON body (central onError, not a 500)', async ()
   const res = await app.request('/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{ not json' });
   expect(res.status).toBe(400);
   expect(await res.json()).toEqual({ error: 'invalid JSON body' });
+});
+
+// The whole chain an operator actually reads: a REAL pool whose fork is refused, published through the
+// REAL /health route. The failure must arrive as a stable code — the raw reason quotes internal paths
+// and build ids, and /health is unauthenticated by design — and the block must exist at all (removing
+// `subagentPool` from /health would strand the diagnosis in a getter nobody calls).
+it('GET /health surfaces the real pool: spawn failure as a stable code, never the raw reason', async () => {
+  class BootRefusingChild extends EventEmitter {
+    readonly pid = 0; // setPriority(0) would renice the test process itself
+    connected = true;
+    send(): boolean { return true; }
+    kill(): boolean { return true; }
+  }
+  const children: BootRefusingChild[] = [];
+  const pool = new SubagentRunnerPool({
+    dbPath: '/tmp/elowen-health-test.db',
+    project: { id: 1, slug: 't', path: '/tmp' },
+    cwd: '/tmp',
+    fork: () => { const c = new BootRefusingChild(); children.push(c); return c as unknown as ChildProcess; },
+    machine: { cpus: () => 8, totalMemBytes: () => 32 * 1024 ** 3, availableMemBytes: () => 24 * 1024 ** 3 },
+  });
+  const run = pool
+    .run({ channelId: 'subagent-sub-dlg-1', ownerUserId: 1, parentSessionId: 'brain-1', delegatedAccess: { admin: false, projectIds: [1], owner: true, permissionBoundary: null }, scheduled: false }, 'x')
+    .catch(() => undefined); // the refusal is the point; the dispatcher would fall back in-process
+  for (let i = 0; i < 4; i += 1) await new Promise((r) => { setImmediate(r); });
+  children[0]?.emit('message', { type: 'fatal', reason: 'build mismatch (daemon /var/www/secret-internal-path 1.2.3)' });
+  await run;
+
+  const db = openDb(':memory:'); db.prepare("INSERT INTO projects (id,slug,path) VALUES (1,'elowen','/o')").run();
+  const app = createServer({
+    tasks: new TaskStore(db), readiness: new Readiness(db), missions: new MissionStore(db), bus: new EventBus(),
+    engine: null as any, spawn: null as any, tmux: null as any,
+    project: { id: 1, path: '/o' }, fallback: { program: 'claude-code', model: 'sonnet' }, clock: new FakeClock(0), config: new ConfigStore(db),
+    subagentPool: () => pool.stats(),
+  });
+  const body = await (await app.request('/health')).json() as {
+    subagentPool: { mode: string; spawnFailure: { code: string; consecutive: number } | null };
+  };
+  expect(body.subagentPool.mode).toBe('runner');
+  expect(body.subagentPool.spawnFailure?.code).toBe('build_mismatch');
+  expect(body.subagentPool.spawnFailure?.consecutive).toBe(1);
+  expect(JSON.stringify(body)).not.toContain('secret-internal-path');
+  pool.reset('test over');
 });
 
 it('POST /sessions reverts the task to open when spawn.launch fails', async () => {

@@ -38,7 +38,7 @@ import type { BrainEvent } from '../brain/events.js';
 import { SubagentRunnerUnavailable, type DelegatedTurnRequest, type DelegatedTurnRunner } from '../brain/delegatedTurn.js';
 import { SubagentRunnerHost, type RunnerHeartbeat, type SubagentRunnerHostDeps } from './runnerHost.js';
 import { FairQueue } from './fairQueue.js';
-import type { SubagentPoolStats } from './poolStats.js';
+import type { SpawnFailureCode, SubagentPoolStats } from './poolStats.js';
 import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -67,6 +67,16 @@ const MAINTENANCE_INTERVAL_MS = HEARTBEAT_INTERVAL_MS * 5;
  *  is what guarantees one channel is live in ONE process, so forgetting it unilaterally is how the same
  *  transcript ends up driven by two sessions. */
 const ROUTE_IDLE_MS = 30 * 60_000;
+
+/** Classify a fork refusal for the public stats block. The raw message is matched here, ONCE, at the
+ *  daemon's own trust boundary — outward goes only the category, because `/health` is unauthenticated
+ *  and a raw boot exception quotes internal paths, build ids and configuration. The detail an operator
+ *  needs is in the daemon log, one line above where this code is recorded. */
+const spawnFailureCode = (reason: string): SpawnFailureCode =>
+  reason.includes('build mismatch') ? 'build_mismatch'
+    : reason.includes('did not report ready') ? 'boot_timeout'
+    : reason.includes('refused to start') ? 'boot_failed'
+    : 'fork_failed';
 
 interface QueuedTurn {
   request: DelegatedTurnRequest;
@@ -125,10 +135,14 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
    *  a pool sized off its smallest member is a pool that overcommits. */
   private measuredRss = 0;
   private lastSpawnAt = 0;
-  /** Why the last fork failed, held until one succeeds. A failure that is only logged is invisible to
-   *  anyone reading `/health`, and this particular one is silent by design: the dispatcher catches it and
-   *  runs the turn in-process, so the delegation still works and nothing surfaces except a slower daemon. */
-  private lastSpawnFailure: { reason: string; at: number; consecutive: number } | null = null;
+  /** Why the last fork failed, as its public category — the CURRENT epoch's failure, not history. A
+   *  failure that is only logged is invisible to anyone reading `/health`, and this particular one is
+   *  silent by design: the dispatcher catches it and runs the turn in-process, so the delegation still
+   *  works and nothing surfaces except a slower daemon. Cleared by a successful spawn, by `reset` and
+   *  by the operator switching runner mode off — each of those ends the epoch the failure describes,
+   *  and a refusal kept past its epoch is an alarm that can never turn off (`agoMs` growing forever,
+   *  `consecutive` no longer meaning a consecutive run). */
+  private lastSpawnFailure: { code: SpawnFailureCode; at: number; consecutive: number } | null = null;
   private spawning: Promise<void> | null = null;
   private maintenance: NodeJS.Timeout | null = null;
   /** Bumped by every `reset`. A spawn that was in flight across one belongs to the pool that no longer
@@ -316,7 +330,7 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
         log.warn(`could not add a sub-agent runner: ${reason}`);
-        this.lastSpawnFailure = { reason, at: Date.now(), consecutive: (this.lastSpawnFailure?.consecutive ?? 0) + 1 };
+        this.lastSpawnFailure = { code: spawnFailureCode(reason), at: Date.now(), consecutive: (this.lastSpawnFailure?.consecutive ?? 0) + 1 };
         throw e;
       }
       // Registered only once it is genuinely up: a half-booted entry in the list would be counted as
@@ -470,6 +484,10 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
     // Cleared, not disabled: the very next delegated turn cold-starts a fresh runner, which is exactly
     // what the single runner this replaced did after a reload.
     this.lastSpawnAt = 0;
+    // A reset ends the failure's epoch too. If the environment is still broken, the very next delegated
+    // turn re-records a FRESH failure (with a truthful `agoMs` and a `consecutive` that really is
+    // consecutive); if it was fixed — which is what a plugin reload often is — the stale alarm is gone.
+    this.lastSpawnFailure = null;
     this.stopped = false;
   }
 
@@ -482,8 +500,13 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
     const sessions = new Map<PooledRunner, number>();
     for (const entry of this.routes.values()) sessions.set(entry, (sessions.get(entry) ?? 0) + 1);
     const oldest = this.oldestQueuedAt();
+    const mode = this.d.enabled?.() !== false && sizing.cap > 0 ? 'runner' : 'in-process';
+    // Switching runner mode off ends the failure's epoch the same way `reset` does: the refusal
+    // described a pool that no longer forks anything, so keeping it would show a permanently growing
+    // `agoMs` for a mode the operator deliberately left.
+    if (mode !== 'runner') this.lastSpawnFailure = null;
     return {
-      mode: this.d.enabled?.() !== false && sizing.cap > 0 ? 'runner' : 'in-process',
+      mode,
       cap: sizing.cap,
       cpuCap: sizing.cpuCap,
       memCap: sizing.memCap,
@@ -492,12 +515,9 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
       operatorCapped: sizing.operatorCapped,
       queueDepth: this.queue.depth,
       oldestQueuedMs: oldest === undefined ? 0 : Math.max(0, Date.now() - oldest),
-      // Deliberately survives `reset`: what refuses a fork is usually a property of the environment, not
-      // of the pool instance, so a plugin reload clearing this would hide the fault at the one moment it
-      // is most likely to be looked at. A successful spawn is what clears it.
       spawnFailure: this.lastSpawnFailure
         ? {
-            reason: this.lastSpawnFailure.reason,
+            code: this.lastSpawnFailure.code,
             agoMs: Math.max(0, Date.now() - this.lastSpawnFailure.at),
             consecutive: this.lastSpawnFailure.consecutive,
           }

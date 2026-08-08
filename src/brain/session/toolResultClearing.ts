@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
-import { fsSafeSegment, toolResultSpillDir } from '../../shared/paths.js';
+import { fsSafeSegment, sessionToolResultSpillDir } from '../../shared/paths.js';
 import { logger } from '../../shared/logger.js';
 import type { PiAgentMessage } from './historyImageStripping.js';
 import { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs } from './cacheTiming.js';
@@ -18,9 +18,13 @@ export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
  *  1. The gate opens only when the turn's first user message arrived MORE than the cache TTL after the
  *     previous message — i.e. the cached prefix had already expired and this provider call pays a full
  *     re-cache either way. Clearing here SHRINKS that rewrite instead of costing anything.
- *  2. A per-session latch (Map of cleared toolCallIds → original bytes) guarantees a result once
+ *  2. A per-session latch (Map of cleared occurrences → their placeholder) guarantees a result once
  *     cleared stays cleared on every later request, so the prefix is byte-stable from then on. The
- *     latch lives in this closure, so a respawn starts empty — and the cache is server-side, so a
+ *     latch is keyed by OCCURRENCE ({@link toolResultOccurrenceKey}), never by toolCallId alone:
+ *     sequential id styles (`call_0`) reset per turn, so after a compaction removes the cleared
+ *     occurrence the same id can genuinely come back on a brand-new result — an id-keyed latch would
+ *     swallow that fresh result and hand the model a placeholder pointing at another call's spill.
+ *     The latch lives in this closure, so a respawn starts empty — and the cache is server-side, so a
  *     respawn WITHIN the TTL is NOT cold: re-sending the full results would rewrite a warm prefix and
  *     pay a full re-cache. `restoreLatch` therefore rebuilds it on the first pass: primarily from the
  *     rows this module writes to SQLite as it clears (`ToolResultLatchStore` → brain_tool_result_spills),
@@ -28,7 +32,7 @@ export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
  *     the original byte counts, which is why they live in the file NAME — the placeholder embeds them
  *     and they cannot be measured back off the file (see `toolResultSpillPath`).
  *
- *  The full text is spilled to `<dataDir>/tool-results/<sessionId>/<toolCallId>.v1-<mode>-<bytes>.txt` BEFORE the
+ *  The full text is spilled to `<dataDir>/tool-results/<spillNs>/<toolCallId>.v1-<mode>-<bytes>.txt` BEFORE the
  *  placeholder replaces it (write-once, `wx`), so clearing loses nothing the model could not re-read
  *  with the Read tool — pathGuard lets every session read its OWN spill dir. Persisted history in
  *  the store is untouched — this runs on PI's egress copy.
@@ -108,6 +112,32 @@ export const SPILL_PREVIEW_CHARS = 2000;
  *  message) plus the whole previous turn. Everything older is eligible once the gate opens. */
 const KEEP_USER_TURNS = 2;
 
+/** Identity of ONE toolResult occurrence in the history: the model-minted id PLUS the message's own
+ *  timestamp. The id alone is not an identity — sequential styles (`call_0`) reset every turn on some
+ *  models, and after a compaction removes a cleared occurrence the same id can return on a completely
+ *  different result. The timestamp is stamped by pi-ai when the result is created and survives both
+ *  persistence and rehydration (the store keeps the full message JSON), which is what makes the pair
+ *  stable across respawns. 0 stands in for a message with no usable timestamp — such occurrences fall
+ *  back to sharing one key per id, i.e. exactly the pre-occurrence behaviour. */
+export function toolResultOccurrenceKey(toolCallId: string, occurredAt: number): string {
+  return `${toolCallId}\u0000${occurredAt}`;
+}
+
+/** A message's occurrence timestamp, defensively: pi-ai stamps every toolResult, but a rehydrated row
+ *  from an old enough build may predate that, and a hook upstream could hand anything through. */
+function messageOccurredAt(message: ToolResultMessage): number {
+  const at = (message as { timestamp?: unknown }).timestamp;
+  return typeof at === 'number' && Number.isFinite(at) && at > 0 ? at : 0;
+}
+
+/** How far past a legacy latch row's own write time an occurrence may be stamped and still be treated
+ *  as the occurrence that row was written for. A size/group spill writes its row within seconds of the
+ *  result being minted, and a time spill only ever clears results that are already old — while a REUSED
+ *  id is minted after a compaction that itself happened after the row existed, putting it well past
+ *  this window. Only legacy rows (occurredAt 0, written before occurrence keying) need the heuristic;
+ *  every new row carries the exact occurrence timestamp. */
+const LEGACY_ROW_MATCH_SLACK_MS = 120_000;
+
 /** Deterministic spill path — the placeholder builds it without any I/O, so the transform stays pure.
  *  The id is fs-encoded like the session id: a provider/plugin-minted toolCallId containing `/` or
  *  `..` must not escape the spill dir (pathGuard would refuse the escaped path and the cleared
@@ -136,22 +166,37 @@ const SPILL_NAME_VERSION = 'v1';
  *  point: the rehydrated text of a cleared result routinely DIFFERS from what was spilled (an
  *  externalized tool image comes back as a placeholder text block — persistence.ts
  *  `withoutExternalizedImages`), and a restore that insists on text equality forfeits exactly the
- *  results it matters for most. `path` is carried verbatim because the placeholder already sent embeds
- *  it, and reproducing those bytes exactly is the entire job. */
+ *  results it matters for most. `placeholder` is the exact text already on the wire and is reproduced
+ *  VERBATIM on restore — never re-rendered — so a later change to the placeholder wording can never
+ *  silently rewrite bytes the provider has already cached. `path` is carried inside it and stored
+ *  separately as well for observability. */
 export interface PersistedToolResultLatch {
   toolCallId: string;
+  /** The occurrence timestamp the latch belongs to ({@link toolResultOccurrenceKey}); 0 marks a legacy
+   *  row written before occurrence keying, restored through the created-at heuristic instead. */
+  occurredAt: number;
   mode: SpillDescriptor['mode'];
   bytes: number;
   /** The exact preview text the placeholder quotes; null for time-mode entries. */
   preview: string | null;
   path: string;
+  /** The exact placeholder text already sent; null only on legacy rows, which fall back to the current
+   *  renderer (whose output is what those rows' senders were running when they wrote them). */
+  placeholder: string | null;
+  /** When the row was written (SQLite UTC 'YYYY-MM-DD HH:MM:SS'). Supplied by load(); ignored on save —
+   *  only the legacy-row restore heuristic reads it. */
+  createdAt?: string;
 }
 
 /** Store seam for the durable latch — BrainStore in production (brain_tool_result_spills), fakes in
- *  tests. Two functions rather than a store reference so this module keeps zero store dependencies. */
+ *  tests. Functions rather than a store reference so this module keeps zero store dependencies.
+ *  `remove` prunes a row whose occurrence no longer exists in the history (compacted away) — optional
+ *  so an older adapter merely accumulates stale rows instead of breaking; the occurrence keying alone
+ *  already keeps a stale row from ever matching a new result. */
 export interface ToolResultLatchStore {
   load(): PersistedToolResultLatch[];
   save(entry: PersistedToolResultLatch): void;
+  remove?(toolCallId: string, occurredAt: number): void;
 }
 
 /** Match the descriptor a spill name carries AFTER its (already known) encoded id. The id is never decoded
@@ -169,7 +214,10 @@ export function parseSpillDescriptor(fileName: string, encodedId: string): Spill
 
 /** The one placeholder shape both triggers use. With a preview the wording says the result was never
  *  put in the context (size trigger); without one it says an older result was cleared (time trigger).
- *  The preview follows the bracketed notice as plain text so the notice itself stays a single line. */
+ *  The preview follows the bracketed notice as plain text so the notice itself stays a single line.
+ *  Only ever called when a result is FIRST cleared (and for legacy rows predating the persisted
+ *  placeholder): a restored latch reproduces its stored placeholder verbatim, so editing this wording
+ *  changes future clearings only and can never rewrite bytes already on the wire. */
 export function clearedToolResultPlaceholder(
   spillPath: string,
   originalBytes: number,
@@ -217,12 +265,19 @@ export function clearingCutIndex(messages: readonly PiAgentMessage[]): number {
 export interface ClearableResult {
   index: number;
   toolCallId: string;
+  /** Occurrence timestamp ({@link toolResultOccurrenceKey}); 0 when the message carries none. */
+  occurredAt: number;
   bytes: number;
+}
+
+function occurrenceKeyOf(message: ToolResultMessage): string {
+  return toolResultOccurrenceKey(message.toolCallId, messageOccurredAt(message));
 }
 
 /** Pure selection: which tool results may be cleared on this pass. Eligible = toolResult before the
  *  cut, ≥ CLEAR_MIN_BYTES of text, with a toolCallId (no id → no spill path → never cleared), not
- *  already latched. Exported for tests. */
+ *  already latched. `alreadyCleared` holds occurrence keys, so a NEW result that merely reuses a
+ *  latched id is judged on its own. Exported for tests. */
 export function selectClearableToolResults(
   messages: PiAgentMessage[],
   alreadyCleared: ReadonlySet<string>,
@@ -233,10 +288,10 @@ export function selectClearableToolResults(
   for (let index = 0; index < cut; index += 1) {
     const message = messages[index];
     if (message?.role !== 'toolResult') continue;
-    if (!message.toolCallId || alreadyCleared.has(message.toolCallId)) continue;
+    if (!message.toolCallId || alreadyCleared.has(occurrenceKeyOf(message))) continue;
     const bytes = textBytes(message);
     if (bytes < CLEAR_MIN_BYTES) continue;
-    selection.push({ index, toolCallId: message.toolCallId, bytes });
+    selection.push({ index, toolCallId: message.toolCallId, occurredAt: messageOccurredAt(message), bytes });
   }
   return selection;
 }
@@ -262,10 +317,10 @@ export function selectOversizedToolResults(
   for (let index = lastUserIndex(messages) + 1; index < messages.length; index += 1) {
     const message = messages[index];
     if (message?.role !== 'toolResult') continue;
-    if (!message.toolCallId || alreadyCleared.has(message.toolCallId)) continue;
+    if (!message.toolCallId || alreadyCleared.has(occurrenceKeyOf(message))) continue;
     const bytes = textBytes(message);
     if (bytes <= spillMaxResultBytes()) continue;
-    selection.push({ index, toolCallId: message.toolCallId, bytes });
+    selection.push({ index, toolCallId: message.toolCallId, occurredAt: messageOccurredAt(message), bytes });
   }
   return selection;
 }
@@ -295,17 +350,18 @@ function currentRunToolResultGroups(messages: readonly PiAgentMessage[]): number
 export interface BudgetedSelection {
   /** Results to spill, largest first — spilling them in this order brings each group back under budget. */
   spill: ClearableResult[];
-  /** Every candidate the budget layer weighed this pass, spilled or not. The caller latches these: a
-   *  result that has once been handed to the provider whole must never be reconsidered, or a later pass
-   *  (after a failed spill, or after a Limits change) would rewrite a prefix the provider already cached. */
+  /** Occurrence keys of every candidate the budget layer weighed this pass, spilled or not. The caller
+   *  latches these: a result that has once been handed to the provider whole must never be reconsidered,
+   *  or a later pass (after a failed spill, or after a Limits change) would rewrite a prefix the
+   *  provider already cached. */
   decided: string[];
 }
 
 /** Pure selection for the aggregate trigger: per wire-level group, spill the largest members until the
  *  group's total is back under budget. `spilled` members already reach the provider as a placeholder, so
  *  they cost the group nothing; `kept` members are latched decisions and count at full size without ever
- *  becoming candidates again. A member without a toolCallId has no spill path, so it can only ever be
- *  weighed, never spilled. Exported for tests. */
+ *  becoming candidates again. Both sets hold occurrence keys. A member without a toolCallId has no spill
+ *  path, so it can only ever be weighed, never spilled. Exported for tests. */
 export function selectBudgetedToolResults(
   messages: PiAgentMessage[],
   spilled: ReadonlySet<string>,
@@ -318,11 +374,12 @@ export function selectBudgetedToolResults(
     const candidates: ClearableResult[] = [];
     for (const index of group) {
       const message = messages[index] as ToolResultMessage;
-      if (message.toolCallId && spilled.has(message.toolCallId)) continue;
+      const key = message.toolCallId ? occurrenceKeyOf(message) : '';
+      if (message.toolCallId && spilled.has(key)) continue;
       const bytes = textBytes(message);
       total += bytes;
-      if (!message.toolCallId || kept.has(message.toolCallId)) continue;
-      candidates.push({ index, toolCallId: message.toolCallId, bytes });
+      if (!message.toolCallId || kept.has(key)) continue;
+      candidates.push({ index, toolCallId: message.toolCallId, occurredAt: messageOccurredAt(message), bytes });
     }
     candidates.sort((a, b) => (b.bytes - a.bytes) || (a.index - b.index));
     for (const candidate of candidates) {
@@ -330,36 +387,40 @@ export function selectBudgetedToolResults(
       selection.spill.push(candidate);
       total -= candidate.bytes;
     }
-    for (const candidate of candidates) selection.decided.push(candidate.toolCallId);
+    for (const candidate of candidates) {
+      selection.decided.push(toolResultOccurrenceKey(candidate.toolCallId, candidate.occurredAt));
+    }
   }
   return selection;
 }
 
-/** Pure replacement: swap each selected message's content for the placeholder text block. Input is
+/** Pure replacement: swap each indexed message's content for its placeholder text block. Input is
  *  never mutated and unselected messages keep their references (idempotence, same contract as
- *  stripHistoricalImages). Exported for tests. */
+ *  stripHistoricalImages). Keyed by INDEX because the caller has already resolved WHICH occurrence of
+ *  each latched id carries the placeholder — this function must not re-guess. Exported for tests. */
 export function applyToolResultClearing(
   messages: PiAgentMessage[],
-  cleared: ReadonlyMap<string, { index: number; placeholder: string }>,
+  cleared: ReadonlyMap<number, string>,
 ): PiAgentMessage[] {
   let changed = false;
   const next = messages.map((message, index): PiAgentMessage => {
     if (message?.role !== 'toolResult') return message;
-    const entry = cleared.get(message.toolCallId);
-    if (!entry || entry.index !== index) return message;
+    const placeholder = cleared.get(index);
+    if (placeholder === undefined) return message;
     const already = Array.isArray(message.content)
       && message.content.length === 1
       && message.content[0]?.type === 'text'
-      && message.content[0].text === entry.placeholder;
+      && message.content[0].text === placeholder;
     if (already) return message;
     changed = true;
-    return { ...message, content: [{ type: 'text', text: entry.placeholder }] };
+    return { ...message, content: [{ type: 'text', text: placeholder }] };
   });
   return changed ? next : messages;
 }
 
 export interface ToolResultClearingOptions {
-  /** Directory the spill files land in; defaults to `<dataDir>/tool-results/<sessionId>`. */
+  /** Directory the spill files land in; defaults to the session's resolved spill dir
+   *  ({@link sessionToolResultSpillDir} — the immutable spill namespace when the resolver is wired). */
   spillDir?: string;
   /** Idle gate in ms; defaults to idleThresholdMs(process.env). */
   idleMs?: number;
@@ -391,6 +452,26 @@ async function defaultListSpill(dir: string): Promise<string[]> {
   catch { return []; } // no spill dir yet is the normal case for a fresh session
 }
 
+/** A row's SQLite UTC 'YYYY-MM-DD HH:MM:SS' as epoch ms; 0 when missing or unparsable — which makes the
+ *  legacy-row heuristic match only timestamp-less occurrences, the conservative reading (a wrong match
+ *  is data corruption, a missed one is a single re-cache). */
+function parseSqliteUtcMs(value: string | undefined): number {
+  if (!value) return 0;
+  const ms = Date.parse(value.includes('T') || value.includes('Z') ? value : `${value.replace(' ', 'T')}Z`);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/** What one latched occurrence carries in memory. `placeholder` is built exactly once — at spill time or
+ *  read back from the durable row — and reproduced verbatim on every later pass. */
+interface LatchEntry {
+  toolCallId: string;
+  occurredAt: number;
+  bytes: number;
+  preview?: string;
+  path: string;
+  placeholder: string;
+}
+
 /** Compose the clearing pass onto the session's `transformContext`, after (inside) any previous hook —
  *  installed after installHistoryImageStripping so it sees images already collapsed. Same wrap pattern
  *  as the other installers; a session without the agent seam is a no-op. */
@@ -401,39 +482,48 @@ export function installToolResultClearing(
 ): void {
   const agent = session.agent;
   if (!agent) return;
-  const spillDir = options.spillDir ?? toolResultSpillDir(process.env, sessionId);
+  const spillDir = options.spillDir ?? sessionToolResultSpillDir(process.env, sessionId);
   const idleMs = options.idleMs ?? idleThresholdMs(process.env);
   const now = options.now ?? Date.now;
   const writeSpill = options.writeSpill ?? defaultWriteSpill;
   const readSpill = options.readSpill ?? defaultReadSpill;
   const listSpill = options.listSpill ?? defaultListSpill;
   const latchStore = options.latchStore;
-  /** Cleared toolCallId → its original text size in bytes, the preview a size-spilled result keeps in
-   *  its placeholder, and the spill path that placeholder names. The latch is what makes the egress
-   *  prefix byte-stable across requests: once inside, the placeholder never reverts to full content —
-   *  and rebuilding it from the same entry every pass is what keeps those bytes identical. The path is
-   *  stored rather than recomputed because it now encodes the descriptor, and a restored entry must
-   *  reproduce the name that is already written on disk. */
-  const latched = new Map<string, { bytes: number; preview?: string; path: string }>();
+  /** Cleared occurrence key → its latch entry. The latch is what makes the egress prefix byte-stable
+   *  across requests: once inside, the placeholder never reverts to full content — and re-sending the
+   *  same stored placeholder every pass is what keeps those bytes identical. Keyed by occurrence, so a
+   *  fresh result that reuses a latched toolCallId (sequential id styles after a compaction) is never
+   *  captured by another occurrence's entry. */
+  const latched = new Map<string, LatchEntry>();
   /** Mirror one latch entry into the durable store. Best-effort by design: the in-memory latch already
    *  holds, so this turn stays byte-stable either way — a failure only means a respawn before a later
    *  successful save falls back to the file-equality restore, i.e. exactly the pre-table behaviour. */
-  const persistLatch = (toolCallId: string, entry: { bytes: number; preview?: string; path: string }): void => {
+  const persistLatch = (entry: LatchEntry): void => {
     if (!latchStore) return;
     try {
       latchStore.save({
-        toolCallId,
+        toolCallId: entry.toolCallId,
+        occurredAt: entry.occurredAt,
         mode: entry.preview === undefined ? 'time' : 'preview',
         bytes: entry.bytes,
         preview: entry.preview ?? null,
         path: entry.path,
+        placeholder: entry.placeholder,
       });
     } catch (error) {
-      log.warn(`failed to persist the latch for ${toolCallId} — it may not survive a respawn`, error);
+      log.warn(`failed to persist the latch for ${entry.toolCallId} — it may not survive a respawn`, error);
     }
   };
-  /** Ids seen more than once in one history — a protocol anomaly (sequential-style ids like `call_0`
-   *  reset per turn on some models) worth exactly one log line, not one per pass. */
+  /** Drop a durable row whose occurrence is gone. Same best-effort stance as persistLatch, and a no-op
+   *  through an adapter that predates `remove` — stale rows then merely accumulate, they never match. */
+  const removeLatch = (toolCallId: string, occurredAt: number): void => {
+    if (!latchStore?.remove) return;
+    try { latchStore.remove(toolCallId, occurredAt); }
+    catch (error) { log.warn(`failed to prune the stale latch row for ${toolCallId}`, error); }
+  };
+  /** Occurrence keys seen more than once in one history — with occurrence keying this means two results
+   *  sharing BOTH id and timestamp, a genuine protocol anomaly worth exactly one log line, not one per
+   *  pass. */
   const duplicateWarned = new Set<string>();
   /** Restoration runs once, on the first pass, and only matters after a RESPAWN: the latch lives in this
    *  closure, so a restart leaves it empty while the persisted history still holds the results in full.
@@ -441,21 +531,65 @@ export function installToolResultClearing(
    *  ($3.04 measured, against ~$0.12 for a normal turn). Doing it here rather than at construction time
    *  is deliberate — this is the first moment the post-hook message text exists to verify against. */
   let restored = false;
-  /** toolCallIds whose spill failed during THIS idle epoch. The gate stays open for a whole turn, so
+  /** Occurrence keys whose spill failed during THIS idle epoch. The gate stays open for a whole turn, so
    *  retrying on the next pass would clear right after THIS pass paid a full re-cache — a warm-prefix
    *  rewrite, the one thing this module must never do. Retries wait for the next gate OPENING. */
   const failedSpills = new Set<string>();
-  /** toolCallIds whose spill path is occupied by a DIFFERENT file. `wx` can never overwrite it, so
+  /** Occurrence keys whose spill path is occupied by a DIFFERENT file. `wx` can never overwrite it, so
    *  retrying could only ever warn again — skip permanently (for this session's lifetime). */
   const foreignSpills = new Set<string>();
-  /** toolCallIds the aggregate budget has already ruled on. The second half of the latch: a member left
-   *  in place goes to the provider whole, so re-weighing its group later — after a failed spill, or after
-   *  the threshold moved — could pick a DIFFERENT member and rewrite a prefix that is already cached.
-   *  A ruling stands for the session; the time trigger may still clear such a result once the gate is
-   *  cold, which is the only moment rewriting history is free. */
+  /** Occurrence keys the aggregate budget has already ruled on. The second half of the latch: a member
+   *  left in place goes to the provider whole, so re-weighing its group later — after a failed spill, or
+   *  after the threshold moved — could pick a DIFFERENT member and rewrite a prefix that is already
+   *  cached. A ruling stands for the session; the time trigger may still clear such a result once the
+   *  gate is cold, which is the only moment rewriting history is free. */
   const budgetDecided = new Set<string>();
   let gateWasOpen = false;
   const previous = agent.transformContext;
+  /** Restore one legacy row (occurredAt 0 — written before occurrence keying) by finding the occurrence
+   *  it was written for. Only occurrences stamped BEFORE the row was written (plus slack) qualify: a
+   *  newer one is a REUSED id minted after a compaction removed the original, and matching it is exactly
+   *  the deployed defect this keying exists to end — the fresh result would go out as a stale
+   *  placeholder pointing at another call's spill. Among the qualifiers the byte-exact one wins (it is
+   *  the one that was spilled); text drift (externalized images) falls back to the first. No qualifier
+   *  at all means the occurrence was compacted away, so the row is pruned rather than left to ambush a
+   *  future reuse of the id. */
+  const restoreLegacyRow = (row: PersistedToolResultLatch, base: readonly PiAgentMessage[]): void => {
+    const rowWrittenMs = parseSqliteUtcMs(row.createdAt);
+    let byteExact: ToolResultMessage | undefined;
+    let first: ToolResultMessage | undefined;
+    for (const message of base) {
+      if (message?.role !== 'toolResult') continue;
+      const candidate = message as ToolResultMessage;
+      if (candidate.toolCallId !== row.toolCallId) continue;
+      const at = messageOccurredAt(candidate);
+      if (at > rowWrittenMs + LEGACY_ROW_MATCH_SLACK_MS) continue;
+      if (latched.has(occurrenceKeyOf(candidate))) continue;
+      if (textBytes(candidate) === row.bytes) { byteExact = candidate; break; }
+      first ??= candidate;
+    }
+    const target = byteExact ?? first;
+    if (!target) {
+      removeLatch(row.toolCallId, 0);
+      return;
+    }
+    const occurredAt = messageOccurredAt(target);
+    const preview = row.mode === 'preview' ? row.preview ?? '' : undefined;
+    const entry: LatchEntry = {
+      toolCallId: row.toolCallId,
+      occurredAt,
+      bytes: row.bytes,
+      ...(preview === undefined ? {} : { preview }),
+      path: row.path,
+      // A legacy row predates the persisted placeholder; the current renderer is what its writer ran.
+      placeholder: row.placeholder ?? clearedToolResultPlaceholder(row.path, row.bytes, preview),
+    };
+    latched.set(toolResultOccurrenceKey(entry.toolCallId, entry.occurredAt), entry);
+    // Graduate the row to its real occurrence key, then retire the legacy one — unless the occurrence
+    // itself has no timestamp, in which case 0 IS its key and the upsert above already refreshed it.
+    persistLatch(entry);
+    if (occurredAt !== 0) removeLatch(row.toolCallId, 0);
+  };
   /** Rebuild the latch a previous process built, so a respawned session keeps sending the placeholders
    *  it was already sending instead of the full results. Durable store rows first (exact, text-drift
    *  proof), then the spill files for anything from before the store existed.
@@ -467,28 +601,40 @@ export function installToolResultClearing(
    *  simply is not latched — and can never produce a placeholder that misdescribes the output. The
    *  store rows need no such check: only the daemon writes them. */
   const restoreLatch = async (base: readonly PiAgentMessage[]): Promise<void> => {
-    // The durable store is the primary source: it records exactly what was latched — placeholder
-    // wording inputs and all — and restoring from it does not require the rehydrated message text to
+    // The durable store is the primary source: it records exactly what was latched — the sent
+    // placeholder verbatim — and restoring from it does not require the rehydrated message text to
     // still match the spill. The file-equality fallback below fails precisely when an upstream rewrite
     // changed that text (externalized images, historyImageStripping), and each such failure is a full
-    // re-cache. Rows for results a compaction has since removed are harmless: a latched id with no
-    // occurrence in the history simply never matches anything.
+    // re-cache. Occurrence-keyed rows restore directly; rows whose occurrence a compaction has since
+    // removed cannot match anything and are pruned on the first pass below.
     if (latchStore) {
-      for (const row of latchStore.load()) {
-        if (latched.has(row.toolCallId)) continue;
-        latched.set(row.toolCallId, {
+      const rows = latchStore.load();
+      for (const row of rows) {
+        if (row.occurredAt === 0) continue; // legacy rows are matched against the history afterwards
+        const key = toolResultOccurrenceKey(row.toolCallId, row.occurredAt);
+        if (latched.has(key)) continue;
+        const preview = row.mode === 'preview' ? row.preview ?? '' : undefined;
+        latched.set(key, {
+          toolCallId: row.toolCallId,
+          occurredAt: row.occurredAt,
           bytes: row.bytes,
-          preview: row.mode === 'preview' ? row.preview ?? '' : undefined,
+          ...(preview === undefined ? {} : { preview }),
           path: row.path,
+          placeholder: row.placeholder ?? clearedToolResultPlaceholder(row.path, row.bytes, preview),
         });
+      }
+      // Second pass so a legacy row can never shadow an occurrence an exact row already owns.
+      for (const row of rows) {
+        if (row.occurredAt === 0) restoreLegacyRow(row, base);
       }
     }
     const names = await listSpill(spillDir);
     if (names.length === 0) return;
     for (const message of base) {
       if (message?.role !== 'toolResult') continue;
-      const toolCallId = (message as ToolResultMessage).toolCallId;
-      if (latched.has(toolCallId)) continue;
+      const occurrence = message as ToolResultMessage;
+      const toolCallId = occurrence.toolCallId;
+      if (!toolCallId || latched.has(occurrenceKeyOf(occurrence))) continue;
       const encoded = fsSafeSegment(toolCallId);
       // Several spills can exist for one result: a restart whose restoration failed leaves the old file
       // behind and the cold gate then clears the same result again under a new name. Try them ALL rather
@@ -501,7 +647,7 @@ export function installToolResultClearing(
         .filter((c): c is { name: string; descriptor: SpillDescriptor } => c.descriptor !== null)
         .sort((a, b) => (a.descriptor.mode === b.descriptor.mode ? 0 : a.descriptor.mode === 'time' ? -1 : 1));
       if (candidates.length === 0) continue; // legacy `<id>.txt` spills land here and are left alone
-      const text = toolResultText(message as ToolResultMessage);
+      const text = toolResultText(occurrence);
       let restoredFrom: string | undefined;
       for (const candidate of candidates) {
         const path = join(spillDir, candidate.name);
@@ -511,15 +657,19 @@ export function installToolResultClearing(
         // what makes that exact: the spill holds the same joined text the preview was sliced from. It also
         // removes the lone-surrogate hazard for free — a text whose UTF-16 was mangled by the write could
         // not have compared equal, so anything reaching this line round-trips faithfully.
-        const entry = {
+        const preview = candidate.descriptor.mode === 'preview' ? onDisk.slice(0, SPILL_PREVIEW_CHARS) : undefined;
+        const entry: LatchEntry = {
+          toolCallId,
+          occurredAt: messageOccurredAt(occurrence),
           bytes: candidate.descriptor.bytes,
-          preview: candidate.descriptor.mode === 'preview' ? onDisk.slice(0, SPILL_PREVIEW_CHARS) : undefined,
+          ...(preview === undefined ? {} : { preview }),
           path,
+          placeholder: clearedToolResultPlaceholder(path, candidate.descriptor.bytes, preview),
         };
-        latched.set(toolCallId, entry);
+        latched.set(occurrenceKeyOf(occurrence), entry);
         // A file-restored entry graduates to the durable store, so the NEXT restart no longer depends
         // on the text still matching — the one-time migration path for pre-table spills.
-        persistLatch(toolCallId, entry);
+        persistLatch(entry);
         restoredFrom = candidate.name;
         break;
       }
@@ -552,22 +702,27 @@ export function installToolResultClearing(
      *  gone out to the provider, so retrying it before the gate re-opens would rewrite a warm prefix. */
     const spillSelected = async (items: ClearableResult[], withPreview: boolean, trigger: SpillTrigger): Promise<void> => {
       for (const item of items) {
-        if (failedSpills.has(item.toolCallId) || foreignSpills.has(item.toolCallId)) continue;
+        const key = toolResultOccurrenceKey(item.toolCallId, item.occurredAt);
+        if (failedSpills.has(key) || foreignSpills.has(key)) continue;
         const message = base[item.index] as ToolResultMessage;
         const text = toolResultText(message);
         const spillPath = toolResultSpillPath(spillDir, item.toolCallId, {
           mode: withPreview ? 'preview' : 'time',
           bytes: item.bytes,
         });
-        const entry = {
+        const preview = withPreview ? text.slice(0, SPILL_PREVIEW_CHARS) : undefined;
+        const entry: LatchEntry = {
+          toolCallId: item.toolCallId,
+          occurredAt: item.occurredAt,
           bytes: item.bytes,
-          preview: withPreview ? text.slice(0, SPILL_PREVIEW_CHARS) : undefined,
+          ...(preview === undefined ? {} : { preview }),
           path: spillPath,
+          placeholder: clearedToolResultPlaceholder(spillPath, item.bytes, preview),
         };
         try {
           await writeSpill(spillPath, text);
-          latched.set(item.toolCallId, entry);
-          persistLatch(item.toolCallId, entry);
+          latched.set(key, entry);
+          persistLatch(entry);
           // The one line that lets a cacheWatch "REWRITTEN IN PLACE at <index>" warning be attributed:
           // without it, clearing a result and stripping an image are the same silence in the log, and the
           // two have completely different fixes.
@@ -582,16 +737,16 @@ export function installToolResultClearing(
             try { onDisk = await readSpill(spillPath); }
             catch { onDisk = null; } // a throwing readSpill must not take the whole turn down
             if (onDisk === text) {
-              latched.set(item.toolCallId, entry);
-              persistLatch(item.toolCallId, entry);
+              latched.set(key, entry);
+              persistLatch(entry);
               log.info(`re-latched ${item.toolCallId} at message ${item.index} from its existing spill (${trigger} trigger, ${item.bytes} bytes)`);
               continue;
             }
-            foreignSpills.add(item.toolCallId);
+            foreignSpills.add(key);
             log.warn(`tool result spill for ${item.toolCallId} conflicts with a different file on disk — leaving the result in context`);
             continue;
           }
-          failedSpills.add(item.toolCallId);
+          failedSpills.add(key);
           log.warn(`tool result spill failed for ${item.toolCallId}`, error);
         }
       }
@@ -606,40 +761,50 @@ export function installToolResultClearing(
     // wire-level message are individually under the per-result threshold but together are not.
     const budgeted = selectBudgetedToolResults(base, new Set(latched.keys()), budgetDecided);
     await spillSelected(budgeted.spill, true, 'group');
-    for (const toolCallId of budgeted.decided) budgetDecided.add(toolCallId);
+    for (const key of budgeted.decided) budgetDecided.add(key);
     if (latched.size === 0) return base;
-    // Pick WHICH occurrence of each latched id carries the placeholder. Ids are normally unique, but
-    // they are minted by the model, and sequential-style ids (`call_0`) reset per turn — a long history
-    // can genuinely hold two toolResults with the same id. A last-set-wins map here would hand the
-    // placeholder to the NEWEST occurrence and silently revert the cleared older one to full text: a
-    // rewrite of a message the provider already cached, the one thing this module must never do. The
-    // occurrence whose text size equals the latched original is the one that was spilled; when none
-    // matches (a respawn can drift the text — see restoreLatch) the EARLIEST wins, because it has been
-    // going out as a placeholder the longest and keeping it stable protects the longest cached prefix.
-    const chosen = new Map<string, { index: number; sized: boolean; entry: { bytes: number; preview?: string; path: string } }>();
+    // Resolve each latched occurrence to the message that carries it. Occurrence keys make this exact in
+    // the common case; two occurrences can still share a key (same id AND same timestamp, or both
+    // timestamp-less), and then the one whose text size equals the latched original is the one that was
+    // spilled — when none matches (a respawn can drift the text — see restoreLatch) the EARLIEST wins,
+    // because it has been going out as a placeholder the longest and keeping it stable protects the
+    // longest cached prefix.
+    const occupied = new Set<string>();
+    const chosen = new Map<string, { index: number; sized: boolean; entry: LatchEntry }>();
     for (let index = 0; index < base.length; index += 1) {
       const message = base[index];
       if (message?.role !== 'toolResult') continue;
-      const entry = latched.get(message.toolCallId);
+      const occurrence = message as ToolResultMessage;
+      const key = occurrenceKeyOf(occurrence);
+      occupied.add(key);
+      const entry = latched.get(key);
       if (entry === undefined) continue;
-      const sized = textBytes(message) === entry.bytes;
-      const existing = chosen.get(message.toolCallId);
+      const sized = textBytes(occurrence) === entry.bytes;
+      const existing = chosen.get(key);
       if (existing !== undefined) {
-        if (!duplicateWarned.has(message.toolCallId)) {
-          duplicateWarned.add(message.toolCallId);
-          log.warn(`toolCallId ${message.toolCallId} occurs more than once in the history — clearing only the occurrence that was spilled`);
+        if (!duplicateWarned.has(key)) {
+          duplicateWarned.add(key);
+          log.warn(`toolCallId ${occurrence.toolCallId} occurs more than once in the history with the same occurrence key — clearing only the occurrence that was spilled`);
         }
         if (existing.sized || !sized) continue;
       }
-      chosen.set(message.toolCallId, { index, sized, entry });
+      chosen.set(key, { index, sized, entry });
     }
-    const cleared = new Map<string, { index: number; placeholder: string }>();
-    for (const [toolCallId, pick] of chosen) {
-      cleared.set(toolCallId, {
-        index: pick.index,
-        placeholder: clearedToolResultPlaceholder(pick.entry.path, pick.entry.bytes, pick.entry.preview),
-      });
+    // Prune entries whose occurrence is GONE — a compaction removed the message, so nothing references
+    // the placeholder any more and the entry's only remaining power is the harmful one: capturing a
+    // future reuse of the id. In memory AND in the durable store, so a respawn cannot resurrect it.
+    // Only after a completed restore: a failed restore must cost a re-cache, never rows.
+    if (restored) {
+      for (const [key, entry] of latched) {
+        if (occupied.has(key)) continue;
+        latched.delete(key);
+        removeLatch(entry.toolCallId, entry.occurredAt);
+        log.info(`pruned the latch for ${entry.toolCallId} — its occurrence left the history (compaction)`);
+      }
+      if (latched.size === 0) return base;
     }
+    const cleared = new Map<number, string>();
+    for (const pick of chosen.values()) cleared.set(pick.index, pick.entry.placeholder);
     return applyToolResultClearing(base, cleared);
   };
 }

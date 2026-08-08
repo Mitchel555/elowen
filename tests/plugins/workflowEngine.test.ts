@@ -44,7 +44,12 @@ interface Tool {
 /** Build a workflow harness: a mock plugin ctx that captures the registered tools + emitted snapshots,
  *  and a controllable fake `run` handler. `run` resolves each node to `done:<task>` unless the task
  *  contains "FAIL" (then it returns an Error), recording the order nodes were launched. */
-interface WorkflowControl { cancelForSession(input: { sessionId: string }): { cancelled: number } }
+interface WorkflowControl {
+  cancelForSession(input: { sessionId: string }): { cancelled: number };
+  /** The engine's liveness seam: does THIS engine still hold the DAG? Status reads consult it instead of
+   *  trusting a durable row whose terminal snapshot may never have landed. */
+  isWorkflowLive(input: { workflowId: string }): boolean;
+}
 
 /** When set, the harness `run` parks the matching task on this promise and settles it as an aborted
  *  child ("Error: interrupted") once released — the cancel test's stand-in for the host's abort tree. */
@@ -76,14 +81,18 @@ function harness(opts: {
   const attempts = new Map<string, number>();
   /** Every launch as the host saw it: which channel the node ran in, and the VERBATIM task it received.
    *  A resume is only real if the channel id repeats — that is what puts the retry back in the same session. */
-  const runs: { task: string; channelId: string; fullTask: string; sessionIdleMs?: number }[] = [];
-  const run = async (source: { access?: { context?: string[]; sessionIdleMs?: number }; channelId?: string }, fullTask: string, onEvent: (e: unknown) => void) => {
+  const runs: { task: string; channelId: string; fullTask: string; sessionIdleMs?: number; toolPolicy?: { allow?: string[]; deny?: string[] } }[] = [];
+  const run = async (source: { access?: { context?: string[]; sessionIdleMs?: number; toolPolicy?: { allow?: string[]; deny?: string[] } }; channelId?: string }, fullTask: string, onEvent: (e: unknown) => void) => {
     // A resumed node is handed its task plus a trailing resume note. Everything keyed by identity here
     // (launch order, session id, FAIL_ONCE attempts) must key on the TASK, or a retry would read as a
     // different node and FAIL_ONCE would fail forever.
     const task = fullTask.split('\n\nNote: an earlier attempt')[0]!;
     launched.push(task);
-    runs.push({ task, channelId: source.channelId ?? '', fullTask, ...(source.access?.sessionIdleMs !== undefined ? { sessionIdleMs: source.access.sessionIdleMs } : {}) });
+    runs.push({
+      task, channelId: source.channelId ?? '', fullTask,
+      ...(source.access?.sessionIdleMs !== undefined ? { sessionIdleMs: source.access.sessionIdleMs } : {}),
+      ...(source.access?.toolPolicy !== undefined ? { toolPolicy: source.access.toolPolicy } : {}),
+    });
     contexts.set(task, source.access?.context ?? []);
     if (!opts.lateSession) onEvent({ type: 'session', sessionId: `s-${task}` });
     onEvent({ type: 'tool', name: 'Read' });
@@ -686,10 +695,63 @@ describe('workflow engine', () => {
     const local = harness();
     await local.tools.get('WorkflowStart')!.execute('t-invite', { nodesFile: workflowFile([{ id: 'n', task: 'invite-me' }]) });
     expect(local.contextOf('invite-me')).toContain('WorkflowAddNodes');
+    // In-process the tool is real, so the node keeps it: no deny is minted.
+    expect(local.runs[0]?.toolPolicy?.deny ?? []).not.toContain('WorkflowAddNodes');
 
     const remote = harness({ delegatedRemote: true });
     await remote.tools.get('WorkflowStart')!.execute('t-remote', { nodesFile: workflowFile([{ id: 'n', task: 'invite-me' }]) });
     expect(remote.contextOf('invite-me')).not.toContain('WorkflowAddNodes');
+  });
+
+  // Silence in the briefing is not protection: without the deny a remote node still HOLDS the full
+  // toolset, calls WorkflowAddNodes anyway, and gets "no running workflow" from the runner's empty
+  // engine. Briefing and tool policy must derive from the same single prediction — and because the deny
+  // rides the delegated access, it also survives the dispatcher's fork-failure fallback: a turn predicted
+  // remote that ends up in-process is conservatively narrowed, never briefed-one-way-armed-another.
+  it('denies WorkflowAddNodes in the tool policy of a node predicted to run remotely', async () => {
+    const remote = harness({ delegatedRemote: true });
+    await remote.tools.get('WorkflowStart')!.execute('t-remote-deny', { nodesFile: workflowFile([{ id: 'n', task: 'invite-me' }]) });
+    expect(remote.runs[0]?.toolPolicy?.deny).toContain('WorkflowAddNodes');
+
+    // An explicitly narrowed node gets the same deny on top of its allow-list: an explicit
+    // tools:['WorkflowAddNodes'] must not smuggle the broken tool into a remote turn either.
+    const narrowed = harness({ delegatedRemote: true });
+    await narrowed.tools.get('WorkflowStart')!.execute('t-remote-narrow', {
+      nodesFile: workflowFile([{ id: 'n', task: 'narrow-me', tools: ['Read'] }]),
+    });
+    expect(narrowed.runs[0]?.toolPolicy).toEqual({ allow: ['Read'], deny: ['WorkflowAddNodes'] });
+  });
+
+  // The engine's own answer to "is this DAG still held here?" — what status reads consult instead of
+  // trusting a durable row whose terminal snapshot may never have landed (a stale `running` row would
+  // otherwise synthesize a phantom anchor until the next daemon restart).
+  it('isWorkflowLive answers true only while the engine holds the running DAG', async () => {
+    const { tools, controls, snapshots } = harness();
+    let releaseRoot!: () => void;
+    gate = { task: 'root', promise: new Promise<void>((r) => { releaseRoot = r; }) };
+    const startP = tools.get('WorkflowStart')!.execute('t-live', { nodesFile: workflowFile([{ id: 'root', task: 'root' }]) });
+    await new Promise((r) => setTimeout(r, 5)); // root launches and parks on the gate
+    const wfId = snapshots[0]!.id;
+    const control = controls.get('workflow')!;
+    expect(control.isWorkflowLive({ workflowId: wfId })).toBe(true);
+    expect(control.isWorkflowLive({ workflowId: 'wf-unknown' })).toBe(false);
+    releaseRoot();
+    await startP;
+    expect(control.isWorkflowLive({ workflowId: wfId })).toBe(false);
+  });
+
+  it('isWorkflowLive turns false the moment a workflow is cancelled', async () => {
+    const { tools, controls, snapshots } = harness();
+    let releaseRoot!: () => void;
+    gate = { task: 'root', promise: new Promise<void>((r) => { releaseRoot = r; }) };
+    const startP = tools.get('WorkflowStart')!.execute('t-live-cancel', { nodesFile: workflowFile([{ id: 'root', task: 'root' }]) });
+    await new Promise((r) => setTimeout(r, 5));
+    const wfId = snapshots[0]!.id;
+    const control = controls.get('workflow')!;
+    control.cancelForSession({ sessionId: 'brain-parent' });
+    expect(control.isWorkflowLive({ workflowId: wfId })).toBe(false);
+    releaseRoot();
+    await startP;
   });
 
   // The Esc-Esc bug: aborting the parent kills the RUNNING node children, but without a cancel the
