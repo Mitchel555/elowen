@@ -63,6 +63,70 @@ describe('SubagentRunnerHost — the forked runner as seen from the daemon', () 
     expect(await run).toBe('child done');
   });
 
+  it('rejects a host call after its daemon-owned turn identity has expired', async () => {
+    const child = new FakeChild();
+    let called = false;
+    const host = new SubagentRunnerHost({
+      dbPath: '/tmp/elowen-test.db',
+      project: { id: 1, slug: 'e2e', path: '/tmp/project' },
+      cwd: '/tmp/project',
+      fork: () => child.asChild(),
+      hostRpc: async () => { called = true; return { added: ['impossible'] }; },
+    });
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    const { turnId } = child.received.find((message) => message.type === 'turn') as { turnId: string };
+    child.reply({ type: 'result', turnId, reply: 'done' });
+    await run;
+
+    child.reply({
+      type: 'hostCall', callId: 'late', turnId,
+      request: { method: 'workflow.addNodes', workflowId: 'wf-late', nodes: [] },
+    });
+    await tick();
+    expect(called).toBe(false);
+    expect(child.received).toContainEqual(expect.objectContaining({
+      type: 'hostError', callId: 'late', message: expect.stringContaining('no longer active'),
+    }));
+  });
+
+  it('rejects a host call denied by the daemon-owned turn policy', async () => {
+    const child = new FakeChild();
+    let called = false;
+    const host = new SubagentRunnerHost({
+      dbPath: '/tmp/elowen-test.db',
+      project: { id: 1, slug: 'e2e', path: '/tmp/project' },
+      cwd: '/tmp/project',
+      fork: () => child.asChild(),
+      hostRpc: async () => { called = true; return { added: ['impossible'] }; },
+    });
+    const denied = {
+      ...request,
+      delegatedAccess: {
+        ...request.delegatedAccess,
+        toolPolicy: { deny: ['Workflow*'] },
+      },
+    };
+    const run = host.run(denied, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    const { turnId } = child.received.find((message) => message.type === 'turn') as { turnId: string };
+    child.reply({
+      type: 'hostCall', callId: 'denied', turnId,
+      request: { method: 'workflow.addNodes', workflowId: 'wf-live', nodes: [] },
+    });
+    await tick();
+    expect(called).toBe(false);
+    expect(child.received).toContainEqual(expect.objectContaining({
+      type: 'hostError', callId: 'denied', message: expect.stringContaining('not allowed'),
+    }));
+    child.reply({ type: 'result', turnId, reply: 'done' });
+    await run;
+  });
+
   it('replays only the child progress the runner sent, into the delegating turn', async () => {
     const child = new FakeChild();
     const host = hostWith(child);
@@ -91,6 +155,78 @@ describe('SubagentRunnerHost — the forked runner as seen from the daemon', () 
     child.die(139, 'SIGSEGV');
     await expect(first).rejects.toThrow('the sub-agent runner exited — this delegated turn was interrupted');
     await expect(second).rejects.toThrow('interrupted');
+  });
+
+  it('expires mutation authority when the runner dies during a reverse RPC', async () => {
+    const child = new FakeChild();
+    let releaseRpc!: () => void;
+    const rpcGate = new Promise<void>((resolve) => { releaseRpc = resolve; });
+    let mutated = false;
+    const host = new SubagentRunnerHost({
+      dbPath: '/tmp/elowen-test.db',
+      project: { id: 1, slug: 'e2e', path: '/tmp/project' },
+      cwd: '/tmp/project',
+      fork: () => child.asChild(),
+      hostRpc: async (caller) => {
+        await rpcGate;
+        if (!caller.isActive()) throw new Error('the host RPC caller turn is no longer active');
+        mutated = true;
+        return { added: ['late'] };
+      },
+    });
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    const { turnId } = child.received.find((message) => message.type === 'turn') as { turnId: string };
+    child.reply({
+      type: 'hostCall', callId: 'mid-crash', turnId,
+      request: { method: 'workflow.addNodes', workflowId: 'wf-live', nodes: [] },
+    });
+    await tick();
+    child.die(139, 'SIGSEGV');
+    await expect(run).rejects.toThrow('interrupted');
+    releaseRpc();
+    await tick();
+    expect(mutated).toBe(false);
+  });
+
+  it('expires mutation authority immediately when the daemon aborts the turn', async () => {
+    const child = new FakeChild();
+    let releaseRpc!: () => void;
+    const rpcGate = new Promise<void>((resolve) => { releaseRpc = resolve; });
+    let mutated = false;
+    const host = new SubagentRunnerHost({
+      dbPath: '/tmp/elowen-test.db',
+      project: { id: 1, slug: 'e2e', path: '/tmp/project' },
+      cwd: '/tmp/project',
+      fork: () => child.asChild(),
+      hostRpc: async (caller) => {
+        await rpcGate;
+        if (!caller.isActive()) throw new Error('the host RPC caller turn is no longer active');
+        mutated = true;
+        return { added: ['late'] };
+      },
+    });
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    const { turnId } = child.received.find((message) => message.type === 'turn') as { turnId: string };
+    child.reply({
+      type: 'hostCall', callId: 'mid-abort', turnId,
+      request: { method: 'workflow.addNodes', workflowId: 'wf-live', nodes: [] },
+    });
+    await tick();
+    host.abort(request.channelId);
+    releaseRpc();
+    await tick();
+    expect(mutated).toBe(false);
+    expect(child.received).toContainEqual(expect.objectContaining({
+      type: 'hostError', callId: 'mid-abort', message: expect.stringContaining('no longer active'),
+    }));
+    child.reply({ type: 'error', turnId, message: 'aborted' });
+    await expect(run).rejects.toThrow('aborted');
   });
 
   // The daemon's registry is the authoritative abort tree. A nested edge left behind by a dead runner

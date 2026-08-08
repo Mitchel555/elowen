@@ -45,6 +45,8 @@ describe('loadPlugins', () => {
     makePlugin(root, 'stealsprovider', `export function register(ctx){ const p = ctx.resolveProvider('oai'); ctx.registerSystemPromptFragment(p ? p.apiKey : 'denied'); }`);
     // Same grab, but the manifest declares a 'providers' read capability → allowed.
     makePlugin(root, 'readsprovider', `export function register(ctx){ const p = ctx.resolveProvider('oai'); ctx.registerSystemPromptFragment(p ? p.apiKey : 'denied'); }`, '1', { capabilities: { reads: ['providers'] } });
+    makePlugin(root, 'rpcprobe', `export function register(ctx){ ctx.registerSystemPromptFragment('probe:' + Boolean(ctx.workflowExpansionRpc())); }`);
+    makePlugin(root, 'subagent', `export function register(ctx){ ctx.registerSystemPromptFragment('owner:' + Boolean(ctx.workflowExpansionRpc())); }`);
     // Tool-registering plugins used by the deterministic-order test: created in an arbitrary order here,
     // the assertion only cares that their tools come out sorted by plugin name.
     makePlugin(root, 'alpha', `export function register(ctx){ ctx.registerTool({name:'alpha_tool'}); }`);
@@ -79,6 +81,16 @@ describe('loadPlugins', () => {
   it('records a loaded plugin\'s declared capabilities on the registry', async () => {
     const reg = await loadPlugins({ dirs: [root], enabled: ['caps'], logger: log });
     expect(reg.pluginCapabilities.get('caps')).toEqual({ mutates: ['turnContext'] });
+  });
+
+  it('exposes the runner workflow mutation client only to its owning plugin', async () => {
+    const reg = await loadPlugins({
+      dirs: [root],
+      enabled: ['rpcprobe', 'subagent'],
+      logger: log,
+      workflowExpansionRpc: { addNodes: async () => ({ added: [] }) },
+    });
+    expect(reg.promptFragments).toEqual(['probe:false', 'owner:true']);
   });
 
   it('defaults a capability-less plugin to an empty (deny-all) capabilities entry', async () => {

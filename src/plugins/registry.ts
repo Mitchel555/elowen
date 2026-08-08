@@ -13,6 +13,7 @@ import { currentIdentity, currentElicitor, currentCardEmitter, currentSubagentEm
 import { processRegistry } from '../brain/processRegistry.js';
 import type { AskAnswer } from '../brain/events.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
+import type { WorkflowExpansionRpc } from '../subagent/hostRpc.js';
 
 /** Recursively collect every string value in a plugin's config slice — the set of provider ids the
  *  operator could legitimately have wired into THIS plugin. `resolveProvider()` is gated to this set so a
@@ -51,7 +52,7 @@ const KNOWN_CONTROL_METHODS: { [K in keyof KnownControls]: readonly (keyof Known
   subagent: ['detachForeground'],
   terminal: ['detachForeground', 'killForeground'],
   cron: ['pendingWakeupOriginSessionIds'],
-  workflow: ['cancelForSession', 'detachForeground', 'isWorkflowLive'],
+  workflow: ['cancelForSession', 'detachForeground', 'isWorkflowLive', 'addNodesFromSession'],
   mcp: ['listServers', 'bridgeSnapshot'],
 };
 
@@ -211,7 +212,7 @@ export class PluginRegistry {
 
   /** Build the context passed to one plugin's `register()`. `config` is that plugin's own slice;
    *  `dataRoot` hosts per-plugin writable dirs (tests fall back to the OS tmpdir). */
-  contextFor(name: string, config: Record<string, unknown>, logger: PluginLogger, dataRoot?: string, notify?: (text: string, channelId?: string) => Promise<void>, listModels?: () => Promise<PluginModelOption[]>, resolveProvider?: (id: string) => ProviderCredentials | null, caps?: PluginCapabilities, provides?: PluginManifest['provides'], answerQuestion?: (id: string, answers: AskAnswer[]) => boolean, embedder?: PluginEmbedder, embeddingConfig?: () => EmbeddingConfig, allToolNames?: () => string[], timezone?: () => string, subagentTypes?: () => { name: string; description: string }[], requestReload?: () => void, allChatCommands?: () => PluginSlashCommand[], delegateContextChars?: () => number, delegatedChildren?: DelegatedChildBridge, mcpBridgeSnapshot?: McpBridgeSnapshot, delegatedTurnsOutOfProcess?: () => boolean): PluginContext {
+  contextFor(name: string, config: Record<string, unknown>, logger: PluginLogger, dataRoot?: string, notify?: (text: string, channelId?: string) => Promise<void>, listModels?: () => Promise<PluginModelOption[]>, resolveProvider?: (id: string) => ProviderCredentials | null, caps?: PluginCapabilities, provides?: PluginManifest['provides'], answerQuestion?: (id: string, answers: AskAnswer[]) => boolean, embedder?: PluginEmbedder, embeddingConfig?: () => EmbeddingConfig, allToolNames?: () => string[], timezone?: () => string, subagentTypes?: () => { name: string; description: string }[], requestReload?: () => void, allChatCommands?: () => PluginSlashCommand[], delegateContextChars?: () => number, delegatedChildren?: DelegatedChildBridge, mcpBridgeSnapshot?: McpBridgeSnapshot, delegatedTurnsOutOfProcess?: () => boolean, delegatedWorkflowExpansionAvailable?: () => boolean, workflowExpansionRpc?: WorkflowExpansionRpc): PluginContext {
     const scoped: PluginLogger = {
       info: (m) => logger.info(`[plugin:${name}] ${m}`),
       warn: (m) => logger.warn(`[plugin:${name}] ${m}`),
@@ -391,6 +392,10 @@ export class PluginRegistry {
       workflowCompletionEmitter: currentWorkflowCompletionEmitter,
       // False when unwired (unit tests, worker contexts): those processes run every delegation in-process.
       delegatedTurnsOutOfProcess: delegatedTurnsOutOfProcess ?? (() => false),
+      // Capability and client are intentionally separate. The daemon advertises what its remote children
+      // will receive; only a runner process holds the client that can call back upward.
+      delegatedWorkflowExpansionAvailable: delegatedWorkflowExpansionAvailable ?? (() => false),
+      workflowExpansionRpc: () => workflowExpansionRpc ?? null,
       currentModel: currentTurnModel,
       notify: notify ?? (async () => { /* no notification sink wired */ }),
       listModels: listModels ?? (async () => []),

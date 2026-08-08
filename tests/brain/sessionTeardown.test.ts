@@ -161,6 +161,7 @@ describe('deleting a conversation releases everything it owns', () => {
       cancelForSession: ({ sessionId }: { sessionId: string }) => { cancelled.push(sessionId); return { cancelled: 1 }; },
       detachForeground: () => ({ detached: 0 }),
       isWorkflowLive: () => false,
+      addNodesFromSession: () => { throw new Error('unused'); },
     });
     (d as unknown as { plugins: unknown }).plugins = new PluginRegistryProvider(async () => reg);
     const svc = new BrainService(d as never);

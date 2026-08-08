@@ -42,6 +42,31 @@ describe('parseDaemonMessage — boot', () => {
   });
 });
 
+describe('workflow host RPC — runner → daemon and back', () => {
+  it('parses a call without accepting a caller session identity', () => {
+    expect(parseRunnerMessage({
+      type: 'hostCall', callId: 'rpc-1', turnId: 'turn-1',
+      request: {
+        method: 'workflow.addNodes', workflowId: 'wf-1', nodes: [{ id: 'leaf', task: 'leaf' }],
+        callerSessionId: 'brain-ch-forged',
+      },
+    })).toEqual({
+      type: 'hostCall', callId: 'rpc-1', turnId: 'turn-1',
+      request: { method: 'workflow.addNodes', workflowId: 'wf-1', nodes: [{ id: 'leaf', task: 'leaf' }] },
+    });
+  });
+
+  it('refuses malformed calls and responses instead of coercing them', () => {
+    expect(parseRunnerMessage({ type: 'hostCall', callId: 'rpc-1', turnId: 'turn-1', request: { method: 'workflow.addNodes', workflowId: 'wf-1', nodes: 'nope' } })).toBeUndefined();
+    expect(parseRunnerMessage({ type: 'hostCall', callId: 'rpc-1', turnId: 'turn-1', request: { method: 'other', workflowId: 'wf-1', nodes: [] } })).toBeUndefined();
+    expect(parseDaemonMessage({ type: 'hostResult', callId: 'rpc-1', result: { added: ['leaf'] } }))
+      .toEqual({ type: 'hostResult', callId: 'rpc-1', result: { added: ['leaf'] } });
+    expect(parseDaemonMessage({ type: 'hostResult', callId: 'rpc-1', result: { added: [7] } })).toBeUndefined();
+    expect(parseDaemonMessage({ type: 'hostError', callId: 'rpc-1', message: 'finished' }))
+      .toEqual({ type: 'hostError', callId: 'rpc-1', message: 'finished' });
+  });
+});
+
 describe('steer verb — daemon → runner and back', () => {
   it('parses a steer frame', () => {
     expect(parseDaemonMessage({ type: 'steer', steerId: 's-1', channelId: 'subagent-sub-dlg-1', text: 'also check docs' }))

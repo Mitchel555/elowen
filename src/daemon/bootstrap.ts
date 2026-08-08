@@ -67,8 +67,29 @@ import { SubagentRunnerPool } from '../subagent/pool.js';
 import { resolvePoolMax } from '../subagent/sizing.js';
 import type { RuntimeConfig } from '../shared/wireContract.js';
 import type { PluginRegistryProvider } from '../plugins/pluginsProvider.js';
+import type { PluginRegistry } from '../plugins/registry.js';
+import { WORKFLOW_ADD_NODES_RPC, type HostRpcHandler } from '../subagent/hostRpc.js';
 
 const log = logger('daemon');
+
+/** Daemon endpoint for reverse workflow expansion, split out so the post-await liveness fence is testable. */
+export function createWorkflowHostRpc(resolvePlugins: () => Promise<PluginRegistry | undefined>): HostRpcHandler {
+  return async (caller, request) => {
+    if (request.method !== WORKFLOW_ADD_NODES_RPC) throw new Error(`unsupported host RPC: ${request.method}`);
+    const workflow = (await resolvePlugins())?.control('workflow');
+    if (!workflow) throw new Error('the workflow engine is unavailable in the daemon');
+    // Registry loading is asynchronous. A result/error/abort can retire the runner turn while it waits;
+    // recheck immediately before the synchronous mutation so expired authority cannot add late nodes.
+    if (!caller.isActive()) throw new Error('the host RPC caller turn is no longer active');
+    return workflow.addNodesFromSession({
+      callerSessionId: caller.sessionId,
+      callerAccess: caller.access,
+      ...(caller.model ? { callerModel: caller.model } : {}),
+      workflowId: request.workflowId,
+      nodes: request.nodes,
+    });
+  };
+}
 
 const MEMORY_EVICTION_BATCH_SIZE = 1_000;
 
@@ -405,6 +426,9 @@ export async function buildApp(opts: BuildOpts) {
       // code. Absent control (plugin disabled, or a registry that will not load) ⇒ no snapshot ⇒ the
       // runner connects at boot, exactly as before.
       mcpBridgeSnapshot: async () => (await pluginsForPool?.get())?.control('mcp')?.bridgeSnapshot(),
+      // Reverse calls terminate in the daemon plugin instance that owns the in-memory DAG. The host has
+      // already replaced all child-supplied identity with the session derived from its active turn table.
+      hostRpc: createWorkflowHostRpc(async () => pluginsForPool?.get()),
       // Explicit: a delegated turn's cwd ends in `process.cwd()`, so a child forked with a different
       // one would change what the model is told about where it is running.
       cwd: process.cwd(),

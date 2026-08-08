@@ -60,6 +60,24 @@ const depIntro = (truncatedIds) => 'Results from the nodes this one depends on f
  *  a change costs only session continuity (see WorkflowResume), while a missed change would fail the node
  *  inside the host with `delegated access unavailable`. */
 const sameParentAccess = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+const toolListCovers = (list, name) => list?.some((entry) =>
+  entry === name || (entry.endsWith('*') && name.startsWith(entry.slice(0, -1)))) === true;
+const toolPolicyAllows = (policy, name) =>
+  (!policy?.allow || toolListCovers(policy.allow, name)) && !toolListCovers(policy?.deny, name);
+/** Strip runner-persisted prompt metadata and retain only authority a dynamically added node may inherit. */
+const delegableAccess = (access) => ({
+  admin: access.admin,
+  projectIds: [...access.projectIds],
+  owner: access.owner,
+  ...(access.toolPolicy ? {
+    toolPolicy: {
+      ...(access.toolPolicy.allow !== undefined ? { allow: [...access.toolPolicy.allow] } : {}),
+      ...(access.toolPolicy.deny !== undefined ? { deny: [...access.toolPolicy.deny] } : {}),
+    },
+  } : {}),
+  permissionBoundary: access.permissionBoundary,
+  ...(access.readOnly ? { readOnly: true } : {}),
+});
 // Some models (seen: Qwen max preview) double-escape non-ASCII in tool-call JSON, so the parsed title
 // still carries literal backslash-u sequences ("Docs \u2014 write" instead of "Docs — write"). The title
 // is pure display, so decoding is always what the model meant; surrogate pairs recombine naturally.
@@ -194,12 +212,16 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
    *     never match the origin's — membership in `childSessions` is the authorization here, and it is
    *     unforgeable: a session lands there only via THIS workflow's own node `session` events.
    *   - the ORIGIN session itself, which must carry the same real principal that started the workflow. */
-  const authWorkflow = (id) => {
+  const authWorkflow = (id, callerSessionId) => {
     const wf = workflows.get(id);
     if (!wf) return undefined;
-    const sessionId = ctx.currentSessionId();
+    const sessionId = callerSessionId ?? ctx.currentSessionId();
     if (!sessionId) return undefined;
     if (wf.childSessions.has(sessionId)) return wf;
+    // An RPC caller is a delegated node by construction. Its session was derived by the daemon from the
+    // active turn, but it carries no origin principal; accepting the origin session here would turn a
+    // transport identity into authority that only an authenticated origin turn is meant to have.
+    if (callerSessionId !== undefined) return undefined;
     const principal = principalOf(ctx.currentIdentity());
     return principal && wf.originPrincipal === principal && sessionId === wf.originSessionId ? wf : undefined;
   };
@@ -242,7 +264,11 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
   /** Build one node's access from the captured parent scope + the node's own model/tool narrowing —
    *  mirrors the `delegate` access assembly exactly (can only ever narrow the parent). May reject. */
   const buildNodeAccess = async (wf, node) => {
-    let model = wf.parentModel ? { provider: wf.parentModel.provider, model: wf.parentModel.model } : undefined;
+    // Nodes added by a workflow child inherit that child's exact effective boundary, never the origin's
+    // broader one. Original nodes and origin-added nodes continue to inherit the workflow parent.
+    const parentAccess = wf.nodeParentAccess.get(node.id) ?? wf.parentAccess;
+    const parentModel = wf.nodeParentModel.get(node.id) ?? wf.parentModel;
+    let model = parentModel ? { provider: parentModel.provider, model: parentModel.model } : undefined;
     if (node.model) {
       const list = await ctx.listModels().catch(() => []);
       const hit = list.find((m) => `${m.provider}/${m.model}` === node.model || m.model === node.model);
@@ -251,7 +277,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     }
     // Nodes inherit the workflow origin's reasoning effort by default (the host drops it if a node's own
     // model has no such level), mirroring the delegate tool.
-    const thinkingLevel = wf.parentModel?.thinkingLevel;
+    const thinkingLevel = parentModel?.thinkingLevel;
     // A named sub-agent TYPE, validated against the live catalog exactly as the delegate tool does — the
     // host resolves the name into the node's role prompt, toolset and (for a read-only type) boundary.
     let agentType;
@@ -262,31 +288,28 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       }
       agentType = node.subagentType;
     }
-    // A node whose turn the host dispatches to a forked runner PROCESS cannot expand the DAG, no matter
-    // what it holds: this map of workflows is process-local, and the runner registers its own empty
-    // instance — its WorkflowAddNodes can never reach this DAG and fails with "no running workflow".
-    //
-    // ONE read decides the whole expansion contract for this node: the briefing below (no invitation)
-    // AND the tool policy (WorkflowAddNodes denied) both derive from this value, and both travel inside
-    // the delegated access to wherever the turn actually executes. That is what keeps the contract
-    // consistent across the dispatcher's fork-failure fallback: a turn predicted remote that ends up
-    // running in-process still carries the deny, so the node can never hold a tool its briefing never
-    // promised — expansion is conservatively withheld, not silently broken. Read live per node launch,
-    // the same expression the dispatcher itself evaluates (predictsRunnerDispatch).
+    // Remote expansion is offered only when BOTH routing and reverse-channel capability agree. This keeps
+    // old/unwired runners on the conservative deny path, while a current runner reaches this process-local
+    // DAG through the daemon-owned RPC endpoint. Both reads are deterministic capability checks; no
+    // per-request ids or timestamps enter the briefing and destabilize its prompt-cache prefix.
     const remoteDispatch = ctx.delegatedTurnsOutOfProcess?.() === true;
-    const restricted = resolveDelegateTools(wf.parentAccess.toolPolicy?.allow, node.tools, ctx.toolNames());
+    const remoteExpansionUnavailable = remoteDispatch
+      && ctx.delegatedWorkflowExpansionAvailable?.() !== true;
+    const restricted = resolveDelegateTools(parentAccess.toolPolicy?.allow, node.tools, ctx.toolNames());
     if (restricted.error) throw new Error(restricted.error);
     const narrowedPolicy = restricted.allow
-      ? { ...(wf.parentAccess.toolPolicy?.deny ? { deny: wf.parentAccess.toolPolicy.deny } : {}), allow: restricted.allow }
-      : wf.parentAccess.toolPolicy;
-    // Silence in the briefing is not protection: without this deny a remote node still holds the full
-    // toolset, calls WorkflowAddNodes, and gets "no running workflow" from the runner's empty engine.
-    const toolPolicy = remoteDispatch && !narrowedPolicy?.deny?.includes('WorkflowAddNodes')
+      ? { ...(parentAccess.toolPolicy?.deny ? { deny: parentAccess.toolPolicy.deny } : {}), allow: restricted.allow }
+      : parentAccess.toolPolicy;
+    // Silence in the briefing is not protection: without this deny an unsupported remote node still holds
+    // the full toolset. The deny also overrides an explicit tools:['WorkflowAddNodes'] fallback attempt.
+    const toolPolicy = remoteExpansionUnavailable && !toolListCovers(narrowedPolicy?.deny, 'WorkflowAddNodes')
       ? { ...(narrowedPolicy ?? {}), deny: [...(narrowedPolicy?.deny ?? []), 'WorkflowAddNodes'] }
       : narrowedPolicy;
-    // A node that keeps full access (no read_only, no explicit toolset) may extend the DAG; a narrowed
-    // node cannot (it may not even hold WorkflowAddNodes), so it is never invited to.
-    const canExpand = !node.readOnly && !node.tools && !remoteDispatch;
+    // Invite only nodes whose known effective boundary can call the tool; hidden/denied tools must not
+    // appear in their instructions. Typed presets are resolved later by the host, so stay conservative.
+    const canExpand = !agentType && !parentAccess.readOnly && !node.readOnly
+      && (!node.tools || node.tools.includes('WorkflowAddNodes'))
+      && !remoteExpansionUnavailable && toolPolicyAllows(toolPolicy, 'WorkflowAddNodes');
     // Read live (Settings → Elowen AI → Limits), so raising the budget applies to the next node without a
     // daemon restart.
     const contextTotal = resolveContextTotalChars(ctx.delegateContextChars?.());
@@ -350,7 +373,7 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     }
     const context = delegateContextChunks(contextParts, contextTotal);
     return {
-      ...wf.parentAccess,
+      ...parentAccess,
       ...(toolPolicy ? { toolPolicy } : {}),
       model,
       parentSessionId: wf.originSessionId,
@@ -557,6 +580,35 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
    *  of Ctrl+B and of background:true, and the host spares a detached delegate's children on this same
    *  abort for exactly that reason. Without the check, any later Esc-Esc in the conversation — related or
    *  not — silently killed work the user had been told keeps running. */
+  /** The single mutation path for local tool calls and runner RPC calls alike. Authorization, node
+   *  normalization, duplicate/cycle checks and the origin-anchored snapshot all stay in this daemon-owned
+   *  engine; the runner only transports the opaque node declarations. */
+  const addNodesFromSession = (workflowId, rawNodes, callerSessionId, callerAccess, callerModel) => {
+    const wf = authWorkflow(workflowId, callerSessionId);
+    if (!wf) throw new Error(`no running workflow ${workflowId} you can extend`);
+    if (wf.finished) throw new Error(`workflow ${workflowId} has already finished; start a new one`);
+    const sessionId = callerSessionId ?? ctx.currentSessionId();
+    const childAccess = sessionId !== wf.originSessionId
+      ? (callerAccess ? delegableAccess(callerAccess) : undefined)
+      : undefined;
+    if (sessionId !== wf.originSessionId && !childAccess) {
+      throw new Error('the workflow node caller has no delegable access boundary');
+    }
+    const { nodes, error } = mergeWorkflowNodes(wf.nodes, rawNodes);
+    if (error) throw new Error(error);
+    for (const node of nodes) {
+      wf.nodes.push(node);
+      wf.state.set(node.id, freshNodeState());
+      if (childAccess) {
+        wf.nodeParentAccess.set(node.id, childAccess);
+        if (callerModel) wf.nodeParentModel.set(node.id, callerModel);
+      }
+    }
+    snapshot(wf);
+    tick(wf);
+    return { added: nodes.map((node) => node.id) };
+  };
+
   const cancelForSession = (sessionId) => {
     let cancelled = 0;
     for (const wf of workflows.values()) {
@@ -595,6 +647,10 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       const wf = workflows.get(workflowId);
       return !!wf && !wf.finished;
     },
+    // Caller identity and access are accepted only on this internal control. SubagentRunnerHost derives both
+    // from a daemon-minted active turn before this method is reachable; the IPC payload carries neither.
+    addNodesFromSession: ({ callerSessionId, callerAccess, callerModel, workflowId, nodes }) =>
+      addNodesFromSession(workflowId, nodes, callerSessionId, callerAccess, callerModel),
   });
 
   /** A plugin reload replaces THIS closure: the fresh instance registers its own empty `workflows` map,
@@ -682,6 +738,9 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
         status: 'running',
         nodes,
         state: new Map(nodes.map((n) => [n.id, freshNodeState()])),
+        // Only dynamically child-added nodes enter these maps; originals and origin-added nodes use the parent.
+        nodeParentAccess: new Map(),
+        nodeParentModel: new Map(),
         parentAccess: ctx.currentAccess(),
         parentModel: ctx.currentModel() ?? undefined,
         // The origin turn's working directory, inherited by every node so a node's tools resolve against
@@ -770,6 +829,12 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       // node rather than here. Start those nodes in a FRESH channel instead — the run continues, at the
       // honest cost of the earlier session's transcript, which they repeat rather than build on.
       const scopeChanged = !sameParentAccess(wf.parentAccess, access);
+      // A child-added node is permanently bounded by the adding child's narrower authority. If the origin's
+      // own boundary also changed, there is no safe general intersection for ordered permission rules; refuse
+      // rather than replay either stale authority or a widened node under the new parent.
+      if (scopeChanged && unfinished.some((node) => wf.nodeParentAccess.has(node.id))) {
+        return ok(`Error: workflow ${wf.id} has unfinished dynamically added nodes and the origin access boundary has changed. Start a new workflow under the current access instead of replaying stale child authority.`);
+      }
       // Reset the run-scoped fields, but carry the channel id of a node that ACTUALLY RAN across: that is
       // what lets it resume inside its own session instead of repeating work it already did. A node holds a
       // session only once it started, so a PENDING one (never launched, or skipped because a dependency
@@ -825,15 +890,21 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
     // deliberately unused: the snapshot must address the origin's WorkflowStart row, which `snapshot()`
     // reads off wf.toolCallId. Keying anything here off `_id` would fork a phantom row per expansion.
     execute: async (_id, p) => {
-      const wf = authWorkflow(p.workflowId);
-      if (!wf) return ok(`Error: no running workflow ${p.workflowId} you can extend.`);
-      if (wf.finished) return ok(`Error: workflow ${p.workflowId} has already finished; start a new one.`);
-      const { nodes, error } = mergeWorkflowNodes(wf.nodes, p.nodes);
-      if (error) return ok(`Error: ${error}`);
-      for (const n of nodes) { wf.nodes.push(n); wf.state.set(n.id, freshNodeState()); }
-      snapshot(wf);
-      tick(wf);
-      return ok(`Added ${nodes.length} node(s) to workflow ${wf.id}: ${nodes.map((n) => n.id).join(', ')}.`);
+      try {
+        // A runner's plugin instance owns no DAG. Its host bridge carries only the requested workflow id and
+        // nodes; the daemon independently derives the caller session and performs this same mutation there.
+        const local = authWorkflow(p.workflowId);
+        const rpc = ctx.workflowExpansionRpc?.();
+        // A runner may itself own a NESTED workflow started by one of its turns. Prefer that local DAG;
+        // only an id absent from this process crosses upward to the daemon-owned parent workflow.
+        let result;
+        if (local) result = addNodesFromSession(p.workflowId, p.nodes, undefined, ctx.currentAccess(), ctx.currentModel());
+        else if (rpc) result = await rpc.addNodes({ workflowId: p.workflowId, nodes: p.nodes });
+        else result = addNodesFromSession(p.workflowId, p.nodes, undefined, ctx.currentAccess(), ctx.currentModel());
+        return ok(`Added ${result.added.length} node(s) to workflow ${p.workflowId}: ${result.added.join(', ')}.`);
+      } catch (e) {
+        return ok(`Error: ${errorText(e)}.`);
+      }
     },
   }));
 

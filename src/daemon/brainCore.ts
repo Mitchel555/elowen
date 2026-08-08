@@ -60,6 +60,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { isExecAllowedForUser, isModelVisibleForUser, elowenExec } from '../shared/execs.js';
+import { WORKFLOW_ADD_NODES_RPC, type WorkflowExpansionRpc } from '../subagent/hostRpc.js';
 
 const log = logger('daemon');
 
@@ -123,6 +124,12 @@ export interface BrainCoreOpts {
    *  identical bridged tool set without connecting anything, and connects a server only when one of its
    *  tools is actually called. The daemon passes nothing and connects at boot exactly as before. */
   mcpBridgeSnapshot?: McpBridgeSnapshot;
+  /** Runner-only reverse channel into the daemon's workflow engine. Omitted anywhere that cannot prove
+   *  support, which keeps remote WorkflowAddNodes denied instead of exposing a dead tool. */
+  workflowExpansionRpc?: WorkflowExpansionRpc;
+  /** Alternate plugin scan roots for an embedded/test core. Production omits this and uses the packaged
+   *  bundled directory plus the instance plugin directory. */
+  pluginDirs?: string[];
 }
 
 /** Construct the store + plugin registry + brain services that ANY Elowen process needs, with no HTTP
@@ -211,7 +218,7 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
   // Plugin scan roots: the bundled dist/plugins dir + the instance data-dir plugins/. Shared by the
   // brain's lazy loader and the admin /plugins listing so both always see the same set.
   const userPluginDir = join(dirname(opts.dbPath), 'plugins');
-  const pluginDirs = [join(dirname(fileURLToPath(import.meta.url)), '..', 'plugins'), userPluginDir];
+  const pluginDirs = opts.pluginDirs ?? [join(dirname(fileURLToPath(import.meta.url)), '..', 'plugins'), userPluginDir];
   const pluginDataRoot = join(dirname(opts.dbPath), 'plugins-data');
   // Typed sub-agents: built-in explore/plan ship in dist/prompts/agents (same `../` resolution as the
   // bundled plugins dir); user `.md` types live next to the DB in <config>/agents. Loaded lazily and
@@ -419,6 +426,13 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
       // there this is structurally false and workflow self-expansion stays open.
       delegatedTurnsOutOfProcess: () => predictsRunnerDispatch(
         opts.subagentRunner, config.get().runtime.subagentRunnerEnabled === true),
+      // An old/unwired runner is not "probably capable": the workflow engine withholds both briefing and
+      // tool unless the exact reverse verb is advertised by the dispatcher it will use.
+      delegatedWorkflowExpansionAvailable: () =>
+        opts.subagentRunner?.supportsHostRpc?.(WORKFLOW_ADD_NODES_RPC) === true,
+      // Present only in the runner process. Its plugin instance has no local DAG, so WorkflowAddNodes uses
+      // this client to reach the daemon instance that owns the workflow.
+      ...(opts.workflowExpansionRpc ? { workflowExpansionRpc: opts.workflowExpansionRpc } : {}),
       logger: log,
     }).then((registry) => {
       // Snapshot the merged plugin output-show patterns so the (sync) messageView policy above reads the

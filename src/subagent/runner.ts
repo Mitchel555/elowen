@@ -19,6 +19,8 @@
  *  The abort tree stays authoritative in the DAEMON (its fencing is synchronous in-memory
  *  read-modify-write across sessions), so abort arrives as an explicit verb and this process only carries
  *  it out. Store writes are its own: it holds its own connection and writes its own sessions' rows. */
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import { logger, setLogScopePrefix } from '../shared/logger.js';
 import { startLoopLagMonitor } from '../shared/eventLoopLag.js';
 import { HEARTBEAT_INTERVAL_MS, LAG_WINDOW_MS } from './sizing.js';
@@ -29,6 +31,8 @@ import { parseDelegatedTurnRequest, toDelegatedProgress } from '../brain/delegat
 import { SUBAGENT_PLATFORM, channelSessionId } from '../brain/sessionId.js';
 import { parseDaemonMessage, subagentBuildId, type RunnerToDaemon } from './protocol.js';
 import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
+import { currentSessionId } from '../plugins/policyContext.js';
+import { HostRpcClient, WORKFLOW_ADD_NODES_RPC, type WorkflowExpansionRpc } from './hostRpc.js';
 
 // A runner writes into the daemon's own log file and builds the same brain core, so its lines carry the
 // same scopes the daemon's do (`[daemon] plugin loaded: …`). The pid is what makes them attributable —
@@ -64,8 +68,29 @@ const REFUSING_TMUX: TmuxDriver = {
   kill: () => Promise.resolve(),
 };
 
-const send = (message: RunnerToDaemon): void => {
-  try { process.send?.(message); } catch { /* the channel closed under us; the exit path handles it */ }
+const send = (message: RunnerToDaemon): boolean => {
+  try {
+    if (!process.connected || !process.send) return false;
+    process.send(message);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const rpcTurn = new AsyncLocalStorage<{ turnId: string; sessionId: string }>();
+const hostRpc = new HostRpcClient(send, randomUUID);
+const workflowExpansionRpc: WorkflowExpansionRpc = {
+  addNodes: ({ workflowId, nodes }) => {
+    const caller = rpcTurn.getStore();
+    // Async context from the outer dispatched turn is inherited by nested delegations. Requiring the live
+    // plugin turn to still be that DIRECT session prevents a grandchild from borrowing its ancestor's RPC
+    // identity and expanding a workflow it was never a node of.
+    if (!caller || currentSessionId() !== caller.sessionId) {
+      return Promise.reject(new Error('WorkflowAddNodes RPC is available only to the directly dispatched sub-agent turn'));
+    }
+    return hostRpc.call(caller.turnId, { method: WORKFLOW_ADD_NODES_RPC, workflowId, nodes });
+  },
 };
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -122,6 +147,7 @@ async function boot(
     // production a whole Chrome per runner, ~2.5 s of this boot, and a process tree the pool's RSS-based
     // sizing cannot see. Absent ⇒ connect at boot, exactly as before.
     ...(mcpBridgeSnapshot ? { mcpBridgeSnapshot } : {}),
+    workflowExpansionRpc,
     // The daemon prepared this database; a process attaching to it must not create accounts…
     bootstrap: null,
     // …nor take the write lock to re-prove a schema that is already final.
@@ -168,13 +194,13 @@ async function runTurn(turnId: string, rawRequest: unknown, text: string): Promi
   heldChannels.add(request.channelId);
   dispatchedEdges.add(edge);
   try {
-    const reply = await service.runDelegatedTurn(request, text, (e) => {
+    const reply = await rpcTurn.run({ turnId, sessionId: childSessionId }, () => service.runDelegatedTurn(request, text, (e) => {
       // ONLY the three low-frequency shapes the delegating plugin consumes. Text deltas, tool-argument
       // deltas and transcripts must never cross: re-amplifying them over IPC would put back the very
       // event-loop pressure this process removes.
       const progress = toDelegatedProgress(e);
       if (progress) send({ type: 'progress', turnId, event: progress });
-    });
+    }));
     send({ type: 'result', turnId, reply });
   } catch (e) {
     send({ type: 'error', turnId, message: errorText(e) });
@@ -246,6 +272,12 @@ process.on('message', (raw: unknown) => {
         });
       return;
     }
+    case 'hostResult':
+      hostRpc.settle(msg.callId, msg.result);
+      return;
+    case 'hostError':
+      hostRpc.settleError(msg.callId, msg.message);
+      return;
     default:
       return;
   }
@@ -262,7 +294,10 @@ const leave = (reason: string): void => {
   // A wedged abort must not keep the orphan alive either.
   setTimeout(() => process.exit(0), 5_000).unref();
 };
-process.on('disconnect', () => leave('the daemon closed the IPC channel'));
+process.on('disconnect', () => {
+  hostRpc.close();
+  leave('the daemon closed the IPC channel');
+});
 process.on('SIGTERM', () => leave('SIGTERM'));
 
 // Same reasoning as the daemon: a stray rejection from one of the many fire-and-forget paths inside a

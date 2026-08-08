@@ -40,6 +40,7 @@ import { SubagentRunnerHost, type RunnerHeartbeat, type SubagentRunnerHostDeps }
 import { FairQueue } from './fairQueue.js';
 import type { SpawnFailureCode, SubagentPoolStats } from './poolStats.js';
 import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
+import { WORKFLOW_ADD_NODES_RPC, type HostRpcMethod } from './hostRpc.js';
 import {
   HEARTBEAT_INTERVAL_MS,
   MAX_TURNS_PER_RUNNER,
@@ -169,6 +170,11 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
   /** The operator's knob resolved to a cap, or 0 when the pool is switched off. `SubagentDispatch` asks
    *  before it routes, so a disabled pool reports `in-process` rather than failing a turn per delegation. */
   usable(): boolean { return this.cap() > 0; }
+
+  /** Capability, not optimism: a daemon without the handler keeps WorkflowAddNodes denied in remote nodes. */
+  supportsHostRpc(method: HostRpcMethod): boolean {
+    return method === WORKFLOW_ADD_NODES_RPC && this.d.hostRpc !== undefined;
+  }
 
   private cap(): number {
     return poolSizing(this.machine, {
@@ -320,6 +326,7 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
         cwd: this.d.cwd,
         ...(mcpBridgeSnapshot ? { mcpBridgeSnapshot } : {}),
         ...(this.d.fork ? { fork: this.d.fork } : {}),
+        ...(this.d.hostRpc ? { hostRpc: this.d.hostRpc } : {}),
         onHeartbeat: (beat) => this.onHeartbeat(entry, beat),
         onExit: () => this.onRunnerExit(entry),
       });

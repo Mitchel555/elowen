@@ -10,6 +10,7 @@ import type { McpBridgeSnapshot } from './mcpSnapshot.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
 import type { AskAnswer } from '../brain/events.js';
 import type { PluginModelOption } from './api.js';
+import type { WorkflowExpansionRpc } from '../subagent/hostRpc.js';
 
 /** Localized overrides for a plugin's user-facing manifest strings, keyed by field key. The manifest's
  *  own English strings stay the source/fallback; a `<lang>.json` supplies translations for other locales. */
@@ -123,6 +124,11 @@ export interface LoadPluginsOptions {
    *  only answer "no running workflow" in the runner. A process with no runner states that explicitly
    *  (`() => false`); dropping the wiring in brainCore now fails the typecheck instead of shipping. */
   delegatedTurnsOutOfProcess: () => boolean;
+  /** Whether a remote child dispatched by this process can call the daemon's workflow engine back. Absent
+   *  is the compatibility fallback and keeps WorkflowAddNodes denied in that child. */
+  delegatedWorkflowExpansionAvailable?: () => boolean;
+  /** Runner-only reverse RPC client. Ordinary daemon plugin instances never receive it. */
+  workflowExpansionRpc?: WorkflowExpansionRpc;
   logger: PluginLogger;
 }
 
@@ -171,7 +177,11 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<PluginRegis
           // Like `toolNames`, this closes over the MERGED registry (not the staging one): the adapter reads it
           // long after every plugin has merged, so it must see the whole live set of plugin prompt commands.
           () => [...registry.commands.values()].map((c) => ({ name: c.name, description: c.description, prompt: c.prompt, surfaces: c.surfaces, plugin: registry.commandOwner.get(c.name) })),
-          opts.delegateContextChars, opts.delegatedChildren, opts.mcpBridgeSnapshot, opts.delegatedTurnsOutOfProcess);
+          opts.delegateContextChars, opts.delegatedChildren, opts.mcpBridgeSnapshot, opts.delegatedTurnsOutOfProcess,
+          opts.delegatedWorkflowExpansionAvailable,
+          // Reverse mutation belongs exclusively to the bundled workflow owner. Do not hand arbitrary enabled
+          // plugins a client that can mutate daemon-owned DAGs from a runner turn.
+          name === 'subagent' ? opts.workflowExpansionRpc : undefined);
         await mod.register(ctx);
         registry.merge(staging, (m) => opts.logger.warn(`[plugin:${name}] ${m}`));
         // Capture the plugin's declared capabilities (deny-by-default `{}` when absent) — the manifest

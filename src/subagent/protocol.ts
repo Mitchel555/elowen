@@ -4,6 +4,7 @@ import { ELOWEN_VERSION } from '../api/version.js';
 import type { BrainUsage } from '../brain/events.js';
 import type { DelegatedProgressEvent, DelegatedTurnRequest } from '../brain/delegatedTurn.js';
 import { parseMcpBridgeSnapshot, type McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
+import { parseHostRpcRequest, parseHostRpcResult, type HostRpcRequest, type HostRpcResult } from './hostRpc.js';
 
 /** The forked runner's entry module. Resolved relative to THIS file so the daemon and the child always
  *  name the same build: in a packaged install both are `dist/subagent/*.js`. A source checkout run through
@@ -66,7 +67,11 @@ export type DaemonToRunner =
   | { type: 'steer'; steerId: string; channelId: string; text: string }
   /** Drop the live record for a channel so the DAEMON can run that child's next turn itself (a drill-in
    *  or a DelegateContinue rehydrates from SQLite). Refused while that channel is busy. */
-  | { type: 'release'; releaseId: string; channelId: string };
+  | { type: 'release'; releaseId: string; channelId: string }
+  /** The daemon's answer to a runner-originated host call. Errors are data so a rejected workflow
+   *  expansion settles the tool call without crashing either IPC peer. */
+  | { type: 'hostResult'; callId: string; result: HostRpcResult }
+  | { type: 'hostError'; callId: string; message: string };
 
 /** How a runner-side steer ended — see DelegatedTurnRunner.steer for what each verdict obliges the
  *  daemon to do next. */
@@ -91,6 +96,9 @@ export type RunnerToDaemon =
    *  context; `idle` when no streaming turn holds this channel here (the daemon then delivers the text
    *  itself); `aborted` when the delegation's abort fences fired while the steer waited. */
   | { type: 'steered'; steerId: string; outcome: RunnerSteerOutcome }
+  /** A reverse RPC is bound to a daemon-minted in-flight turn id. There is deliberately no session id in
+   *  this frame: the daemon derives the caller session from its own pending-turn table. */
+  | { type: 'hostCall'; callId: string; turnId: string; request: HostRpcRequest }
   /** What this runner sees of ITSELF, on a fixed interval. The event-loop p99 is the load signal nothing
    *  outside the process can observe — a busy runner and an idle one look identical from the daemon —
    *  and the RSS is what turns the memory ceiling from a guess into a measurement (see sizing.ts). The
@@ -148,6 +156,15 @@ export function parseDaemonMessage(raw: unknown): DaemonToRunner | undefined {
     const channelId = str(v.channelId);
     return releaseId && channelId ? { type: 'release', releaseId, channelId } : undefined;
   }
+  if (v.type === 'hostResult') {
+    const callId = str(v.callId);
+    const result = parseHostRpcResult(v.result);
+    return callId && result ? { type: 'hostResult', callId, result } : undefined;
+  }
+  if (v.type === 'hostError') {
+    const callId = str(v.callId);
+    return callId ? { type: 'hostError', callId, message: str(v.message) ?? 'the daemon host RPC failed' } : undefined;
+  }
   return undefined;
 }
 
@@ -191,6 +208,12 @@ export function parseRunnerMessage(raw: unknown): RunnerToDaemon | undefined {
       // An unknown outcome is a dropped frame, not a coerced one: the daemon acts on this verdict
       // (deliver the text itself, or report the delegation aborted), so guessing would misdeliver.
       return steerId && isSteerOutcome(v.outcome) ? { type: 'steered', steerId, outcome: v.outcome } : undefined;
+    }
+    case 'hostCall': {
+      const callId = str(v.callId);
+      const turnId = str(v.turnId);
+      const request = parseHostRpcRequest(v.request);
+      return callId && turnId && request ? { type: 'hostCall', callId, turnId, request } : undefined;
     }
     case 'heartbeat': {
       // Every field must be a finite non-negative number: these drive spawn decisions, and a NaN sneaking

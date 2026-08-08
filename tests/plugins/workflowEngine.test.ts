@@ -44,8 +44,16 @@ interface Tool {
 /** Build a workflow harness: a mock plugin ctx that captures the registered tools + emitted snapshots,
  *  and a controllable fake `run` handler. `run` resolves each node to `done:<task>` unless the task
  *  contains "FAIL" (then it returns an Error), recording the order nodes were launched. */
+const TEST_ACCESS = { admin: false, projectIds: [1], owner: true, permissionBoundary: null } as const;
+
 interface WorkflowControl {
   cancelForSession(input: { sessionId: string }): { cancelled: number };
+  addNodesFromSession(input: {
+    callerSessionId: string;
+    callerAccess: { admin: boolean; projectIds: number[]; owner: boolean; permissionBoundary: null; toolPolicy?: { allow?: string[]; deny?: string[] } };
+    workflowId: string;
+    nodes: unknown[];
+  }): { added: string[] };
   /** The engine's liveness seam: does THIS engine still hold the DAG? Status reads consult it instead of
    *  trusting a durable row whose terminal snapshot may never have landed. */
   isWorkflowLive(input: { workflowId: string }): boolean;
@@ -65,9 +73,11 @@ function harness(opts: {
   /** Make the host refuse every stop, the way it does when the call is scoped to a turn that does not own
    *  the child (a node's own turn, after a self-expansion). */
   stopRejects?: boolean;
-  /** Report delegated turns as dispatched to a forked runner process — where a node's WorkflowAddNodes
-   *  resolves against that process's own empty engine and can never reach this DAG. */
+  /** Report delegated turns as dispatched to a forked runner process. */
   delegatedRemote?: boolean;
+  delegatedRpcAvailable?: boolean;
+  subagentTypes?: { name: string; description: string }[];
+  workflowExpansionRpc?: { addNodes(input: { workflowId: string; nodes: unknown[] }): Promise<{ added: string[] }> };
 } = {}) {
   gate = null;
   const tools = new Map<string, Tool>();
@@ -81,8 +91,8 @@ function harness(opts: {
   const attempts = new Map<string, number>();
   /** Every launch as the host saw it: which channel the node ran in, and the VERBATIM task it received.
    *  A resume is only real if the channel id repeats — that is what puts the retry back in the same session. */
-  const runs: { task: string; channelId: string; fullTask: string; sessionIdleMs?: number; toolPolicy?: { allow?: string[]; deny?: string[] } }[] = [];
-  const run = async (source: { access?: { context?: string[]; sessionIdleMs?: number; toolPolicy?: { allow?: string[]; deny?: string[] } }; channelId?: string }, fullTask: string, onEvent: (e: unknown) => void) => {
+  const runs: { task: string; channelId: string; fullTask: string; sessionIdleMs?: number; toolPolicy?: { allow?: string[]; deny?: string[] }; model?: { provider: string; model: string } }[] = [];
+  const run = async (source: { access?: { context?: string[]; sessionIdleMs?: number; toolPolicy?: { allow?: string[]; deny?: string[] }; model?: { provider: string; model: string } }; channelId?: string }, fullTask: string, onEvent: (e: unknown) => void) => {
     // A resumed node is handed its task plus a trailing resume note. Everything keyed by identity here
     // (launch order, session id, FAIL_ONCE attempts) must key on the TASK, or a retry would read as a
     // different node and FAIL_ONCE would fail forever.
@@ -92,6 +102,7 @@ function harness(opts: {
       task, channelId: source.channelId ?? '', fullTask,
       ...(source.access?.sessionIdleMs !== undefined ? { sessionIdleMs: source.access.sessionIdleMs } : {}),
       ...(source.access?.toolPolicy !== undefined ? { toolPolicy: source.access.toolPolicy } : {}),
+      ...(source.access?.model !== undefined ? { model: source.access.model } : {}),
     });
     contexts.set(task, source.access?.context ?? []);
     if (!opts.lateSession) onEvent({ type: 'session', sessionId: `s-${task}` });
@@ -117,9 +128,12 @@ function harness(opts: {
   const sessionId = { current: 'brain-parent' };
   /** Mutable so a test can narrow the caller's access boundary between a start and a resume, the way an
    *  operator revoking a project or disabling tools does to a real conversation. */
-  const access: { current: { toolPolicy?: { allow?: string[] } } } = {
-    current: { toolPolicy: opts.toolPolicyAllow ? { allow: opts.toolPolicyAllow } : undefined },
+  const access: {
+    current: { admin: boolean; projectIds: number[]; owner: boolean; permissionBoundary: null; toolPolicy?: { allow?: string[]; deny?: string[] }; readOnly?: boolean };
+  } = {
+    current: { ...TEST_ACCESS, toolPolicy: opts.toolPolicyAllow ? { allow: opts.toolPolicyAllow } : undefined },
   };
+  const model = { current: { provider: 'p', model: 'm', thinkingLevel: undefined as string | undefined } };
   /** The node child sessions the engine asked the host to abort — the stand-in for the real abort tree. */
   const stoppedSessions: string[] = [];
   /** What the engine warned about — the only channel it has for a failure it cannot itself recover from. */
@@ -137,7 +151,7 @@ function harness(opts: {
     currentSessionId: () => sessionId.current,
     currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
     currentAccess: () => access.current,
-    currentModel: () => ({ provider: 'p', model: 'm' }),
+    currentModel: () => model.current,
     assertPathAllowed: assertTestPathAllowed,
     workflowEmitter: () => (u: (typeof snapshots)[number]) => { snapshots.push(u); },
     // The gated variant must also RESOLVE the model: returning [] makes buildNodeAccess throw
@@ -150,6 +164,9 @@ function harness(opts: {
     toolNames: () => ['Read', 'Write', 'Bash'],
     delegateContextChars: () => opts.contextChars ?? undefined,
     delegatedTurnsOutOfProcess: () => opts.delegatedRemote === true,
+    delegatedWorkflowExpansionAvailable: () => opts.delegatedRpcAvailable === true,
+    workflowExpansionRpc: () => opts.workflowExpansionRpc ?? null,
+    subagentTypes: () => opts.subagentTypes ?? [],
   };
   const helpers = {
     resolveDelegateTools: (_inheritedAllow: string[] | undefined, requested: string[] | undefined) =>
@@ -160,7 +177,7 @@ function harness(opts: {
   registerWorkflow(ctx, () => run, helpers);
   /** Everything the node can read, as one string — the chunks are a transport detail, not the content. */
   const contextOf = (task: string) => (contexts.get(task) ?? []).join('\n\n');
-  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, access, runs, stoppedSessions, warnings };
+  return { tools, controls, snapshots, launched, contexts, contextOf, sessionId, access, model, runs, stoppedSessions, warnings };
 }
 
 describe('workflow engine', () => {
@@ -596,7 +613,7 @@ describe('workflow engine', () => {
       logger: { info() {}, warn() {} },
       currentSessionId: () => 'brain-parent',
       currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
-      currentAccess: () => ({ toolPolicy: undefined }),
+      currentAccess: () => ({ ...TEST_ACCESS, toolPolicy: undefined }),
       currentModel: () => ({ provider: 'p', model: 'm' }),
       assertPathAllowed: assertTestPathAllowed,
       workflowEmitter: () => (u: { id: string; toolCallId: string; status: string }) => { snapshots.push(u); },
@@ -651,7 +668,7 @@ describe('workflow engine', () => {
       logger: { info() {}, warn() {} },
       currentSessionId: () => sessionId,
       currentIdentity: () => identity,
-      currentAccess: () => ({ toolPolicy: undefined }),
+      currentAccess: () => ({ ...TEST_ACCESS, toolPolicy: undefined }),
       currentModel: () => ({ provider: 'p', model: 'm' }),
       assertPathAllowed: assertTestPathAllowed,
       workflowEmitter: () => (u: { id: string }) => { snapshots.push(u); },
@@ -687,6 +704,60 @@ describe('workflow engine', () => {
     expect(res.content[0]!.text).toMatch(/status: done/);
   });
 
+  it('validates RPC additions in the owning engine and keeps snapshots on the origin tool call', async () => {
+    const h = harness();
+    let release!: () => void;
+    gate = { task: 'root', promise: new Promise<void>((resolveGate) => { release = resolveGate; }) };
+    const start = h.tools.get('WorkflowStart')!.execute('rpc-origin', {
+      nodesFile: workflowFile([{ id: 'root', task: 'root' }]),
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    const workflowId = h.snapshots[0]!.id;
+    const control = h.controls.get('workflow')!;
+
+    expect(() => control.addNodesFromSession({
+      callerSessionId: 's-root', callerAccess: { ...TEST_ACCESS }, workflowId,
+      nodes: [{ id: 'a', task: 'a', deps: ['b'] }, { id: 'b', task: 'b', deps: ['a'] }],
+    })).toThrow(/cycle/i);
+    expect(h.launched).toEqual(['root']);
+
+    expect(control.addNodesFromSession({
+      callerSessionId: 's-root', callerAccess: { ...TEST_ACCESS }, workflowId,
+      nodes: [{ id: 'leaf', task: 'leaf', deps: ['root'] }],
+    })).toEqual({ added: ['leaf'] });
+    expect(h.snapshots.every((snapshot) => snapshot.toolCallId === 'rpc-origin')).toBe(true);
+
+    release();
+    await start;
+    expect(() => control.addNodesFromSession({
+      callerSessionId: 's-root', callerAccess: { ...TEST_ACCESS }, workflowId, nodes: [{ id: 'late', task: 'late' }],
+    })).toThrow(/already finished/);
+  });
+
+  it('keeps child-added nodes inside the adding node\'s access boundary', async () => {
+    const h = harness();
+    let release!: () => void;
+    gate = { task: 'root', promise: new Promise<void>((resolveGate) => { release = resolveGate; }) };
+    const start = h.tools.get('WorkflowStart')!.execute('bounded-origin', {
+      nodesFile: workflowFile([{ id: 'root', task: 'root', tools: ['WorkflowAddNodes'] }]),
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    h.sessionId.current = 's-root';
+    h.access.current = { ...TEST_ACCESS, toolPolicy: { allow: ['WorkflowAddNodes'] } };
+    h.model.current = { provider: 'child-provider', model: 'child-model', thinkingLevel: 'high' };
+    const workflowId = h.snapshots[0]!.id;
+    const added = await h.tools.get('WorkflowAddNodes')!.execute('bounded-add', {
+      workflowId, nodes: [{ id: 'leaf', task: 'leaf' }],
+    });
+    expect(added.content[0]?.text).toContain('leaf');
+    release();
+    await start;
+    expect(h.runs.find((run) => run.task === 'leaf')).toMatchObject({
+      toolPolicy: { allow: ['WorkflowAddNodes'] },
+      model: { provider: 'child-provider', model: 'child-model' },
+    });
+  });
+
   // The invitation must track reachability: WorkflowAddNodes resolves against the PROCESS-LOCAL engine
   // map, and a node whose turn the host ships to a forked runner lands in that process's own EMPTY
   // instance — its WorkflowAddNodes always answers "no running workflow". Promising expansion there is a
@@ -701,6 +772,60 @@ describe('workflow engine', () => {
     const remote = harness({ delegatedRemote: true });
     await remote.tools.get('WorkflowStart')!.execute('t-remote', { nodesFile: workflowFile([{ id: 'n', task: 'invite-me' }]) });
     expect(remote.contextOf('invite-me')).not.toContain('WorkflowAddNodes');
+
+    const denied = harness();
+    denied.access.current = { ...TEST_ACCESS, toolPolicy: { deny: ['Workflow*'] } };
+    await denied.tools.get('WorkflowStart')!.execute('t-policy-denied', {
+      nodesFile: workflowFile([{ id: 'n', task: 'invite-me' }]),
+    });
+    expect(denied.contextOf('invite-me')).not.toContain('WorkflowAddNodes');
+
+    const typed = harness({ subagentTypes: [{ name: 'explore', description: 'read-only explorer' }] });
+    await typed.tools.get('WorkflowStart')!.execute('t-typed', {
+      nodesFile: workflowFile([{ id: 'n', task: 'invite-me', subagent_type: 'explore' }]),
+    });
+    expect(typed.contextOf('invite-me')).not.toContain('WorkflowAddNodes');
+  });
+
+  it('keeps a nested workflow local inside a runner even when the parent RPC bridge exists', async () => {
+    let rpcCalls = 0;
+    const runner = harness({
+      workflowExpansionRpc: {
+        addNodes: async () => { rpcCalls += 1; return { added: ['wrong-process'] }; },
+      },
+    });
+    let release!: () => void;
+    gate = { task: 'root', promise: new Promise<void>((resolveGate) => { release = resolveGate; }) };
+    const start = runner.tools.get('WorkflowStart')!.execute('nested-origin', {
+      nodesFile: workflowFile([{ id: 'root', task: 'root' }]),
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    runner.sessionId.current = 's-root';
+    const workflowId = runner.snapshots[0]!.id;
+    const added = await runner.tools.get('WorkflowAddNodes')!.execute('nested-add', {
+      workflowId, nodes: [{ id: 'leaf', task: 'leaf' }],
+    });
+    expect(added.content[0]?.text).toContain('leaf');
+    expect(rpcCalls).toBe(0);
+    release();
+    await start;
+    expect(runner.launched).toEqual(['root', 'leaf']);
+  });
+
+  it('routes WorkflowAddNodes through the runner bridge when this engine owns no local DAG', async () => {
+    const calls: { workflowId: string; nodes: unknown[] }[] = [];
+    const runner = harness({
+      workflowExpansionRpc: {
+        addNodes: async (input) => { calls.push(input); return { added: ['leaf'] }; },
+      },
+    });
+    const result = await runner.tools.get('WorkflowAddNodes')!.execute('rpc-tool', {
+      workflowId: 'wf-daemon', nodes: [{ id: 'leaf', task: 'leaf' }],
+    });
+    expect(result.content[0]?.text).toBe('Added 1 node(s) to workflow wf-daemon: leaf.');
+    expect(calls).toEqual([{
+      workflowId: 'wf-daemon', nodes: [{ id: 'leaf', task: 'leaf' }],
+    }]);
   });
 
   // Silence in the briefing is not protection: without the deny a remote node still HOLDS the full
@@ -850,7 +975,7 @@ describe('workflow start limit', () => {
       logger: { info() {}, warn() {} },
       currentSessionId: () => 'brain-parent',
       currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
-      currentAccess: () => ({ toolPolicy: undefined }),
+      currentAccess: () => ({ ...TEST_ACCESS, toolPolicy: undefined }),
       currentModel: () => ({ provider: 'p', model: 'm' }),
       assertPathAllowed: assertTestPathAllowed,
       workflowEmitter: () => () => {},
@@ -928,7 +1053,7 @@ describe('workflow background + detach', () => {
       logger: { info() {}, warn() {} },
       currentSessionId: () => 'brain-parent',
       currentIdentity: () => ({ elowenUserId: 1, platform: 'cli', userId: '1' }),
-      currentAccess: () => ({ toolPolicy: undefined }),
+      currentAccess: () => ({ ...TEST_ACCESS, toolPolicy: undefined }),
       currentModel: () => ({ provider: 'p', model: 'm' }),
       assertPathAllowed: assertTestPathAllowed,
       workflowEmitter: () => (u: (typeof snapshots)[number]) => { snapshots.push(u); },
@@ -1224,7 +1349,7 @@ describe('WorkflowResume', () => {
     const firstA = runs.find((r) => r.task === 'a FAIL_ONCE')!;
 
     // The operator narrows what this conversation may delegate.
-    access.current = { toolPolicy: { allow: ['Read'] } };
+    access.current = { ...TEST_ACCESS, toolPolicy: { allow: ['Read'] } };
     const resumed = await tools.get('WorkflowResume')!.execute('r-scope-resume', { workflowId: wfId });
 
     const retryA = runs.filter((r) => r.task === 'a FAIL_ONCE')[1]!;
@@ -1374,7 +1499,7 @@ describe('WorkflowResume', () => {
       currentIdentity: () => (turn.getStore()?.sessionId === 'brain-parent'
         ? { elowenUserId: 1, platform: 'cli', userId: '1' }
         : { platform: 'subagent', userId: 'subagent' }),
-      currentAccess: () => ({ toolPolicy: undefined }),
+      currentAccess: () => ({ ...TEST_ACCESS, toolPolicy: undefined }),
       currentModel: () => ({ provider: 'p', model: 'm' }),
       assertPathAllowed: assertTestPathAllowed,
       workflowEmitter: () => (u: { id: string }) => { snapshots.push(u); },

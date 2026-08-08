@@ -11,8 +11,16 @@ import {
 } from '../brain/delegatedTurn.js';
 import { RUNNER_ENTRY, parseRunnerMessage, subagentBuildId, type DaemonToRunner, type RunnerSteerOutcome } from './protocol.js';
 import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
+import { channelSessionId } from '../brain/sessionId.js';
+import { delegatedToolPolicy } from '../brain/delegatedScope.js';
+import { toolPermitted } from '../plugins/policyContext.js';
+import type { HostRpcHandler } from './hostRpc.js';
 
 const log = logger('subagent-runner');
+
+function hostRpcAllowed(turn: PendingTurn): boolean {
+  return toolPermitted('WorkflowAddNodes', delegatedToolPolicy(turn.request.delegatedAccess));
+}
 
 /** How long the child gets to attach its database, load plugins and build its brain before we give up on
  *  it. Generous: it does everything the daemon's own boot does minus the server, and a cold plugin load on
@@ -42,6 +50,9 @@ export interface SubagentRunnerHostDeps {
   /** The child is gone — for good. The pool drops this host and every route pointing at it here; nothing
    *  re-forks in place, because a host is one process for its whole life. */
   onExit?: () => void;
+  /** Execute a reverse RPC in the daemon. The host supplies the caller session from its own pending-turn
+   *  table; no identity field from the runner crosses this boundary. */
+  hostRpc?: HostRpcHandler;
 }
 
 /** What a runner says about itself, as forwarded to whoever owns this host. */
@@ -53,6 +64,8 @@ export interface RunnerHeartbeat {
 }
 
 interface PendingTurn {
+  request: DelegatedTurnRequest;
+  rpcActive: boolean;
   resolve: (reply: string) => void;
   reject: (e: Error) => void;
   onEvent?: (e: BrainEvent) => void;
@@ -109,7 +122,7 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
     const child = await this.ensure();
     const turnId = randomUUID();
     return new Promise<string>((resolve, reject) => {
-      this.pending.set(turnId, { resolve, reject, ...(onEvent ? { onEvent } : {}) });
+      this.pending.set(turnId, { request, rpcActive: true, resolve, reject, ...(onEvent ? { onEvent } : {}) });
       if (!this.post(child, { type: 'turn', turnId, request, text })) {
         this.pending.delete(turnId);
         reject(new SubagentRunnerUnavailable('the sub-agent runner channel closed before the turn was sent'));
@@ -118,6 +131,11 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
   }
 
   abort(channelId: string): void {
+    // Revocation is synchronous: a reverse call waiting on daemon/plugin work must lose authority before
+    // the runner gets around to acknowledging the abort and settling its turn.
+    for (const turn of this.pending.values()) {
+      if (turn.request.channelId === channelId) turn.rpcActive = false;
+    }
     if (this.child) this.post(this.child, { type: 'abort', channelId });
   }
 
@@ -254,6 +272,45 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
             const key = `${msg.parentSessionId}\u0000${msg.childSessionId}`;
             if (msg.running) this.mirroredEdges.add(key); else this.mirroredEdges.delete(key);
             this.childEdgeSink?.(msg.parentSessionId, msg.childSessionId, msg.running);
+            return;
+          }
+          case 'hostCall': {
+            const turn = this.pending.get(msg.turnId);
+            if (!turn || !turn.rpcActive) {
+              this.post(child, { type: 'hostError', callId: msg.callId, message: 'the host RPC caller turn is no longer active' });
+              return;
+            }
+            if (!this.d.hostRpc) {
+              this.post(child, { type: 'hostError', callId: msg.callId, message: 'the daemon does not support this host RPC' });
+              return;
+            }
+            if (!hostRpcAllowed(turn)) {
+              this.post(child, { type: 'hostError', callId: msg.callId, message: 'the active turn is not allowed to call WorkflowAddNodes' });
+              return;
+            }
+            // The runner names only the daemon-minted turn correlation id. Session, access and liveness all
+            // come from the request the daemon placed on THIS IPC connection, never from child-controlled data.
+            const caller = {
+              sessionId: channelSessionId(turn.request.channelId),
+              access: turn.request.delegatedAccess,
+              ...(turn.request.model || turn.request.thinkingLevel ? {
+                model: {
+                  ...(turn.request.model ?? {}),
+                  ...(turn.request.thinkingLevel ? { thinkingLevel: turn.request.thinkingLevel } : {}),
+                },
+              } : {}),
+              isActive: () => turn.rpcActive && this.pending.get(msg.turnId) === turn
+                && this.child === child && child.connected && !this.dead,
+            };
+            void this.d.hostRpc(caller, msg.request).then(
+              (result) => { this.post(child, { type: 'hostResult', callId: msg.callId, result }); },
+              (e: unknown) => {
+                this.post(child, {
+                  type: 'hostError', callId: msg.callId,
+                  message: e instanceof Error ? e.message : String(e),
+                });
+              },
+            );
             return;
           }
           case 'result': {

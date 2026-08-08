@@ -3,6 +3,7 @@ import type { TurnIdentity } from '../plugins/policyContext.js';
 import type { ChannelSendOpts } from './channels.js';
 import type { BrainEvent, BrainUsage } from './events.js';
 import { delegatedToolPolicy, normalizeDelegatedExecutionScope, type DelegatedExecutionScope } from './delegatedScope.js';
+import type { HostRpcMethod } from '../subagent/hostRpc.js';
 
 /** Everything a delegated child's turn needs that a SECOND PROCESS could not derive for itself.
  *
@@ -109,6 +110,9 @@ export interface DelegatedTurnRunner {
    *  zero, so the dispatcher reports `in-process` and routes there directly — rather than failing a turn
    *  per delegation and logging a fallback warning each time. Absent ⇒ assumed usable. */
   usable?(): boolean;
+  /** Whether remote turns have a live reverse channel for this host operation. Absent is an old/unwired
+   *  runner and callers must withhold the corresponding tool rather than hand out a broken capability. */
+  supportsHostRpc?(method: HostRpcMethod): boolean;
 }
 
 /** The runner could not be STARTED. Distinct from a turn that failed inside a healthy runner: nothing ran

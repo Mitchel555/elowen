@@ -6,6 +6,7 @@ import type { NoninteractivePermissionBoundary } from '../brain/toolPermissions.
 import type { SlashCommandDef } from '../brain/slashCommands.js';
 import type { DelegatedChildSummary } from '../store/brainDelegationStore.js';
 import type { McpBridgeSnapshot } from './mcpSnapshot.js';
+import type { WorkflowAddNodesRpcResult, WorkflowExpansionRpc } from '../subagent/hostRpc.js';
 
 export type { DelegatedChildSummary };
 
@@ -375,6 +376,28 @@ export interface WorkflowLivenessControl {
   isWorkflowLive(input: { workflowId: string }): boolean;
 }
 
+/** The exact delegable authorization boundary of the node requesting workflow expansion. */
+export interface WorkflowExpansionCallerAccess {
+  admin: boolean;
+  projectIds: number[];
+  owner: boolean;
+  toolPolicy?: { allow?: string[]; deny?: string[] };
+  permissionBoundary: NoninteractivePermissionBoundary | null;
+  readOnly?: boolean;
+}
+
+/** Daemon-owned endpoint for a runner node's dynamic workflow expansion. Both caller fields are trusted only
+ * because SubagentRunnerHost derives them from its own active turn table before invoking this control. */
+export interface WorkflowExpansionControl {
+  addNodesFromSession(input: {
+    callerSessionId: string;
+    callerAccess: WorkflowExpansionCallerAccess;
+    callerModel?: { provider?: string; model?: string; thinkingLevel?: string };
+    workflowId: string;
+    nodes: unknown[];
+  }): WorkflowAddNodesRpcResult;
+}
+
 /** One MCP server as the plugin's live table reports it. Core reads only the two fields a chat client's
  *  telemetry rail renders; the plugin's own admin surface serves the full record (tools, last error). */
 export interface McpServerState { name: string; status: string }
@@ -396,7 +419,7 @@ export interface KnownControls {
   subagent: DetachControl;
   terminal: DetachControl & KillForegroundControl;
   cron: PendingWakeupControl;
-  workflow: WorkflowCancelControl & DetachControl & WorkflowLivenessControl;
+  workflow: WorkflowCancelControl & DetachControl & WorkflowLivenessControl & WorkflowExpansionControl;
   mcp: McpListControl;
 }
 
@@ -603,11 +626,13 @@ export interface PluginContext {
    *  turn before scheduling nodes, mirroring subagentCompletionEmitter. */
   workflowCompletionEmitter(): WorkflowCompletionEmitter | null;
   /** True when a delegated child turn dispatched from THIS process may execute in a forked sub-agent
-   *  runner process (Settings → runtime.subagentRunnerEnabled, pool usable). Read live per delegation.
-   *  A plugin whose tools resolve against process-local state (the workflow engine's in-memory DAG map)
-   *  must not promise a remote child that those tools will reach it — the runner registers its own,
-   *  empty instance. Always false inside a runner itself: a nested delegation stays in-process there. */
+   *  runner process (Settings → runtime.subagentRunnerEnabled, pool usable). Read live per delegation. */
   delegatedTurnsOutOfProcess(): boolean;
+  /** Whether such a remote child has the reverse workflow-expansion RPC. A false answer is load-bearing:
+   *  the workflow engine denies WorkflowAddNodes in the child's effective tool policy. */
+  delegatedWorkflowExpansionAvailable(): boolean;
+  /** Runner-only client for the reverse RPC. Null in the daemon and in ordinary in-process contexts. */
+  workflowExpansionRpc(): WorkflowExpansionRpc | null;
   /** The provider entry id + model the CURRENT turn's session runs on, or null outside a prompt turn —
    *  a delegating plugin uses it to default the child to "the same model as me". */
   currentModel(): TurnModel | null;

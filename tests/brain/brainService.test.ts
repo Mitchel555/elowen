@@ -1578,6 +1578,7 @@ describe('BrainService', () => {
       cancelForSession: ({ sessionId }: { sessionId: string }) => { cancelledFor.push(sessionId); return { cancelled: 1 }; },
       detachForeground: () => ({ detached: 0 }),
       isWorkflowLive: () => false,
+      addNodesFromSession: () => { throw new Error('unused'); },
     });
     (d as unknown as { plugins: unknown }).plugins = new PluginRegistryProvider(async () => reg);
     const svc = new BrainService(d as never);
