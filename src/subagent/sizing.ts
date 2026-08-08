@@ -51,10 +51,9 @@ export const SATURATION_P99_MS = 250;
  *  spike — a single large tool result parsed, a GC pause — and forking a process for a spike is exactly
  *  how a burst becomes a herd. Two beats is >= 4 s of evidence at {@link HEARTBEAT_INTERVAL_MS}.
  *
- *  TRAP, worth stating: the runner's lag window ROLLS AND CLEARS (see shared/eventLoopLag), so the beat
- *  landing just after a reset reads low and BREAKS the streak. That biases the pool towards NOT growing,
- *  which is the safe direction — and under genuinely sustained load four of every five beats still read
- *  high, so a streak of two still forms within a few seconds. */
+ *  The lag window is double-buffered (see shared/eventLoopLag): every beat reads between half and one
+ *  full window of history, so a beat can no longer land on a freshly cleared histogram and break the
+ *  streak by accident — the old single-buffer roll did exactly that and biased the pool against growing. */
 export const SATURATED_BEATS = 2;
 
 /** A runner already carrying this many concurrent turns counts as saturated whatever its loop reports.
@@ -87,8 +86,8 @@ export const IDLE_REAP_MS = 120_000;
 export const HEARTBEAT_INTERVAL_MS = 2_000;
 
 /** The runner's lag sampling window, as a multiple of the heartbeat interval. Five keeps each reading
- *  describing the recent past (a stall stops being reported ~10 s after it ends) while leaving four of
- *  every five beats reading a window with real history in it — see the trap on {@link SATURATED_BEATS}. */
+ *  describing the recent past — with the double-buffered window a stall stays reported for 5–10 s after
+ *  it ends, and every beat reads at least half a window of real history (see {@link SATURATED_BEATS}). */
 export const LAG_WINDOW_MS = HEARTBEAT_INTERVAL_MS * 5;
 
 /** Linux reports MemFree in `os.freemem()`, which is NOT the memory a new process can have: page cache is

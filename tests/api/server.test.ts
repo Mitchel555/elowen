@@ -48,6 +48,25 @@ describe('api', () => {
     expect(body.ok).toBe(true);
     expect(typeof body.version).toBe('string'); // surfaced for the web footer
   });
+  it('GET /health reports the event loop window including the stall sum', async () => {
+    const { app } = makeApp();
+    const res = await app.request('/health');
+    const body = await res.json() as { eventLoop: Record<string, unknown> };
+    // stalledMs is the number that explains client-observed latency when `max` cannot (a request queues
+    // through the SUM of stalls); windowMs says how much history the figures describe.
+    for (const key of ['p50', 'p99', 'max', 'stalledMs', 'windowMs']) {
+      expect(typeof body.eventLoop[key], key).toBe('number');
+    }
+  });
+  // The server-side half of the latency split: client total minus this duration is time the request
+  // spent WAITING to be served (kernel backlog + event-loop queueing), which no in-process histogram
+  // can attribute to a single request. Without the header, a 19.9 s /health round-trip measured during
+  // a stall storm was indistinguishable from a slow handler.
+  it('responses carry a Server-Timing header with the handler duration', async () => {
+    const { app } = makeApp();
+    const res = await app.request('/health');
+    expect(res.headers.get('server-timing')).toMatch(/^app;dur=\d+(\.\d+)?$/);
+  });
   it('GET /health includes CORS header', async () => {
     const { app } = makeApp();
     const res = await app.request('/health', { headers: { origin: 'http://localhost:3000' } });

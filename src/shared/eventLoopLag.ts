@@ -1,22 +1,31 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
-/** Event loop delay percentiles in MILLISECONDS, over the current sampling window. */
+/** Event loop delay figures in MILLISECONDS, over the reported sampling window. */
 export interface LoopLag {
   p50: number;
   p99: number;
   max: number;
+  /** Total time the loop spent in stalls (late timer gaps >= {@link STALL_FLOOR_MS}) within the window.
+   *  `max` is the single worst stall; this is their SUM — and the sum, not the max, is what bounds how
+   *  long a request may have queued behind the loop. Measured incident: `/health` took 19.9 s (plus two
+   *  20 s client timeouts) while `max` reported 4.1 s, because each request waited through a CHAIN of
+   *  multi-second stalls, none of which was individually 20 s long. */
+  stalledMs: number;
+  /** How much history the numbers above describe. Between half and one full configured window once the
+   *  monitor has warmed up — see the double-buffering note in {@link startLoopLagMonitor}. */
+  windowMs: number;
 }
 
 export interface LoopLagMonitor {
-  /** Percentiles since the window last rolled. */
+  /** Figures over the older of the two staggered windows. */
   lag(): LoopLag;
-  /** Stop sampling and release the timer. */
+  /** Stop sampling and release the timers. */
   stop(): void;
 }
 
-/** How long a sampling window lasts before the histogram is cleared. Percentiles that accumulate since
- *  process start are useless for "is it starving RIGHT NOW": one bad minute during a fan-out would keep
- *  p99 high for days afterwards, and a daemon that has been up a week would never show a fresh spike. */
+/** How long a sampling window lasts. Percentiles that accumulate since process start are useless for
+ *  "is it starving RIGHT NOW": one bad minute during a fan-out would keep p99 high for days afterwards,
+ *  and a daemon that has been up a week would never show a fresh spike. */
 const WINDOW_MS = 60_000;
 
 /** Sampling interval, and therefore the FLOOR of every reading: the histogram records the interval it
@@ -27,14 +36,22 @@ const WINDOW_MS = 60_000;
  *  like. */
 const RESOLUTION_MS = 1;
 
+/** Tick of the JS-side stall accumulator. Coarse on purpose: normal scheduling jitter is single-digit
+ *  milliseconds, so at 100 ms the tick itself contributes nothing, and any stall worth counting is far
+ *  longer than the tick. */
+const STALL_TICK_MS = 100;
+
+/** A late tick only counts as a stall above this. Below it is scheduler jitter — and summing jitter over
+ *  a 60 s window (600 ticks) would fabricate whole seconds of "stall" on a perfectly healthy loop. The
+ *  histogram's 1 ms floor has the same disease in additive form, which is why `stalledMs` cannot be
+ *  derived from the histogram's mean × count. */
+const STALL_FLOOR_MS = 50;
+
 const toMs = (nanos: number): number => (Number.isFinite(nanos) ? Math.round(nanos / 1e5) / 10 : 0);
 
 /** Measure how late the event loop runs its own timers — the one number that says whether this process
  *  is keeping up. It is what distinguishes "the provider is slow" from "we never got round to reading
- *  the response", which is invisible from every other metric the daemon reports.
- *
- *  The window rolls on a timer rather than on read, so that two readers cannot clear each other's data
- *  and a scrape does not change what the next scrape sees. */
+ *  the response", which is invisible from every other metric the daemon reports. */
 /** Sustained p99 above this means the loop is not keeping up: callbacks are waiting a tenth of a second
  *  for their turn, which is already visible as a sluggish CLI and web UI. */
 const SUSTAINED_P99_MS = 150;
@@ -50,10 +67,10 @@ export function watchLoopLag(
   const threshold = opts.thresholdMs ?? SUSTAINED_P99_MS;
   let saturated = false;
   const timer = setInterval(() => {
-    const { p50, p99, max } = monitor.lag();
+    const { p50, p99, max, stalledMs, windowMs } = monitor.lag();
     if (p99 > threshold && !saturated) {
       saturated = true;
-      log.warn(`event loop is not keeping up — p50 ${p50}ms, p99 ${p99}ms, max ${max}ms (interactive requests are queueing behind other work)`);
+      log.warn(`event loop is not keeping up — p50 ${p50}ms, p99 ${p99}ms, max ${max}ms, stalled ${stalledMs}ms of the last ${Math.round(windowMs / 1000)}s (a queued request can wait through the SUM of stalls, not just the worst one)`);
     } else if (p99 <= threshold && saturated) {
       saturated = false;
       log.info(`event loop recovered — p50 ${p50}ms, p99 ${p99}ms`);
@@ -64,20 +81,61 @@ export function watchLoopLag(
 }
 
 export function startLoopLagMonitor(windowMs = WINDOW_MS): LoopLagMonitor {
-  const histogram = monitorEventLoopDelay({ resolution: RESOLUTION_MS });
-  histogram.enable();
-  const roll = setInterval(() => histogram.reset(), windowMs);
+  // Two histograms staggered by half a window, reset alternately; reads always come from the OLDER one.
+  // A single histogram reset on its own timer has a proven failure mode: after a long stall the overdue
+  // reset fires in the same timer sweep as the overdue readers, so `/health` and the watchdog read a
+  // freshly cleared histogram at the exact moment the spike matters (observed in production: a 5.7 s
+  // `/health` response carrying `max: 0`, and a "recovered — p99 0ms" line 30 s after a 4 s stall
+  // warning). With the stagger, the reader-facing half always holds between half and one full window of
+  // history, so a spike stays visible for at least half a window no matter when it lands.
+  const now = () => performance.now();
+  const startedAt = now();
+  const makeHalf = () => {
+    const h = monitorEventLoopDelay({ resolution: RESOLUTION_MS });
+    h.enable();
+    return { h, resetAt: startedAt, stalled: 0 };
+  };
+  // `older` is always the read side and always the next to reset; the roll swaps the roles.
+  let older = makeHalf();
+  let younger = makeHalf();
+  const roll = setInterval(() => {
+    older.h.reset();
+    older.stalled = 0;
+    older.resetAt = now();
+    [older, younger] = [younger, older];
+  }, Math.max(1, windowMs / 2));
   // Never hold the process open for a metric — a daemon shutting down must not wait for this.
   roll.unref?.();
+
+  // JS-side stall clock: the histogram can report the worst single stall, but not the total time lost
+  // to stalls — its per-sample floor (~0.1 ms of overhead each) sums to seconds over a window, so the
+  // total has to be measured directly with a floor that jitter cannot reach. A blocked loop coalesces
+  // the missed intervals into one late tick, so a 4 s stall is counted once, as ~3.9 s.
+  let lastTick = now();
+  const stallTick = setInterval(() => {
+    const t = now();
+    const gap = t - lastTick - STALL_TICK_MS;
+    lastTick = t;
+    if (gap >= STALL_FLOOR_MS) {
+      older.stalled += gap;
+      younger.stalled += gap;
+    }
+  }, STALL_TICK_MS);
+  stallTick.unref?.();
+
   return {
     lag: () => ({
-      p50: toMs(histogram.percentile(50)),
-      p99: toMs(histogram.percentile(99)),
-      max: toMs(histogram.max),
+      p50: toMs(older.h.percentile(50)),
+      p99: toMs(older.h.percentile(99)),
+      max: toMs(older.h.max),
+      stalledMs: Math.round(older.stalled),
+      windowMs: Math.max(1, Math.round(now() - older.resetAt)),
     }),
     stop: () => {
       clearInterval(roll);
-      histogram.disable();
+      clearInterval(stallTick);
+      older.h.disable();
+      younger.h.disable();
     },
   };
 }

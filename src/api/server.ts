@@ -25,6 +25,18 @@ export function createServer(d: ServerDeps): ElowenApp {
   const loopLag = startLoopLagMonitor();
   watchLoopLag(loopLag, log);
   const app: ElowenApp = new Hono();
+  // Split the one number a client can measure into the two it needs: how long the daemon actually
+  // worked on the response (this header) versus how long the request waited to be served (client total
+  // minus this). During a stall storm, `/health` measured 19.9 s from curl while the handler itself ran
+  // in under a millisecond — without this header that gap is indistinguishable from a slow handler, and
+  // the event-loop histogram cannot show it either (it reports the worst single stall, not the queueing
+  // a request accumulated across many). Registered first so the duration covers the whole app work.
+  app.use('*', async (c, next) => {
+    const startedMs = performance.now();
+    await next();
+    // A 101 hands the socket to the WebSocket upgrade; its headers are no longer ours to extend.
+    if (c.res.status !== 101) c.res.headers.set('Server-Timing', `app;dur=${(performance.now() - startedMs).toFixed(1)}`);
+  });
   app.use('*', cors());
   app.use('/auth/login', bodyLimitBytes(MAX_LOGIN_BODY_BYTES));
   // Single source of truth for malformed-body handling: most POST/PATCH routes call `c.req.json()`
