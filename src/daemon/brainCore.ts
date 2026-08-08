@@ -26,6 +26,7 @@ import { lspManager } from '../brain/tools/lspTools.js';
 import { BrainOAuthManager } from '../brain/oauth.js';
 import { ModelRuntime, readStoredCredential } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
+import { FileCredentialStore } from '../brain/credentialStore.js';
 import { bearerFromAuth, type BrainCredentialAccess } from '../brain/providerUsage.js';
 import { BrainStore } from '../store/brainStore.js';
 import { MemoryStore } from '../store/memoryStore.js';
@@ -228,12 +229,16 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
     allowedProjectIds: new Set(ids),
     allowedPaths: () => ids.map((id) => projects.get(id)?.path).filter((p): p is string => !!p),
   });
-  // The brain's model runtime: a file-backed credential store (OAuth tokens persist + pi refreshes them in
-  // place) plus the built-in model catalog. A `:memory:` test DB gets an ephemeral in-memory store instead.
+  // The brain's model runtime: a file-backed credential store (OAuth tokens persist + pi refreshes them
+  // in place) plus the built-in model catalog. Elowen's OWN store rather than pi's default AuthStorage:
+  // this same auth.json is shared by the daemon and every forked sub-agent runner, and AuthStorage serves
+  // a construction-time snapshot — a runner (or the daemon) would keep using a token a re-login in
+  // another process already replaced, and a revoked-but-wallclock-valid token never even enters the
+  // refresh path (see credentialStore.ts). A `:memory:` test DB gets an ephemeral in-memory store.
   const brainAuthPath = opts.dbPath === ':memory:' ? undefined : join(brainDir, 'auth.json');
-  const brainRuntime = await ModelRuntime.create(
-    brainAuthPath ? { authPath: brainAuthPath } : { credentials: new InMemoryCredentialStore() },
-  );
+  const brainRuntime = await ModelRuntime.create({
+    credentials: brainAuthPath ? new FileCredentialStore(brainAuthPath) : new InMemoryCredentialStore(),
+  });
   // Synchronous credential existence/read (config + usage pollers) reads auth.json directly; token
   // resolution (with refresh) goes through the runtime. Both no-op safely for an in-memory `:memory:` store.
   const brainCreds: BrainCredentialAccess = {
