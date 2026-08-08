@@ -269,7 +269,13 @@ export function registerWorkflow(ctx, getRun, { resolveDelegateTools, principalO
       : wf.parentAccess.toolPolicy;
     // A node that keeps full access (no read_only, no explicit toolset) may extend the DAG; a narrowed
     // node cannot (it may not even hold WorkflowAddNodes), so it is never invited to.
-    const canExpand = !node.readOnly && !node.tools;
+    //
+    // A node whose turn the host dispatches to a forked runner PROCESS cannot expand either, no matter
+    // what it holds: this map of workflows is process-local, and the runner registers its own empty
+    // instance — its WorkflowAddNodes can never reach this DAG and fails with "no running workflow".
+    // Extending the invitation there is a promise the tool cannot keep, so it is withheld. Read live
+    // per node launch, mirroring the dispatch decision it predicts.
+    const canExpand = !node.readOnly && !node.tools && ctx.delegatedTurnsOutOfProcess?.() !== true;
     // Read live (Settings → Elowen AI → Limits), so raising the budget applies to the next node without a
     // daemon restart.
     const contextTotal = resolveContextTotalChars(ctx.delegateContextChars?.());

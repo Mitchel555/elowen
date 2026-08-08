@@ -390,6 +390,12 @@ export async function buildBrainCore(opts: BrainCoreOpts) {
       // Present only in a sub-agent runner (see BrainCoreOpts). Captured once, at fork time, and reused
       // across this process's plugin reloads: it describes the tool SET, which a reload does not change.
       ...(opts.mcpBridgeSnapshot ? { mcpBridgeSnapshot: opts.mcpBridgeSnapshot } : {}),
+      // Mirrors SubagentDispatch.mode(): only the daemon holds a runner, the toggle is read live, and a
+      // pool sized to zero routes in-process. A runner process has no `subagentRunner` by construction
+      // (no nested forking), so there this is structurally false and workflow self-expansion stays open.
+      delegatedTurnsOutOfProcess: () => opts.subagentRunner !== undefined
+        && config.get().runtime.subagentRunnerEnabled === true
+        && opts.subagentRunner.usable?.() !== false,
       logger: log,
     }).then((registry) => {
       // Snapshot the merged plugin output-show patterns so the (sync) messageView policy above reads the

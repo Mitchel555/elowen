@@ -114,6 +114,9 @@ export interface LoadPluginsOptions {
    *  bridged tools without connecting a single server at boot (see plugins/mcpSnapshot.ts). Absent in the
    *  daemon, which connects at boot exactly as before. */
   mcpBridgeSnapshot?: McpBridgeSnapshot;
+  /** Whether a delegated child turn dispatched from this process may run in a forked runner process,
+   *  exposed to plugins as ctx.delegatedTurnsOutOfProcess() (read live per delegation). Absent → false. */
+  delegatedTurnsOutOfProcess?: () => boolean;
   logger: PluginLogger;
 }
 
@@ -162,7 +165,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<PluginRegis
           // Like `toolNames`, this closes over the MERGED registry (not the staging one): the adapter reads it
           // long after every plugin has merged, so it must see the whole live set of plugin prompt commands.
           () => [...registry.commands.values()].map((c) => ({ name: c.name, description: c.description, prompt: c.prompt, surfaces: c.surfaces, plugin: registry.commandOwner.get(c.name) })),
-          opts.delegateContextChars, opts.delegatedChildren, opts.mcpBridgeSnapshot);
+          opts.delegateContextChars, opts.delegatedChildren, opts.mcpBridgeSnapshot, opts.delegatedTurnsOutOfProcess);
         await mod.register(ctx);
         registry.merge(staging, (m) => opts.logger.warn(`[plugin:${name}] ${m}`));
         // Capture the plugin's declared capabilities (deny-by-default `{}` when absent) — the manifest

@@ -578,6 +578,12 @@ export interface PluginContext {
   /** Host-only durable completion sink for a detached/background workflow. Capture it in the parent
    *  turn before scheduling nodes, mirroring subagentCompletionEmitter. */
   workflowCompletionEmitter(): WorkflowCompletionEmitter | null;
+  /** True when a delegated child turn dispatched from THIS process may execute in a forked sub-agent
+   *  runner process (Settings → runtime.subagentRunnerEnabled, pool usable). Read live per delegation.
+   *  A plugin whose tools resolve against process-local state (the workflow engine's in-memory DAG map)
+   *  must not promise a remote child that those tools will reach it — the runner registers its own,
+   *  empty instance. Always false inside a runner itself: a nested delegation stays in-process there. */
+  delegatedTurnsOutOfProcess(): boolean;
   /** The provider entry id + model the CURRENT turn's session runs on, or null outside a prompt turn —
    *  a delegating plugin uses it to default the child to "the same model as me". */
   currentModel(): TurnModel | null;

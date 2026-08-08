@@ -60,6 +60,9 @@ function harness(opts: {
   /** Make the host refuse every stop, the way it does when the call is scoped to a turn that does not own
    *  the child (a node's own turn, after a self-expansion). */
   stopRejects?: boolean;
+  /** Report delegated turns as dispatched to a forked runner process — where a node's WorkflowAddNodes
+   *  resolves against that process's own empty engine and can never reach this DAG. */
+  delegatedRemote?: boolean;
 } = {}) {
   gate = null;
   const tools = new Map<string, Tool>();
@@ -137,6 +140,7 @@ function harness(opts: {
     },
     toolNames: () => ['Read', 'Write', 'Bash'],
     delegateContextChars: () => opts.contextChars ?? undefined,
+    delegatedTurnsOutOfProcess: () => opts.delegatedRemote === true,
   };
   const helpers = {
     resolveDelegateTools: (_inheritedAllow: string[] | undefined, requested: string[] | undefined) =>
@@ -672,6 +676,20 @@ describe('workflow engine', () => {
     const res = await startP;
     expect(launched).toEqual(['root', 'leaf']);
     expect(res.content[0]!.text).toMatch(/status: done/);
+  });
+
+  // The invitation must track reachability: WorkflowAddNodes resolves against the PROCESS-LOCAL engine
+  // map, and a node whose turn the host ships to a forked runner lands in that process's own EMPTY
+  // instance — its WorkflowAddNodes always answers "no running workflow". Promising expansion there is a
+  // lie, so the invite is extended only when delegated turns stay in this process.
+  it('invites a full-access node to self-expand only when its turn stays in this process', async () => {
+    const local = harness();
+    await local.tools.get('WorkflowStart')!.execute('t-invite', { nodesFile: workflowFile([{ id: 'n', task: 'invite-me' }]) });
+    expect(local.contextOf('invite-me')).toContain('WorkflowAddNodes');
+
+    const remote = harness({ delegatedRemote: true });
+    await remote.tools.get('WorkflowStart')!.execute('t-remote', { nodesFile: workflowFile([{ id: 'n', task: 'invite-me' }]) });
+    expect(remote.contextOf('invite-me')).not.toContain('WorkflowAddNodes');
   });
 
   // The Esc-Esc bug: aborting the parent kills the RUNNING node children, but without a cancel the

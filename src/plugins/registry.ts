@@ -211,7 +211,7 @@ export class PluginRegistry {
 
   /** Build the context passed to one plugin's `register()`. `config` is that plugin's own slice;
    *  `dataRoot` hosts per-plugin writable dirs (tests fall back to the OS tmpdir). */
-  contextFor(name: string, config: Record<string, unknown>, logger: PluginLogger, dataRoot?: string, notify?: (text: string, channelId?: string) => Promise<void>, listModels?: () => Promise<PluginModelOption[]>, resolveProvider?: (id: string) => ProviderCredentials | null, caps?: PluginCapabilities, provides?: PluginManifest['provides'], answerQuestion?: (id: string, answers: AskAnswer[]) => boolean, embedder?: PluginEmbedder, embeddingConfig?: () => EmbeddingConfig, allToolNames?: () => string[], timezone?: () => string, subagentTypes?: () => { name: string; description: string }[], requestReload?: () => void, allChatCommands?: () => PluginSlashCommand[], delegateContextChars?: () => number, delegatedChildren?: DelegatedChildBridge, mcpBridgeSnapshot?: McpBridgeSnapshot): PluginContext {
+  contextFor(name: string, config: Record<string, unknown>, logger: PluginLogger, dataRoot?: string, notify?: (text: string, channelId?: string) => Promise<void>, listModels?: () => Promise<PluginModelOption[]>, resolveProvider?: (id: string) => ProviderCredentials | null, caps?: PluginCapabilities, provides?: PluginManifest['provides'], answerQuestion?: (id: string, answers: AskAnswer[]) => boolean, embedder?: PluginEmbedder, embeddingConfig?: () => EmbeddingConfig, allToolNames?: () => string[], timezone?: () => string, subagentTypes?: () => { name: string; description: string }[], requestReload?: () => void, allChatCommands?: () => PluginSlashCommand[], delegateContextChars?: () => number, delegatedChildren?: DelegatedChildBridge, mcpBridgeSnapshot?: McpBridgeSnapshot, delegatedTurnsOutOfProcess?: () => boolean): PluginContext {
     const scoped: PluginLogger = {
       info: (m) => logger.info(`[plugin:${name}] ${m}`),
       warn: (m) => logger.warn(`[plugin:${name}] ${m}`),
@@ -389,6 +389,8 @@ export class PluginRegistry {
       subagentCompletionEmitter: currentSubagentCompletionEmitter,
       workflowEmitter: currentWorkflowEmitter,
       workflowCompletionEmitter: currentWorkflowCompletionEmitter,
+      // False when unwired (unit tests, worker contexts): those processes run every delegation in-process.
+      delegatedTurnsOutOfProcess: delegatedTurnsOutOfProcess ?? (() => false),
       currentModel: currentTurnModel,
       notify: notify ?? (async () => { /* no notification sink wired */ }),
       listModels: listModels ?? (async () => []),
