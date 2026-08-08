@@ -1581,6 +1581,58 @@ describe('BrainStore', () => {
     });
   });
 
+  describe('tool-result spill latch rows', () => {
+    const latch = (toolCallId: string, over: Partial<{ mode: 'time' | 'preview'; bytes: number; preview: string | null; path: string }> = {}) => ({
+      toolCallId, mode: 'preview' as const, bytes: 50_007,
+      preview: 'head 😀 of the output', path: `/data/tool-results/s1/${toolCallId}.v1-preview-50007.txt`,
+      ...over,
+    });
+
+    it('round-trips a row exactly, including a multi-byte preview, and upserts on the same key', () => {
+      store.createSession({ id: 's1', userId: 7, model: 'm' });
+      store.upsertToolResultSpill('s1', latch('call-1'));
+      expect(store.toolResultSpills('s1')).toEqual([latch('call-1')]);
+      // Upsert: an EEXIST re-latch writes the same key again — one row, latest values.
+      store.upsertToolResultSpill('s1', latch('call-1', { mode: 'time', preview: null, bytes: 4_196 }));
+      expect(store.toolResultSpills('s1')).toEqual([latch('call-1', { mode: 'time', preview: null, bytes: 4_196 })]);
+    });
+
+    it('deleteSession removes the session\'s latch rows and only those', () => {
+      store.createSession({ id: 's1', userId: 7, model: 'm' });
+      store.createSession({ id: 's2', userId: 7, model: 'm' });
+      store.upsertToolResultSpill('s1', latch('call-1'));
+      store.upsertToolResultSpill('s2', latch('call-2'));
+      store.deleteSession('s1');
+      expect(store.toolResultSpills('s1')).toEqual([]);
+      expect(store.toolResultSpills('s2')).toEqual([latch('call-2')]);
+    });
+
+    it('reassignSession moves the latch rows and re-points their paths at the moved spill dir', async () => {
+      const { mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const home = mkdtempSync(join(tmpdir(), 'elowen-latch-move-'));
+      dirs.push(home);
+      vi.stubEnv('HOME', home);
+      try {
+        const oldDir = join(home, '.config/elowen/tool-results/chan-x');
+        const newDir = join(home, '.config/elowen/tool-results/arch-1');
+        store.createSession({ id: 'chan-x', userId: 7, model: 'm' });
+        store.upsertToolResultSpill('chan-x', latch('call-1', { path: join(oldDir, 'call-1.v1-preview-50007.txt') }));
+        store.reassignSession('chan-x', 'arch-1');
+        expect(store.toolResultSpills('chan-x')).toEqual([]);
+        // The spill FILES move to the new session dir in the same operation, so a verbatim path would
+        // name a directory the file just left; rollover targets an idle (cache-cold) conversation, so
+        // the placeholder change is free.
+        expect(store.toolResultSpills('arch-1')).toEqual([
+          latch('call-1', { path: join(newDir, 'call-1.v1-preview-50007.txt') }),
+        ]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+
   describe('deleteSession', () => {
     it('removes the session\'s tool-result spill dir along with its rows', async () => {
       const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import('node:fs');

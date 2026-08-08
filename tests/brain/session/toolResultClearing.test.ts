@@ -22,9 +22,11 @@ import {
   toolResultSpillPath,
   parseSpillDescriptor,
 } from '../../../src/brain/session/toolResultClearing.js';
+import type { PersistedToolResultLatch, ToolResultLatchStore } from '../../../src/brain/session/toolResultClearing.js';
 import { toolResultSpillDir } from '../../../src/shared/paths.js';
 import { openDb } from '../../../src/store/db.js';
 import { BrainStore } from '../../../src/store/brainStore.js';
+import { HISTORY_IMAGE_PLACEHOLDER } from '../../../src/brain/session/historyImageStripping.js';
 import type { PiAgentMessage } from '../../../src/brain/session/historyImageStripping.js';
 
 let dirs: string[] = [];
@@ -855,6 +857,179 @@ describe('latch restoration across a respawn', () => {
     const after = await restartOver(disk)(history());
     // Refusing to choose would mean paying a full re-cache on every restart from then on, forever.
     expect((after[1] as { content: { text: string }[] }).content[0]!.text).toContain('Older tool result cleared');
+  });
+});
+
+describe('duplicate toolCallIds', () => {
+  // Ids are minted by the model, and sequential-style ids (`call_0`) reset per turn — a long history can
+  // genuinely repeat one. The invariant under test: an occurrence already sent as a placeholder NEVER
+  // reverts to full text, whatever else carries the same id.
+  it('keeps the cleared occurrence cleared when the same id reappears with different content', async () => {
+    const h = harness();
+    const cleared3: PiAgentMessage[] = [
+      user('one', T0), toolResult('dup', big, T0 + 1_000),
+      user('two', T0 + 2_000),
+      user('three', T0 + IDLE + 3_000),
+    ];
+    const before = await h.transform(cleared3);
+    const placeholderText = JSON.stringify(before[1]);
+    expect(placeholderText).toContain('Older tool result cleared');
+    // The same id comes back as a FRESH result of the current run.
+    const fresh = toolResult('dup', 'fresh content the model must still see', T0 + IDLE + 4_000);
+    const grown: PiAgentMessage[] = [...cleared3, assistant('calling', T0 + IDLE + 3_500), fresh];
+    const after = await h.transform(grown);
+    // A keyed last-wins map would revert index 1 to full text here — a warm-prefix rewrite.
+    expect(JSON.stringify(after[1])).toBe(placeholderText);
+    // …and the fresh occurrence is not the one that was spilled, so the old placeholder (which
+    // describes DIFFERENT content) must not be applied to it either.
+    expect(after[5]).toBe(fresh);
+    // The choice is stable on the next pass too.
+    const again = await h.transform([...grown, user('four', T0 + IDLE + 5_000)]);
+    expect(JSON.stringify(again[1])).toBe(placeholderText);
+    expect(again[5]).toBe(fresh);
+  });
+
+  it('hands the placeholder to the occurrence that was spilled, not blindly to the first', async () => {
+    const h = harness();
+    // The FIRST occurrence of the id is too small to ever clear; the SECOND is what the time trigger
+    // spilled. Keyed first-wins on the id alone would misapply the placeholder to the small one.
+    const messages: PiAgentMessage[] = [
+      user('zero', T0), toolResult('dup', small, T0 + 500),
+      user('one', T0 + 1_000), toolResult('dup', big, T0 + 1_500),
+      user('two', T0 + 2_000),
+      user('three', T0 + IDLE + 3_000),
+    ];
+    const result = await h.transform(messages);
+    expect(result[1]).toBe(messages[1]); // the small occurrence is untouched
+    expect(JSON.stringify(result[3])).toContain('Older tool result cleared');
+  });
+});
+
+describe('durable latch across a respawn (store-backed)', () => {
+  /** A daemon restart with the latch store in play: a NEW installation over the SAME disk and the SAME
+   *  BrainStore, exactly as the factory wires it. */
+  const restartOver = (
+    disk: Map<string, string>,
+    latchStore: ToolResultLatchStore | undefined,
+    now?: () => number,
+  ) => {
+    const session: Harness['session'] = { agent: {} };
+    installToolResultClearing(session, 'sess-1', {
+      idleMs: IDLE,
+      ...(now ? { now } : {}),
+      ...(latchStore ? { latchStore } : {}),
+      spillDir: '/tmp/spill/sess-1',
+      writeSpill: async (p, t) => {
+        if (disk.has(p)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+        disk.set(p, t);
+      },
+      readSpill: async (p) => disk.get(p) ?? null,
+      listSpill: async () => [...disk.keys()].map((p) => p.slice('/tmp/spill/sess-1/'.length)),
+    });
+    return (m: PiAgentMessage[]) => session.agent.transformContext!(m);
+  };
+
+  const storeAdapter = (store: BrainStore): ToolResultLatchStore => ({
+    load: () => store.toolResultSpills('sess-1'),
+    save: (entry: PersistedToolResultLatch) => { store.upsertToolResultSpill('sess-1', entry); },
+  });
+
+  /** An oversized fresh tool result CARRYING AN IMAGE, as PI delivers it live: the image block
+   *  contributes nothing to the spill text (only text blocks do), which is exactly what makes its
+   *  rehydrated form unmatchable by text equality. */
+  const liveImageResult: PiAgentMessage = {
+    role: 'toolResult', toolCallId: 'shot', toolName: 'Screenshot', isError: false, timestamp: T0 + 2_000,
+    content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }, { type: 'text', text: oversized }],
+  } as PiAgentMessage;
+  const liveTurn: PiAgentMessage[] = [user('one', T0), assistant('calling', T0 + 1_000), liveImageResult];
+  /** The same result as `rehydrate` replays it after a crash: persistence externalized the image and
+   *  `withoutExternalizedImages` replaced it with the placeholder TEXT block — the text of the very
+   *  same result now differs from what was spilled. The new prompt lands after the settled history. */
+  const rehydratedTurn = (promptAt: number): PiAgentMessage[] => [
+    user('one', T0), assistant('calling', T0 + 1_000),
+    {
+      ...liveImageResult,
+      content: [{ type: 'text', text: HISTORY_IMAGE_PLACEHOLDER }, { type: 'text', text: oversized }],
+    } as PiAgentMessage,
+    user('two', promptAt),
+  ];
+  /** Immediately after the crash — inside the idle threshold, so the time gate is SHUT and re-clearing
+   *  afresh is not an option: restoration is the only path to a placeholder. */
+  const warmNow = () => T0 + 10_000;
+
+  it('re-sends a byte-identical placeholder after a respawn even when rehydration changed the text', async () => {
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    const disk = new Map<string, string>();
+    const before = await restartOver(disk, storeAdapter(store))(liveTurn);
+    const placeholder = (before[2] as { content: { text: string }[] }).content[0]!.text;
+    expect(placeholder).toContain('saved to disk instead of the context');
+    expect(disk.size).toBe(1);
+
+    const after = await restartOver(disk, storeAdapter(store), warmNow)(rehydratedTurn(warmNow()));
+    // Byte equality is the whole point: one differing byte re-caches the entire conversation. The
+    // file-equality fallback alone CANNOT restore this (the drifted text matches no spill), which is
+    // why the store rows exist — see the refutation test below.
+    expect((after[2] as { content: { text: string }[] }).content[0]!.text).toBe(placeholder);
+    // Nothing was re-spilled under a new name either — the second warm rewrite the old design risked.
+    expect(disk.size).toBe(1);
+  });
+
+  it('REFUTATION CONTROL: without the store, the drifted text really does defeat the file restore', async () => {
+    // Not a wanted behaviour — this pins down that the store-backed test above fails for the exact
+    // reason it claims to guard against, so a mutation that drops the store restore goes red there.
+    const disk = new Map<string, string>();
+    await restartOver(disk, undefined)(liveTurn);
+    const after = await restartOver(disk, undefined, warmNow)(rehydratedTurn(warmNow()));
+    expect((after[2] as { content: { text: string }[] }).content[1]?.text).toBe(oversized); // full again
+  });
+
+  it('restores from the store even when the spill file is gone — stability beats a dangling path', async () => {
+    // A swept spill file cannot un-send the placeholder the provider already cached: re-sending those
+    // exact bytes keeps the prefix stable, and the durable transcript still holds the full text. The
+    // model merely loses the Read-back path, which full re-sending would not restore either.
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    const disk = new Map<string, string>();
+    const before = await restartOver(disk, storeAdapter(store))(liveTurn);
+    const placeholder = (before[2] as { content: { text: string }[] }).content[0]!.text;
+    disk.clear();
+    const after = await restartOver(disk, storeAdapter(store), warmNow)(rehydratedTurn(warmNow()));
+    expect((after[2] as { content: { text: string }[] }).content[0]!.text).toBe(placeholder);
+  });
+
+  it('a file-restored latch graduates to the store, so the next restart no longer depends on the text', async () => {
+    // Process 1 predates the table (no latch store) and clears on the time trigger; process 2 has the
+    // store and restores from the FILE (text still matches); process 3 sees drifted text and can only
+    // succeed through the rows process 2 wrote.
+    const timeHistory: PiAgentMessage[] = [
+      user('one', T0), toolResult('old-big', big, T0 + 1_000),
+      user('two', T0 + 2_000),
+      user('three', T0 + IDLE + 3_000),
+    ];
+    const disk = new Map<string, string>();
+    const before = await restartOver(disk, undefined)(timeHistory);
+    const placeholder = (before[1] as { content: { text: string }[] }).content[0]!.text;
+
+    const store = new BrainStore(openDb(':memory:'));
+    store.createSession({ id: 'sess-1', userId: 7, model: 'm' });
+    await restartOver(disk, storeAdapter(store), () => T0 + IDLE + 4_000)(timeHistory);
+    expect(store.toolResultSpills('sess-1')).toEqual([
+      { toolCallId: 'old-big', mode: 'time', bytes: big.length, preview: null, path: `/tmp/spill/sess-1/old-big.v1-time-${big.length}.txt` },
+    ]);
+
+    const drifted: PiAgentMessage[] = [
+      user('one', T0),
+      {
+        role: 'toolResult', toolCallId: 'old-big', toolName: 'Bash', isError: false, timestamp: T0 + 1_000,
+        content: [{ type: 'text', text: HISTORY_IMAGE_PLACEHOLDER }, { type: 'text', text: big }],
+      } as PiAgentMessage,
+      user('two', T0 + 2_000),
+      user('three', T0 + IDLE + 3_000),
+      user('four', T0 + IDLE + 5_000),
+    ];
+    const after = await restartOver(disk, storeAdapter(store), () => T0 + IDLE + 5_000)(drifted);
+    expect((after[1] as { content: { text: string }[] }).content[0]!.text).toBe(placeholder);
   });
 });
 

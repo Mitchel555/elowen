@@ -22,9 +22,11 @@ export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
  *     cleared stays cleared on every later request, so the prefix is byte-stable from then on. The
  *     latch lives in this closure, so a respawn starts empty — and the cache is server-side, so a
  *     respawn WITHIN the TTL is NOT cold: re-sending the full results would rewrite a warm prefix and
- *     pay a full re-cache. `restoreLatch` therefore rebuilds it from the spill dir on the first pass.
- *     That needs the original byte counts, which is why they live in the file NAME — the placeholder
- *     embeds them and they cannot be measured back off the file (see `toolResultSpillPath`).
+ *     pay a full re-cache. `restoreLatch` therefore rebuilds it on the first pass: primarily from the
+ *     rows this module writes to SQLite as it clears (`ToolResultLatchStore` → brain_tool_result_spills),
+ *     falling back to the spill FILES for sessions cleared before that table existed. The fallback needs
+ *     the original byte counts, which is why they live in the file NAME — the placeholder embeds them
+ *     and they cannot be measured back off the file (see `toolResultSpillPath`).
  *
  *  The full text is spilled to `<dataDir>/tool-results/<sessionId>/<toolCallId>.v1-<mode>-<bytes>.txt` BEFORE the
  *  placeholder replaces it (write-once, `wx`), so clearing loses nothing the model could not re-read
@@ -36,7 +38,12 @@ export { cacheColdAtTurnStart, cacheTtlMs, idleThresholdMs };
  *  DEFAULT_MAX_RESULT_SIZE_CHARS behaves the same way). It is restricted to the current run — the
  *  results produced after the last user message — because those have not been sent to the provider
  *  yet: replacing one there APPENDS a smaller block to the prefix instead of rewriting a cached one,
- *  so rule 1 still holds. Everything older stays the time gate's business. Because the model never
+ *  so rule 1 still holds. Everything older stays the time gate's business. That boundary survives a
+ *  respawn as well — not because `settlePartialTurn` inserts anything (it does not), but because a
+ *  provider request only ever happens inside a prompt, and a respawned session is always prompted with
+ *  a FRESH user message appended after its rehydrated history: results settled from a crashed turn sit
+ *  before that message, in the time gate's region, where this process's empty per-run decision sets
+ *  (`budgetDecided`, `failedSpills`) can never re-judge them. Because the model never
  *  gets to see such a result at all, this placeholder also carries a preview of the content; the
  *  time-triggered one does not, since the model already read that result earlier in the conversation.
  *
@@ -122,6 +129,30 @@ export function toolResultSpillPath(spillDir: string, toolCallId: string, descri
 export interface SpillDescriptor { mode: 'time' | 'preview'; bytes: number }
 
 const SPILL_NAME_VERSION = 'v1';
+
+/** One durable latch entry — what a `latched` map entry looks like at rest. Written the moment a result
+ *  is cleared and read back on the first pass after a respawn. The store is daemon-owned, so unlike the
+ *  spill FILES these rows need no anti-spoof verification against the live message text — which is the
+ *  point: the rehydrated text of a cleared result routinely DIFFERS from what was spilled (an
+ *  externalized tool image comes back as a placeholder text block — persistence.ts
+ *  `withoutExternalizedImages`), and a restore that insists on text equality forfeits exactly the
+ *  results it matters for most. `path` is carried verbatim because the placeholder already sent embeds
+ *  it, and reproducing those bytes exactly is the entire job. */
+export interface PersistedToolResultLatch {
+  toolCallId: string;
+  mode: SpillDescriptor['mode'];
+  bytes: number;
+  /** The exact preview text the placeholder quotes; null for time-mode entries. */
+  preview: string | null;
+  path: string;
+}
+
+/** Store seam for the durable latch — BrainStore in production (brain_tool_result_spills), fakes in
+ *  tests. Two functions rather than a store reference so this module keeps zero store dependencies. */
+export interface ToolResultLatchStore {
+  load(): PersistedToolResultLatch[];
+  save(entry: PersistedToolResultLatch): void;
+}
 
 /** Match the descriptor a spill name carries AFTER its (already known) encoded id. The id is never decoded
  *  back out of a file name: `fsSafeSegment` is injective but not cleanly reversible at its '%' edge cases,
@@ -340,6 +371,9 @@ export interface ToolResultClearingOptions {
   readSpill?: (path: string) => Promise<string | null>;
   /** Spill directory listing injection for tests. Missing directory = empty list, never a throw. */
   listSpill?: (dir: string) => Promise<string[]>;
+  /** Durable latch storage. Omitted (tests, un-wired paths) the latch is file-restored only, which
+   *  cannot survive a text drift between spill and rehydration — see {@link PersistedToolResultLatch}. */
+  latchStore?: ToolResultLatchStore;
 }
 
 async function defaultWriteSpill(path: string, text: string): Promise<void> {
@@ -373,6 +407,7 @@ export function installToolResultClearing(
   const writeSpill = options.writeSpill ?? defaultWriteSpill;
   const readSpill = options.readSpill ?? defaultReadSpill;
   const listSpill = options.listSpill ?? defaultListSpill;
+  const latchStore = options.latchStore;
   /** Cleared toolCallId → its original text size in bytes, the preview a size-spilled result keeps in
    *  its placeholder, and the spill path that placeholder names. The latch is what makes the egress
    *  prefix byte-stable across requests: once inside, the placeholder never reverts to full content —
@@ -380,6 +415,26 @@ export function installToolResultClearing(
    *  stored rather than recomputed because it now encodes the descriptor, and a restored entry must
    *  reproduce the name that is already written on disk. */
   const latched = new Map<string, { bytes: number; preview?: string; path: string }>();
+  /** Mirror one latch entry into the durable store. Best-effort by design: the in-memory latch already
+   *  holds, so this turn stays byte-stable either way — a failure only means a respawn before a later
+   *  successful save falls back to the file-equality restore, i.e. exactly the pre-table behaviour. */
+  const persistLatch = (toolCallId: string, entry: { bytes: number; preview?: string; path: string }): void => {
+    if (!latchStore) return;
+    try {
+      latchStore.save({
+        toolCallId,
+        mode: entry.preview === undefined ? 'time' : 'preview',
+        bytes: entry.bytes,
+        preview: entry.preview ?? null,
+        path: entry.path,
+      });
+    } catch (error) {
+      log.warn(`failed to persist the latch for ${toolCallId} — it may not survive a respawn`, error);
+    }
+  };
+  /** Ids seen more than once in one history — a protocol anomaly (sequential-style ids like `call_0`
+   *  reset per turn on some models) worth exactly one log line, not one per pass. */
+  const duplicateWarned = new Set<string>();
   /** Restoration runs once, on the first pass, and only matters after a RESPAWN: the latch lives in this
    *  closure, so a restart leaves it empty while the persisted history still holds the results in full.
    *  Sending them whole again is what makes the first request of a warm conversation pay a full re-cache
@@ -401,15 +456,33 @@ export function installToolResultClearing(
   const budgetDecided = new Set<string>();
   let gateWasOpen = false;
   const previous = agent.transformContext;
-  /** Rebuild the latch from the spill files a previous process left behind, so a respawned session keeps
-   *  sending the placeholders it was already sending instead of the full results.
+  /** Rebuild the latch a previous process built, so a respawned session keeps sending the placeholders
+   *  it was already sending instead of the full results. Durable store rows first (exact, text-drift
+   *  proof), then the spill files for anything from before the store existed.
    *
-   *  The verification is an ANTI-SPOOF check, not part of building the placeholder: a session may write
-   *  into its own spill dir (pathGuard allows it), so a file could hold text that was never this tool's
-   *  output. A time-mode placeholder needs only the path and the byte count, both of which come from the
-   *  file NAME. Consequently a failed comparison costs one re-cache — the result simply is not latched —
-   *  and can never produce a placeholder that misdescribes the output. */
+   *  The file path's verification is an ANTI-SPOOF check, not part of building the placeholder: a
+   *  session may write into its own spill dir (pathGuard allows it), so a file could hold text that was
+   *  never this tool's output. A time-mode placeholder needs only the path and the byte count, both of
+   *  which come from the file NAME. Consequently a failed comparison costs one re-cache — the result
+   *  simply is not latched — and can never produce a placeholder that misdescribes the output. The
+   *  store rows need no such check: only the daemon writes them. */
   const restoreLatch = async (base: readonly PiAgentMessage[]): Promise<void> => {
+    // The durable store is the primary source: it records exactly what was latched — placeholder
+    // wording inputs and all — and restoring from it does not require the rehydrated message text to
+    // still match the spill. The file-equality fallback below fails precisely when an upstream rewrite
+    // changed that text (externalized images, historyImageStripping), and each such failure is a full
+    // re-cache. Rows for results a compaction has since removed are harmless: a latched id with no
+    // occurrence in the history simply never matches anything.
+    if (latchStore) {
+      for (const row of latchStore.load()) {
+        if (latched.has(row.toolCallId)) continue;
+        latched.set(row.toolCallId, {
+          bytes: row.bytes,
+          preview: row.mode === 'preview' ? row.preview ?? '' : undefined,
+          path: row.path,
+        });
+      }
+    }
     const names = await listSpill(spillDir);
     if (names.length === 0) return;
     for (const message of base) {
@@ -438,11 +511,15 @@ export function installToolResultClearing(
         // what makes that exact: the spill holds the same joined text the preview was sliced from. It also
         // removes the lone-surrogate hazard for free — a text whose UTF-16 was mangled by the write could
         // not have compared equal, so anything reaching this line round-trips faithfully.
-        latched.set(toolCallId, {
+        const entry = {
           bytes: candidate.descriptor.bytes,
           preview: candidate.descriptor.mode === 'preview' ? onDisk.slice(0, SPILL_PREVIEW_CHARS) : undefined,
           path,
-        });
+        };
+        latched.set(toolCallId, entry);
+        // A file-restored entry graduates to the durable store, so the NEXT restart no longer depends
+        // on the text still matching — the one-time migration path for pre-table spills.
+        persistLatch(toolCallId, entry);
         restoredFrom = candidate.name;
         break;
       }
@@ -490,6 +567,7 @@ export function installToolResultClearing(
         try {
           await writeSpill(spillPath, text);
           latched.set(item.toolCallId, entry);
+          persistLatch(item.toolCallId, entry);
           // The one line that lets a cacheWatch "REWRITTEN IN PLACE at <index>" warning be attributed:
           // without it, clearing a result and stripping an image are the same silence in the log, and the
           // two have completely different fixes.
@@ -505,6 +583,7 @@ export function installToolResultClearing(
             catch { onDisk = null; } // a throwing readSpill must not take the whole turn down
             if (onDisk === text) {
               latched.set(item.toolCallId, entry);
+              persistLatch(item.toolCallId, entry);
               log.info(`re-latched ${item.toolCallId} at message ${item.index} from its existing spill (${trigger} trigger, ${item.bytes} bytes)`);
               continue;
             }
@@ -529,15 +608,36 @@ export function installToolResultClearing(
     await spillSelected(budgeted.spill, true, 'group');
     for (const toolCallId of budgeted.decided) budgetDecided.add(toolCallId);
     if (latched.size === 0) return base;
-    const cleared = new Map<string, { index: number; placeholder: string }>();
+    // Pick WHICH occurrence of each latched id carries the placeholder. Ids are normally unique, but
+    // they are minted by the model, and sequential-style ids (`call_0`) reset per turn — a long history
+    // can genuinely hold two toolResults with the same id. A last-set-wins map here would hand the
+    // placeholder to the NEWEST occurrence and silently revert the cleared older one to full text: a
+    // rewrite of a message the provider already cached, the one thing this module must never do. The
+    // occurrence whose text size equals the latched original is the one that was spilled; when none
+    // matches (a respawn can drift the text — see restoreLatch) the EARLIEST wins, because it has been
+    // going out as a placeholder the longest and keeping it stable protects the longest cached prefix.
+    const chosen = new Map<string, { index: number; sized: boolean; entry: { bytes: number; preview?: string; path: string } }>();
     for (let index = 0; index < base.length; index += 1) {
       const message = base[index];
       if (message?.role !== 'toolResult') continue;
       const entry = latched.get(message.toolCallId);
       if (entry === undefined) continue;
-      cleared.set(message.toolCallId, {
-        index,
-        placeholder: clearedToolResultPlaceholder(entry.path, entry.bytes, entry.preview),
+      const sized = textBytes(message) === entry.bytes;
+      const existing = chosen.get(message.toolCallId);
+      if (existing !== undefined) {
+        if (!duplicateWarned.has(message.toolCallId)) {
+          duplicateWarned.add(message.toolCallId);
+          log.warn(`toolCallId ${message.toolCallId} occurs more than once in the history — clearing only the occurrence that was spilled`);
+        }
+        if (existing.sized || !sized) continue;
+      }
+      chosen.set(message.toolCallId, { index, sized, entry });
+    }
+    const cleared = new Map<string, { index: number; placeholder: string }>();
+    for (const [toolCallId, pick] of chosen) {
+      cleared.set(toolCallId, {
+        index: pick.index,
+        placeholder: clearedToolResultPlaceholder(pick.entry.path, pick.entry.bytes, pick.entry.preview),
       });
     }
     return applyToolResultClearing(base, cleared);

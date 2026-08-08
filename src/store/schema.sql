@@ -193,6 +193,25 @@ CREATE TABLE IF NOT EXISTS brain_messages (
   pending INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_brain_messages_session ON brain_messages(session_id);
+-- The persisted egress latch of tool-result clearing (brain/session/toolResultClearing.ts). A row means
+-- "this session already replaced tool_call_id's result with a spill placeholder on the wire", and holds
+-- everything needed to rebuild that placeholder BYTE-IDENTICALLY after a respawn: `bytes` and `preview`
+-- go into its wording, `path` is embedded verbatim. Restoring from here instead of comparing the live
+-- message text against the spill file is what keeps a restart free even when rehydration changed that
+-- text (an externalized tool image comes back as a placeholder text block — persistence.ts
+-- `withoutExternalizedImages`). The spill FILES keep the full output for the model to Read; this table
+-- carries only the placeholder metadata. No foreign keys, same lifecycle policy as brain_subagent_runs:
+-- sessions are re-keyed during channel rollover, so BrainStore moves/deletes these rows itself.
+CREATE TABLE IF NOT EXISTS brain_tool_result_spills (
+  session_id TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  preview TEXT,
+  path TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (session_id, tool_call_id)
+);
 -- Latest durable UI state for each delegated tool call. The parent assistant message remains the
 -- canonical transcript row; this sidecar supplies the child session id + rolling status that PI's
 -- message format does not carry. No foreign keys here: brain sessions are re-keyed during channel

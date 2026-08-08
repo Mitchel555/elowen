@@ -459,8 +459,15 @@ export class BrainSessionFactory {
     // Same egress seam: large tool results that have scrolled two user turns back are swapped for a
     // placeholder + spill-file path, but only once the prompt cache has provably expired (idle gate) —
     // history is never rewritten while a request could still cache-hit, and the per-session latch keeps
-    // a cleared result cleared so the prefix stays byte-stable afterwards.
-    installToolResultClearing(session, spec.sessionId);
+    // a cleared result cleared so the prefix stays byte-stable afterwards. The latch is mirrored into
+    // brain_tool_result_spills so a respawn restores it even when rehydration changed the message text
+    // (externalized images) — the file-equality fallback alone cannot.
+    installToolResultClearing(session, spec.sessionId, {
+      latchStore: {
+        load: () => this.d.store.toolResultSpills(spec.sessionId),
+        save: (entry) => { this.d.store.upsertToolResultSpill(spec.sessionId, entry); },
+      },
+    });
     // cacheWatch is the tripwire that logs whether a warm drop came from system, tools, a history segment,
     // or a likely provider-side eviction. Anthropic-only: other providers report best-effort cache stats
     // whose warm drops are routine noise.
