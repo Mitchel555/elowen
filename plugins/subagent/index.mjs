@@ -748,14 +748,19 @@ export function register(ctx) {
 
   ctx.registerTool(defineTool({
     name: 'DelegateContinue', label: 'Continue a sub-agent',
-    description: 'Send a follow-up to a sub-agent that already ran (id from DelegateList) and get its '
-      + 'reply. The sub-agent resumes its OWN conversation with full context preserved, so write a '
-      + 'directive — what to change, add or check — not a fresh briefing: it still remembers the task, the '
-      + 'files it read and what it concluded. Prefer this over a new Delegate whenever the work builds on '
-      + 'what that sub-agent already did; a fresh sub-agent would have to rediscover all of it. '
-      + 'The call BLOCKS until it answers. A sub-agent with a turn still in flight is refused rather than '
-      + 'interrupted — wait for it and try again. It resumes under the exact access it was originally '
-      + 'given, narrowed by whatever you hold now, so continuing one can never widen anything.',
+    description: 'Send a follow-up to a sub-agent that already ran (id from DelegateList). The sub-agent '
+      + 'resumes its OWN conversation with full context preserved, so write a directive — what to change, '
+      + 'add or check — not a fresh briefing: it still remembers the task, the files it read and what it '
+      + 'concluded. Prefer this over a new Delegate whenever the work builds on what that sub-agent '
+      + 'already did; a fresh sub-agent would have to rediscover all of it. '
+      + 'An IDLE sub-agent runs your message as its own turn — the call BLOCKS and returns its reply. A '
+      + 'sub-agent whose turn is still RUNNING is not interrupted and not refused: your message is steered '
+      + 'into the running turn (exactly like a user steering you mid-turn) and the call returns once it '
+      + 'has entered the sub-agent\'s context — expect no separate reply; the updated conclusion arrives '
+      + 'through the delegation\'s normal result path (the blocked Delegate call, or background delivery). '
+      + 'Only a sub-agent caught between model steps (starting up, or collecting background work) is '
+      + 'refused — retry in a moment. It resumes under the exact access it was originally given, narrowed '
+      + 'by whatever you hold now, so continuing one can never widen anything.',
     parameters: Type.Object({
       id: Type.String({ description: 'Which sub-agent — either the job id Delegate returned ("dlg-…") or the session id DelegateList shows ("brain-ch-subagent-sub-dlg-…"). Both name the same one.' }),
       message: Type.String({
@@ -766,7 +771,8 @@ export function register(ctx) {
         description: 'Run the continuation on a DIFFERENT model (value from DelegateModels, e.g. '
           + '"anthropic/claude-sonnet-5"). Omit it to resume on the model the sub-agent already ran on — '
           + 'which is almost always what you want. Use it only when that model is unavailable or the user '
-          + 'explicitly asked to switch.',
+          + 'explicitly asked to switch. A sub-agent whose turn is still running cannot switch model; a '
+          + 'follow-up carrying one is refused while it runs.',
       })),
     }),
     execute: async (_id, p) => {
@@ -794,16 +800,25 @@ export function register(ctx) {
         else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { state.tokens = e.usage.totalTokens; push('running'); }
       };
       try {
-        // Start the continuation BEFORE raising the progress row. The host refuses a child that has a turn
-        // in flight by reading the very registry this row writes to (a `running` update registers the child
-        // as live), so raising it first made every continuation refuse ITSELF — the child was reported busy
-        // by the same call that was asking to continue it. continueSubagent runs all its guards
-        // synchronously before its first await, so they see the registry as it was.
+        // Start the continuation BEFORE raising the progress row. The host decides between "steer into the
+        // running turn" and "run an idle turn" by reading the very registry this row writes to (a `running`
+        // update registers the child as live), so raising it first made every idle continuation see ITSELF
+        // as the running child. continueSubagent runs all its guards synchronously before its first await,
+        // so they see the registry as it was.
         const continuation = ctx.continueSubagent(childSessionId, message, onEvent, model || undefined);
         push('running');
-        const reply = await continuation;
+        const res = await continuation;
         push('done');
-        return ok(reply || '(the sub-agent returned nothing)');
+        if (res.status === 'steered') {
+          return ok(
+            'The sub-agent was mid-turn, so your message was steered into its RUNNING turn and has entered '
+              + 'its context — it folds it into the work in progress. There is no separate reply to this '
+              + 'message: the (updated) conclusion arrives through the delegation\'s normal result path, so '
+              + 'do not poll for it.',
+            { steered: true },
+          );
+        }
+        return ok(res.reply || '(the sub-agent returned nothing)');
       } catch (e) {
         // A refusal is self-correctable — the agent can wait for a busy child or pick another one — so it
         // comes back as a readable result, exactly like every other error this plugin surfaces. An abort

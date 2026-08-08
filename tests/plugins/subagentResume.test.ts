@@ -26,12 +26,14 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
   let asked: { parent: string; limit?: number }[];
   let read: { parent: string; child: string }[];
   let continued: { parent: string; child: string; text: string }[];
+  let steeredInto: { parent: string; child: string; text: string }[];
   /** Progress the host feeds back through the callback the plugin now passes down — a test sets it to
    *  drive one tool + token update before the continuation resolves. */
   let continueProgress: ((onEvent?: (e: SubagentProgressEvent) => void) => void) | undefined;
   /** Children the host currently considers live. In production this is LiveRegistry's child map, and the
    *  SAME map a `running` progress update writes to — which is exactly how a continuation could end up
-   *  refused by its own progress row. The mock host below refuses a live child just as the real one does. */
+   *  steering into its own progress row. The mock host below steers into a live child just as the real
+   *  one does (resolving {status:'steered'} instead of running a fresh turn). */
   let liveChildren: Set<string>;
   let readResult: string | Error;
   let reply: string | Error;
@@ -43,6 +45,7 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
     asked = [];
     read = [];
     continued = [];
+    steeredInto = [];
     continueProgress = undefined;
     liveChildren = new Set();
     stopped = [];
@@ -59,16 +62,17 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
           return readResult;
         },
         continue: async (parent, childSessionId, text, _access, onEvent) => {
-          // The real host refuses a child with a turn in flight rather than steering it (two drivers on
-          // one transcript is a race with no owner). Its guards run synchronously before the first await,
-          // so this mock checks synchronously too.
+          // The real host STEERS a child with a turn in flight (the message rides PI's steering queue
+          // inside that turn) and resolves {status:'steered'} with no reply. Its guards run synchronously
+          // before the first await, so this mock checks synchronously too.
           if (liveChildren.has(childSessionId)) {
-            throw new Error('that sub-agent is still running — wait for it to finish before sending it more');
+            steeredInto.push({ parent, child: childSessionId, text });
+            return { status: 'steered' };
           }
           continued.push({ parent, child: childSessionId, text });
           continueProgress?.(onEvent);
           if (reply instanceof Error) throw reply;
-          return reply;
+          return { status: 'reply', reply };
         },
         stop: async (parent, childSessionId) => {
           stopped.push({ parent, child: childSessionId });
@@ -205,6 +209,13 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
   });
 
   describe('DelegateContinue', () => {
+    it('describes the mid-turn behavior as steering, not refusal', () => {
+      const tool = reg.tools.find((t) => t.name === 'DelegateContinue')!;
+      // The description is what the agent plans against: it must not keep promising the old refusal.
+      expect(tool.description).not.toMatch(/refused rather than interrupted/);
+      expect(tool.description).toMatch(/steered/);
+    });
+
     it('sends the follow-up to that child and returns what it answered', async () => {
       reply = 'checked the tests too — all green';
       const res = await call('DelegateContinue',
@@ -220,13 +231,13 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       expect(continued[0]!.parent).toBe('brain-2');
     });
 
-    // A refusal (foreign child, still running, scope now too wide) has to come back as a readable result
-    // the agent can act on — waiting, or picking another child — not as a thrown tool failure.
+    // A refusal (foreign child, scope now too wide) has to come back as a readable result the agent can
+    // act on — waiting, or picking another child — not as a thrown tool failure.
     it('reports a host refusal as an actionable error instead of throwing', async () => {
-      reply = new Error('that sub-agent is still running — wait for it to finish before sending it more');
-      const res = await call('DelegateContinue', { id: 'brain-ch-subagent-busy', message: 'hi' }, 'brain-1');
+      reply = new Error('cannot continue that sub-agent: its captured scope grants more than this conversation holds');
+      const res = await call('DelegateContinue', { id: 'brain-ch-subagent-wide', message: 'hi' }, 'brain-1');
       expect(res.content[0]!.text).toMatch(/^Error: /);
-      expect(res.content[0]!.text).toMatch(/still running/);
+      expect(res.content[0]!.text).toMatch(/cannot continue/);
     });
 
     // The progress row and the host's "is this child busy?" guard read and write the SAME live-child
@@ -255,14 +266,27 @@ describe('subagent plugin — listing and continuing past sub-agents', () => {
       expect(liveChildren.has('brain-ch-subagent-sub-dlg-abc')).toBe(false);
     });
 
-    it('still refuses a child that genuinely has a turn in flight', async () => {
-      // The guard must keep working: two agents driving one transcript is a race with no owner.
+    // The new mid-turn behavior: a busy child is steered, not refused. The tool must say plainly that no
+    // separate reply exists (the result rides the delegation's own result path), so the parent does not
+    // sit polling for an answer that will never come through this call.
+    it('steers into a child whose turn is in flight and reports there is no separate reply', async () => {
       liveChildren.add('brain-ch-subagent-busy');
-      const res = await call('DelegateContinue', { id: 'brain-ch-subagent-busy', message: 'hi' }, 'brain-1', registerLive);
+      const res = await call('DelegateContinue', { id: 'brain-ch-subagent-busy', message: 'also check the docs' }, 'brain-1', registerLive);
 
+      expect(steeredInto).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-busy', text: 'also check the docs' }]);
+      expect(continued).toEqual([]); // never also ran as a fresh idle turn — that would double-deliver
+      expect(res.content[0]!.text).toMatch(/steered into its RUNNING turn/);
+      expect(res.content[0]!.text).toMatch(/no separate reply/);
+      expect(res.details).toMatchObject({ steered: true });
+    });
+
+    // The narrow remaining refusal (child active but not steerable anywhere — turn queued for a runner
+    // slot, or collecting between turns) must still come back as a readable, retryable result.
+    it('reports the between-steps refusal as an actionable error instead of throwing', async () => {
+      reply = new Error('that sub-agent is busy between model steps (starting up or collecting background work) and cannot take a steered message right now — try again in a moment');
+      const res = await call('DelegateContinue', { id: 'brain-ch-subagent-gap', message: 'hi' }, 'brain-1');
       expect(res.content[0]!.text).toMatch(/^Error: /);
-      expect(res.content[0]!.text).toMatch(/still running/);
-      expect(continued).toEqual([]);
+      expect(res.content[0]!.text).toMatch(/try again in a moment/);
     });
 
     it('refuses outside a conversation turn', async () => {

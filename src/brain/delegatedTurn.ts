@@ -94,6 +94,12 @@ export interface DelegatedTurnRunner {
   /** Abort the runner's live session for a channel. The abort TREE stays in the daemon; this only reaches
    *  the process that actually holds the PI session. */
   abort(channelId: string): void;
+  /** Steer a parent's follow-up into a child turn RUNNING in the runner (the daemon has already authorized
+   *  it). `delivered` = the message provably entered the child's context over there; `idle` = the runner
+   *  holds no streaming turn for that channel (or its turn ended first, with the stale queue copy removed),
+   *  so the caller falls back to running the follow-up itself; `aborted` = the delegation's abort fences
+   *  fired while the steer waited. */
+  steer(channelId: string, text: string): Promise<{ outcome: 'delivered' | 'idle' | 'aborted' }>;
   /** Ask the runner to drop its live record for a channel so the caller can run that child's next turn
    *  itself (a drill-in or a DelegateContinue rehydrates from SQLite). `busy` = still working on it. */
   release(channelId: string): Promise<{ busy: boolean }>;

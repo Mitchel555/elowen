@@ -28,10 +28,18 @@ import { globalMemoryRecallScope } from './memoryRecallScope.js';
 import type { MemoryCurator } from './memoryCurator.js';
 import type { ConversationTitler } from './conversationTitler.js';
 import type { LiveSessionRegistry } from './session/liveRegistry.js';
-import type { LiveBrain, SpawnOpts } from './session/liveBrain.js';
+import type { LiveBrain, QueuedMsg, SpawnOpts } from './session/liveBrain.js';
 import { DEFAULT_AUTO_COMPACT_PCT } from './session/liveBrain.js';
 import { clearDeliveredUserEchoes, enqueueMirrored } from './session/queueMirror.js';
 import { abortSessionWork } from './session/abortSessionWork.js';
+
+/** How a delegated steer ended: `delivered` = the message provably reached the child's context (its
+ *  durable user row exists); `idle` = the child was not mid-turn here, or its turn ended before the queue
+ *  drained the message — which was then removed, so the caller can (and must) deliver it another way. */
+export type DelegatedSteerOutcome = 'delivered' | 'idle';
+
+/** How often a pending delegated steer re-checks the child's transcript/queue for its verdict. */
+const STEER_POLL_MS = 100;
 
 export interface ChannelSendOpts {
   channelId: string;
@@ -549,6 +557,76 @@ export class ChannelSessionService {
     } finally {
       this.endDelegatedCall(parentSessionId, sessionId);
     }
+  }
+
+  /** Steer a delegating turn's follow-up into ITS OWN child's RUNNING turn, and report success only once
+   *  the message provably reached the child's context.
+   *
+   *  PI accepting a steer is a promise, not delivery: the queue drains before the next model call, so a
+   *  turn that ends first leaves the message stranded in an in-memory queue that dies with the live record
+   *  (LRU eviction, release to the runner) — silently. The transcript is the only honest confirmation
+   *  (the same reasoning as BrainTurnRunner's resultInContext): a delivered queue item is persisted as a
+   *  durable user row at message_start, so this method enqueues and then waits for that row. A turn that
+   *  ends with the item still queued gets it REMOVED — the caller's fallback turn re-sends the text, and
+   *  the next prompt's queue drain would otherwise deliver the stale copy alongside it, putting the same
+   *  message in front of the model twice. The wait is bounded by the child's own turn: it ends at
+   *  delivery, at turn end, or with the delegation's abort fences (the stall watchdog aborts a wedged
+   *  child, so this can never hang past it).
+   *
+   *  Authorization stays with the caller (DelegatedSessionService.continueSubagent's ownership + scope
+   *  guards; the runner invokes this only for a steer verb the daemon already guarded). The parent-link
+   *  check here is a backstop so an ordinary platform channel is never steerable through this seam. */
+  async steerDelegatedTurn(channelId: string, text: string): Promise<DelegatedSteerOutcome> {
+    const sessionId = channelSessionId(channelId);
+    const parentSessionId = this.d.store.getSession(sessionId)?.parent_session_id;
+    if (!parentSessionId) return 'idle';
+    const aborted = (): boolean =>
+      this.d.registry.isParentAborting(parentSessionId) || this.d.registry.hasPendingAbort(sessionId);
+    const ch = this.d.registry.channelGet(channelId);
+    if (!ch?.session.isStreaming) return 'idle';
+    if (aborted()) throw new Error('delegation aborted');
+    // Everything at or past this index is "new since this steer" — the only rows its delivery can produce.
+    const baseline = this.d.store.getMessages(sessionId).length;
+    const item = await enqueueMirrored(ch, 'steer', text, undefined, {
+      persistText: text, displayText: text, sourceText: text, publish: true,
+    });
+    const landed = (): boolean => this.d.store.getMessages(sessionId).slice(baseline).some((m) => {
+      if (m.role !== 'user') return false;
+      try { return (JSON.parse(m.content) as { content?: unknown }).content === text; } catch { return false; }
+    });
+    while (true) {
+      // Same fence as the ownerSteer fast path, re-checked every beat: a stop clears PI's queue, and the
+      // copy enqueued after that clear must be cleared again before rejecting.
+      if (aborted()) {
+        const live = this.d.registry.channelGet(channelId);
+        if (live) { live.session.clearQueue(); clearDeliveredUserEchoes(live); }
+        throw new Error('delegation aborted');
+      }
+      if (landed()) return 'delivered';
+      const live = this.d.registry.channelGet(channelId);
+      // The live record died under us (eviction, release to the runner) — the queue died with it.
+      if (!live) return 'idle';
+      if (!live.session.isStreaming) {
+        if ((live.queuedSteer ?? []).includes(item)) { this.removeQueuedItem(live, item); return 'idle'; }
+        // Gone from the queue with no durable row yet: one final read decides between "persisted in the
+        // same beat the turn ended" and "erased by an abort/clear".
+        return landed() ? 'delivered' : 'idle';
+      }
+      await new Promise((resolve) => setTimeout(resolve, STEER_POLL_MS));
+    }
+  }
+
+  /** Drop ONE mirror item from PI's queue while keeping every other queued message (with its images) —
+   *  the same clear-and-requeue dance as SessionQueueService.queueRemove, targeted by identity instead of
+   *  position. */
+  private removeQueuedItem(live: LiveBrain, item: QueuedMsg): void {
+    const survivors = [
+      ...(live.queuedSteer ?? []).filter((m) => m !== item).map((m) => ({ kind: 'steer' as const, m })),
+      ...(live.queuedFollowUp ?? []).filter((m) => m !== item).map((m) => ({ kind: 'followUp' as const, m })),
+    ];
+    live.session.clearQueue();
+    clearDeliveredUserEchoes(live);
+    for (const s of survivors) void enqueueMirrored(live, s.kind, s.m.text, s.m.images, s.m.echo);
   }
 
   /** Mid-run: a SAME-SENDER message that arrives while this channel's turn streams is STEERED into the

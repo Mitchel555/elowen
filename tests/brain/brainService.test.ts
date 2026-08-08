@@ -5644,7 +5644,7 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
   it('continues an idle child on its own transcript and returns its reply', async () => {
     const { svc, sessionId, child, send } = await seed();
     await expect(svc.continueSubagent(sessionId, child, 'also check the tests', ADMIN_ACCESS))
-      .resolves.toBe('the sub-agent answered');
+      .resolves.toEqual({ status: 'reply', reply: 'the sub-agent answered' });
     const [opts, text] = send.mock.calls[0] as unknown as [Record<string, unknown>, string];
     expect(text).toBe('also check the tests');
     // The child's OWN channel, its durable parent edge, and the scope minted for it originally — this is
@@ -5790,14 +5790,15 @@ describe('BrainService.continueSubagent (a delegating turn picking a sub-agent b
     });
   });
 
-  // Two agents driving one transcript is a race with no owner. The human drill-in steers a running child
-  // on purpose; a delegating agent is told to wait instead, using the same live-child registration the
-  // abort tree and eviction guard already key on.
-  it('refuses a sub-agent that still has a turn in flight', async () => {
+  // A mid-turn child is STEERED, not refused (see delegatedSteer.test.ts for the full routing matrix).
+  // Here the child is registered active but no streaming turn exists anywhere — no live channel record,
+  // no runner — which is the queued-turn/collect gap: the one window that must still refuse, retryably,
+  // because a fresh turn then could go live in two processes at once. It must never fall through to send.
+  it('refuses, retryably, an active child with no steerable turn anywhere', async () => {
     const { svc, sessionId, child, send, sessions } = await seed();
     sessions.setChildRunning(sessionId, child, true);
     await expect(svc.continueSubagent(sessionId, child, 'one more thing', ADMIN_ACCESS))
-      .rejects.toThrow(/still running/);
+      .rejects.toThrow(/try again in a moment/);
     expect(send).not.toHaveBeenCalled();
 
     sessions.setChildRunning(sessionId, child, false);

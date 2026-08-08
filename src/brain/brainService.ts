@@ -1,6 +1,6 @@
 import type { PluginRegistry } from '../plugins/registry.js';
 import { PluginHookBus } from '../plugins/hookBus.js';
-import type { ServiceNotice, SubagentProgressEvent } from '../plugins/api.js';
+import type { DelegatedContinueResult, ServiceNotice, SubagentProgressEvent } from '../plugins/api.js';
 import { ElicitationRegistry } from './elicitation.js';
 import { CardRegistry } from './cards.js';
 import type { BrainSearchHit, BrainGoalRow } from '../store/brainStore.js';
@@ -14,7 +14,7 @@ import type { LiveBrain, QueuedMsg } from './session/liveBrain.js';
 import { DEFAULT_AUTO_COMPACT_PCT } from './session/liveBrain.js';
 import { enqueueMirrored } from './session/queueMirror.js';
 import { ChannelSessionService } from './channels.js';
-import type { ChannelSendOpts } from './channels.js';
+import type { ChannelSendOpts, DelegatedSteerOutcome } from './channels.js';
 import { PlatformOrchestrator } from './platforms.js';
 import { delegatedChannelSendOpts, type DelegatedTurnRequest } from './delegatedTurn.js';
 import { SubagentDispatch } from '../subagent/dispatch.js';
@@ -26,6 +26,7 @@ import { lastAssistantText } from './goal.js';
 import { ClientAttachments } from './service/attachments.js';
 import { DelegatedSessionService } from './service/delegatedSession.js';
 import { IdleSessionClock } from './service/liveSessionReaper.js';
+import { IdleCompactionSweep } from './service/idleCompactionSweep.js';
 import { PermissionApprovalService } from './service/permissionApproval.js';
 import { GoalLoopService } from './service/goalLoop.js';
 import { LiveSessionSpawner } from './service/spawner.js';
@@ -127,6 +128,8 @@ export class BrainService {
   private processSvc: SessionProcessService;
   /** The mid-turn message backlog (list/remove/recall) — see SessionQueueService. */
   private queue: SessionQueueService;
+  /** Idle post-cache-expiry compaction of open-terminal conversations — see IdleCompactionSweep. */
+  private idleCompaction: IdleCompactionSweep;
   /** A plugin (e.g. the skills plugin's CreateSkill) asked for a plugin reload from INSIDE a running
    *  turn. Reloading there would dispose the very session executing the tool, so the request is coalesced
    *  onto this flag and drained once the turn settles (see drainDeferredPluginReload). */
@@ -294,6 +297,9 @@ export class BrainService {
       // rehydrates the child from SQLite HERE, so the runner must not still be holding a live record for
       // it. Asking first is what keeps one child session from being live in two processes at once.
       ...(d.subagentRunner ? { releaseRemote: (channelId: string) => d.subagentRunner?.release(channelId) ?? Promise.resolve({ busy: false }) } : {}),
+      // A DelegateContinue targeting a child whose turn runs in the sub-agent runner steers THROUGH that
+      // process — only the process holding the PI session can inject into its running turn.
+      ...(d.subagentRunner ? { steerRemote: (channelId: string, text: string) => d.subagentRunner?.steer(channelId, text) ?? Promise.resolve({ outcome: 'idle' as const }) } : {}),
     });
     this.platforms = new PlatformOrchestrator({
       plugins: () => this.resolvePlugins(),
@@ -345,6 +351,17 @@ export class BrainService {
     });
     this.processSvc = new SessionProcessService({ store: d.store, attachments: this.attachments, identity: this.identity });
     this.queue = new SessionQueueService({ sessions: this.sessions, lifecycle: this.lifecycle });
+    // Idle compaction (daemon 60 s tick): compact an open-terminal conversation once its prompt cache
+    // has provably expired, so the next turn re-caches the compacted context instead of the full history.
+    this.idleCompaction = new IdleCompactionSweep({
+      liveEntries: () => this.sessions.liveEntries(),
+      live: (sessionId) => this.sessions.get(sessionId),
+      lastMessageAt: (sessionId) => d.store.lastMessageAt(sessionId),
+      hasLiveStableClient: (sessionId) => this.attachments.hasLiveStableClient(sessionId),
+      hasActiveChildren: (sessionId) => this.sessions.hasActiveChildren(sessionId),
+      hasPendingElicitation: (sessionId) => this.elicitation.pendingForSession(sessionId) !== null,
+      withLock: (key, fn) => this.sessions.withLock(key, fn),
+    });
   }
 
   /** Admin daemon-restart handler for a platform `/restart` slash. Late-bound: it's built after the brain
@@ -535,6 +552,13 @@ export class BrainService {
    *  client is still on this conversation — see SessionTeardownService.stopSession. */
   async stopSession(userId: number, session?: string, clientId?: string, clientGeneration?: number, opts?: { detachOnly?: boolean }): Promise<{ stopped: boolean; disposed: boolean }> {
     return this.teardown.stopSession(userId, session, clientId, clientGeneration, opts);
+  }
+
+  /** Periodic sweep: compact open-terminal conversations whose prompt cache has provably expired, so
+   *  their next turn re-caches the compacted context instead of the full history — see IdleCompactionSweep.
+   *  Returns the ids compacted. */
+  async compactIdleLiveSessions(now: number = Date.now()): Promise<string[]> {
+    return this.idleCompaction.run(now);
   }
 
   /** Periodic sweep: dispose live PI sessions unwatched and idle for a full SESSION_IDLE_ROLLOVER_MS —
@@ -871,7 +895,7 @@ export class BrainService {
     access: Parameters<DelegatedSessionService['continueSubagent']>[3],
     onEvent?: (e: SubagentProgressEvent) => void,
     model?: string,
-  ): Promise<string> {
+  ): Promise<DelegatedContinueResult> {
     return this.delegated.continueSubagent(parentSessionId, childSessionId, text, access, onEvent, model);
   }
 
@@ -1183,6 +1207,13 @@ export class BrainService {
    *  platform `/stop` does. Used by the sub-agent runner to carry out the daemon's abort verb. */
   async abortChannel(channelId: string): Promise<void> {
     await this.channelService.abort(channelId);
+  }
+
+  /** Steer a parent's follow-up into a delegated child turn RUNNING in this process, resolving only once
+   *  the message is confirmed in (or confirmed absent from) the child's context. Used by the sub-agent
+   *  runner to carry out the daemon's steer verb — the daemon has already authorized the caller. */
+  async steerChannel(channelId: string, text: string): Promise<DelegatedSteerOutcome> {
+    return this.channelService.steerDelegatedTurn(channelId, text);
   }
 
   /** Drop the live record for a channel (its transcript stays in SQLite and rehydrates on the next turn),

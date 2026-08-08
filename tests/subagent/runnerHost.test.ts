@@ -171,6 +171,49 @@ describe('SubagentRunnerHost — the forked runner as seen from the daemon', () 
     expect(await host.release('subagent-sub-dlg-1')).toEqual({ busy: false });
   });
 
+  it('steer forwards the text to the runner and resolves with ITS verdict', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    const pending = host.steer('subagent-sub-dlg-1', 'also check the docs');
+    await tick();
+    const asked = child.received.find((m) => m.type === 'steer') as { steerId: string; channelId: string; text: string };
+    expect(asked).toMatchObject({ channelId: 'subagent-sub-dlg-1', text: 'also check the docs' });
+    // A verdict for a DIFFERENT steer must not settle this one — correlation is by id, so a stray frame
+    // resolving it would hand the caller another channel's outcome.
+    child.reply({ type: 'steered', steerId: 'someone-elses-steer', outcome: 'idle' });
+    child.reply({ type: 'steered', steerId: asked.steerId, outcome: 'delivered' });
+    expect(await pending).toEqual({ outcome: 'delivered' });
+    // A steered verdict for a DIFFERENT request must not have settled this one — correlation is by id.
+    const { turnId } = child.received.find((m) => m.type === 'turn') as { turnId: string };
+    child.reply({ type: 'result', turnId, reply: 'ok' });
+    await run;
+  });
+
+  it('steer resolves idle when the runner dies before answering — the caller falls back', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+    const pending = host.steer('subagent-sub-dlg-1', 'late instruction');
+    await tick();
+    child.die(139, 'SIGSEGV');
+    expect(await pending).toEqual({ outcome: 'idle' });
+    await expect(run).rejects.toThrow('interrupted');
+  });
+
+  it('steer on a runner that is not running resolves idle without forking one', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    expect(await host.steer('subagent-sub-dlg-1', 'hello')).toEqual({ outcome: 'idle' });
+    expect(child.received).toEqual([]); // no boot, no steer — nothing of this channel can be running there
+  });
+
   it('reset kills the child and settles what it was running', async () => {
     const child = new FakeChild();
     const host = hostWith(child);

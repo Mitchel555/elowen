@@ -433,6 +433,14 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
     this.routes.get(channelId)?.host.abort(channelId);
   }
 
+  async steer(channelId: string, text: string): Promise<{ outcome: 'delivered' | 'idle' | 'aborted' }> {
+    // Same routing rule as abort: only the runner holding the session can inject into its turn. No route
+    // ⇒ no turn of this channel runs in any runner, and the caller delivers the text itself.
+    const entry = this.routes.get(channelId);
+    if (!entry) return { outcome: 'idle' };
+    return entry.host.steer(channelId, text);
+  }
+
   async release(channelId: string): Promise<{ busy: boolean }> {
     const entry = this.routes.get(channelId);
     // Not routed ⇒ no runner holds a record for this channel, by definition of the routing map.

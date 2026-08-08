@@ -9,7 +9,7 @@ import {
   type DelegatedTurnRequest,
   type DelegatedTurnRunner,
 } from '../brain/delegatedTurn.js';
-import { RUNNER_ENTRY, parseRunnerMessage, subagentBuildId, type DaemonToRunner } from './protocol.js';
+import { RUNNER_ENTRY, parseRunnerMessage, subagentBuildId, type DaemonToRunner, type RunnerSteerOutcome } from './protocol.js';
 import type { McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 
 const log = logger('subagent-runner');
@@ -119,6 +119,28 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
 
   abort(channelId: string): void {
     if (this.child) this.post(this.child, { type: 'abort', channelId });
+  }
+
+  async steer(channelId: string, text: string): Promise<{ outcome: RunnerSteerOutcome }> {
+    const child = this.child;
+    // Nothing forked (or already gone) ⇒ no turn of this channel is running here, by definition.
+    if (!child || !this.ready) return { outcome: 'idle' };
+    const steerId = randomUUID();
+    return new Promise<{ outcome: RunnerSteerOutcome }>((resolve) => {
+      const onMessage = (raw: unknown): void => {
+        const msg = parseRunnerMessage(raw);
+        if (msg?.type !== 'steered' || msg.steerId !== steerId) return;
+        child.off('message', onMessage);
+        child.off('exit', onExit);
+        resolve({ outcome: msg.outcome });
+      };
+      // A runner that died mid-steer delivered nothing: `idle` sends the caller down the fallback path,
+      // which is exactly what a rehydrating continuation needs after a runner death.
+      const onExit = (): void => { child.off('message', onMessage); resolve({ outcome: 'idle' }); };
+      child.on('message', onMessage);
+      child.once('exit', onExit);
+      if (!this.post(child, { type: 'steer', steerId, channelId, text })) { onExit(); }
+    });
   }
 
   async release(channelId: string): Promise<{ busy: boolean }> {
@@ -252,7 +274,7 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
             this.d.onHeartbeat?.(this.lastBeat);
             return;
           }
-          default: return; // `released` is handled by the per-call listener in release()
+          default: return; // `released`/`steered` are handled by the per-call listeners in release()/steer()
         }
       });
       child.on('error', (e) => {

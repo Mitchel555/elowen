@@ -36,14 +36,16 @@ export function queuedWithPending(live: LiveBrain): { id: string; text: string }
  *  and its clearQueue() drops image attachments (they live on the lower-level agent queue, not the text
  *  arrays). A positional queue-remove drains the queue and re-queues the survivors, so without an
  *  image-carrying copy every kept message would lose its image. `steer` interrupts the running turn;
- *  `followUp` waits for it. */
+ *  `followUp` waits for it. Returns the mirror item: reconcileMirrors keeps object identity, so a caller
+ *  that must know whether ITS message was delivered (a delegated steer) can watch for this exact item
+ *  leaving the mirror instead of matching by text. */
 export async function enqueueMirrored(
   live: LiveBrain,
   kind: 'steer' | 'followUp',
   text: string,
   images?: QueuedImage[],
   echo?: QueuedUserEcho,
-): Promise<void> {
+): Promise<QueuedMsg> {
   const arr = kind === 'steer' ? (live.queuedSteer ??= []) : (live.queuedFollowUp ??= []);
   const item: QueuedMsg = { text, images, ...(echo ? { echo } : {}) };
   arr.push(item);
@@ -57,6 +59,7 @@ export async function enqueueMirrored(
     if (index >= 0) arr.splice(index, 1);
     throw error;
   }
+  return item;
 }
 
 /** Reconcile the image-carrying mirrors against PI's authoritative text queues after a `queue_update`.

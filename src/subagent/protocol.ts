@@ -60,9 +60,20 @@ export type DaemonToRunner =
   | { type: 'turn'; turnId: string; request: DelegatedTurnRequest; text: string }
   /** Abort verb (the abort tree stays authoritative in the daemon — see LiveSessionRegistry). */
   | { type: 'abort'; channelId: string }
+  /** Steer a parent's follow-up into a child turn RUNNING here (a DelegateContinue on a mid-turn child).
+   *  The daemon has already authorized the caller against the child's ownership and scope; this process
+   *  only carries the injection out and answers with the matching `steered` frame. */
+  | { type: 'steer'; steerId: string; channelId: string; text: string }
   /** Drop the live record for a channel so the DAEMON can run that child's next turn itself (a drill-in
    *  or a DelegateContinue rehydrates from SQLite). Refused while that channel is busy. */
   | { type: 'release'; releaseId: string; channelId: string };
+
+/** How a runner-side steer ended — see DelegatedTurnRunner.steer for what each verdict obliges the
+ *  daemon to do next. */
+export type RunnerSteerOutcome = 'delivered' | 'idle' | 'aborted';
+
+const isSteerOutcome = (v: unknown): v is RunnerSteerOutcome =>
+  v === 'delivered' || v === 'idle' || v === 'aborted';
 
 export type RunnerToDaemon =
   | { type: 'ready'; buildId: string }
@@ -76,6 +87,10 @@ export type RunnerToDaemon =
   | { type: 'result'; turnId: string; reply: string }
   | { type: 'error'; turnId: string; message: string }
   | { type: 'released'; releaseId: string; busy: boolean }
+  /** The answer to a `steer` frame. `delivered` only once the message is confirmed in the child's
+   *  context; `idle` when no streaming turn holds this channel here (the daemon then delivers the text
+   *  itself); `aborted` when the delegation's abort fences fired while the steer waited. */
+  | { type: 'steered'; steerId: string; outcome: RunnerSteerOutcome }
   /** What this runner sees of ITSELF, on a fixed interval. The event-loop p99 is the load signal nothing
    *  outside the process can observe — a busy runner and an idle one look identical from the daemon —
    *  and the RSS is what turns the memory ceiling from a guess into a measurement (see sizing.ts). The
@@ -120,6 +135,14 @@ export function parseDaemonMessage(raw: unknown): DaemonToRunner | undefined {
     const channelId = str(v.channelId);
     return channelId ? { type: 'abort', channelId } : undefined;
   }
+  if (v.type === 'steer') {
+    const steerId = str(v.steerId);
+    const channelId = str(v.channelId);
+    const text = str(v.text);
+    // An empty steer text is refused with the frame: PI would queue it, the model would read a blank
+    // user message, and the daemon would still be told 'delivered'.
+    return steerId && channelId && text ? { type: 'steer', steerId, channelId, text } : undefined;
+  }
   if (v.type === 'release') {
     const releaseId = str(v.releaseId);
     const channelId = str(v.channelId);
@@ -162,6 +185,12 @@ export function parseRunnerMessage(raw: unknown): RunnerToDaemon | undefined {
     case 'released': {
       const releaseId = str(v.releaseId);
       return releaseId ? { type: 'released', releaseId, busy: v.busy === true } : undefined;
+    }
+    case 'steered': {
+      const steerId = str(v.steerId);
+      // An unknown outcome is a dropped frame, not a coerced one: the daemon acts on this verdict
+      // (deliver the text itself, or report the delegation aborted), so guessing would misdeliver.
+      return steerId && isSteerOutcome(v.outcome) ? { type: 'steered', steerId, outcome: v.outcome } : undefined;
     }
     case 'heartbeat': {
       // Every field must be a finite non-negative number: these drive spawn decisions, and a NaN sneaking

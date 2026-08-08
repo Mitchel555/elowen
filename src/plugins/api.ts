@@ -26,6 +26,12 @@ export interface SubagentProgressEvent {
   usage?: { totalTokens?: number };
 }
 
+/** How a sub-agent continuation ended. `reply` = the child was idle, ran the follow-up as its own turn
+ *  and this is its answer. `steered` = the child was mid-turn and the message was injected into that
+ *  RUNNING turn (confirmed in its context) — there is no separate reply; the child's result reaches the
+ *  caller through the delegation's own result path (the blocking Delegate return / background delivery). */
+export type DelegatedContinueResult = { status: 'reply'; reply: string } | { status: 'steered' };
+
 export interface DelegatedChildBridge {
   runs(parentSessionId: string, limit?: number): DelegatedChildSummary[];
   read(parentSessionId: string, childSessionId: string): string;
@@ -36,7 +42,7 @@ export interface DelegatedChildBridge {
     access: { admin: boolean; projectIds: number[]; owner: boolean; toolPolicy?: { allow?: string[]; deny?: string[] }; permissionBoundary: NoninteractivePermissionBoundary | null; readOnly?: boolean },
     onEvent?: (e: SubagentProgressEvent) => void,
     model?: string,
-  ): Promise<string>;
+  ): Promise<DelegatedContinueResult>;
   stop(parentSessionId: string, childSessionId: string): Promise<{ stopped: boolean }>;
 }
 
@@ -512,14 +518,23 @@ export interface PluginContext {
    *  the lookup to the current turn's session; the plugin supplies only the child id and cannot widen the
    *  parent scope. Throws for unknown/foreign children, invalid delegated scope, or no final text yet. */
   readSubagent(sessionId: string): string;
-  /** Send a follow-up to a sub-agent listed by {@link subagentRuns} and resolve with its reply. The child
-   *  resumes its own transcript with full context preserved — this is how a delegating agent refines a
-   *  finished sub-agent's work instead of respawning one that has to rediscover everything.
+  /** Send a follow-up to a sub-agent listed by {@link subagentRuns}. The child resumes its own transcript
+   *  with full context preserved — this is how a delegating agent refines a finished sub-agent's work
+   *  instead of respawning one that has to rediscover everything.
    *
-   *  Rejects when the id is not a child of this conversation, when that child still has a turn in flight
-   *  (two agents on one transcript is a race), or when its captured scope would now grant more than this
-   *  conversation itself holds. A continuation replays the child's ORIGINAL immutable boundary, narrowed
-   *  by the caller's current denies — it can never widen access.
+   *  An IDLE child runs the follow-up as its own turn and the call resolves `{status:'reply'}` with that
+   *  turn's answer. A child whose turn is IN FLIGHT is not refused: the message is steered into the
+   *  running turn (the same primitive a user steering their agent rides) and the call resolves
+   *  `{status:'steered'}` once the message has provably entered the child's context — the child folds it
+   *  into the work in progress and its (updated) result arrives through the delegation's normal result
+   *  path, so no separate reply exists.
+   *
+   *  Rejects when the id is not a child of this conversation, when its captured scope would now grant
+   *  more than this conversation itself holds, when a `model` switch targets a mid-turn child (a running
+   *  turn cannot change model), or when the child is busy between model steps (starting up, or collecting
+   *  background work) — that state cannot take a steer and a retry moments later succeeds. A continuation
+   *  replays the child's ORIGINAL immutable boundary, narrowed by the caller's current denies — it can
+   *  never widen access.
    *
    *  `onEvent` receives the child's live progress (tool starts, token usage) so the follow-up shows as a
    *  running sub-agent in the CLI rail / web table, the same way the first delegation does — omit it and
@@ -527,7 +542,7 @@ export interface PluginContext {
    *
    *  `model` optionally overrides the model the sub-agent runs on, as a `provider/model` string (value
    *  from {@link listModels}); omit it to resume on the model recorded on the child's session row. */
-  continueSubagent(sessionId: string, text: string, onEvent?: (e: SubagentProgressEvent) => void, model?: string): Promise<string>;
+  continueSubagent(sessionId: string, text: string, onEvent?: (e: SubagentProgressEvent) => void, model?: string): Promise<DelegatedContinueResult>;
   /** Stop a DIRECT sub-agent listed by {@link subagentRuns} — a runaway or no-longer-needed one — without
    *  touching its parent or siblings. The host anchors the lookup to the current turn's session, exactly
    *  like {@link readSubagent}; the plugin supplies only the child id and cannot widen the parent scope.

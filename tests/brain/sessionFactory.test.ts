@@ -401,6 +401,63 @@ describe('BrainSessionFactory deferred-tool wiring', () => {
   });
 });
 
+describe('BrainSessionFactory idle-compaction assessment', () => {
+  async function createWithHistory(messages: unknown[], autoCompact = true) {
+    const listeners: ((e: unknown) => void)[] = [];
+    const session = {
+      sessionId: 'sess-idle-assess',
+      agent: {} as Record<string, unknown>,
+      subscribe: (l: (e: unknown) => void) => { listeners.push(l); return () => {}; },
+      messages,
+      setSteeringMode: vi.fn(),
+    };
+    const factory = new BrainSessionFactory({
+      store: new BrainStore(openDb(':memory:')),
+      createSession: vi.fn(async () => ({ session })) as never,
+      resourceLoaderFactory: () => undefined,
+    });
+    const { assessIdleCompaction, applyCompaction } = await factory.create({
+      sessionId: session.sessionId, ownerUserId: 1, runtime: undefined,
+      model: { id: 'test-model', provider: 'kimi-coding', contextWindow: 200_000 },
+      cwd: process.cwd(), systemPrompt: 'sp', appendSystemPrompt: [], skills: [], tools: [],
+      autoCompact, autoCompactAtPct: 80,
+    } as never);
+    return { assess: assessIdleCompaction, applyCompaction, listeners };
+  }
+
+  // 300k chars ≈ 75k estimated tokens: far above the floor (1 fixed + 8k allowance + 20k tail).
+  const bigHistory = [{ role: 'user', content: 'x'.repeat(300_000), timestamp: 1 }];
+
+  it('reports a large idle context as eligible, with the estimates PI’s own check would see', async () => {
+    const { assess } = await createWithHistory(bigHistory);
+    expect(assess()).toEqual({ eligible: true, contextTokens: 75_000, floorTokens: 28_001 });
+  });
+
+  it('refuses a conversation with nothing worth summarizing', async () => {
+    const { assess } = await createWithHistory([{ role: 'user', content: 'short', timestamp: 1 }]);
+    expect(assess()).toEqual({ eligible: false, reason: 'too-small' });
+  });
+
+  it('reads the auto-compact toggle LIVE, exactly like the boundary check does', async () => {
+    const { assess, applyCompaction } = await createWithHistory(bigHistory, false);
+    expect(assess()).toEqual({ eligible: false, reason: 'auto-compact-off' });
+    applyCompaction(true, 80);
+    expect(assess().eligible).toBe(true);
+  });
+
+  it('is refused by the circuit breaker once repeated automatic compaction failures tripped it', async () => {
+    const { assess, listeners } = await createWithHistory(bigHistory);
+    expect(assess().eligible).toBe(true);
+    // Three exhausted attempts (start + end with no result) — the same evidence that stops PI's own
+    // threshold compaction. The factory subscribed the breaker's observe at create time.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (const listener of listeners) listener({ type: 'compaction_start' });
+      for (const listener of listeners) listener({ type: 'compaction_end', aborted: false });
+    }
+    expect(assess()).toEqual({ eligible: false, reason: 'breaker' });
+  });
+});
+
 describe('BrainSessionFactory steering queue', () => {
   it('drains the whole steering queue into one model round', async () => {
     // PI's default is "one-at-a-time": messages sent while a turn streams are injected one per model

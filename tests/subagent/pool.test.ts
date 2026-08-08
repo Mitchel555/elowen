@@ -299,6 +299,26 @@ describe('SubagentRunnerPool — placement and routing', () => {
     await run;
     h.pool.reset('test over');
   });
+
+  it('steers only through the runner actually holding the channel, and answers idle for an unrouted one', async () => {
+    const h = poolWith();
+    const { run } = await coldStart(h, 'subagent-sub-dlg-1');
+    // Unrouted channel: no runner holds it, so no round trip happens and no runner is forked for it —
+    // the routing map IS the answer, exactly like release.
+    expect(await h.pool.steer('subagent-sub-dlg-unknown', 'hello')).toEqual({ outcome: 'idle' });
+    expect(h.children).toHaveLength(1);
+    expect(h.children[0]!.received.some((m) => m.type === 'steer')).toBe(false);
+    // Routed channel: the steer frame reaches ITS runner and the pool relays that runner's verdict.
+    const pending = h.pool.steer('subagent-sub-dlg-1', 'also check the docs');
+    await settle();
+    const asked = h.children[0]!.received.find((m) => m.type === 'steer') as { steerId: string; text: string };
+    expect(asked).toMatchObject({ text: 'also check the docs' });
+    h.children[0]!.reply({ type: 'steered', steerId: asked.steerId, outcome: 'delivered' });
+    expect(await pending).toEqual({ outcome: 'delivered' });
+    h.children[0]!.finish(h.children[0]!.turns()[0]!.turnId);
+    await run;
+    h.pool.reset('test over');
+  });
 });
 
 describe('SubagentRunnerPool — admission is placement, not a cap', () => {

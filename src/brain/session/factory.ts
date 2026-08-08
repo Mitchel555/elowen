@@ -9,9 +9,12 @@ import { installLiveRecall, type LiveRecallOptions } from './liveRecall.js';
 import { createCompactionModelRoute, type CompactionModelRoute } from './compactionModelRoute.js';
 import { createCompactionCircuitBreaker, type CompactionThresholdBudget } from './compactionCircuitBreaker.js';
 import {
+  estimatedContextTokens,
   installTurnBoundaryAutoCompaction,
+  latestCompaction,
   type PendingCompactionMessage,
 } from './turnBoundaryCompaction.js';
+import { assessIdleCompaction, type AssessIdleCompaction } from './idleCompaction.js';
 import { installHistoryImageStripping } from './historyImageStripping.js';
 import { imagesRejected } from './imageRejection.js';
 import { installToolResultClearing } from './toolResultClearing.js';
@@ -325,7 +328,14 @@ function defaultResourceLoaderFactory(o: BrainResourceLoaderOptions): ResourceLo
 export class BrainSessionFactory {
   constructor(private d: SessionFactoryDeps) {}
 
-  async create(spec: SessionSpec): Promise<{ session: AgentSession; applyCompaction: ApplyCompaction }> {
+  async create(spec: SessionSpec): Promise<{
+    session: AgentSession;
+    applyCompaction: ApplyCompaction;
+    /** Live idle-compaction eligibility for THIS session, consulted by the daemon's idle sweep. Built
+     *  here because only the factory closure holds the pieces together: the live proactive flag, the
+     *  circuit breaker and the fixed-cost/tail estimates. */
+    assessIdleCompaction: AssessIdleCompaction;
+  }> {
     // Ensure the store row (sole source of truth) exists before rehydration.
     const existing = this.d.store.getSession(spec.sessionId);
     if (!existing) {
@@ -534,8 +544,20 @@ export class BrainSessionFactory {
     session.subscribe(createSessionPersistenceProjector(
       this.d.store, session, spec.sessionId, spec.model.contextWindow, this.d.chatImagesDir,
     ));
+    // Idle-compaction eligibility, read live at every sweep tick: the proactive flag and the breaker
+    // state may change during the session's life, and the context/floor estimates must reflect the
+    // history as it stands. `contextTokens` measures the same way PI's own shouldCompact does (newest
+    // provider usage + estimated unseen tail); the floor mirrors the breaker budget's shape but with the
+    // REAL retained tail for the trigger currently in force, not the minimal seed.
+    const assessIdle: AssessIdleCompaction = () => assessIdleCompaction({
+      proactive: () => proactiveCompaction,
+      breakerBlocks: () => compactionBreaker.blocks('threshold'),
+      contextTokens: () => estimatedContextTokens(session.messages, latestCompaction(sessionManager)?.timestamp),
+      floorTokens: () => fixedCostTokens + COMPACTION_SUMMARY_ALLOWANCE
+        + compactionKeepRecentTokens(thresholdBudget.trigger ?? spec.model.contextWindow, fixedCostTokens),
+    });
     // Last, so observers see the finished session — and before the caller can run a turn on it.
     await spec.onSpawned?.({ sessionId: spec.sessionId, messages: session.messages });
-    return { session, applyCompaction };
+    return { session, applyCompaction, assessIdleCompaction: assessIdle };
   }
 }

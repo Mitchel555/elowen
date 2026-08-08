@@ -211,6 +211,27 @@ process.on('message', (raw: unknown) => {
       // process holding the PI session can do.
       void brain?.abortChannel(msg.channelId).catch((e: unknown) => log.warn(`abort failed: ${errorText(e)}`));
       return;
+    case 'steer': {
+      // A DelegateContinue on a child running HERE: inject the parent's follow-up into the live turn.
+      // The daemon already authorized the caller; this process only carries the injection out. The
+      // answer can take as long as the child's current model call (steerChannel resolves only once the
+      // message is confirmed in the child's context), which is exactly what the blocking tool promises.
+      // Detached like a turn — a long steer must not stall the IPC handler for every other channel.
+      void (async (): Promise<void> => {
+        await booting;
+        try {
+          const outcome = brain ? await brain.steerChannel(msg.channelId, msg.text) : 'idle';
+          send({ type: 'steered', steerId: msg.steerId, outcome });
+        } catch (e) {
+          // The abort fences reject with exactly this message; anything else is a failure to steer, and
+          // for the daemon "could not inject here" and "no turn here" oblige the same fallback.
+          const aborted = e instanceof Error && e.message === 'delegation aborted';
+          if (!aborted) log.warn(`steer failed: ${errorText(e)}`);
+          send({ type: 'steered', steerId: msg.steerId, outcome: aborted ? 'aborted' : 'idle' });
+        }
+      })();
+      return;
+    }
     case 'release': {
       // The daemon wants to run this child's next turn itself. Refuse while it is working here — one
       // transcript driven by two live sessions is worse than a refused continuation.

@@ -12,7 +12,7 @@ import type { LiveBrain } from '../session/liveBrain.js';
 import type { LiveSessionRegistry } from '../session/liveRegistry.js';
 import { channelIdOf, isSubagentSession } from '../sessionId.js';
 import { terminalizeWorkflow } from '../workflowRuns.js';
-import type { SubagentProgressEvent } from '../../plugins/api.js';
+import type { DelegatedContinueResult, SubagentProgressEvent } from '../../plugins/api.js';
 import { logger } from '../../shared/logger.js';
 
 /** Parse a `provider/model` spec into a brain model selection. Splits on the FIRST slash only — model
@@ -67,6 +67,9 @@ interface DelegatedSessionDeps {
    *  Every send below runs the turn HERE, so a record still held over there would leave one session live
    *  in two processes at once. Absent (no runner) ⇒ there is nothing to release. */
   releaseRemote?: (channelId: string) => Promise<{ busy: boolean }>;
+  /** Steer a parent's follow-up into a child turn RUNNING in the sub-agent runner — the cross-process
+   *  half of continueSubagent's mid-turn delivery. Absent (no runner) ⇒ no remote turn can exist. */
+  steerRemote?: (channelId: string, text: string) => Promise<{ outcome: 'delivered' | 'idle' | 'aborted' }>;
 }
 
 /** The sub-agent delegation half of the brain facade: the durable boot reconcile of restart-zombie
@@ -201,19 +204,32 @@ export class DelegatedSessionService {
     return { stopped: true };
   }
 
-  /** A delegating TURN continuing one of its own sub-agents: the child picks its transcript back up
-   *  (rehydrated from SQLite) and answers this follow-up, whose reply is returned to the caller — the
-   *  agent-facing counterpart of the owner's drill-in `sendToSubagent`, which streams to a human instead.
+  /** A delegating TURN continuing one of its own sub-agents — the agent-facing counterpart of the owner's
+   *  drill-in `sendToSubagent`, which streams to a human instead.
    *
-   *  Three guards, in order, and each of them is the point:
+   *  An IDLE child picks its transcript back up (rehydrated from SQLite) and answers the follow-up as its
+   *  own turn; the reply comes back as `{status:'reply'}`. A child whose turn is IN FLIGHT is no longer
+   *  refused: the message is STEERED into the running turn — the same primitive a user steering their
+   *  agent (and the owner drill-in) already ride, so it appends to the transcript's END and never touches
+   *  already-sent prefix (prompt-cache safe). The call resolves `{status:'steered'}` only once the message
+   *  provably reached the child's context (see ChannelSessionService.steerDelegatedTurn); a steer that the
+   *  ending turn never drained is removed and delivered as a fresh idle turn instead, so it can neither
+   *  vanish silently nor double-deliver. Both agents drive one transcript, but only through PI's own
+   *  steering queue inside the child's turn — never as a second concurrent turn.
+   *
+   *  Guards, in order, and each of them is the point:
    *  - `parentSessionId` comes from the HOST's own turn scope, never from the calling plugin, and the
    *    child must name exactly it. That is what keeps a conversation inside its own delegation tree —
    *    a sibling conversation's (or another account's) child is simply not addressable.
-   *  - A child with a turn in flight is refused rather than steered. `sendToSubagent` deliberately steers
-   *    (a human correcting a running agent mid-flight), but two agents driving one transcript is a race
-   *    with no owner, so the delegating turn is told to wait instead.
    *  - The persisted scope may not exceed what this conversation holds NOW (see
-   *    scopeExceedsCurrentAccess). It is then narrowed further by the caller's current denies. */
+   *    scopeExceedsCurrentAccess) — checked BEFORE any delivery, so a parent whose access has narrowed
+   *    cannot inject instructions into a child running wider than it. An idle continuation is then
+   *    narrowed further by the caller's current denies.
+   *  - A `model` switch is refused while the child is mid-turn: a running turn cannot change model, and
+   *    silently dropping the switch would lie about what the child runs on.
+   *  - A child that is active but not steerable anywhere (its turn is queued for a runner slot, or it sits
+   *    between turns collecting background work) is refused with a retry hint: running a fresh turn in
+   *    that window could put one transcript live in two processes at once. */
   async continueSubagent(
     parentSessionId: string,
     childSessionId: string,
@@ -221,25 +237,44 @@ export class DelegatedSessionService {
     access: Parameters<typeof scopeExceedsCurrentAccess>[1],
     onEvent?: (e: SubagentProgressEvent) => void,
     model?: string,
-  ): Promise<string> {
+  ): Promise<DelegatedContinueResult> {
     const row = this.d.store.getSession(childSessionId);
     if (!row || row.parent_session_id !== parentSessionId || !isSubagentSession(childSessionId)) {
       throw new Error('unknown sub-agent for this conversation');
-    }
-    if (this.d.sessions.isActiveChild(childSessionId)) {
-      throw new Error('that sub-agent is still running — wait for it to finish before sending it more');
     }
     const scope = this.d.store.delegatedAccessFor(childSessionId);
     if (!scope) throw new Error('delegated access unavailable');
     const exceeds = scopeExceedsCurrentAccess(scope, access);
     if (exceeds) throw new Error(`cannot continue that sub-agent: ${exceeds}`);
-    return this.sendDelegated(row.user_id, childSessionId, text, {
+    if (this.d.sessions.isActiveChild(childSessionId)) {
+      if (model) {
+        throw new Error('that sub-agent has a turn in flight, and a running turn cannot switch model — retry without `model`, or wait for it to finish');
+      }
+      const channelId = channelIdOf(childSessionId);
+      // The turn body lives either HERE or in the sub-agent runner — try both homes. Each steer resolves
+      // only once the message is confirmed in the child's context (or provably not deliverable there).
+      if (await this.d.channelService.steerDelegatedTurn(channelId, text) === 'delivered') {
+        return { status: 'steered' };
+      }
+      const remote = await this.d.steerRemote?.(channelId, text) ?? { outcome: 'idle' as const };
+      if (remote.outcome === 'delivered') return { status: 'steered' };
+      if (remote.outcome === 'aborted') throw new Error('delegation aborted');
+      // Still registered as active with no steerable turn anywhere: the turn is queued for a runner slot,
+      // starting up, or the child sits between turns (collecting background work). A fresh turn now could
+      // race the pending one — refuse, retryably, exactly like the old blanket refusal did.
+      if (this.d.sessions.isActiveChild(childSessionId)) {
+        throw new Error('that sub-agent is busy between model steps (starting up or collecting background work) and cannot take a steered message right now — try again in a moment');
+      }
+      // The delegation ended while we looked: the child is idle now, so fall through to a normal turn.
+    }
+    const reply = await this.sendDelegated(row.user_id, childSessionId, text, {
       extraDeny: access.toolPolicy?.deny ?? [],
       // The plugin's callback contract is the narrow progress shape, while the child's stream is the full
       // BrainEvent set — narrow every event at this boundary so the value matches the declared contract.
       ...(onEvent ? { onEvent: (e: BrainEvent) => onEvent(narrowSubagentProgress(e)) } : {}),
       ...(model ? { model } : {}),
     });
+    return { status: 'reply', reply };
   }
 
   /** Resolve the durable, immutable scope for an owner drill-in. Kept synchronous so the HTTP route can

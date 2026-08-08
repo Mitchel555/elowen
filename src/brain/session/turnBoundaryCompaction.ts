@@ -30,8 +30,9 @@ function pendingQueueTokens(
 
 /** PI's zero/error-usage fallback, kept local because estimateContextTokens is not part of the public
  * coding-agent export. Start from the newest valid provider usage and estimate only its unseen tail;
- * when no valid usage exists, conservatively estimate the whole visible message context. */
-function estimatedContextTokens(
+ * when no valid usage exists, conservatively estimate the whole visible message context. Also reused by
+ * the factory's idle-compaction assessment, which needs the same number shouldCompact would see. */
+export function estimatedContextTokens(
   messages: readonly Parameters<typeof estimateTokens>[0][],
   compactionTimestamp?: string,
 ): number {
@@ -50,7 +51,7 @@ function estimatedContextTokens(
   return messages.reduce((total, message) => total + estimateTokens(message), 0);
 }
 
-function latestCompaction(sessionManager: SessionManager) {
+export function latestCompaction(sessionManager: SessionManager) {
   return sessionManager.getBranch().findLast((entry) => entry.type === 'compaction') ?? null;
 }
 
