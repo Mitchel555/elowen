@@ -21,10 +21,11 @@ export const CACHE_DROP_MIN_TOKENS = 2000;
 const CACHE_DROP_MIN_RATIO = 0.05;
 /** The provider request can contain thousands of messages. Tracking its stable prefix is enough to catch
  * egress rewrites while bounding both hashing work and retained digests. */
-/** Anthropic's automatic prefix checking scans roughly this many content blocks back from a breakpoint
- * when looking for a hit. A step that appends more than this can miss a segment that IS cached — the
- * fan-out failure mode `cacheBreakpoints` exists to prevent. Approximate by nature: it describes their
- * matcher, and is used here only to name the likely cause rather than to decide anything. */
+/** Anthropic's documented lookback: prefix checking tests at most 20 positions per breakpoint, counting
+ * the breakpoint itself as the first, then stops or resumes from the next explicit breakpoint
+ * (docs.anthropic.com, "How automatic prefix checking works"). A step that appends more blocks than this
+ * pushes every earlier write out of the final breakpoint's window — the fan-out failure mode
+ * `cacheBreakpoints` exists to prevent. Used here only to name the likely cause, never to decide. */
 const BLOCK_LOOKBACK = 20;
 const MAX_TRACKED_HISTORY_SEGMENTS = 512;
 const MAX_TRACKED_TOOL_SEGMENTS = 256;
@@ -78,6 +79,14 @@ function canonical(value: unknown): unknown {
     out[key] = canonical(item);
   }
   return out;
+}
+
+/** One message, hashed over its canonical content. Shared with cacheBreakpoints, which must recognize
+ *  "the same message as last request" by content — through the marker pi-ai moves every step — with the
+ *  exact equality this monitor's comparisons are built on, or the two modules would disagree about
+ *  whether history changed. */
+export function hashCanonical(value: unknown): string {
+  return hash(canonical(value));
 }
 
 /** Total content blocks across the payload's messages. Anthropic resolves a cache hit by scanning back a
@@ -331,8 +340,8 @@ function attributePayloadChange(
   // shrug": one says which code to fix, the other says the provider had a bad day.
   const added = current.blockCount - previous.blockCount;
   if (added > BLOCK_LOOKBACK) {
-    return `${unchanged}; this step appended ${added} content blocks, past the ~${BLOCK_LOOKBACK} Anthropic `
-      + `scans back from a breakpoint — a FAN-OUT MISS, not a rewrite${suffix}`;
+    return `${unchanged}; this step appended ${added} content blocks, past the ${BLOCK_LOOKBACK}-position `
+      + `lookback window Anthropic scans from a breakpoint — a FAN-OUT MISS, not a rewrite${suffix}`;
   }
   return `${unchanged}; likely provider eviction or routing${suffix}`;
 }
