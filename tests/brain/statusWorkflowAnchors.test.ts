@@ -1,0 +1,151 @@
+import { describe, it, expect } from 'vitest';
+import { openDb } from '../../src/store/db.js';
+import { BrainStore } from '../../src/store/brainStore.js';
+import { BrainStatusService } from '../../src/brain/service/statusService.js';
+import { ConversationLifecycle } from '../../src/brain/service/lifecycle.js';
+import { LiveSessionRegistry } from '../../src/brain/session/liveRegistry.js';
+import { ClientAttachments } from '../../src/brain/service/attachments.js';
+import { ElicitationRegistry } from '../../src/brain/elicitation.js';
+import { CardRegistry } from '../../src/brain/cards.js';
+import { PermissionApprovalService } from '../../src/brain/service/permissionApproval.js';
+import type { LiveBrain } from '../../src/brain/session/liveBrain.js';
+import type { BrainSegment } from '../../src/shared/wireContract.js';
+
+// The incident this file guards: auto-compaction trimmed a conversation's WorkflowStart row out of the
+// durable history while the engine kept running the DAG. Every workflow rendering — the transcript chip,
+// the panel projection and live-event attachment — keys on that row, so the running workflow silently
+// vanished from the UI of the very conversation that owned it. The status reads must pin a synthetic
+// anchor into what they return (see withWorkflowAnchors).
+
+const SESSION = 'brain-1';
+
+function harness() {
+  const store = new BrainStore(openDb(':memory:'));
+  const sessions = new LiveSessionRegistry<LiveBrain>();
+  const elicitation = new ElicitationRegistry();
+  const lifecycle = new ConversationLifecycle({
+    store,
+    sessions,
+    attachments: new ClientAttachments(),
+    elicitation,
+    goals: { cancelGoalContinuation: () => {} } as unknown as ConstructorParameters<typeof ConversationLifecycle>[0]['goals'],
+    spawn: () => Promise.reject(new Error('no spawn in this harness')),
+    selectionAllowed: () => true,
+  });
+  const status = new BrainStatusService({
+    store,
+    sessions,
+    attachments: new ClientAttachments(),
+    elicitation,
+    cards: new CardRegistry(),
+    lifecycle,
+    permissions: new PermissionApprovalService({ elicitation }),
+    config: undefined,
+    runtime: undefined as unknown as ConstructorParameters<typeof BrainStatusService>[0]['runtime'],
+  });
+  store.createSession({ id: SESSION, userId: 1, model: 'm' });
+  return { store, sessions, status };
+}
+
+/** A post-compaction tail that no longer contains the WorkflowStart tool row. */
+function seedCompactedTail(store: BrainStore, turns: number) {
+  store.appendMessage({ id: 'c0', sessionId: SESSION, parentId: null, role: 'compaction', content: { role: 'compactionSummary', summary: 'older turns' } });
+  for (let i = 0; i < turns; i += 1) {
+    store.appendMessage({ id: `u${i}`, sessionId: SESSION, parentId: null, role: 'user', content: { role: 'user', content: `question ${i}` } });
+    store.appendMessage({ id: `a${i}`, sessionId: SESSION, parentId: null, role: 'assistant', content: { role: 'assistant', content: [{ type: 'text', text: `answer ${i}` }] } });
+  }
+}
+
+const runningRun = {
+  id: 'wf-1', toolCallId: 'call-wf', title: 'Ship it', status: 'running',
+  nodes: [{ id: 'gather', task: 'gather facts', status: 'running', deps: [] }],
+};
+
+/** Registered live origin — a genuinely running workflow has one; without it the stale-row read-time
+ *  fallback terminalizes the run (statusService.workflowRuns), which is its own test below. */
+function liveOrigin(sessions: LiveSessionRegistry<LiveBrain>) {
+  sessions.set(SESSION, {
+    sessionId: SESSION,
+    lastTurnMode: 'build',
+    session: { isStreaming: false, messages: [], getContextUsage: () => undefined, getSteeringMessages: () => [], getFollowUpMessages: () => [] },
+    replay: { transportSnapshot: () => ({ cursor: 0, events: [], run: 0, eventCursors: [] }) },
+  } as unknown as LiveBrain);
+}
+
+const anchorItems = (views: { segments?: BrainSegment[] }[]) => views
+  .flatMap((v) => v.segments ?? [])
+  .filter((s): s is Extract<BrainSegment, { kind: 'tool' }> => s.kind === 'tool' && s.id === 'call-wf');
+
+describe('status reads pin a synthetic anchor for a running workflow', () => {
+  it('messagesPage first page carries the anchor even though the window has no WorkflowStart row', () => {
+    const { store, sessions, status } = harness();
+    seedCompactedTail(store, 40); // 81 rows, far more than the page below
+    expect(store.upsertWorkflowRun(SESSION, runningRun)).toBe(true);
+    liveOrigin(sessions);
+
+    const page = status.messagesPage(1, SESSION, { limit: 50 });
+    const anchors = anchorItems(page.items);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]?.wf).toMatchObject({ id: 'wf-1', status: 'running' });
+    // The pin rides the page, it does not displace it: the newest turn is still the newest (session-event
+    // markers may trail it, so compare against the newest ASSISTANT view).
+    expect(page.items.filter((v) => v.role === 'assistant' && v.text).at(-1)?.text).toBe('answer 39');
+    expect(page.items[0]?.id).toBe('wf-anchor-call-wf');
+  });
+
+  it('older pages are never pinned, so paging back cannot duplicate the anchor', () => {
+    const { store, sessions, status } = harness();
+    seedCompactedTail(store, 40);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    liveOrigin(sessions);
+
+    const first = status.messagesPage(1, SESSION, { limit: 20 });
+    expect(first.nextBefore).not.toBeNull();
+    const older = status.messagesPage(1, SESSION, { limit: 20, before: first.nextBefore! });
+    expect(anchorItems(older.items)).toHaveLength(0);
+  });
+
+  it('the stream snapshot (reconnect hydration) carries the anchor in its windowed history', () => {
+    const { store, sessions, status } = harness();
+    seedCompactedTail(store, 40);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    liveOrigin(sessions);
+
+    const snapshot = status.streamSnapshot(1, SESSION, { limit: 50 });
+    expect(anchorItems(snapshot.history)).toHaveLength(1);
+    // And in the un-windowed variant (the CLI attaches without a history page).
+    expect(anchorItems(status.streamSnapshot(1, SESSION).history)).toHaveLength(1);
+  });
+
+  it('messagesOf (read-only full history) carries the anchor too', () => {
+    const { store, sessions, status } = harness();
+    seedCompactedTail(store, 3);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    liveOrigin(sessions);
+    expect(anchorItems(status.messagesOf(1, SESSION))).toHaveLength(1);
+  });
+
+  it('does not pin when the real WorkflowStart row is inside the window', () => {
+    const { store, sessions, status } = harness();
+    store.appendMessage({
+      id: 'wf-row', sessionId: SESSION, parentId: null, role: 'assistant',
+      content: { role: 'assistant', content: [{ type: 'toolCall', id: 'call-wf', name: 'WorkflowStart', arguments: {} }] },
+    });
+    store.upsertWorkflowRun(SESSION, runningRun);
+    liveOrigin(sessions);
+
+    const page = status.messagesPage(1, SESSION, { limit: 50 });
+    const anchors = anchorItems(page.items);
+    expect(anchors).toHaveLength(1); // the REAL row, wf attached by shaping
+    expect(page.items.some((v) => v.id === 'wf-anchor-call-wf')).toBe(false);
+  });
+
+  // The read-time stale fallback stays intact: with no live origin the 'running' row is terminalized
+  // for display, and a terminalized run must not be resurrected as a pinned running anchor.
+  it('a stale running row without a live origin is not pinned', () => {
+    const { store, status } = harness();
+    seedCompactedTail(store, 2);
+    store.upsertWorkflowRun(SESSION, runningRun);
+    expect(anchorItems(status.messagesPage(1, SESSION, { limit: 50 }).items)).toHaveLength(0);
+  });
+});

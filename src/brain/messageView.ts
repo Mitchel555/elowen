@@ -575,3 +575,39 @@ export function shapeBrainMessages(
   for (; next < events.length; next += 1) merged.push(events[next]!.view);
   return merged;
 }
+
+/** Every workflow rendering keys on the WorkflowStart tool row: the transcript chip, the panel projection
+ *  (both clients rebuild it from the loaded views) and even LIVE `workflow` events, which clients attach
+ *  by tool call id and silently drop when no such row is loaded. That row is not guaranteed to be there —
+ *  compaction trims it out of the durable history, and the chat's windowed first page can cut it off —
+ *  while the engine keeps running the DAG regardless. Without an anchor a RUNNING workflow becomes
+ *  invisible to the conversation that owns it, which is exactly the state this repairs: prepend a
+ *  synthetic anchor view for each running workflow that has no real one among `views`.
+ *
+ *  Only RUNNING workflows are synthesized. A terminal one already left its durable finish marker in the
+ *  transcript, and resurrecting every finished DAG of a long conversation at the top of each page would
+ *  be noise, not recovered state.
+ *
+ *  The synthetic view's id is derived (stable across refetches, so client turn-dedup works) and its tool
+ *  item carries the run's REAL toolCallId — that is what re-attaches subsequent live snapshots. Prepended
+ *  because the missing anchor is by construction older than every loaded view; when paging later reaches
+ *  the real anchor row, both render, which is a mild cosmetic duplication in a rare path. */
+export function withWorkflowAnchors(views: BrainMessageView[], workflowRuns: readonly BrainWorkflowView[]): BrainMessageView[] {
+  const running = workflowRuns.filter((run) => run.status === 'running');
+  if (running.length === 0) return views;
+  const anchored = new Set<string>();
+  for (const view of views) {
+    for (const segment of view.segments ?? []) {
+      if (segment.kind === 'tool' && segment.id) anchored.add(segment.id);
+    }
+  }
+  const synthetic = running
+    .filter((run) => !anchored.has(run.toolCallId))
+    .map((run): BrainMessageView => ({
+      id: `wf-anchor-${run.toolCallId}`,
+      role: 'assistant',
+      text: '',
+      segments: [{ kind: 'tool', name: 'WorkflowStart', id: run.toolCallId, ...(run.title ? { detail: run.title } : {}), wf: run }],
+    }));
+  return synthetic.length ? [...synthetic, ...views] : views;
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { stripInlineReasoning, extractText, toolDetail, toolDisplay, toolOutputView, isThinkingOnlyReply, shapeBrainMessages, pendingSubmittedPlan, newestTurnStart, setToolOutputPolicy } from '../../src/brain/messageView.js';
+import { stripInlineReasoning, extractText, toolDetail, toolDisplay, toolOutputView, isThinkingOnlyReply, shapeBrainMessages, withWorkflowAnchors, pendingSubmittedPlan, newestTurnStart, setToolOutputPolicy } from '../../src/brain/messageView.js';
 import { makeToolOutputPolicy } from '../../src/brain/toolOutput.js';
 
 describe('toolDisplay: skill loads', () => {
@@ -100,6 +100,60 @@ describe('shapeBrainMessages: durable workflow state', () => {
     const [view] = shapeBrainMessages(rows, [], [], [run]);
     expect(view?.segments?.[0]).toMatchObject({ kind: 'tool', id: 'call-1', name: 'WorkflowStart', wf: run });
     expect(view?.segments?.[1]).not.toHaveProperty('wf');
+  });
+});
+
+describe('withWorkflowAnchors: orphaned running workflows', () => {
+  const runningRun = {
+    id: 'wf-1', toolCallId: 'call-wf', title: 'Ship it', status: 'running' as const,
+    nodes: [{ id: 'gather', task: 'gather facts', status: 'running' as const, deps: [] }],
+  };
+  const tailViews = () => [
+    { role: 'compaction' as const, text: '' },
+    { role: 'user' as const, text: 'recent question' },
+  ];
+
+  // The incident this guards: compaction trimmed the WorkflowStart row out of the durable history while
+  // the engine kept running the DAG — every client keys the panel AND live-event attachment on that row,
+  // so the running workflow silently vanished from its own conversation's UI.
+  it('prepends a synthetic WorkflowStart anchor for a running workflow with no anchor row', () => {
+    const views = withWorkflowAnchors(tailViews(), [runningRun]);
+    expect(views).toHaveLength(3);
+    expect(views[0]).toEqual({
+      id: 'wf-anchor-call-wf',
+      role: 'assistant',
+      text: '',
+      segments: [{ kind: 'tool', name: 'WorkflowStart', id: 'call-wf', detail: 'Ship it', wf: runningRun }],
+    });
+    // The tail is untouched and keeps its order.
+    expect(views.slice(1)).toEqual(tailViews());
+  });
+
+  it('does nothing when the real anchor row is among the views', () => {
+    const anchored = [
+      {
+        role: 'assistant' as const, text: '',
+        segments: [{ kind: 'tool' as const, name: 'WorkflowStart', id: 'call-wf', wf: runningRun }],
+      },
+      ...tailViews(),
+    ];
+    expect(withWorkflowAnchors(anchored, [runningRun])).toEqual(anchored);
+  });
+
+  it('never resurrects a terminal workflow — only a running one is invisible-and-lying', () => {
+    const done = { ...runningRun, status: 'done' as const };
+    const cancelled = { ...runningRun, id: 'wf-2', toolCallId: 'call-2', status: 'cancelled' as const };
+    expect(withWorkflowAnchors(tailViews(), [done, cancelled])).toEqual(tailViews());
+  });
+
+  it('keys the anchor check on the tool call id, not on any tool row being present', () => {
+    const otherTool = [{
+      role: 'assistant' as const, text: '',
+      segments: [{ kind: 'tool' as const, name: 'Read', id: 'call-other' }],
+    }];
+    const views = withWorkflowAnchors(otherTool, [runningRun]);
+    expect(views).toHaveLength(2);
+    expect(views[0]?.segments?.[0]).toMatchObject({ id: 'call-wf', wf: runningRun });
   });
 });
 

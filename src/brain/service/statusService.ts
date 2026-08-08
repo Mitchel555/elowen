@@ -2,7 +2,7 @@ import { createAgentSession, SessionManager, DefaultResourceLoader } from '@eare
 import type { BrainStore, BrainSearchHit, BrainMessageRow, BrainWorkflowRun } from '../../store/brainStore.js';
 import type { BrainRuntimeConfig } from '../providers.js';
 import { buildBrainRegistry, resolveBrainModel } from '../providers.js';
-import { extractText, shapeBrainMessages, lastAssistant, pendingSubmittedPlan } from '../messageView.js';
+import { extractText, shapeBrainMessages, withWorkflowAnchors, lastAssistant, pendingSubmittedPlan } from '../messageView.js';
 import type { BrainMessageView } from '../messageView.js';
 import type { BrainContextBreakdown, BrainPendingPlan, BrainWorkMode } from '../../shared/wireContract.js';
 import { buildContextBreakdown, contextSnapshotOf } from '../contextBreakdown.js';
@@ -373,7 +373,8 @@ export class BrainStatusService {
   /** The user's stored conversation, shaped for display (channels render this on connect). Reads the
    *  sole store; no live session required, so it works before/independently of `start`. */
   history(userId: number): BrainMessageView[] {
-    return this.shapedHistory(this.d.lifecycle.activeSessionId(userId));
+    const id = this.d.lifecycle.activeSessionId(userId);
+    return withWorkflowAnchors(this.shapedHistory(id), this.workflowRuns(id));
   }
 
   /** ANY of the owner's stored sessions, shaped for display — including the channel (Discord) and
@@ -382,7 +383,7 @@ export class BrainStatusService {
   messagesOf(userId: number, sessionId: string): BrainMessageView[] {
     const row = this.d.store.getSession(sessionId);
     if (!row || row.user_id !== userId) throw new Error('unknown session');
-    return this.shapedHistory(sessionId);
+    return withWorkflowAnchors(this.shapedHistory(sessionId), this.workflowRuns(sessionId));
   }
 
   /** A backwards-paged window over a conversation's history for the chat's lazy-load: the newest `limit`
@@ -395,7 +396,14 @@ export class BrainStatusService {
       if (!row || row.user_id !== userId) throw new Error('unknown session');
     }
     const id = sessionId ?? this.d.lifecycle.activeSessionId(userId);
-    return windowViews(this.shapedHistory(id), opts);
+    const page = windowViews(this.shapedHistory(id), opts);
+    // Anchors are pinned AFTER windowing, and only into the FIRST (newest) page: the window can cut a
+    // running workflow's WorkflowStart row out of view, and without it the panel and every subsequent
+    // live snapshot are lost (see withWorkflowAnchors). Older pages are skipped so paging back never
+    // duplicates the pin, and the cursor is untouched — synthetic views carry no window position.
+    return opts.before === undefined
+      ? { ...page, items: withWorkflowAnchors(page.items, this.workflowRuns(id)) }
+      : page;
   }
 
   /** Atomic, idempotent first frame for an opt-in fixed-session SSE stream. Reads the clean durable
@@ -422,11 +430,18 @@ export class BrainStatusService {
     // i.e. the very tail, so everything before `nextBefore` is identical in the unfiltered array the
     // lazy-load pages through — the cursor stays valid across the two endpoints.
     const page = history ? windowViews(clean, history) : undefined;
+    // Same first-page pinning as messagesPage: a reconnect hydrates from THIS frame, so a running
+    // workflow whose anchor row was compacted or windowed away would otherwise vanish from the panel
+    // and drop every later live snapshot (no row to attach to).
+    const views = page ? page.items : clean;
+    const anchoredViews = history?.before === undefined
+      ? withWorkflowAnchors(views, this.workflowRuns(sessionId))
+      : views;
     return {
       type: 'snapshot',
       sessionId,
       goal: this.d.store.getGoal(sessionId) ?? null,
-      history: page ? page.items : clean,
+      history: anchoredViews,
       control: {
         streaming: !!live && (live.session.isStreaming || this.d.sessions.hasActiveChildren(live.sessionId)),
         pendingAsk: live ? this.d.elicitation.pendingForSession(live.sessionId) : null,
