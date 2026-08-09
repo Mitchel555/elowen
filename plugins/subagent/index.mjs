@@ -210,7 +210,14 @@ export function register(ctx) {
   // guard then answers, exactly as it did before.
   const asChildSessionId = (raw) => {
     const id = String(raw ?? '').trim();
-    return getJob(id)?.sessionId || id;
+    const fromJob = getJob(id)?.sessionId;
+    if (fromJob) return fromJob;
+    // After a restart the in-memory jobs map is empty, so a `dlg-*` handle no longer resolves through it —
+    // but the child session outlived the restart in the store. Rebuild the session id from the job id via
+    // the host (which owns the id shape), so a follow-up by job id still lands. Ownership is still enforced
+    // downstream in continueSubagent/readSubagent/stopSubagent, exactly as for a session id passed straight.
+    if (id.startsWith('dlg-') && ctx.subagentSessionForJob) return ctx.subagentSessionForJob(id);
+    return id;
   };
 
   const elapsedSeconds = (job) => Math.round(((job.finishedAt ?? Date.now()) - job.startedAt) / 1000);
@@ -660,8 +667,21 @@ export function register(ctx) {
     parameters: Type.Object({ id: Type.String({ description: 'Job id returned by delegate(background=true)' }) }),
     execute: async (_id, p) => {
       const job = getJob(p.id);
-      if (!job) return ok(`Error: no background delegation ${p.id}. It may have expired.`);
-      return ok(describeJob(job), jobDetails(job));
+      if (job) return ok(describeJob(job), jobDetails(job));
+      // A restart cleared the in-memory job, but the run itself is durable. The live progress it tracked
+      // (tools so far, tokens) died with the process, so resolve the session (job id or the session id
+      // DelegateList shows) and, if the run still exists, say so and point at the durable calls rather than
+      // claiming the delegation expired.
+      const sessionId = asChildSessionId(p.id);
+      const run = ctx.subagentRuns?.().find((r) => r.sessionId === sessionId);
+      if (run) {
+        return ok(
+          `Delegation ${p.id} is no longer tracked live (the daemon restarted since it ran). `
+            + 'Read its result with DelegateResult, or resume it with DelegateContinue — both work by session id.',
+          { sessionId, status: run.status },
+        );
+      }
+      return ok(`Error: no background delegation ${p.id}. It may have expired.`);
     },
   }));
 
@@ -672,17 +692,27 @@ export function register(ctx) {
     parameters: Type.Object({ id: Type.String({ description: 'Job id returned by delegate(background=true)' }) }),
     execute: async (_id, p) => {
       const job = getJob(p.id);
-      if (!job) return ok(`Error: no background delegation ${p.id}. It may have expired.`);
-      if (job.status === 'running') {
-        return ok(
-          `Delegation job ${job.id} is still running.${job.autoDeliver
-            ? ' Its result reaches you automatically in a new turn — stop fetching it, and end your turn if you have nothing else to do.'
-            : ' Continue other work and check again later; do not busy-wait.'}`,
-          jobDetails(job),
-        );
+      if (job) {
+        if (job.status === 'running') {
+          return ok(
+            `Delegation job ${job.id} is still running.${job.autoDeliver
+              ? ' Its result reaches you automatically in a new turn — stop fetching it, and end your turn if you have nothing else to do.'
+              : ' Continue other work and check again later; do not busy-wait.'}`,
+            jobDetails(job),
+          );
+        }
+        if (job.status === 'error') return ok(`Error: ${job.error}`, jobDetails(job));
+        return ok(job.result || '(the sub-agent returned nothing)', jobDetails(job));
       }
-      if (job.status === 'error') return ok(`Error: ${job.error}`, jobDetails(job));
-      return ok(job.result || '(the sub-agent returned nothing)', jobDetails(job));
+      // A restart cleared the in-memory job, but the final text is durable. Resolve the session (job id or
+      // the session id DelegateList shows) and read it from the store; readSubagent applies the ownership
+      // guard and throws for an unknown/foreign child or one with no stored text yet.
+      if (ctx.readSubagent) {
+        try {
+          return ok(ctx.readSubagent(asChildSessionId(p.id)) || '(the sub-agent returned nothing)');
+        } catch { /* fall through to the expired-handle message */ }
+      }
+      return ok(`Error: no background delegation ${p.id}. It may have expired.`);
     },
   }));
 

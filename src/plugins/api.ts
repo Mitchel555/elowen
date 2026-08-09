@@ -546,6 +546,13 @@ export interface PluginContext {
    *  conversation's or another account's children are not merely hidden but unaddressable. Empty outside
    *  a prompt turn, or when nothing is wired. */
   subagentRuns(limit?: number): DelegatedChildSummary[];
+  /** Translate a delegation JOB id (`dlg-…`, the handle Delegate returns) into the child SESSION id the
+   *  durable calls above take. The delegating plugin holds the job→session map only in memory, so a
+   *  follow-up by job id stops resolving after a restart; the session id is a pure function of the job id
+   *  (the host owns that shape), so this rebuilds it without the plugin hard-coding the prefix. Pure
+   *  string derivation — it does NOT assert the session exists; {@link readSubagent}/{@link continueSubagent}
+   *  still apply the ownership guard, exactly as when the caller passes a session id straight. */
+  subagentSessionForJob(jobId: string): string;
   /** Read the final stored assistant text of a sub-agent listed by {@link subagentRuns}. The host anchors
    *  the lookup to the current turn's session; the plugin supplies only the child id and cannot widen the
    *  parent scope. Throws for unknown/foreign children, invalid delegated scope, or no final text yet. */

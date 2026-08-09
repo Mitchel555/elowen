@@ -11,6 +11,7 @@ import type { PluginManifest } from './manifest.js';
 import { assertPathAllowed, allowedRoots, defaultCwd, isAllAccess, currentAccess } from './pathGuard.js';
 import { currentIdentity, currentElicitor, currentCardEmitter, currentSubagentEmitter, currentSubagentCompletionEmitter, currentWorkflowEmitter, currentWorkflowCompletionEmitter, currentTurnModel, currentWorkDir, currentSessionId } from './policyContext.js';
 import { processRegistry } from '../brain/processRegistry.js';
+import { subagentSessionId } from '../brain/sessionId.js';
 import type { AskAnswer } from '../brain/events.js';
 import { DEFAULT_BRAIN_LIMITS } from '../store/configStore.js';
 import type { WorkflowExpansionRpc } from '../subagent/hostRpc.js';
@@ -352,6 +353,11 @@ export class PluginRegistry {
         const parentSessionId = currentSessionId();
         return parentSessionId && delegatedChildren ? delegatedChildren.runs(parentSessionId, limit) : [];
       },
+      // The plugin mints the channel id as `sub-<jobId>`; the router keys the session as
+      // subagentSessionId(channelId). Rebuild that here so the single source of the prefix stays in
+      // sessionId.ts, never a literal in the plugin. No scope check: it is a pure id derivation, and the
+      // ownership guard lives in readSubagent/continueSubagent/stopSubagent where the id is actually used.
+      subagentSessionForJob: (jobId) => subagentSessionId(`sub-${jobId}`),
       readSubagent: (sessionId) => {
         const parentSessionId = currentSessionId();
         if (!parentSessionId || !delegatedChildren) {
