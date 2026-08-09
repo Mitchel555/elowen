@@ -34,9 +34,12 @@ const JOB_WAIT_TIMEOUT_MS = 5 * 60_000;
 // stream, which a working child feeds constantly (tool starts, step boundaries). Deliberately far above
 // the provider retry/backoff cycles the agent runtime handles by itself, so a slow answer is never
 // mistaken for a wedged one; a stalled verdict is recoverable through DelegateContinue.
-// Overridable so the watchdog can be exercised end to end without a fifteen-minute test, and so an
+// Overridable so the watchdog can be exercised end to end without a thirty-minute test, and so an
 // operator with a pathologically slow provider can raise it without a rebuild. Not a user-facing knob.
-const TURN_STALL_MS = Number(process.env.ELOWEN_SUBAGENT_TURN_STALL_MS) || 15 * 60_000;
+// 30 min: a deep read-only analysis can legitimately think for a long stretch between visible events
+// (one long provider generation over a big context emits no tool starts), and a stalled verdict is only
+// a safety net for a genuinely wedged child — better to wait than to kill live work.
+const TURN_STALL_MS = Number(process.env.ELOWEN_SUBAGENT_TURN_STALL_MS) || 30 * 60_000;
 const STALL_CHECK_MS = Math.min(30_000, Math.max(50, Math.floor(TURN_STALL_MS / 4)));
 
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
