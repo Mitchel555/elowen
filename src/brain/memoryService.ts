@@ -63,6 +63,8 @@ const DEFAULT_SIMILAR_LIMIT = 5;
 export interface RetrieveOpts {
   maxCount?: number;
   charBudget?: number;
+  /** Strict UTF-8 budget for callers that add the results to a byte-bounded prompt frame. */
+  byteBudget?: number;
   /** Explicit turn scope. This takes precedence over AsyncLocalStorage for detached recall work. */
   scope?: MemoryRecallScope;
 }
@@ -239,6 +241,7 @@ export class MemoryService {
     const tuned = this.recallDefaults?.();
     const maxCount = opts.maxCount ?? tuned?.count ?? DEFAULT_MAX_COUNT;
     const charBudget = opts.charBudget ?? tuned?.chars ?? DEFAULT_CHAR_BUDGET;
+    const byteBudget = opts.byteBudget;
     const scope = this.recallScope(userId, opts.scope);
     const cfg = this.activeConfig();
     const provider = cfg ? (cfg.providerId ?? cfg.baseUrl ?? null) : null;
@@ -251,14 +254,14 @@ export class MemoryService {
     if (cfg) {
       try {
         const queryVec = await this.embeddings.embed(cfg, query);
-        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, provider, model, scope);
+        const semantic = this.retrieveVector(userId, query, queryVec, maxCount, charBudget, byteBudget, provider, model, scope);
         // An embed that succeeds but clears nothing is not "no memory is relevant" — it is usually a
         // query too thin to score, like "fix it", which cannot reach the floor against any body no
         // matter how on-topic. Measured: that query peaks at 0.12 cosine and admits 0 of 53 memories.
         // The manual search box has fallen through to keyword for exactly this reason (searchSemantic);
         // recall silently returned nothing instead, which is where the "it forgot again" reports come from.
         if (semantic.memories.length > 0) return semantic;
-        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, true);
+        const keyword = this.retrieveFallback(userId, query, maxCount, charBudget, byteBudget, provider, model, scope, true);
         // Keep the cosine breakdown from the pass that found nothing. Otherwise the debug panel reports
         // a bare "fallback" and cannot answer the only question worth asking here — how close the best
         // candidate actually came to the floor.
@@ -269,7 +272,7 @@ export class MemoryService {
       }
     }
 
-    return this.retrieveFallback(userId, query, maxCount, charBudget, provider, model, scope, false);
+    return this.retrieveFallback(userId, query, maxCount, charBudget, byteBudget, provider, model, scope, false);
   }
 
   /** Record that these memories were actually DELIVERED to the model.
@@ -354,6 +357,7 @@ export class MemoryService {
     queryVec: Float32Array,
     maxCount: number,
     charBudget: number,
+    byteBudget: number | undefined,
     provider: string | null,
     model: string | null,
     scope: MemoryRecallScope | undefined,
@@ -377,7 +381,7 @@ export class MemoryService {
     // not ride recency/importance into the prompt. `ranked` stays whole so the debug UI still explains
     // every candidate (including the ones floored out).
     const eligible = ranked.filter((c) => c.semantic >= this.minSemantic());
-    const picked = this.pack(eligible, maxCount, charBudget, true);
+    const picked = this.pack(eligible, maxCount, charBudget, byteBudget, true);
     return {
       memories: picked.map((c) => c.memory),
       debug: { query, fallback: false, provider, model, candidates: ranked.length, scores: toScores(ranked, picked) },
@@ -391,6 +395,7 @@ export class MemoryService {
     query: string,
     maxCount: number,
     charBudget: number,
+    byteBudget: number | undefined,
     provider: string | null,
     model: string | null,
     scope: MemoryRecallScope | undefined,
@@ -422,7 +427,7 @@ export class MemoryService {
       })
       .sort((a, b) => b.score - a.score);
 
-    const picked = this.pack(ranked, maxCount, charBudget, false);
+    const picked = this.pack(ranked, maxCount, charBudget, byteBudget, false);
     return {
       memories: picked.map((c) => c.memory),
       debug: { query, fallback: true, provider, model, candidates: ranked.length, scores: toScores(ranked, picked) },
@@ -430,23 +435,33 @@ export class MemoryService {
   }
 
   /** Greedily take from the pre-sorted candidates: at most maxCount, staying within charBudget (the
-   *  top candidate is always admitted even if it alone exceeds the budget). When `dedupe`, a candidate
+   *  top candidate is always admitted even if it alone exceeds the character budget). A byte-bounded
+   *  caller instead receives only candidates that fit its strict UTF-8 budget. When `dedupe`, a candidate
    *  whose vector is near-identical (cosine ≥ DEDUPE_COSINE) to an already-picked one is skipped;
    *  otherwise dedupe falls back to exact-body equality. */
-  private pack(ranked: Candidate[], maxCount: number, charBudget: number, dedupe: boolean): Candidate[] {
+  private pack(
+    ranked: Candidate[], maxCount: number, charBudget: number, byteBudget: number | undefined, dedupe: boolean,
+  ): Candidate[] {
     const picked: Candidate[] = [];
     const paraphrase = this.threshold('paraphrase', DEDUPE_COSINE);
     let chars = 0;
+    let bytes = 0;
     for (const cand of ranked) {
       if (picked.length >= maxCount) break;
       const isDup = dedupe && cand.vector
         ? picked.some((p) => p.vector && cosine(p.vector, cand.vector!) >= paraphrase)
         : picked.some((p) => p.memory.body === cand.memory.body);
       if (isDup) continue;
-      const len = cand.memory.body.length;
-      if (picked.length > 0 && chars + len > charBudget) continue;
+      const charLength = cand.memory.body.length;
+      const byteLength = Buffer.byteLength(cand.memory.body);
+      if (byteBudget === undefined) {
+        if (picked.length > 0 && chars + charLength > charBudget) continue;
+      } else if (bytes + byteLength > byteBudget) {
+        continue;
+      }
       picked.push(cand);
-      chars += len;
+      chars += charLength;
+      bytes += byteLength;
     }
     return picked;
   }

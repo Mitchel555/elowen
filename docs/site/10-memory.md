@@ -71,11 +71,11 @@ This live recall runs on a budget set in Settings → Elowen AI → Limits, unde
 
 | Setting | Default | Range |
 |---------|---------|-------|
-| Passes | 3 | 0–10 |
-| Memories added | 8 | 0–20 |
-| Tokens | ~1500 (6000 chars) | ~750–5000 |
+| Searches per turn | 10 | 0–20 |
+| Memories per batch | 2 | 0–10 |
+| Turn byte budget | 20,000 UTF-8 bytes | 10,000–40,000 UTF-8 bytes |
 
-Set passes to 0 to disable mid-turn recall entirely.
+Set searches per turn to 0 to disable mid-turn recall entirely. The search cap prevents unbounded embedding requests in a changing tool loop; the byte budget limits only context actually injected into the turn.
 
 Live recall is **non-blocking**: the agent starts an embedding search and returns immediately, so the model is never stalled on a network call. The result arrives one model call later and is injected as a frozen block after the message that triggered the search. The memories are rendered as `<memory>` elements with id, kind, importance and age.
 

@@ -50,7 +50,7 @@ async function buildWithLiveRecall(retrieve: (q: string) => Promise<{ id: number
     cwd: process.cwd(), systemPrompt: 'sp', appendSystemPrompt: [], skills: [], tools: [],
     autoCompact: false, autoCompactAtPct: 80,
     liveRecall: {
-      budget: () => ({ passes: 3, count: 8, chars: 6000 }),
+      budget: () => ({ passes: 10, count: 8, bytes: 6000 }),
       enabled: () => true,
       retrieve: async (q: string) => retrieve(q),
     },
@@ -105,7 +105,7 @@ describe('live recall wiring — a real session reaches the recall pass', () => 
     const seenProjects: (number | null)[] = [];
     const pi = { on: (event: string, fn: unknown) => { if (event === 'context') handler = fn as CapturedHandlers['context']; } };
     installLiveRecall(pi as never, {
-      budget: () => ({ passes: 2, count: 2, chars: 1000 }),
+      budget: () => ({ passes: 10, count: 2, bytes: 1000 }),
       enabled: () => true,
       retrieve: async () => {
         seenProjects.push(currentMemoryRecallScope()?.projectId ?? null);

@@ -175,6 +175,17 @@ describe('MemoryService.retrieve', () => {
     expect(res.memories.map((m) => m.body)).toEqual(['0123456789']);
   });
 
+  it('uses a strict UTF-8 byte budget when the caller needs a byte-bounded prompt frame', async () => {
+    const table = { query: [1, 0, 0], 'éééééééééé': [1, 0, 0], small: [0.99, 0.14, 0] };
+    addWithVec(store, 1, 'éééééééééé', table, 5); // 20 UTF-8 bytes, too large for this frame.
+    addWithVec(store, 1, 'small', table, 1);
+    const svc = makeService(store, table);
+
+    const res = await svc.retrieve(1, 'query', { byteBudget: 15 });
+
+    expect(res.memories.map((m) => m.body)).toEqual(['small']);
+  });
+
   // Retrieval used to mark its own result, which counted passes rather than deliveries: live recall
   // issues several passes a turn and drops what it already injected, so an overlapping hit was counted
   // again without ever reaching the model a second time. Marking now belongs to whoever delivers.

@@ -287,12 +287,12 @@ export class LiveSessionSpawner {
       // the operator's limits take effect on a conversation that is already running.
       ...(memService && liveRecallAllowed(sessionId, ownerUserId) ? {
         liveRecall: {
-          budget: () => this.d.liveRecallBudget?.() ?? { passes: 0, count: 0, chars: 0 },
+          budget: () => this.d.liveRecallBudget?.() ?? { passes: 0, count: 0, bytes: 0 },
           enabled: () => {
             const userId = recallUserId();
             return userId !== null && this.d.userSettings?.(userId)?.autoLiveRecall !== false;
           },
-          retrieve: async (query: string, maxCount: number, charBudget: number) => {
+          retrieve: async (query: string, maxCount: number, byteBudget: number) => {
             const userId = recallUserId();
             if (userId === null) return []; // an unlinked sender in a shared room recalls nothing
             // The retrieval continues after the context hook returns, so its AsyncLocalStorage scope is not
@@ -306,7 +306,7 @@ export class LiveSessionSpawner {
                 ? globalMemoryRecallScope(userId, memCats)
                 : memoryRecallScope(userId, recallCwd, memCats, memProjects))
               : { projectId: null, categoryIds: new Set<number>() };
-            const found = await memService.retrieve(userId, query, { maxCount, charBudget, scope });
+            const found = await memService.retrieve(userId, query, { maxCount, byteBudget, scope });
             return found.memories.map((m) => ({
               id: m.id, body: m.body, kind: m.kind, importance: m.importance, updatedAt: m.updated_at,
             }));

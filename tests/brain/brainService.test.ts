@@ -140,11 +140,11 @@ describe('BrainService', () => {
 
   it('forwards the live-recall budget from its deps down into the spawned session', async () => {
     // The wiring this asserts was missing in production: BrainService built the spawner without
-    // `liveRecallBudget`, the spawner fell back to `{passes: 0, ...}`, and mid-turn recall was dead in
-    // every session while every existing test stayed green — because they all drove the session factory
-    // directly and never crossed this boundary. Assert the value that actually reaches the session.
+    // `liveRecallBudget`, so mid-turn recall was dead in every session while every existing test stayed
+    // green — because they all drove the session factory directly and never crossed this boundary. Assert
+    // the value that actually reaches the session.
     const d = fakeDeps();
-    const budget = { passes: 3, count: 8, chars: 6000 };
+    const budget = { passes: 10, count: 2, bytes: 6000 };
     // Spy on the loader options, because that is the last place the spec is visible before it becomes a
     // pi extension — `createSession` receives pi's own options, not ours.
     const seen: ({ budget: () => typeof budget } | undefined)[] = [];

@@ -225,12 +225,12 @@ export const DEFAULT_BRAIN_LIMITS: BrainLimits = {
   // ~5000 tokens, the budget the hits SHARE — at memoryRecallCount that is ~2000 chars each, enough for
   // a memory carrying a decision and its reasoning to arrive whole instead of cut mid-sentence.
   memoryRecallChars: 20_000,
-  // Recall during the work itself. A long turn changes subject repeatedly (open a file, hit an error,
-  // move to a different service) and each change is a chance to surface something already learned, so
-  // this sits at the ceiling; the count and char budgets bound what a pass may actually spend.
+  // Recall during work injects small batches, but a long turn can move through several genuinely distinct
+  // topics. The search ceiling prevents a no-result tool loop from issuing unbounded embeddings. 20 kB
+  // covers the observed p90 of whole-turn injections (~19.8k characters) while capping the suffix at ~5k tokens.
   memoryLiveRecallPasses: 10,
-  memoryLiveRecallCount: 10,
-  memoryLiveRecallChars: 8000,
+  memoryLiveRecallCount: 2,
+  memoryLiveRecallBytes: 20_000,
   // A goal worth starting autonomously routinely needs tens of turns. Budget and ceiling are set equal:
   // the ceiling exists to stop a runaway goal, not to cut short one that is still making progress.
   goalTurnBudget: 50,
@@ -275,14 +275,11 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // Ceiling doubled at the instance owner's request: ~10k tokens of recalled memory. The floor still
   // follows the default, so the extra range is headroom above it rather than a shifted band.
   memoryRecallChars: band('memoryRecallChars', 40_000),
-  // Exempt from the ±50% rule because 0 has to stay reachable: an operator who does not want the agent
-  // interrupted mid-turn must be able to switch the passes off outright, which a band around the default
-  // would forbid. The count/char ceilings mirror the turn-start ones so raising one does not strand the other.
-  // The pass ceiling is doubled at the instance owner's request — the default used to sit ON it, which left
-  // the knob with headroom in one direction only.
+  // Zero searches is the explicit live-recall kill switch. A cap remains necessary when repeated changing
+  // work produces no injectable memory; without it, an agent tool loop could issue embeddings forever.
   memoryLiveRecallPasses: [0, 20],
-  memoryLiveRecallCount: [0, 20],
-  memoryLiveRecallChars: band('memoryLiveRecallChars', 40_000),
+  memoryLiveRecallCount: [0, 10],
+  memoryLiveRecallBytes: band('memoryLiveRecallBytes', 40_000),
   // Raised past the ±50% rule at the owner's request to ~20k tokens of ceiling. It is bounded by
   // MAX_PROMPT_TOTAL_CHARS (brain/delegatedScope.ts), the budget packDelegatedPromptAppend fair-shares
   // with the child's role prompt — that budget was raised to 120 000 alongside this, so the value here
@@ -301,16 +298,37 @@ const BRAIN_LIMIT_BOUNDS: Record<keyof BrainLimits, [min: number, max: number]> 
   // the default is the whole useful range — a far larger one would just re-send settled turns every ask.
   askHistoryTurns: band('askHistoryTurns'),
 };
+/** Limits written before live recall became batch-based. Kept at this boundary so an old settings row
+ *  cannot silently turn its former whole-turn count into an oversized per-batch count. */
+interface LegacyLiveRecallLimits {
+  memoryLiveRecallChars?: unknown;
+}
+
+function clampBrainLimit(key: keyof BrainLimits, value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  const [min, max] = BRAIN_LIMIT_BOUNDS[key];
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
 /** Merge a (possibly partial, possibly malformed) limits patch onto `fallback`, clamping each field to
  *  its bound and rounding to a whole number; a missing/invalid field keeps the fallback value. */
-function clampBrainLimits(next: Partial<BrainLimits> | undefined, fallback: BrainLimits): BrainLimits {
+function clampBrainLimits(next: unknown, fallback: BrainLimits): BrainLimits {
+  const patch = next && typeof next === 'object' && !Array.isArray(next)
+    ? next as Partial<BrainLimits> & LegacyLiveRecallLimits
+    : {};
   const out = { ...fallback };
   for (const key of Object.keys(BRAIN_LIMIT_BOUNDS) as (keyof BrainLimits)[]) {
-    const v = next?.[key];
-    if (typeof v === 'number' && Number.isFinite(v)) {
-      const [min, max] = BRAIN_LIMIT_BOUNDS[key];
-      out[key] = Math.min(max, Math.max(min, Math.round(v)));
-    }
+    out[key] = clampBrainLimit(key, patch[key], out[key]);
+  }
+
+  if (Object.hasOwn(patch, 'memoryLiveRecallChars')) {
+    // The old count capped a whole turn. Reusing it as a batch size would multiply context growth on the
+    // very installations that had raised it, so retain only its explicit off state and otherwise reset it.
+    const legacyDisabled = patch.memoryLiveRecallPasses === 0 || patch.memoryLiveRecallCount === 0;
+    out.memoryLiveRecallCount = legacyDisabled ? 0 : DEFAULT_BRAIN_LIMITS.memoryLiveRecallCount;
+    out.memoryLiveRecallBytes = clampBrainLimit(
+      'memoryLiveRecallBytes', patch.memoryLiveRecallChars, out.memoryLiveRecallBytes,
+    );
   }
   return out;
 }

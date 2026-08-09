@@ -33,8 +33,8 @@ const flush = async (): Promise<void> => new Promise((resolve) => { setImmediate
 
 /** Captures the handler installLiveRecall registers, so a test can drive `context` calls directly. */
 function harness(opts: {
-  retrieve: (query: string, maxCount: number, charBudget: number) => Promise<LiveRecallMemory[]>;
-  passes?: number; count?: number; chars?: number; enabled?: () => boolean; now?: () => number;
+  retrieve: (query: string, maxCount: number, byteBudget: number) => Promise<LiveRecallMemory[]>;
+  passes?: number; count?: number; bytes?: number; enabled?: () => boolean; now?: () => number;
   onInjected?: (ids: number[]) => void;
 }): { fire: (messages: Msg[]) => Promise<Msg[]> } {
   let handler: Handler = async () => undefined;
@@ -43,7 +43,7 @@ function harness(opts: {
   } as unknown as ExtensionAPI;
 
   installLiveRecall(pi, {
-    budget: () => ({ passes: opts.passes ?? 3, count: opts.count ?? 8, chars: opts.chars ?? 6000 }),
+    budget: () => ({ passes: opts.passes ?? 10, count: opts.count ?? 8, bytes: opts.bytes ?? 6000 }),
     enabled: opts.enabled ?? (() => true),
     retrieve: opts.retrieve,
     ...(opts.onInjected ? { onInjected: opts.onInjected } : {}),
@@ -136,7 +136,7 @@ describe('live recall — memories arrive mid-turn', () => {
   });
 
   it('keeps the whole previous provider message stream as a byte prefix after the turn grows', async () => {
-    const { fire } = harness({ passes: 1, retrieve: async () => [mem(1, 'First fact')] });
+    const { fire } = harness({ retrieve: async () => [mem(1, 'First fact')] });
     const providerBytes = (messages: Msg[]): string => messages.map((message) => JSON.stringify(message)).join('\n') + '\n';
 
     const working: Msg[] = [
@@ -259,17 +259,108 @@ describe('live recall — memories arrive mid-turn', () => {
 });
 
 describe('live recall — budget and switches', () => {
-  it('stops searching once the pass budget is spent', async () => {
+  it('caps changing no-result searches before a tool loop can issue embeddings forever', async () => {
     let calls = 0;
-    const { fire } = harness({ passes: 2, retrieve: async () => { calls += 1; return []; } });
+    const { fire } = harness({
+      passes: 2,
+      retrieve: async () => { calls += 1; return []; },
+    });
 
-    for (let i = 0; i < 5; i += 1) {
-      await fire([
+    for (let step = 1; step <= 5; step += 1) {
+      const work: Msg[] = [
         { role: 'user', content: 'go' },
-        { role: 'toolResult', content: `distinct tool output number ${i} about a completely different subject each time` },
-      ]);
+        ...Array.from({ length: step }, (_, i) => ({
+          role: 'toolResult', content: `distinct no-result work step ${i + 1} with enough context`,
+        })),
+      ];
+      await fire(work);
+      await fire(work);
     }
+
     expect(calls).toBe(2);
+  });
+
+  it('caps each injected batch but keeps recall available across many work steps', async () => {
+    const requestedCounts: number[] = [];
+    let calls = 0;
+    const { fire } = harness({
+      count: 2,
+      bytes: 50_000,
+      retrieve: async (_query, maxCount) => {
+        calls += 1;
+        requestedCounts.push(maxCount);
+        return [
+          mem(calls * 10 + 1, `Batch ${calls} first fact`),
+          mem(calls * 10 + 2, `Batch ${calls} second fact`),
+          mem(calls * 10 + 3, `Batch ${calls} must stay out`),
+        ];
+      },
+    });
+
+    let out: Msg[] = [];
+    for (let step = 1; step <= 5; step += 1) {
+      const work: Msg[] = [
+        { role: 'user', content: 'go' },
+        ...Array.from({ length: step }, (_, i) => ({
+          role: 'toolResult', content: `distinct work step ${i + 1}: inspect service ${i + 1} in detail`,
+        })),
+      ];
+      await fire(work);
+      out = await fire(work);
+    }
+
+    expect(requestedCounts).toEqual([2, 2, 2, 2, 2]);
+    expect(calls).toBe(5);
+    const injected = providerText(out);
+    expect(injected).toContain('Batch 5 first fact');
+    expect(injected).toContain('Batch 5 second fact');
+    expect(injected).not.toContain('Batch 5 must stay out');
+    expect(out.filter((message) => message.role === 'user' && message.isMeta === true)).toHaveLength(5);
+  });
+
+  it('counts injected context in UTF-8 bytes, not JavaScript characters', async () => {
+    const { fire } = harness({
+      count: 2,
+      bytes: 500,
+      retrieve: async () => [
+        mem(1, `First ${'é'.repeat(80)}`),
+        mem(2, `Second ${'é'.repeat(80)}`),
+      ],
+    });
+    const work: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'enough detail about the current work' }];
+
+    await fire(work);
+    const out = await fire(work);
+    const injected = providerText(out);
+    expect(injected).toContain('First');
+    expect(injected).not.toContain('Second');
+  });
+
+  it('stops injecting once the turn-wide byte budget is full', async () => {
+    let calls = 0;
+    const { fire } = harness({
+      count: 1,
+      bytes: 410,
+      retrieve: async () => {
+        calls += 1;
+        return [mem(calls, `Turn budget fact ${calls}`)];
+      },
+    });
+
+    let out: Msg[] = [];
+    for (let step = 1; step <= 3; step += 1) {
+      const work: Msg[] = [
+        { role: 'user', content: 'go' },
+        ...Array.from({ length: step }, (_, i) => ({ role: 'toolResult', content: `new detail ${i + 1} for budget test` })),
+      ];
+      await fire(work);
+      out = await fire(work);
+    }
+
+    expect(calls).toBe(3);
+    expect(providerText(out)).toContain('Turn budget fact 1');
+    expect(providerText(out)).toContain('Turn budget fact 2');
+    expect(providerText(out)).not.toContain('Turn budget fact 3');
   });
 
   it('adds nothing when the owner has the feature switched off', async () => {
@@ -278,28 +369,10 @@ describe('live recall — budget and switches', () => {
     expect(await fire(base)).toEqual(base);
   });
 
-  it('adds nothing when the operator set the pass budget to zero', async () => {
-    const { fire } = harness({ passes: 0, retrieve: async () => [mem(1, 'Never seen')] });
+  it('adds nothing when the operator sets the batch size to zero', async () => {
+    const { fire } = harness({ count: 0, retrieve: async () => [mem(1, 'Never seen')] });
     const base: Msg[] = [{ role: 'user', content: 'go' }, { role: 'toolResult', content: 'plenty of tool output here' }];
     expect(await fire(base)).toEqual(base);
-  });
-
-  it('resets its budget when a new user message starts a fresh turn', async () => {
-    let calls = 0;
-    const { fire } = harness({ passes: 1, retrieve: async () => { calls += 1; return []; } });
-
-    await fire([{ role: 'user', content: 'first' }, { role: 'toolResult', content: 'output about the first subject entirely' }]);
-    expect(calls).toBe(1);
-
-    // Same session, second turn: the budget must be available again, otherwise one long conversation
-    // would permanently exhaust recall after its first turn.
-    await fire([
-      { role: 'user', content: 'first' },
-      { role: 'toolResult', content: 'output about the first subject entirely' },
-      { role: 'user', content: 'second' },
-      { role: 'toolResult', content: 'output about a totally separate second subject' },
-    ]);
-    expect(calls).toBe(2);
   });
 
   it('keeps already injected memories when the user steers mid-turn, and searches with the new instruction', async () => {
@@ -498,6 +571,51 @@ describe('liveRecallQuery', () => {
     expect(q).not.toContain('oprav to');
     expect(q).toContain('migrations/007.sql');
     expect(q).toContain('checking the migration');
+  });
+
+  it('recalls only the memory relevant to current work after stripping runtime context frames', async () => {
+    const queries: string[] = [];
+    const { fire } = harness({
+      retrieve: async (query) => {
+        queries.push(query);
+        if (query.includes('release.sh')) return [mem(1, 'Irrelevant deployment memory')];
+        if (query.includes('invoice reconciliation')) return [mem(2, 'Relevant invoice-reconciliation memory')];
+        return [];
+      },
+    });
+    const before: Msg[] = [
+      { role: 'user', content: 'start the investigation' },
+      { role: 'assistant', content: 'checking the current service state' },
+      { role: 'toolResult', content: 'the initial service check completed without a useful match' },
+    ];
+    await fire(before);
+    await fire(before);
+
+    const steered: Msg[] = [
+      ...before,
+      {
+        role: 'user',
+        content: '<user_memories>\nrelease.sh deploy instructions\n</user_memories>\n'
+          + '<permissions>\nrun release.sh\n</permissions>\n'
+          + '<system-reminder>\nresume the deployment\n</system-reminder>\n'
+          + '<plugin_context>\nrelease.sh plugin instruction\n</plugin_context>\n'
+          + 'Switch to invoice reconciliation for the failed payment import.'
+      },
+      { role: 'toolResult', content: 'invoice reconciliation rejected the payment import at ledger validation' },
+    ];
+    await fire(steered);
+    const out = await fire(steered);
+
+    const query = queries.at(-1) ?? '';
+    expect(query).toContain('invoice reconciliation');
+    expect(query).not.toContain('release.sh');
+    expect(query).not.toContain('<user_memories>');
+    expect(query).not.toContain('<permissions>');
+    expect(query).not.toContain('<system-reminder>');
+    expect(query).not.toContain('<plugin_context>');
+    const injected = providerText(out);
+    expect(injected).toContain('Relevant invoice-reconciliation memory');
+    expect(injected).not.toContain('Irrelevant deployment memory');
   });
 });
 

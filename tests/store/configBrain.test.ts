@@ -49,7 +49,7 @@ describe('ConfigStore brain limits', () => {
       toolOutputMaxLines: 100, toolOutputMaxChars: 41000, toolResultInlineBytes: 60000,
       toolResultGroupBudgetBytes: 200000, compactionFailureLimit: 3, elicitationTimeoutMs: 21600000,
       memoryRecallCount: 10, memoryRecallChars: 20000,
-      memoryLiveRecallPasses: 10, memoryLiveRecallCount: 10, memoryLiveRecallChars: 8000,
+      memoryLiveRecallPasses: 10, memoryLiveRecallCount: 2, memoryLiveRecallBytes: 20000,
       goalTurnBudget: 50, goalMaxTurns: 50, channelSessionCap: 32,
       delegateContextChars: 40000, askHistoryTurns: 30,
     });
@@ -82,26 +82,47 @@ describe('ConfigStore brain limits', () => {
     expect(cs.get().brain.limits.toolOutputMaxLines).toBe(50);    // 100 − 50%
   });
 
-  // The three recall ceilings were doubled at the owner's request, and a ceiling the clamp does not
-  // actually honour is worse than none: the slider offers the value, the save reports success, and the
-  // daemon quietly keeps the old one. Each is asserted AT its new ceiling and beyond it.
-  it('honours the raised recall ceilings', () => {
+  it('honours live-recall batch and byte ceilings', () => {
     const cs = new ConfigStore(openDb(':memory:'));
     cs.update({
-      brain: { limits: { memoryRecallChars: 40_000, memoryLiveRecallChars: 40_000, memoryLiveRecallPasses: 20 } },
+      brain: { limits: { memoryRecallChars: 40_000, memoryLiveRecallBytes: 40_000, memoryLiveRecallCount: 10 } },
     });
     expect(cs.get().brain.limits.memoryRecallChars).toBe(40_000);
-    expect(cs.get().brain.limits.memoryLiveRecallChars).toBe(40_000);
-    expect(cs.get().brain.limits.memoryLiveRecallPasses).toBe(20);
+    expect(cs.get().brain.limits.memoryLiveRecallBytes).toBe(40_000);
+    expect(cs.get().brain.limits.memoryLiveRecallCount).toBe(10);
     cs.update({
-      brain: { limits: { memoryRecallChars: 999_999, memoryLiveRecallChars: 999_999, memoryLiveRecallPasses: 999 } },
+      brain: { limits: { memoryRecallChars: 999_999, memoryLiveRecallBytes: 999_999, memoryLiveRecallCount: 999 } },
     });
     expect(cs.get().brain.limits.memoryRecallChars).toBe(40_000);
-    expect(cs.get().brain.limits.memoryLiveRecallChars).toBe(40_000);
-    expect(cs.get().brain.limits.memoryLiveRecallPasses).toBe(20);
-    // Switching the passes off outright must stay reachable — the floor is not collateral of the raise.
-    cs.update({ brain: { limits: { memoryLiveRecallPasses: 0 } } });
-    expect(cs.get().brain.limits.memoryLiveRecallPasses).toBe(0);
+    expect(cs.get().brain.limits.memoryLiveRecallBytes).toBe(40_000);
+    expect(cs.get().brain.limits.memoryLiveRecallCount).toBe(10);
+    expect(cs.get().brain.limits.memoryLiveRecallCount).not.toBe(0);
+  });
+
+  it('normalizes legacy whole-turn recall settings into a safe batch configuration', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify({
+      brain: { limits: { memoryLiveRecallPasses: 10, memoryLiveRecallCount: 10, memoryLiveRecallChars: 20_000 } },
+    }));
+    const cs = new ConfigStore(db);
+
+    expect(cs.get().brain.limits.memoryLiveRecallPasses).toBe(10);
+    expect(cs.get().brain.limits.memoryLiveRecallCount).toBe(2);
+    expect(cs.get().brain.limits.memoryLiveRecallBytes).toBe(20_000);
+
+    cs.update({ brain: { limits: { memoryLiveRecallCount: 4 } } });
+    expect(cs.get().brain.limits.memoryLiveRecallCount).toBe(4);
+    const stored = db.prepare('SELECT data FROM settings WHERE id = 1').get() as { data: string };
+    expect(stored.data).toContain('memoryLiveRecallPasses');
+    expect(stored.data).not.toContain('memoryLiveRecallChars');
+  });
+
+  it('keeps an explicitly disabled legacy recall setting disabled', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify({
+      brain: { limits: { memoryLiveRecallPasses: 0, memoryLiveRecallCount: 10, memoryLiveRecallChars: 20_000 } },
+    }));
+    expect(new ConfigStore(db).get().brain.limits.memoryLiveRecallCount).toBe(0);
   });
 
   // The aggregate tool-result budget bands at ±50%, and its floor is the load-bearing part: 100 000 stays

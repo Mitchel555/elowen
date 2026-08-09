@@ -133,15 +133,6 @@ const lastUserText = (messages) => {
   return '';
 };
 const workflowIdIn = (text) => (/wf-[0-9a-f-]{36}/.exec(text) ?? [''])[0];
-/** The tool results of THIS turn only, oldest first — everything after the newest user message. The model is
- *  handed the WHOLE conversation, so counting over all of it would mix in every earlier turn's tool calls and
- *  make a parent script think it was further along than it is. */
-const turnToolResults = (messages) => {
-  let start = 0;
-  for (let i = messages.length - 1; i >= 0; i -= 1) if (messages[i]?.role === 'user') { start = i; break; }
-  return messages.slice(start).filter((m) => m?.role === 'tool').map(contentText);
-};
-
 /** When the scripted parent issued DelegateStop. Module-level because the parent script and the request
  *  handler live in different scopes, and scenario F has to pair the two moments to prove causation. */
 const stopClock = { issuedAt: undefined };
@@ -204,15 +195,15 @@ const PARENT_MODES = {
         nodesFile: nodesFile([{ id: BG_NODE, task: `Run the standalone check. Task marker: ${nodeTask(BG_NODE)}.` }]),
       });
   },
-  // F: delegate a child that never answers, find its session id, and stop it. Every step reads the tool
-  // results already in the turn, so the chain cannot skip a step or fire DelegateStop before it holds a real
+  // F: delegate a child that never answers, find its session id, and stop it. Each step reads what the
+  // transcript already proves, so the chain cannot skip a step or fire DelegateStop before it holds a real
   // session id.
-  // Driven entirely off the WHOLE conversation rather than off this turn's tool window, because a stopped
+  // Progress is read from the WHOLE conversation rather than from this turn's tool window, because a stopped
   // child settles immediately and the daemon then wakes the parent with its result — as a fresh turn, or
-  // steered into the chain still running. A steer arrives as a USER message, so it resets what
-  // `turnToolResults` considers "this turn" and makes a mid-chain delivery indistinguishable from a fresh
-  // one. Reading progress from the transcript makes the script indifferent to which of the two happened,
-  // which is the only way this scenario is not a race.
+  // steered into the chain still running. A steer arrives as a USER message, so anything that treats "since
+  // the last user message" as this turn is reset by it, making a mid-chain delivery indistinguishable from
+  // the fresh one. Reading the transcript makes the script indifferent to which happened, which is the only
+  // way this scenario is not a race.
   stop: ({ say, callTool, awaitingTool, lastTool, allText }) => {
     const jobId = (/Started background delegation (dlg-[0-9a-f-]+)/.exec(allText) ?? [])[1];
     const sessionId = (/Session: (brain-ch-subagent-\S+)/.exec(allText) ?? [])[1];

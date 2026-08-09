@@ -40,6 +40,8 @@ export const brainLimitsPatchSchema = z.object({
   memoryRecallChars: z.number().optional(),
   memoryLiveRecallPasses: z.number().optional(),
   memoryLiveRecallCount: z.number().optional(),
+  memoryLiveRecallBytes: z.number().optional(),
+  // Accepted only to migrate open legacy clients; ConfigStore replaces it with memoryLiveRecallBytes.
   memoryLiveRecallChars: z.number().optional(),
   goalTurnBudget: z.number().optional(),
   goalMaxTurns: z.number().optional(),

@@ -78,7 +78,21 @@ describe('PUT /config validates the patch at the trust boundary', () => {
 describe('patch schemas accept exactly the store defaults\u2019 keys', () => {
   it('brainLimitsPatchSchema matches ConfigStore\u2019s brain.limits shape', () => {
     const cs = new ConfigStore(openDb(':memory:'));
-    expect(Object.keys(brainLimitsPatchSchema.shape).sort()).toEqual(Object.keys(cs.get().brain.limits).sort());
+    expect(Object.keys(brainLimitsPatchSchema.shape).filter((key) => key !== 'memoryLiveRecallChars').sort())
+      .toEqual(Object.keys(cs.get().brain.limits).sort());
+  });
+
+  it('migrates a legacy live-recall patch from an already-open client', async () => {
+    const { app, token } = await makeTestApp({});
+    const res = await app.request('/config', put(token, {
+      brain: { limits: { memoryLiveRecallPasses: 10, memoryLiveRecallCount: 10, memoryLiveRecallChars: 20_000 } },
+    }));
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as { brain: { limits: Record<string, number> } };
+    expect(body.brain.limits.memoryLiveRecallCount).toBe(2);
+    expect(body.brain.limits.memoryLiveRecallBytes).toBe(20_000);
+    expect(body.brain.limits).not.toHaveProperty('memoryLiveRecallChars');
   });
 
   it('runtimeLimitsPatchSchema matches ConfigStore\u2019s runtime.limits shape', () => {

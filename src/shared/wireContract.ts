@@ -261,14 +261,12 @@ export interface BrainLimits {
   elicitationTimeoutMs: number;
   memoryRecallCount: number;
   memoryRecallChars: number;
-  /** How many times a SINGLE turn may pause to recall again while the agent is still working. Recall at
-   *  turn start is driven by the user's message alone, which says little once the work moves on to files
-   *  and errors; these extra passes search from what the turn has actually done. 0 disables them. */
+  /** Maximum background memory searches in one turn. 0 disables recall while working. */
   memoryLiveRecallPasses: number;
-  /** Ceiling on memories those extra passes may add across one turn, over and above the turn-start block. */
+  /** Maximum memories one mid-turn retrieval may inject. */
   memoryLiveRecallCount: number;
-  /** Character budget those extra passes share across one turn. */
-  memoryLiveRecallChars: number;
+  /** Byte budget all mid-turn recall injections share across one turn. */
+  memoryLiveRecallBytes: number;
   goalTurnBudget: number;
   goalMaxTurns: number;
   channelSessionCap: number;
