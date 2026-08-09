@@ -158,6 +158,66 @@ describe('BrainStore', () => {
     expect(row()).toEqual({ lifecycle: 'done', owner_boot_id: 'boot-A' });
   });
 
+  it('claims restart orphans for the new boot but leaves its own live work and a leased concurrent recovery alone', () => {
+    // Boot A ran three children, then the daemon restarted as boot B.
+    store.setDelegationBootId('boot-A');
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    for (const c of ['c1', 'c2', 'c3']) store.createSession({ id: c, userId: 1, model: 'm', parentSessionId: 'root' });
+    const running = (tc: string, child: string) => store.upsertSubagentRun('root', { id: tc, sessionId: child, status: 'running', task: 't', tools: 0, seconds: 0 });
+    running('orphan', 'c1'); // owned by boot-A
+    // A row already `recovering` under a DIFFERENT boot with a LIVE lease = a concurrent recovery; leave it.
+    running('leased', 'c2');
+    db.prepare("UPDATE brain_subagent_runs SET lifecycle='recovering', owner_boot_id='boot-C', lease_until=? WHERE tool_call_id='leased'").run(Date.now() + 60_000);
+    // A row `recovering` under another boot with an EXPIRED lease = that recovery died; reclaim it.
+    running('stale', 'c3');
+    db.prepare("UPDATE brain_subagent_runs SET lifecycle='recovering', owner_boot_id='boot-C', lease_until=? WHERE tool_call_id='stale'").run(Date.now() - 1);
+
+    store.setDelegationBootId('boot-B');
+    // Also start a genuinely live child under boot-B: it must NOT be claimed as an orphan.
+    store.createSession({ id: 'c4', userId: 1, model: 'm', parentSessionId: 'root' });
+    running('live-b', 'c4');
+
+    const claimed = store.claimRecoverableRuns(30_000).map((r) => r.toolCallId).sort();
+    expect(claimed).toEqual(['orphan', 'stale']); // boot-A orphan + expired-lease recovering
+    const lc = (tc: string) => (db.prepare('SELECT lifecycle, owner_boot_id, attempt FROM brain_subagent_runs WHERE tool_call_id = ?').get(tc) as { lifecycle: string; owner_boot_id: string; attempt: number });
+    expect(lc('orphan')).toMatchObject({ lifecycle: 'recovering', owner_boot_id: 'boot-B', attempt: 1 });
+    expect(lc('leased')).toMatchObject({ lifecycle: 'recovering', owner_boot_id: 'boot-C' }); // untouched
+    expect(lc('live-b')).toMatchObject({ lifecycle: 'running', owner_boot_id: 'boot-B' }); // own live work
+  });
+
+  it('completes a claimed run atomically (terminal + enqueue) and rejects a completion from a non-owner boot', () => {
+    store.setDelegationBootId('boot-A');
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+    store.upsertSubagentRun('root', { id: 'd1', sessionId: 'child', status: 'running', task: 't', tools: 0, seconds: 0, autoDeliver: true });
+    store.setDelegationBootId('boot-B');
+    expect(store.claimRecoverableRuns(30_000).map((r) => r.toolCallId)).toEqual(['d1']);
+
+    const completion = { id: 'dlg-x', toolCallId: 'd1', sessionId: 'child', status: 'done' as const, task: 't', result: 'recovered answer', tools: 1, seconds: 2 };
+    // A completion from a boot that does NOT hold the claim is rejected.
+    store.setDelegationBootId('boot-OTHER');
+    expect(store.completeRecoveredRun('root', 'd1', completion)).toBe(false);
+    // The owner boot completes it: run goes terminal AND the result is enqueued in one shot.
+    store.setDelegationBootId('boot-B');
+    expect(store.completeRecoveredRun('root', 'd1', completion)).toBe(true);
+    expect((db.prepare("SELECT lifecycle FROM brain_subagent_runs WHERE tool_call_id='d1'").get() as { lifecycle: string }).lifecycle).toBe('done');
+    expect(store.pendingSubagentResults('root').map((r) => r.result)).toEqual(['recovered answer']);
+  });
+
+  it('parks a claimed run as recovery_required with a reason, only for the owning boot', () => {
+    store.setDelegationBootId('boot-A');
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+    store.upsertSubagentRun('root', { id: 'd1', sessionId: 'child', status: 'running', task: 't', tools: 0, seconds: 0 });
+    store.setDelegationBootId('boot-B');
+    store.claimRecoverableRuns(30_000);
+    expect(store.markRecoveryRequired('root', 'd1', 'unanswered Write in discarded suffix')).toBe(true);
+    const st = db.prepare("SELECT lifecycle, state, owner_boot_id FROM brain_subagent_runs WHERE tool_call_id='d1'").get() as { lifecycle: string; state: string; owner_boot_id: string | null };
+    expect(st.lifecycle).toBe('recovery_required');
+    expect(st.owner_boot_id).toBeNull();
+    expect(JSON.parse(st.state).recoveryReason).toBe('unanswered Write in discarded suffix');
+  });
+
   it('persists sub-agent results as an idempotent pending inbox and acknowledges them explicitly', () => {
     store.createSession({ id: 'root', userId: 1, model: 'm' });
     store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });

@@ -24,7 +24,7 @@ import type { BrainCard, BrainGoalState } from '../brain/events.js';
 // brainService + tests: syntheticRestartResultId). BrainSubagentRun/BrainSubagentResult have no external
 // importer (consumed structurally), so they are not re-exported.
 export { syntheticRestartResultId } from './brainDelegationStore.js';
-export type { BrainWorkflowRun } from './brainDelegationStore.js';
+export type { BrainWorkflowRun, RecoverableRun } from './brainDelegationStore.js';
 
 export interface BrainSessionRow {
   id: string; user_id: number; title: string; model: string; provider: string; work_dir: string; parent_session_id: string | null;
@@ -592,6 +592,23 @@ export class BrainStore {
     return this.delegation.getSubagentRuns(parentSessionId);
   }
 
+  /** Claim every restart-orphaned delegation for this boot — see
+   *  {@link BrainDelegationStore.claimRecoverableRuns}. */
+  claimRecoverableRuns(leaseMs: number): ReturnType<BrainDelegationStore['claimRecoverableRuns']> {
+    return this.delegation.claimRecoverableRuns(leaseMs);
+  }
+
+  /** Park a claimed run as recovery_required — see {@link BrainDelegationStore.markRecoveryRequired}. */
+  markRecoveryRequired(parentSessionId: string, toolCallId: string, reason: string): boolean {
+    return this.delegation.markRecoveryRequired(parentSessionId, toolCallId, reason);
+  }
+
+  /** Terminalize a claimed run and enqueue its result in one transaction — see
+   *  {@link BrainDelegationStore.completeRecoveredRun}. */
+  completeRecoveredRun(parentSessionId: string, toolCallId: string, raw: unknown): boolean {
+    return this.delegation.completeRecoveredRun(parentSessionId, toolCallId, raw);
+  }
+
   /** The delegated sub-agents one conversation spawned, newest first — see
    *  {@link BrainDelegationStore.listDelegatedChildren}. */
   listDelegatedChildren(parentSessionId: string, limit?: number): ReturnType<BrainDelegationStore['listDelegatedChildren']> {
@@ -621,12 +638,6 @@ export class BrainStore {
    *  see {@link BrainDelegationStore.runningDelegationParentSessionIds}. */
   runningDelegationParentSessionIds(): string[] {
     return this.delegation.runningDelegationParentSessionIds();
-  }
-
-  /** Boot-reconcile fallback for `running` rows whose child relation no longer resolves — see
-   *  {@link BrainDelegationStore.terminalizeOrphanedSubagentRuns}. */
-  terminalizeOrphanedSubagentRuns(parentSessionId: string): number {
-    return this.delegation.terminalizeOrphanedSubagentRuns(parentSessionId);
   }
 
   /** Append a display-only session-event marker (model/mode/rename/reasoning change). Insertion order

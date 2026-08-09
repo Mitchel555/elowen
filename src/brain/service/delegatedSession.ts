@@ -1,5 +1,6 @@
-import type { BrainStore } from '../../store/brainStore.js';
+import type { BrainStore, RecoverableRun } from '../../store/brainStore.js';
 import { syntheticRestartResultId } from '../../store/brainStore.js';
+import { settlePartialTurn, outstandingToolCalls } from '../persistence.js';
 import type { BrainDeps } from '../brainDeps.js';
 import type { ChannelSessionService } from '../channels.js';
 import type { DelegatedExecutionScope } from '../delegatedScope.js';
@@ -53,6 +54,20 @@ function narrowSubagentProgress(e: BrainEvent): SubagentProgressEvent {
   };
 }
 
+/** How long a boot's recovery claim holds a run before ANOTHER booting instance may steal it (the lease
+ *  in the compare-and-swap). Only matters for a rare concurrent recovery; a normal restart claims a
+ *  previous boot's run immediately regardless, because its lease is never set while it runs. */
+const RECOVERY_LEASE_MS = 5 * 60_000;
+/** A run whose recovery keeps failing (crash loop) is given up as an error after this many attempts, so a
+ *  poison transcript cannot respawn forever. attempt is bumped on each claim. */
+const MAX_RECOVERY_ATTEMPTS = 3;
+/** The follow-up appended to a rehydrated child transcript to finish an interrupted delegation. Kept as a
+ *  suffix so the already-sent prefix — and its prompt cache — is untouched. */
+const RECOVERY_INSTRUCTION =
+  'The daemon restarted and interrupted you mid-task. Your transcript above is intact up to your last '
+  + 'completed step. Continue from there, finish the task you were originally given, and give your final '
+  + 'answer as usual.';
+
 interface DelegatedSessionDeps {
   store: BrainStore;
   /** The shared live-session state (owned by the BrainService facade). */
@@ -80,57 +95,93 @@ interface DelegatedSessionDeps {
 export class DelegatedSessionService {
   constructor(private d: DelegatedSessionDeps) {}
 
-  /** The delegation twin of GoalLoopService.reconcileGoalsOnBoot: every durable sub-agent/workflow row the
-   *  DB still marks `running` at boot is a zombie, because the in-memory child registrations died with the
-   *  process. Terminalize them ONCE, HERE. Boot is the only moment the blanket rule is sound — no live
-   *  delegation can exist yet. The same sweep run lazily from start() cannot tell an orphan from a healthy
-   *  delegation whose registration it simply cannot see, and killed live work from the outside on every
-   *  client reconnect. Sweeping globally also repairs the state for good instead of hiding it per read, and
-   *  reaches the channel/task sessions an owner start() never visits.
-   *
-   *  Only an autoDeliver child ever promised automatic delivery, so only it gets a synthetic "interrupted
-   *  by daemon restart" result — enqueued durably, NOT delivered here: draining would respawn every
-   *  orphaned conversation at boot. start() and the post-turn hook drain the inbox when the conversation is
-   *  next used. */
+  /** Runs this boot CLAIMED for recovery in {@link reconcileDelegationsOnBoot} (synchronous), to respawn
+   *  asynchronously in {@link runDelegationRecovery} once the platforms are up. Held on the instance so the
+   *  two boot phases stay ordered: claim before any client attaches, respawn only after channelService can
+   *  actually run a turn. */
+  private pendingRecovery: RecoverableRun[] = [];
+
+  /** Boot phase 1 (SYNCHRONOUS, before startPlatforms): atomically CLAIM every restart-orphaned delegation
+   *  for this boot and stash it for phase 2. The compare-and-swap in claimRecoverableRuns is what makes the
+   *  blanket "everything running is a zombie" rule safe even with the sub-agent runner: a row owned by a
+   *  PREVIOUS boot is the orphan, a row this boot owns is live. Workflows keep the old treatment — a
+   *  WorkflowStart BLOCKS, so a restart killed its whole turn and nobody waits on a result; the row only has
+   *  to stop claiming the DAG runs. Nothing is respawned here: the actual recovery turns need the platforms
+   *  up and must not run before any client can attach, so they are deferred to runDelegationRecovery. */
   reconcileDelegationsOnBoot(): void {
+    this.pendingRecovery = this.d.store.claimRecoverableRuns(RECOVERY_LEASE_MS);
+    if (this.pendingRecovery.length > 0) {
+      logger('brain').info(`boot recovery claimed ${this.pendingRecovery.length} interrupted delegation(s) for respawn`);
+    }
     for (const sessionId of this.d.store.runningDelegationParentSessionIds()) {
-      for (const run of this.d.store.getSubagentRuns(sessionId)) {
-        if (run.status !== 'running') continue;
-        // Preserve the detail + ORIGINAL flags — never fabricate background/autoDeliver.
-        const terminal = {
-          id: run.toolCallId, sessionId: run.sessionId, status: 'error' as const, task: run.task,
-          ...(run.detail !== undefined ? { detail: run.detail } : {}),
-          tools: run.tools, tokens: run.tokens, seconds: run.seconds, model: run.model,
-          ...(run.background === true ? { background: true } : {}),
-          ...(run.autoDeliver === true ? { autoDeliver: true } : {}),
-        };
-        // No timeline marker here on purpose: this runs at boot before any client attaches, so there is no
-        // live replay to publish to and the marker is display-only (never persisted to session events). The
-        // panel reflects the terminal status on next read; the marker is for finishes that happen live.
-        if (!this.d.store.upsertSubagentRun(sessionId, terminal)) continue;
-        if (run.autoDeliver !== true) continue;
-        this.d.store.enqueueSubagentResult(sessionId, {
-          id: syntheticRestartResultId(sessionId, run.toolCallId), toolCallId: run.toolCallId,
-          sessionId: run.sessionId, status: 'error', task: run.task,
-          error: 'sub-agent interrupted by daemon restart', tools: run.tools, tokens: run.tokens,
-          seconds: run.seconds, model: run.model,
-        });
-      }
-      // The loop above can only repair what getSubagentRuns returns, and that read requires a live direct
-      // same-owner child. A row whose child session vanished or changed hands is skipped by it AND rejected
-      // by upsertSubagentRun, so it would keep claiming `running` for good. Repair it straight on the row.
-      const orphaned = this.d.store.terminalizeOrphanedSubagentRuns(sessionId);
-      if (orphaned > 0) {
-        logger('brain').warn(`boot reconcile terminalized ${orphaned} delegation row(s) of ${sessionId} whose child session no longer resolves`);
-      }
-      // Same restart concern for workflows, minus the delivery half: WorkflowStart BLOCKS, so a restart
-      // killed the tool call and its whole turn — there is no result anyone is still waiting on, and no
-      // completion inbox to weave into. The row only has to stop claiming the DAG is still running.
       for (const run of this.d.store.getWorkflowRuns(sessionId)) {
         if (run.status !== 'running') continue;
         this.d.store.upsertWorkflowRun(sessionId, terminalizeWorkflow(run));
       }
     }
+  }
+
+  /** Boot phase 2 (ASYNCHRONOUS, after startPlatforms): respawn each claimed delegation to finish where it
+   *  was interrupted, or park it as recovery_required when replay is not safe. Runs the children serially
+   *  so a fleet of interrupted delegations does not stampede the freshly booted daemon. A per-run failure
+   *  is logged and left claimed (its lease lapses, so a later boot retries until MAX_RECOVERY_ATTEMPTS). */
+  async runDelegationRecovery(): Promise<void> {
+    const claimed = this.pendingRecovery;
+    this.pendingRecovery = [];
+    for (const run of claimed) {
+      try { await this.recoverOne(run); }
+      catch (e) {
+        logger('brain').error(`boot recovery of ${run.childSessionId} failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  /** Recover ONE claimed delegation. Gives up as an error past the attempt cap; parks as recovery_required
+   *  when the interrupted transcript ends on an UNANSWERED tool call (replaying it might repeat a side
+   *  effect the parent must decide on); otherwise trims the partial tail and respawns the child to finish,
+   *  then completes the run atomically — enqueuing the result even for a foreground delegation, whose
+   *  blocking parent turn did not survive the restart. */
+  private async recoverOne(run: RecoverableRun): Promise<void> {
+    const { parentSessionId, toolCallId, childSessionId, attempt, state } = run;
+    const base = {
+      id: syntheticRestartResultId(parentSessionId, toolCallId), toolCallId, sessionId: childSessionId,
+      task: state.task, tools: state.tools, seconds: state.seconds,
+      ...(state.tokens !== undefined ? { tokens: state.tokens } : {}),
+      ...(state.model !== undefined ? { model: state.model } : {}),
+    };
+    if (attempt > MAX_RECOVERY_ATTEMPTS) {
+      this.d.store.completeRecoveredRun(parentSessionId, toolCallId, {
+        ...base, status: 'error', error: 'sub-agent could not be recovered after repeated daemon restarts',
+      });
+      return;
+    }
+    // Classify the crash-interrupted tail BEFORE trimming it. An unanswered tool call in the discarded
+    // suffix means a step STARTED whose effect is unknown — replaying the turn could repeat it, so the
+    // parent decides via DelegateContinue instead of the daemon guessing.
+    const pending = this.d.store.pendingMessages(childSessionId);
+    const outstanding = outstandingToolCalls(pending.map((row) => row.content));
+    if (outstanding.length > 0) {
+      this.d.store.markRecoveryRequired(
+        parentSessionId, toolCallId,
+        `interrupted with unanswered tool call(s): ${outstanding.map((o) => o.name).join(', ')} — continuing may repeat a side effect`,
+      );
+      return;
+    }
+    // Safe to replay: drop the partial tail so the transcript ends clean, then respawn the child with a
+    // suffix instruction to finish. The child owns this session id, so sendDelegated resolves its scope.
+    settlePartialTurn(this.d.store, childSessionId);
+    const owner = this.d.store.getSession(childSessionId);
+    if (!owner) {
+      this.d.store.completeRecoveredRun(parentSessionId, toolCallId, {
+        ...base, status: 'error', error: 'sub-agent session vanished before it could be recovered',
+      });
+      return;
+    }
+    const answer = await this.sendDelegated(owner.user_id, childSessionId, RECOVERY_INSTRUCTION);
+    // The respawn was a continuation turn of the CHILD, which never edits its own run row (that row belongs
+    // to the parent), so the lifecycle is still `recovering` and completeRecoveredRun terminalizes it and
+    // enqueues the answer in one transaction.
+    this.d.store.completeRecoveredRun(parentSessionId, toolCallId, { ...base, status: 'done', result: answer });
   }
 
   /** Synchronous route preflight for `/brain/subagent/send`: a legacy child with no immutable scope

@@ -820,6 +820,10 @@ export async function buildApp(opts: BuildOpts) {
     // `/restart` asked for it.
     void brain?.startPlatforms(log)
       .then(() => announceBoot(brain, restartMarker, bootMarker, ELOWEN_VERSION))
+      // Boot phase 2 of delegation recovery: respawn the interrupted sub-agents claimed above, now that the
+      // platforms are up so their turns can actually run. After announceBoot, with its own catch, so a
+      // recovery failure neither blocks the boot announcement nor is misreported as a startPlatforms error.
+      .then(() => brain?.runDelegationRecovery().catch((e) => log.error('delegation recovery failed', e)))
       .catch((e) => log.error('startPlatforms failed', e));
     // Registered only once the platforms are coming up, so a stop can actually announce itself. Skipped
     // under the in-memory test DB, where installing process-wide signal handlers would leak across tests.

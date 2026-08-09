@@ -133,6 +133,30 @@ export function answeredToolCallPrefix(contents: string[]): number {
   return answered;
 }
 
+/** The tool calls left UNANSWERED at the end of these serialized messages — an assistant `toolCall` with
+ *  no later matching `toolResult`. Returns each as {id, name}. Boot recovery reads this over a child's
+ *  pending (crash-interrupted) transcript to decide replay safety: a non-empty result means the discarded
+ *  suffix contains a tool call that STARTED but whose effect is unknown, so the run cannot be blindly
+ *  respawned (it might repeat a mutation) and is parked as recovery_required instead. Named separately
+ *  from answeredToolCallPrefix, which only needs the prefix LENGTH and so never extracts the tool name. */
+export function outstandingToolCalls(contents: string[]): { id: string; name: string }[] {
+  const outstanding = new Map<string, string>(); // tool_call_id -> tool name
+  for (const raw of contents) {
+    let message: { role?: string; content?: unknown; toolCallId?: string };
+    try { message = JSON.parse(raw) as typeof message; }
+    catch { break; } // corrupt row — everything from here on is unverifiable, treat as unanswered
+    if (message.role === 'toolResult') {
+      if (message.toolCallId) outstanding.delete(message.toolCallId);
+    } else {
+      for (const part of Array.isArray(message.content) ? message.content : []) {
+        const call = part as { type?: string; id?: string; name?: string };
+        if (call?.type === 'toolCall' && call.id) outstanding.set(call.id, call.name ?? 'unknown');
+      }
+    }
+  }
+  return [...outstanding.entries()].map(([id, name]) => ({ id, name }));
+}
+
 /** Remove only PI's transient terminal overflow assistant from a deferred agent_end. The preceding
  * assistant/tool rows are real completed work and must become durable before a replacement overflow
  * compaction aligns its kept tail against BrainStore. */

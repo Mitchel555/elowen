@@ -408,6 +408,13 @@ export class BrainService {
     this.delegated.reconcileDelegationsOnBoot();
   }
 
+  /** Boot phase 2: respawn the delegations reconcileDelegationsOnBoot claimed, once platforms are up — see
+   *  DelegatedSessionService.runDelegationRecovery. Detached from boot so a multi-minute recovery turn
+   *  never blocks startup, and deliberately AFTER startPlatforms so the respawned child turns can run. */
+  async runDelegationRecovery(): Promise<void> {
+    await this.delegated.runDelegationRecovery();
+  }
+
   /** The model id the CURRENT config resolves to (readiness), or null — see BrainStatusService. */
   resolvableModel(): string | null {
     return this.statusView.resolvableModel();

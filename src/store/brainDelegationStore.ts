@@ -25,6 +25,16 @@ export interface BrainSubagentRun extends BrainSubagentRunState {
   toolCallId: string;
   sessionId: string;
 }
+/** One restart-orphaned delegation claimed for recovery at boot: enough to rehydrate the child session,
+ *  classify its discarded suffix and decide respawn vs recovery_required. `attempt` is the post-increment
+ *  count, so boot recovery can cap a run that keeps crashing its own recovery. */
+export interface RecoverableRun {
+  parentSessionId: string;
+  toolCallId: string;
+  childSessionId: string;
+  attempt: number;
+  state: BrainSubagentRunState;
+}
 /** The validated latest snapshot of one workflow DAG (see brain_workflows). Aliases the wire payload on
  *  purpose: a `workflow` event carries the WHOLE DAG, so the durable row IS the snapshot and the row,
  *  the event and the state attached to the tool item cannot drift apart. Bounded display data only. */
@@ -547,71 +557,56 @@ export class BrainDelegationStore {
     return rows.map((row) => row.id);
   }
 
-  /** Terminalize the `running` rows of one parent whose child relation no longer resolves — the child
-   *  session is gone, changed hands, or is no longer a direct child of this parent. Such a row is
-   *  invisible to getSubagentRuns (which JOINs the live relation), so the boot reconcile's per-run sweep
-   *  cannot reach it, and upsertSubagentRun would refuse to repair it for exactly the same reason: the
-   *  delegation would claim `running` in the DB forever. Only the status is rewritten, so the rest of the
-   *  recorded state survives. `json_valid` guards the rewrite — `json_set` on a malformed row yields NULL,
-   *  which would destroy the state instead of repairing it. Returns how many rows were repaired. */
-  terminalizeOrphanedSubagentRuns(parentSessionId: string): number {
-    return this.db.prepare(
-      `UPDATE brain_subagent_runs
-          SET state = json_set(state, '$.status', 'error'), updated_at = datetime('now')
-        WHERE parent_session_id = ?
-          AND json_valid(state) AND json_extract(state, '$.status') = 'running'
-          AND NOT EXISTS (
-            SELECT 1 FROM brain_sessions p
-              JOIN brain_sessions c ON c.id = brain_subagent_runs.child_session_id
-             WHERE p.id = brain_subagent_runs.parent_session_id
-               AND c.parent_session_id = p.id AND c.user_id = p.user_id)`
-    ).run(parentSessionId).changes;
-  }
-
   /** Persist a terminal child result before any attempt to wake the parent. Stable result/tool ids make
    * duplicate plugin callbacks idempotent; the durable direct-child relation is revalidated here. */
   enqueueSubagentResult(parentSessionId: string, raw: unknown): boolean {
     const result = normalizeSubagentResult(raw);
     if (!parentSessionId || !result) return false;
-    return withWriteLock(this.db, () => {
-      const linked = result.sessionId ? this.db.prepare(
-        `SELECT 1 FROM brain_subagent_runs r
-          JOIN brain_sessions p ON p.id = r.parent_session_id
-          JOIN brain_sessions c ON c.id = r.child_session_id
-         WHERE r.parent_session_id = ? AND r.tool_call_id = ? AND r.child_session_id = ?
-           AND c.parent_session_id = p.id AND c.user_id = p.user_id`
-      ).get(parentSessionId, result.toolCallId, result.sessionId) : this.db.prepare(
-        'SELECT 1 FROM brain_sessions WHERE id = ?'
-      ).get(parentSessionId);
-      if (!linked || (!result.sessionId && result.status !== 'error')) return false;
-      const payload = JSON.stringify({
-        result: result.result, error: result.error, tools: result.tools, tokens: result.tokens,
-        seconds: result.seconds, model: result.model,
-      });
-      // Handle BOTH unique constraints (result_id PK + parent/tool_call) so a late or duplicate callback can
-      // never throw and silently drop a result. A real completion arriving for a (parent, tool_call) that a
-      // restart reconcile already filled with a SYNTHETIC `restart-` row UPGRADES it in place, keeping its
-      // queue position (created_at untouched). That holds even once the synthetic was delivered: the parent
-      // was told the delegate had been interrupted, so the truth has to reach it — the row goes back to
-      // pending and is delivered again. A synthetic never overwrites a real row, and a real row is never
-      // clobbered by a second distinct real result (first-write-wins).
-      this.db.prepare(
-        `INSERT INTO brain_subagent_results
-          (result_id, parent_session_id, tool_call_id, child_session_id, status, task, payload)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(result_id) DO NOTHING
-         ON CONFLICT(parent_session_id, tool_call_id) DO UPDATE SET
-           result_id = excluded.result_id, child_session_id = excluded.child_session_id,
-           status = excluded.status, task = excluded.task, payload = excluded.payload,
-           attempts = 0, delivery_state = 'pending'
-         WHERE brain_subagent_results.result_id LIKE '${SYNTHETIC_RESTART_RESULT_PREFIX}%'
-           AND excluded.result_id NOT LIKE '${SYNTHETIC_RESTART_RESULT_PREFIX}%'`
-      ).run(result.id, parentSessionId, result.toolCallId, result.sessionId, result.status, result.task, payload);
-      const row = this.db.prepare(
-        `SELECT parent_session_id, tool_call_id, child_session_id FROM brain_subagent_results WHERE result_id = ?`
-      ).get(result.id) as { parent_session_id: string; tool_call_id: string; child_session_id: string } | undefined;
-      return row?.parent_session_id === parentSessionId && row.tool_call_id === result.toolCallId && row.child_session_id === result.sessionId;
+    return withWriteLock(this.db, () => this.enqueueResultRowLocked(parentSessionId, result));
+  }
+
+  /** The INSERT half of {@link enqueueSubagentResult}, WITHOUT its own write lock, so the recovery path
+   *  can enqueue the result in the SAME transaction that terminalizes the run (see completeRecoveredRun).
+   *  withWriteLock uses an IMMEDIATE transaction; nesting one would demote it to a savepoint and lose the
+   *  fencing, so this shared seam takes no lock and the two public callers each own theirs. */
+  private enqueueResultRowLocked(parentSessionId: string, result: NonNullable<ReturnType<typeof normalizeSubagentResult>>): boolean {
+    const linked = result.sessionId ? this.db.prepare(
+      `SELECT 1 FROM brain_subagent_runs r
+        JOIN brain_sessions p ON p.id = r.parent_session_id
+        JOIN brain_sessions c ON c.id = r.child_session_id
+       WHERE r.parent_session_id = ? AND r.tool_call_id = ? AND r.child_session_id = ?
+         AND c.parent_session_id = p.id AND c.user_id = p.user_id`
+    ).get(parentSessionId, result.toolCallId, result.sessionId) : this.db.prepare(
+      'SELECT 1 FROM brain_sessions WHERE id = ?'
+    ).get(parentSessionId);
+    if (!linked || (!result.sessionId && result.status !== 'error')) return false;
+    const payload = JSON.stringify({
+      result: result.result, error: result.error, tools: result.tools, tokens: result.tokens,
+      seconds: result.seconds, model: result.model,
     });
+    // Handle BOTH unique constraints (result_id PK + parent/tool_call) so a late or duplicate callback can
+    // never throw and silently drop a result. A real completion arriving for a (parent, tool_call) that a
+    // restart reconcile already filled with a SYNTHETIC `restart-` row UPGRADES it in place, keeping its
+    // queue position (created_at untouched). That holds even once the synthetic was delivered: the parent
+    // was told the delegate had been interrupted, so the truth has to reach it — the row goes back to
+    // pending and is delivered again. A synthetic never overwrites a real row, and a real row is never
+    // clobbered by a second distinct real result (first-write-wins).
+    this.db.prepare(
+      `INSERT INTO brain_subagent_results
+        (result_id, parent_session_id, tool_call_id, child_session_id, status, task, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(result_id) DO NOTHING
+       ON CONFLICT(parent_session_id, tool_call_id) DO UPDATE SET
+         result_id = excluded.result_id, child_session_id = excluded.child_session_id,
+         status = excluded.status, task = excluded.task, payload = excluded.payload,
+         attempts = 0, delivery_state = 'pending'
+       WHERE brain_subagent_results.result_id LIKE '${SYNTHETIC_RESTART_RESULT_PREFIX}%'
+         AND excluded.result_id NOT LIKE '${SYNTHETIC_RESTART_RESULT_PREFIX}%'`
+    ).run(result.id, parentSessionId, result.toolCallId, result.sessionId, result.status, result.task, payload);
+    const row = this.db.prepare(
+      `SELECT parent_session_id, tool_call_id, child_session_id FROM brain_subagent_results WHERE result_id = ?`
+    ).get(result.id) as { parent_session_id: string; tool_call_id: string; child_session_id: string } | undefined;
+    return row?.parent_session_id === parentSessionId && row.tool_call_id === result.toolCallId && row.child_session_id === result.sessionId;
   }
 
   /** Persist a terminal WORKFLOW result before waking the parent. Same durable queue as a sub-agent
@@ -715,5 +710,85 @@ export class BrainDelegationStore {
       `UPDATE brain_subagent_results SET attempts = attempts + 1
        WHERE parent_session_id = ? AND result_id = ? AND delivery_state = 'pending'`
     ).run(parentSessionId, resultId);
+  }
+
+  /** Atomically CLAIM every restart-orphaned delegation for THIS boot, returning what to recover. Called
+   *  exactly once at boot. The compare-and-swap is the whole point: `owner_boot_id != current` is the
+   *  primary signal (a running row owned by a PREVIOUS boot is by definition an orphan — the daemon is a
+   *  singleton, so the boot that owned it is gone), while the lease only fences a CONCURRENT recovery of a
+   *  row already `recovering` (a rare second booting instance): that one is left alone until its lease
+   *  lapses. A running row carries no live lease (it is set NULL in upsert), so a real restart claims it
+   *  immediately without waiting. attempt is bumped so a run that keeps crashing recovery eventually caps
+   *  out. json_valid guards the SELECT's later parse and skips a corrupt row (which then stays put — a
+   *  malformed row is neither claimable nor renderable, so it is inert rather than dangerous). */
+  claimRecoverableRuns(leaseMs: number): RecoverableRun[] {
+    const cur = this.bootId;
+    if (!cur) return []; // no boot identity (unit test store) -> nothing is ours to claim
+    const now = Date.now();
+    return withWriteLock(this.db, () => {
+      this.db.prepare(
+        `UPDATE brain_subagent_runs
+            SET lifecycle = 'recovering', owner_boot_id = ?, attempt = attempt + 1, lease_until = ?
+          WHERE json_valid(state) AND (
+                 (lifecycle = 'running' AND owner_boot_id IS NOT NULL AND owner_boot_id != ?)
+              OR (lifecycle = 'recovering' AND owner_boot_id != ? AND (lease_until IS NULL OR lease_until < ?)))`
+      ).run(cur, now + leaseMs, cur, cur, now);
+      // Every recovering row now owned by this boot is one we just claimed (a fresh boot held none before).
+      const rows = this.db.prepare(
+        `SELECT parent_session_id, tool_call_id, child_session_id, attempt, state
+           FROM brain_subagent_runs WHERE owner_boot_id = ? AND lifecycle = 'recovering'`
+      ).all(cur) as { parent_session_id: string; tool_call_id: string; child_session_id: string; attempt: number; state: string }[];
+      return rows.flatMap((r) => {
+        let raw: unknown;
+        try { raw = JSON.parse(r.state); } catch { return []; }
+        const state = normalizeSubagentState(raw);
+        if (!state) return [];
+        return [{
+          parentSessionId: r.parent_session_id, toolCallId: r.tool_call_id,
+          childSessionId: r.child_session_id, attempt: r.attempt, state,
+        }];
+      });
+    });
+  }
+
+  /** Park a claimed run as `recovery_required`: recovery could not safely replay it (an unanswered
+   *  mutating tool call in the discarded suffix), so the parent must decide via DelegateContinue. Only the
+   *  boot that holds the claim may do this. The reason is stored for the UI; owner/lease are cleared so the
+   *  row is inert (no longer claimable, no auto-delivery). Returns whether a claimed row was updated. */
+  markRecoveryRequired(parentSessionId: string, toolCallId: string, reason: string): boolean {
+    const cur = this.bootId;
+    return withWriteLock(this.db, () => this.db.prepare(
+      `UPDATE brain_subagent_runs
+          SET lifecycle = 'recovery_required', owner_boot_id = NULL, lease_until = NULL,
+              state = CASE WHEN json_valid(state) THEN json_set(state, '$.recoveryReason', ?) ELSE state END,
+              updated_at = datetime('now')
+        WHERE parent_session_id = ? AND tool_call_id = ? AND owner_boot_id = ? AND lifecycle = 'recovering'`
+    ).run(bounded(reason, 2_000), parentSessionId, toolCallId, cur).changes === 1);
+  }
+
+  /** Finish a claimed run in ONE transaction: terminalize the run row AND enqueue its result for the
+   *  parent. Atomicity closes the crash-between-the-two gap (a `done` run with no inbox row a parent could
+   *  never receive). Guarded by the claim: only the boot whose owner_boot_id still holds a `recovering`
+   *  row may complete it, so a completion from a superseded boot is rejected. Enqueues for foreground runs
+   *  too — the blocking parent turn did not survive the restart, so its answer has to reach the parent
+   *  through the durable inbox like a background one. Returns false if the claim no longer holds. */
+  completeRecoveredRun(parentSessionId: string, toolCallId: string, raw: unknown): boolean {
+    const cur = this.bootId;
+    const result = normalizeSubagentResult(raw);
+    if (!parentSessionId || !result || result.toolCallId !== toolCallId) return false;
+    return withWriteLock(this.db, () => {
+      const run = this.db.prepare(
+        'SELECT owner_boot_id, lifecycle FROM brain_subagent_runs WHERE parent_session_id = ? AND tool_call_id = ?'
+      ).get(parentSessionId, toolCallId) as { owner_boot_id: string | null; lifecycle: string } | undefined;
+      if (!run || run.owner_boot_id !== cur || run.lifecycle !== 'recovering') return false;
+      this.db.prepare(
+        `UPDATE brain_subagent_runs
+            SET lifecycle = ?, owner_boot_id = NULL, lease_until = NULL,
+                state = CASE WHEN json_valid(state) THEN json_set(state, '$.status', ?) ELSE state END,
+                updated_at = datetime('now')
+          WHERE parent_session_id = ? AND tool_call_id = ?`
+      ).run(result.status, result.status, parentSessionId, toolCallId);
+      return this.enqueueResultRowLocked(parentSessionId, result);
+    });
   }
 }
