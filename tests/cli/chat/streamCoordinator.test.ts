@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { StreamCoordinator } from '../../../src/cli/chat/streamCoordinator.js';
 import type { Flows } from '../../../src/cli/chat/flows.js';
-import { BrainClient } from '../../../src/cli/chat/brainClient.js';
+import { BrainClient, type BrainStreamFrame } from '../../../src/cli/chat/brainClient.js';
 import type { BrainEvent } from '../../../src/brain/events.js';
 import { TranscriptModel } from '../../../src/brain/transcriptModel.js';
 import { ChatState } from '../../../src/cli/chat/chatState.js';
@@ -1110,6 +1110,73 @@ describe('StreamCoordinator — parent snapshot hydration', () => {
     expect(rt.goal).toBeNull();
     onFrame({ type: 'snapshot', cursor: 2, history: [], events: [], goal: activeGoal });
     expect(rt.goal).toEqual(activeGoal);
+    stream.stop();
+  });
+
+  it('settles a stale thinking state from snapshot control when the terminal event was missed', () => {
+    let onFrame!: (frame: BrainStreamFrame) => void;
+    const client = {
+      stream: (cb: typeof onFrame, signal: AbortSignal) => {
+        onFrame = cb;
+        return new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      },
+      rebind: () => {},
+    } as unknown as BrainClient;
+    const rt = state();
+    rt.transcript.apply({ type: 'user', text: 'long request' });
+    expect(rt.transcript.thinking).toBe(true);
+    const onTurnSettled = vi.fn();
+    const stream = new StreamCoordinator(
+      rt, { client }, actions({ onTurnSettled }),
+      { launchAsk: () => {}, openPlanDecision: () => {} } as unknown as Flows,
+      new SnapshotHydrator<BrainEvent>(), new HydrationNoticeOwner(),
+    );
+    stream.openStream(rt.streamAc);
+
+    onFrame({
+      type: 'snapshot',
+      sessionId: 'brain-parent',
+      cursor: 9,
+      history: [{ role: 'assistant', text: 'finished while disconnected' }],
+      events: [],
+      control: { streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null },
+    });
+
+    expect(rt.transcript.thinking).toBe(false);
+    expect(onTurnSettled).toHaveBeenCalledOnce();
+    stream.stop();
+  });
+
+  it('settles a step-and-error snapshot replay that has no terminal idle', () => {
+    let onFrame!: (frame: BrainStreamFrame) => void;
+    const client = {
+      stream: (cb: typeof onFrame, signal: AbortSignal) => {
+        onFrame = cb;
+        return new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      },
+      rebind: () => {},
+    } as unknown as BrainClient;
+    const onTurnActive = vi.fn();
+    const onTurnSettled = vi.fn();
+    const rt = state();
+    const stream = new StreamCoordinator(
+      rt, { client }, actions({ onTurnActive, onTurnSettled }),
+      { launchAsk: () => {}, openPlanDecision: () => {} } as unknown as Flows,
+      new SnapshotHydrator<BrainEvent>(), new HydrationNoticeOwner(),
+    );
+    stream.openStream(rt.streamAc);
+
+    onFrame({
+      type: 'snapshot',
+      sessionId: 'brain-parent',
+      cursor: 10,
+      history: [],
+      events: [{ type: 'step', step: 1, maxSteps: 8 }, { type: 'error', message: 'provider failed' }],
+      control: { streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null },
+    });
+
+    expect(onTurnActive).toHaveBeenCalledOnce();
+    expect(onTurnSettled).toHaveBeenCalledOnce();
     stream.stop();
   });
 

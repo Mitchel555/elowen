@@ -238,7 +238,8 @@ export class StreamCoordinator implements StreamCoordinatorPort {
         lease.applySnapshot(() => {
           clearHydrationNotice('parent');
           pendingSessionReset = null;
-          const terminal = snapshot.events.some((event) => event.type === 'idle' || event.type === 'error');
+          const hasIdle = snapshot.events.some((event) => event.type === 'idle');
+          const terminal = hasIdle || snapshot.events.some((event) => event.type === 'error');
           if (terminal) truncatedSnapshotPending = false;
           else if (snapshot.truncated) truncatedSnapshotPending = true;
           if (snapshot.sessionId && snapshot.sessionId !== streamSessionAtOpen) {
@@ -249,6 +250,13 @@ export class StreamCoordinator implements StreamCoordinatorPort {
           }
           rt.transcript.replaceHistory(snapshot.history);
           for (const event of snapshot.events) onEvent(event, true, true);
+          // The bounded replay can lose its terminal idle, but control is taken atomically with history and
+          // the journal. Synthesize only that missed control edge: it clears stale Stop state and retires a
+          // long-turn poll armed by a replayed step/error, without adding anything to the transcript.
+          if (snapshot.control?.streaming === false && !hasIdle) {
+            truncatedSnapshotPending = false;
+            onEvent({ type: 'idle' }, true, true);
+          }
           // Replay is the transient run tail; this top-level value is the durable authority and must win
           // even when the journal was cleared at beginRun()/settleRun(). Absence means an older daemon.
           if (Object.prototype.hasOwnProperty.call(snapshot, 'goal')) rt.setGoal(snapshot.goal ?? null);

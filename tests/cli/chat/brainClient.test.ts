@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { BrainClient, parseSse, Unauthorized } from '../../../src/cli/chat/brainClient.js';
+import { BRAIN_STREAM_SILENCE_LIMIT_MS, BrainClient, parseSse, Unauthorized } from '../../../src/cli/chat/brainClient.js';
 
 describe('parseSse', () => {
   it('splits complete frames and keeps the tail', () => {
@@ -207,9 +207,13 @@ describe('BrainClient', () => {
         ctrl.close();
       },
     });
+    let streamSignal: AbortSignal | null | undefined;
     const f = vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/brain/start')) return j(201, { sessionId: 'brain-7' });
-      if (url.includes('/brain/stream')) return new Response(streamBody, { status: 200 });
+      if (url.includes('/brain/stream')) {
+        streamSignal = init?.signal;
+        return new Response(streamBody, { status: 200 });
+      }
       if (url.endsWith('/brain/session/stop')) {
         return await new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
@@ -224,8 +228,10 @@ describe('BrainClient', () => {
     await stream;
     expect(f).toHaveBeenCalledWith(
       'http://x/brain/stream?session=brain-7&client=cli-a&generation=1',
-      expect.objectContaining({ signal: streamAc.signal }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+    expect(streamSignal).not.toBe(streamAc.signal);
+    expect(streamSignal?.aborted).toBe(true);
 
     const stopAc = new AbortController();
     const stop = c.stopSession(stopAc.signal);
@@ -341,15 +347,21 @@ describe('BrainClient', () => {
         ctrl.close();
       },
     });
-    const f = vi.fn(async () => new Response(body, { status: 200 })) as unknown as typeof fetch;
+    let streamSignal: AbortSignal | null | undefined;
+    const f = vi.fn(async (_url: string, init?: RequestInit) => {
+      streamSignal = init?.signal;
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
     const c = new BrainClient({ base: 'http://x', token: 't', fetchImpl: f });
     const ac = new AbortController();
     const seen: unknown[] = [];
     await c.stream((event) => { seen.push(event); ac.abort(); }, ac.signal, 5, undefined, 'brain-ch-subagent-a', true);
     expect(f).toHaveBeenCalledWith(
       'http://x/brain/stream?session=brain-ch-subagent-a&snapshot=1',
-      expect.objectContaining({ signal: ac.signal }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+    expect(streamSignal).not.toBe(ac.signal);
+    expect(streamSignal?.aborted).toBe(true);
     expect(seen).toEqual([{
       type: 'snapshot', cursor: 9,
       history: [{ role: 'user', text: 'stored' }],
@@ -420,6 +432,90 @@ describe('BrainClient', () => {
       'http://x/brain/stream?session=brain-fresh&client=cli-a&generation=1&snapshot=1',
     ]);
     expect(c.boundSession).toBe('brain-fresh');
+  });
+
+  it('reconnects a half-open bound stream, rebinds from its snapshot, and aborts the recovered session', async () => {
+    vi.useFakeTimers();
+    try {
+      let streamAttempts = 0;
+      let abortBody: Record<string, unknown> | undefined;
+      let aborting: Promise<void> | undefined;
+      const encoder = new TextEncoder();
+      const f = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/brain/start')) return j(201, { sessionId: 'brain-old' });
+        if (url.endsWith('/brain/abort')) {
+          abortBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return j(200, { ok: true });
+        }
+        streamAttempts++;
+        const attempt = streamAttempts;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            if (attempt === 1) {
+              // The dead TCP path never closes or emits another byte. Only aborting this attempt can release
+              // reader.read(), which is exactly the production half-open connection this test reproduces.
+              init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason ?? new Error('aborted')), { once: true });
+              return;
+            }
+            controller.enqueue(encoder.encode('event: snapshot\ndata: {"type":"snapshot","sessionId":"brain-fresh","cursor":8,"history":[{"role":"assistant","text":"finished while disconnected"}],"events":[{"type":"idle"}],"control":{"streaming":false,"pendingAsk":null}}\n\n'));
+            controller.close();
+          },
+        });
+        return new Response(body, { status: 200 });
+      }) as unknown as typeof fetch;
+      const c = new BrainClient({ base: 'http://x', token: 't', fetchImpl: f, clientId: 'cli-a' });
+      await c.start();
+      const lifecycle = new AbortController();
+      const streaming = c.stream((frame) => {
+        if (frame.type !== 'snapshot') return;
+        aborting = c.abort();
+        lifecycle.abort();
+      }, lifecycle.signal, 1, undefined, undefined, true);
+
+      await vi.advanceTimersByTimeAsync(BRAIN_STREAM_SILENCE_LIMIT_MS + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(streamAttempts).toBe(2);
+      await streaming.catch(() => {});
+      await aborting;
+
+      expect(c.boundSession).toBe('brain-fresh');
+      expect(abortBody).toEqual({ session: 'brain-fresh' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps one stream alive through more than ten minutes of a silent model request when heartbeats arrive', async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      const f = vi.fn(async (_url: string, init?: RequestInit) => {
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(': connected\n\n'));
+            heartbeat = setInterval(() => controller.enqueue(encoder.encode(': ping\n\n')), 30_000);
+            init?.signal?.addEventListener('abort', () => {
+              if (heartbeat) clearInterval(heartbeat);
+              controller.error(init.signal?.reason ?? new Error('aborted'));
+            }, { once: true });
+          },
+        });
+        return new Response(body, { status: 200 });
+      }) as unknown as typeof fetch;
+      const c = new BrainClient({ base: 'http://x', token: 't', fetchImpl: f });
+      const lifecycle = new AbortController();
+      const streaming = c.stream(() => {}, lifecycle.signal, 1);
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1);
+      expect(f).toHaveBeenCalledTimes(1);
+
+      lifecycle.abort();
+      await streaming.catch(() => {});
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('cancels reconnect backoff immediately on lifecycle abort without leaving a timer', async () => {

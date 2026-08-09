@@ -14,6 +14,10 @@ import {
 
 export type BrainStreamFrame = BrainEvent | BrainStreamSnapshot;
 
+/** The daemon writes SSE keep-alive bytes every 30 s. Two missed keep-alives plus headroom means the
+ * connection is half-open: abort only this fetch so the stable bound stream can reconnect and hydrate. */
+export const BRAIN_STREAM_SILENCE_LIMIT_MS = 75_000;
+
 /** Thrown on a 401 so the caller can drop the cached token and re-login. */
 export class Unauthorized extends Error {
   constructor() { super('unauthorized'); this.name = 'Unauthorized'; }
@@ -664,8 +668,18 @@ export class BrainClient {
       }
       if (sid && snapshot) params.set('snapshot', '1');
       const qs = params.size > 0 ? `?${params.toString()}` : '';
+      const attempt = new AbortController();
+      const abortAttempt = (): void => attempt.abort(signal.reason);
+      signal.addEventListener('abort', abortAttempt, { once: true });
+      if (signal.aborted) abortAttempt(); // an already-aborted signal never fires the listener above
+      let silenceTimer: ReturnType<typeof setTimeout> | undefined;
+      const armSilenceWatchdog = (): void => {
+        if (silenceTimer) clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => attempt.abort(new Error('elowen brain stream timed out')), BRAIN_STREAM_SILENCE_LIMIT_MS);
+      };
+      armSilenceWatchdog();
       try {
-        const res = await this.f(`${this.o.base}/brain/stream${qs}`, { headers: this.headers(), signal });
+        const res = await this.f(`${this.o.base}/brain/stream${qs}`, { headers: this.headers(), signal: attempt.signal });
         if (res.status === 401) throw new Unauthorized();
         if (!res.ok || !res.body) throw new Error(`elowen brain ${res.status} on /brain/stream`);
         const reader = res.body.getReader();
@@ -675,6 +689,9 @@ export class BrainClient {
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
+          // Every body byte — including the daemon's comment-only `: ping` — proves that the transport is
+          // alive. A provider may legitimately produce no model event for much longer than this timeout.
+          armSilenceWatchdog();
           // Fire onOpen on the FIRST body byte (the server's `: connected` comment), not on the response
           // headers: the subscribe happens inside the stream body, so a proxy that flushes headers early
           // could otherwise let the caller's first turn race ahead of the subscription and miss events.
@@ -712,7 +729,10 @@ export class BrainClient {
         }
       } catch (err) {
         if (err instanceof Unauthorized || signal.aborted) throw err;
-        // otherwise fall through to reconnect
+        // A read error or the per-attempt silence watchdog reconnects with the same stable binding.
+      } finally {
+        if (silenceTimer) clearTimeout(silenceTimer);
+        signal.removeEventListener('abort', abortAttempt);
       }
       if (signal.aborted) break;
       await reconnectDelay(backoffMs, signal);
