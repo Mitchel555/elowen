@@ -201,6 +201,17 @@ function applyAdditiveMigrations(db: Db): void {
   // rows are all sub-agent completions, so the 'subagent' default reads the whole back catalogue right.
   addColumn(db, 'brain_subagent_results', 'kind', "TEXT NOT NULL DEFAULT 'subagent'");
   addColumn(db, 'brain_subagent_results', 'workflow_id', 'TEXT');
+  // Host-owned recovery lifecycle for delegated runs (see brain_subagent_runs in schema.sql). All
+  // nullable/zero-default so a row written before these columns existed reads as legacy: a later data
+  // migration backfills `lifecycle` from the JSON `state`, and boot recovery only ever claims rows an
+  // owner_boot_id stamped — never a NULL one — so a NULL here can never be mistaken for live work.
+  // job_id lets a `dlg-` handle resolve after the in-memory job map is gone; lifecycle drives boot
+  // recovery; attempt bounds respawn retries; owner_boot_id + lease_until are the compare-and-swap claim.
+  addColumn(db, 'brain_subagent_runs', 'job_id', 'TEXT');
+  addColumn(db, 'brain_subagent_runs', 'lifecycle', 'TEXT');
+  addColumn(db, 'brain_subagent_runs', 'attempt', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'brain_subagent_runs', 'owner_boot_id', 'TEXT');
+  addColumn(db, 'brain_subagent_runs', 'lease_until', 'INTEGER');
   // Mid-turn (provisional) message rows — see brain_messages in schema.sql. Every existing row was written
   // by a settled agent_end, so the 0 default correctly reads the whole back catalogue as durable history.
   addColumn(db, 'brain_messages', 'pending', 'INTEGER NOT NULL DEFAULT 0');

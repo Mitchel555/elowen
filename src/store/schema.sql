@@ -242,6 +242,17 @@ CREATE TABLE IF NOT EXISTS brain_subagent_runs (
   tool_call_id TEXT NOT NULL,
   child_session_id TEXT NOT NULL,
   state TEXT NOT NULL,
+  -- Host-owned recovery lifecycle (Phase 2 — see the matching addColumn block in db.ts for full
+  -- semantics). NULL on rows written before these columns existed; the data migration backfills them.
+  -- job_id mirrors the `dlg-` job so a handle still resolves after a restart clears the in-memory map.
+  -- lifecycle (running|recovering|recovery_required|done|error|legacy_interrupted) drives boot recovery.
+  -- attempt bounds respawn retries. owner_boot_id + lease_until are the compare-and-swap claim that stops
+  -- two booting daemons recovering the same run.
+  job_id TEXT,
+  lifecycle TEXT,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  owner_boot_id TEXT,
+  lease_until INTEGER,
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (parent_session_id, tool_call_id)
 );
