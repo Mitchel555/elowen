@@ -161,10 +161,13 @@ function outputTone(text: string, exitCode?: unknown): ToolOutputView['tone'] {
   // just trained users to ignore the status.
   if (exitCode === true) return 'warning';
   if (typeof exitCode === 'number') return exitCode !== 0 ? 'warning' : 'success';
-  // No authoritative signal → conservative text heuristic: only unambiguous failure markers count
-  // (a line STARTING with an error word, or an explicit "<something> failed" phrase).
-  if (/(^|\n)\s*(error|fatal|exception|traceback)\b|\b(command|build|tests?|compilation|request) failed\b/i.test(text)) return 'warning';
-  if (/\b(pass|passed|success|ok|done|green)\b/i.test(text)) return 'success';
+  // No authoritative signal → judge the HEADLINE only (first non-blank line). A tool's verdict is its
+  // opening line; the same word further down is data, not this call's status — DelegateList naming a
+  // sub-agent whose own run ended in `error`, a grep hit on "error", a task description mentioning a
+  // "build failed" bug. Scanning the whole body turned every such informational listing into a red row.
+  const headline = text.split('\n').find((line) => line.trim()) ?? '';
+  if (/^\s*(error|fatal|exception|traceback)\b|\b(command|build|tests?|compilation|request) failed\b/i.test(headline)) return 'warning';
+  if (/\b(pass|passed|success|ok|done|green)\b/i.test(headline)) return 'success';
   return 'normal';
 }
 

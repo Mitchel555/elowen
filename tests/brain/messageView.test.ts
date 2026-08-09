@@ -497,6 +497,16 @@ describe('tool output tone (needs attention)', () => {
     });
     expect(v?.tone).toBe('warning');
   });
+
+  it('an informational listing that NAMES a failed item is not itself a failure', () => {
+    // DelegateList prints each sub-agent's own status; one that ended in `error` puts that word at the
+    // start of a later line. That is the listed run's outcome, not this call's — the row must stay calm.
+    const list = '2 sub-agents in this conversation (newest first).\n\n'
+      + '- brain-ch-subagent-sub-dlg-a\n  fix the money bug\n  error · 80 messages · 45m ago · gpt-5.6-terra\n'
+      + '- brain-ch-subagent-sub-dlg-b\n  add the measurement\n  done · 80 messages · 42m ago · gpt-5.6-terra';
+    const v = toolOutputView('DelegateList', {}, { content: [{ type: 'text', text: list }] });
+    expect(v?.tone).not.toBe('warning');
+  });
 });
 
 describe('newestTurnStart', () => {
