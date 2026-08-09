@@ -1,4 +1,4 @@
-import type { BrainEvent, BrainGoalState } from '../events.js';
+import type { BrainCard, BrainEvent, BrainGoalState } from '../events.js';
 import type { BrainMessageView } from '../messageView.js';
 import type { BrainStreamControl } from '../../shared/wireContract.js';
 
@@ -42,6 +42,10 @@ export interface BrainStreamSnapshot extends LiveEventSnapshot {
   /** The actual tapped session. It can differ from the query after an idle rollover retargeted this
    * stable client while its previous SSE was down. */
   sessionId?: string;
+  /** Identity of the tapped session, which may use a different model/provider than its parent. */
+  session?: { model: string; provider: string };
+  /** Persisted display cards for reconnect/drill-in hydration before live replay events are applied. */
+  cards?: BrainCard[];
   /** See {@link BrainStreamControl}. Optional only for rolling compatibility with an older daemon. */
   control?: BrainStreamControl;
   run?: number;

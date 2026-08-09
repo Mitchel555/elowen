@@ -184,6 +184,9 @@ export class StreamCoordinator implements StreamCoordinatorPort {
         if (event.type === 'step') onTurnActive();
         if (event.type === 'step' && event.usage) rt.usage = event.usage;
         if (event.type === 'card') rt.cards = upsertCard(rt.cards, event.card);
+        if (event.type === 'session-event') {
+          void refreshMeta().then(() => { if (current() && lease.isCurrent()) render('metadata:session-event'); });
+        }
         if (event.type === 'subagent' && event.status !== 'running') {
           void refreshMeta().then(() => { if (current() && lease.isCurrent()) render('metadata:subagent-settled'); });
         }
@@ -294,7 +297,7 @@ export class StreamCoordinator implements StreamCoordinatorPort {
       const ac = new AbortController();
       rt.childAc = ac;
       const transcript = new TranscriptModel();
-      rt.childView = { sessionId, transcript, processes: [], loading: true, usage: null, cards: [] };
+      rt.childView = { sessionId, model: '', provider: '', transcript, processes: [], loading: true, usage: null, cards: [] };
       render('child:opening');
       let processRevision = 0;
 
@@ -408,6 +411,11 @@ export class StreamCoordinator implements StreamCoordinatorPort {
           const terminal = snapshot.events.some((event) => event.type === 'idle' || event.type === 'error');
           if (terminal) truncatedSnapshotPending = false;
           else if (snapshot.truncated) truncatedSnapshotPending = true;
+          if (snapshot.session) {
+            rt.childView!.model = snapshot.session.model;
+            rt.childView!.provider = snapshot.session.provider;
+          }
+          rt.childView!.cards = snapshot.cards ?? [];
           rt.childView!.transcript.replaceHistory(snapshot.history);
           rt.childView!.loading = false;
           for (const event of snapshot.events) fold(event, true);

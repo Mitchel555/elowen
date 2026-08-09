@@ -383,6 +383,30 @@ describe('StreamCoordinator — idle rollover', () => {
     expect(turns(rt.transcript).at(-1)).toEqual({ role: 'you', text: 'combined queued delivery' });
   });
 
+  it('refreshes metadata when another surface changes the parent session model', () => {
+    let onEvent!: (event: BrainEvent) => void;
+    const client = {
+      stream: (cb: (event: BrainEvent) => void) => { onEvent = cb; return Promise.resolve(); },
+      history: () => Promise.resolve([]),
+      rebind: () => {},
+    } as unknown as BrainClient;
+    const rt = state();
+    const refreshMeta = vi.fn(async () => {});
+    const stream = new StreamCoordinator(
+      rt, { client }, actions({ refreshMeta }),
+      { launchAsk: () => {}, openPlanDecision: () => {} } as unknown as Flows,
+      new SnapshotHydrator<BrainEvent>(), new HydrationNoticeOwner(),
+    );
+    stream.openStream(rt.streamAc);
+
+    onEvent({
+      type: 'session-event', id: 'model-switch', kind: 'model',
+      detail: 'openai-codex/gpt-5.6-sol', at: '2026-08-09T18:00:00.000Z',
+    });
+
+    expect(refreshMeta).toHaveBeenCalledOnce();
+  });
+
   it('drops buffered frames delivered by an aborted stale parent stream after a switch', () => {
     let staleEvent!: (event: BrainEvent) => void;
     const rebinds: string[] = [];
@@ -481,7 +505,28 @@ describe('StreamCoordinator — focused sub-agent panels', () => {
     expect(rt.childView?.usage).toBeNull();
   });
 
-  it('keeps a card emitted by the child on its own view and leaves the parent\'s panel untouched', async () => {
+  it('hydrates the child identity and persisted cards from the snapshot without a live card event', async () => {
+    const lanes = new Map<string, Lane>();
+    const rt = state();
+    const parentCard = { id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'parent step' }] };
+    const childCard = { id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'persisted child step' }] };
+    rt.cards = [parentCard];
+    const stream = coordinator(rt, lanes);
+
+    void stream.openSubagent('brain-ch-a');
+    await Promise.resolve();
+    lanes.get('brain-ch-a')!({
+      ...snapshot([]),
+      session: { model: 'gpt-5.6-sol', provider: 'openai-codex' },
+      cards: [childCard],
+    });
+
+    expect(rt.childView).toMatchObject({ model: 'gpt-5.6-sol', provider: 'openai-codex' });
+    expect(rt.childView?.cards).toEqual([childCard]);
+    expect(rt.cards).toEqual([parentCard]);
+  });
+
+  it('keeps a live card emitted by the child on its own view and leaves the parent\'s panel untouched', async () => {
     const lanes = new Map<string, Lane>();
     const rt = state();
     const parentCard = { id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'parent step' }] };

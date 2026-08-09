@@ -218,6 +218,7 @@ export class ChatApplication {
       transcript: new TranscriptModel(initialTranscript.history),
       notice: notices.render(),
       modelName: boot?.model || options.model || '',
+      provider: boot?.provider ?? '',
       conversationTitle: boot?.title ?? '',
       lineCfg: boot?.statusline ?? null,
       usage: boot?.usage ?? null,
@@ -356,7 +357,6 @@ export class ChatApplication {
     if (!this.resources) return;
     const publication = this.lifetime.begin('metadata');
     const goalRevisionAtRequest = this.state.goalRevision;
-    void this.refreshRateLimits();
     const [status, mcp, goal] = await Promise.all([
       this.resources.client.status().catch(() => null),
       this.resources.client.mcpServers().catch(() => null),
@@ -368,11 +368,19 @@ export class ChatApplication {
       // Goal lifecycle events are newer than a GET that was already in flight. A monotonic revision is
       // required here: reference/value comparison cannot detect a null → active → null ABA transition.
       if (goal !== undefined && this.state.goalRevision === goalRevisionAtRequest) this.state.setGoal(goal);
+      // Fetch only after status commits so a provider switch cannot race a request keyed to stale UI state.
+      void this.refreshRateLimits();
     });
   }
 
   private applyStatus(status: BrainStatus): void {
     const state = this.state;
+    const nextProvider = status.provider || state.provider;
+    if (state.provider && nextProvider && state.provider !== nextProvider) {
+      state.rateLimits = null;
+      this.rateLimitsFetchedAt = 0;
+    }
+    state.provider = nextProvider;
     state.modelName = status.model || state.modelName;
     state.conversationTitle = status.title ?? state.conversationTitle;
     state.lineCfg = status.statusline;

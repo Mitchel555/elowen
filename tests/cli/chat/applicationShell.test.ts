@@ -1066,6 +1066,8 @@ describe('chat application shell ownership', () => {
     h.rt.cards = [{ id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'parent checklist item' }] }];
     h.rt.childView = {
       sessionId: 'child-1',
+      model: 'child-model',
+      provider: 'test',
       transcript: new TranscriptModel([{ role: 'assistant', text: 'child output' }]),
       processes: [],
       loading: false,
@@ -1417,6 +1419,8 @@ describe('chat application shell ownership', () => {
     childTranscript.apply({ type: 'text', delta: 'thinking…' }); // child is active → activity 'agent'
     h.rt.childView = {
       sessionId: 'child-42',
+      model: 'gpt-5.6-sol',
+      provider: 'openai-codex',
       transcript: childTranscript,
       processes: [],
       loading: false,
@@ -1430,16 +1434,17 @@ describe('chat application shell ownership', () => {
       detail: 'reading',
       tools: 2,
       seconds: 137,
-      model: 'anthropic/haiku-child',
+      model: 'anthropic/stale-rail-model',
     }]);
     const composition = makeComposition(h);
     composition.resume();
     composition.renderForced('test:child-meta');
     await vi.runOnlyPendingTimersAsync();
     const rendered = renderMountedRoot(h).map(terminalPlainText).join('\n');
-    // Child model, not the parent's.
-    expect(rendered).toContain('haiku-child');
+    // Snapshot identity is authoritative over both the parent and a stale parent-rail entry.
+    expect(rendered).toContain('gpt-5.6-sol');
     expect(rendered).not.toContain('provider-model');
+    expect(rendered).not.toContain('stale-rail-model');
     // Child's elapsed seconds (137s → "2m 17s"), from the rail entry.
     expect(rendered).toContain('2m 17s');
     // The parent's reasoning-level label is dropped for a child (level unknown).

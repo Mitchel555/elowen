@@ -272,7 +272,7 @@ export class BrainService {
     });
     this.channelService = new ChannelSessionService({
       registry: this.sessions, admitsNewWork: () => !this.draining,
-      store: d.store, users: d.users,
+      store: d.store, cards: this.cards, users: d.users,
       maxChannels: () => this.limits().channelSessionCap,
       spawn: (o) => this.spawner.spawn(o), // composition stays in the spawner — single source
       // Verified channel senders get memory too, keyed on their linked account and their own toggles.

@@ -137,7 +137,7 @@ function subgoalTally(raw: string): { done: number; total: number } | null {
  *  empty rail is quieter than a rail full of dashes. Shared by the desktop column and the mobile drawer. */
 function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => void }) {
   const { t } = useTranslation();
-  const { usage, telemetry, activeSessionId, busy, goal, subagents, workflows, setAgentsOpen } = useBrainChat();
+  const { usage, telemetry, activeSessionId, provider, busy, goal, subagents, workflows, setAgentsOpen } = useBrainChat();
   const { data: allProcesses = [] } = useBrainProcesses();
   const qc = useQueryClient();
   // Track the open process by id, not a click-time copy, so the modal follows the live list (it stops
@@ -146,7 +146,7 @@ function TelemetryBody({ onOpenWorkflow }: { onOpenWorkflow?: (id: string) => vo
   // The subscription rail changes on the scale of hours and lives on its own endpoint (the daemon keeps
   // it out of the hot status poll on purpose) — so it is fetched separately and refreshed slowly.
   const { data: limits } = useQuery({
-    queryKey: ['brain-rate-limits-session', activeSessionId],
+    queryKey: ['brain-rate-limits-session', activeSessionId, provider],
     queryFn: () => elowenClient.brainRateLimits(activeSessionId ?? undefined),
     refetchInterval: 60_000,
     staleTime: 30_000,

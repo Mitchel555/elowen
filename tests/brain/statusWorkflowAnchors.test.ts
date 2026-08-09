@@ -32,19 +32,20 @@ function harness() {
     spawn: () => Promise.reject(new Error('no spawn in this harness')),
     selectionAllowed: () => true,
   });
+  const cards = new CardRegistry(() => store);
   const status = new BrainStatusService({
     store,
     sessions,
     attachments: new ClientAttachments(),
     elicitation,
-    cards: new CardRegistry(),
+    cards,
     lifecycle,
     permissions: new PermissionApprovalService({ elicitation }),
     config: undefined,
     runtime: undefined as unknown as ConstructorParameters<typeof BrainStatusService>[0]['runtime'],
   });
-  store.createSession({ id: SESSION, userId: 1, model: 'm' });
-  return { store, sessions, status };
+  store.createSession({ id: SESSION, userId: 1, model: 'stored-model', provider: 'stored-provider' });
+  return { store, sessions, cards, status };
 }
 
 /** A post-compaction tail that no longer contains the WorkflowStart tool row. */
@@ -66,6 +67,8 @@ const runningRun = {
 function liveOrigin(sessions: LiveSessionRegistry<LiveBrain>) {
   sessions.set(SESSION, {
     sessionId: SESSION,
+    model: 'live-model',
+    providerId: 'live-provider',
     lastTurnMode: 'build',
     session: { isStreaming: false, messages: [], getContextUsage: () => undefined, getSteeringMessages: () => [], getFollowUpMessages: () => [] },
     replay: { transportSnapshot: () => ({ cursor: 0, events: [], run: 0, eventCursors: [] }) },
@@ -75,6 +78,26 @@ function liveOrigin(sessions: LiveSessionRegistry<LiveBrain>) {
 const anchorItems = (views: { segments?: BrainSegment[] }[]) => views
   .flatMap((v) => v.segments ?? [])
   .filter((s): s is Extract<BrainSegment, { kind: 'tool' }> => s.kind === 'tool' && s.id === 'call-wf');
+
+describe('stream snapshot session identity and cards', () => {
+  it('falls back to the stored session identity and restores persisted cards without a live brain', () => {
+    const { cards, status } = harness();
+    const card = { id: 'todos', pinned: true, items: [{ text: 'Ship it', status: 'in_progress' as const }] };
+    cards.set(SESSION, card);
+
+    const snapshot = status.streamSnapshot(1, SESSION);
+
+    expect(snapshot.session).toEqual({ model: 'stored-model', provider: 'stored-provider' });
+    expect(snapshot.cards).toEqual([card]);
+  });
+
+  it('prefers the tapped live brain identity over the stored fallback', () => {
+    const { sessions, status } = harness();
+    liveOrigin(sessions);
+
+    expect(status.streamSnapshot(1, SESSION).session).toEqual({ model: 'live-model', provider: 'live-provider' });
+  });
+});
 
 describe('status reads pin a synthetic anchor for a running workflow', () => {
   it('messagesPage first page carries the anchor even though the window has no WorkflowStart row', () => {

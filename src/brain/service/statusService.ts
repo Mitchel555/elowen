@@ -476,6 +476,8 @@ export class BrainStatusService {
     return {
       type: 'snapshot',
       sessionId,
+      session: { model: live?.model ?? row.model, provider: live?.providerId ?? row.provider },
+      cards: this.d.cards.forSession(sessionId),
       goal: this.d.store.getGoal(sessionId) ?? null,
       history: anchoredViews,
       control: {

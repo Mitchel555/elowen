@@ -323,6 +323,45 @@ describe('ChatApplication shutdown ownership', () => {
     expect(state.goal).toEqual(activeGoal);
   });
 
+  it('clears stale limits and refetches immediately when metadata reports a provider switch', async () => {
+    const codexLimits = {
+      provider: 'openai-codex', planType: 'pro', fetchedAt: 2, stale: false,
+      windows: [{ usedPercent: 11, windowMinutes: 300, resetsAt: 123 }],
+    };
+    const client = {
+      bindLifetime: vi.fn(),
+      status: vi.fn(async () => ({
+        running: false, sessionId: 'brain-1', model: 'gpt-5.6-sol', provider: 'openai-codex',
+        usage: null, statusline: null,
+      })),
+      mcpServers: vi.fn(async () => []),
+      rateLimits: vi.fn(async () => codexLimits),
+      goal: vi.fn(async () => null),
+    } as unknown as BrainClient;
+    const application = new ChatApplication({ base: 'http://unused', token: 'unused', client });
+    const state = new ChatState({ transcript: new TranscriptModel(), provider: 'anthropic' });
+    state.rateLimits = {
+      provider: 'anthropic', planType: null, fetchedAt: 1, stale: false,
+      windows: [{ usedPercent: 90, windowMinutes: 300, resetsAt: 456 }],
+    };
+    const internals = application as unknown as {
+      state: ChatState;
+      resources: { client: BrainClient };
+      rateLimitsFetchedAt: number;
+      refreshMeta(): Promise<void>;
+    };
+    internals.state = state;
+    internals.resources = { client };
+    internals.rateLimitsFetchedAt = 999;
+
+    await internals.refreshMeta();
+    await vi.waitFor(() => expect(state.rateLimits).toEqual(codexLimits));
+
+    expect(state.provider).toBe('openai-codex');
+    expect(client.rateLimits).toHaveBeenCalledOnce();
+    expect(internals.rateLimitsFetchedAt).not.toBe(999);
+  });
+
   it('does not let an older metadata response overwrite a newer streamed goal transition', async () => {
     const activeGoal = {
       session_id: 'brain-1', user_id: 1, status: 'active' as const, goal: 'Finish safely',

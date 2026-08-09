@@ -6,7 +6,8 @@ import { BrainStore } from '../../src/store/brainStore.js';
 import { openDb } from '../../src/store/db.js';
 import { LiveEventReplay } from '../../src/brain/session/liveEventReplay.js';
 import type { BrainEvent } from '../../src/brain/events.js';
-import { currentSubagentEmitter, currentTurnPermissions } from '../../src/plugins/policyContext.js';
+import { currentCardEmitter, currentSubagentEmitter, currentTurnPermissions } from '../../src/plugins/policyContext.js';
+import { CardRegistry } from '../../src/brain/cards.js';
 import { resolveToolPermission } from '../../src/brain/toolPermissions.js';
 import type { DelegatedExecutionScope } from '../../src/brain/delegatedScope.js';
 
@@ -41,9 +42,10 @@ function fakeBrain(providerId = 'moonshot', model = 'kimi', onPrompt?: () => voi
 }
 type Brain = ReturnType<typeof fakeBrain>;
 
-function setup(maxChannels?: number, templates: { name: string }[] = [], beforeUser = '') {
+function setup(maxChannels?: number, templates: { name: string }[] = [], beforeUser = '', channelId = 'discord-c1') {
   const store = new BrainStore(openDb(':memory:'));
   const registry = new LiveSessionRegistry<Brain>();
+  const cards = new CardRegistry(() => store);
   const spawn = vi.fn(async (o: { sessionId: string; ownerUserId: number; selection?: { provider?: string; model?: string }; parentSessionId?: string; delegatedAccess?: DelegatedExecutionScope }) => {
     if (!store.getSession(o.sessionId)) store.createSession({
       id: o.sessionId, userId: o.ownerUserId, model: o.selection?.model ?? 'kimi',
@@ -51,15 +53,36 @@ function setup(maxChannels?: number, templates: { name: string }[] = [], beforeU
     });
     return fakeBrain(o.selection?.provider ?? 'moonshot', o.selection?.model ?? 'kimi', undefined, o.sessionId, templates, beforeUser);
   });
-  const svc = new ChannelSessionService({ registry, store, users: { get: () => ({ username: 'o' }) }, spawn, maxChannels } as never);
-  const channelId = 'discord-c1';
+  const svc = new ChannelSessionService({ registry, store, cards, users: { get: () => ({ username: 'o' }) }, spawn, maxChannels } as never);
   const sessionId = channelSessionId(channelId);
   const opts = (userId?: number, onEvent?: (e: unknown) => void) => ({
     channelId, ownerUserId: 1, policy: { allowedProjectIds: 'all' as const, allowedPaths: () => [] },
     identity: userId != null ? { userId } : undefined, onEvent,
   });
-  return { store, registry, svc, channelId, sessionId, opts };
+  return { store, registry, cards, svc, channelId, sessionId, opts };
 }
+
+describe('ChannelSessionService — display cards', () => {
+  it('persists a sub-agent/channel card through the shared registry and publishes it live', async () => {
+    const { store, registry, svc, channelId, sessionId, opts } = setup(undefined, [], '', 'subagent-card-test');
+    const card = { id: 'todos', title: 'Todos', pinned: true, items: [{ text: 'Inspect', status: 'in_progress' }] };
+    const liveEvents: BrainEvent[] = [];
+
+    expect(sessionId).toBe('brain-ch-subagent-card-test');
+    await svc.send({ ...opts(7), onEvent: (event: BrainEvent) => liveEvents.push(event) }, 'first');
+    const live = registry.channelGet(channelId)!;
+
+    // Run a second turn with the emitter invoked inside the active policy context.
+    live.session.prompt.mockImplementationOnce(async () => {
+      currentCardEmitter()?.(card);
+      live.session.messages.push({ role: 'assistant', content: 'done' });
+    });
+    await svc.send({ ...opts(7), onEvent: (event: BrainEvent) => liveEvents.push(event) }, 'second');
+
+    expect(store.getCards(sessionId)).toEqual([card]);
+    expect(liveEvents).toContainEqual({ type: 'card', card });
+  });
+});
 
 describe('ChannelSessionService — mid-turn steering (Discord double-message)', () => {
   it('a SAME-SENDER message arriving mid-turn stays queue-only until PI delivers it', async () => {

@@ -343,6 +343,12 @@ export function createChatComposition(
   );
   let childViewport: ChatViewport | null = null;
   let childViewportSession = '';
+  const childModelName = (): string => {
+    const child = rt.childView;
+    if (!child) return '';
+    if (!child.provider || child.model.includes('/')) return child.model;
+    return `${child.provider}/${child.model}`;
+  };
   const newChildViewport = (): ChatViewport => new ChatViewport(
     {
       transcript: rt.childView?.transcript ?? rt.transcript,
@@ -350,7 +356,7 @@ export function createChatComposition(
       transcriptNotice: (rt.childView?.transcript ?? rt.transcript).activity === 'compaction'
         ? undefined
         : (rt.childView?.transcript.notice ?? rt.transcript.notice),
-      notice: '', modelName: rt.modelName, thinkingSeconds: 0,
+      notice: '', modelName: childModelName(), thinkingSeconds: 0,
     },
     mdTheme,
     () => rowBudget().sections.transcript,
@@ -509,10 +515,9 @@ export function createChatComposition(
     // child's own effective level onto the subagent event); its activity from the child transcript. Work
     // mode stays the parent's — it is a session-wide setting the sub-agent inherits, not a per-agent one.
     const childEntry = child ? currentAgents.find((agent) => agent.sessionId === child.sessionId) : undefined;
-    // Fall back to the parent model name when the entry has none yet: sub-agents inherit the parent's
-    // model, so it is the right default rather than a wrong one, and '—' would flicker before the first
-    // rail entry lands.
-    const rawModel = child ? (childEntry?.model ?? rt.modelName) : rt.modelName;
+    // The child snapshot is authoritative. A parent rail entry may be stale after a model switch, and the
+    // parent itself may use an entirely different model from this delegated session.
+    const rawModel = child ? childModelName() : rt.modelName;
     const modelArg = opts.provider === false ? rawModel.replace(/^[^/]+\//, '') : rawModel;
     const activity = child ? child.transcript.activity : rt.transcript.activity;
     const seconds = child ? (childEntry?.seconds ?? currentRunSeconds) : currentRunSeconds;
@@ -629,7 +634,7 @@ export function createChatComposition(
         notice: rt.childView.loading
           ? color.dim('· loading sub-agent transcript…')
           : (rt.notice || color.dim('· sub-agent session — your messages go to this agent')),
-        modelName: rt.modelName,
+        modelName: childModelName(),
         thinkingSeconds: currentRunSeconds,
         composingMarkerReady,
         spinnerFrame,

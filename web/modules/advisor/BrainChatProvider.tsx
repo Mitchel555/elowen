@@ -228,6 +228,8 @@ export interface BrainChatValue {
   models: BrainModelOption[] | null;
   /** The active conversation's model id (from status / a switch) — the picker's trigger label + active mark. */
   currentModel: string;
+  /** The active conversation's provider, used to scope provider-specific telemetry cache. */
+  provider: string;
   /** Switch this conversation to `m` in place (respawn under the same id; no SSE reconnect). */
   setModel: (m: BrainModelOption) => void;
   /** Fetch the catalog on first picker open (idempotent-cheap; re-invoked by the picker's error retry). */
@@ -373,6 +375,7 @@ function useBrainChatController(): BrainChatValue {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState(false);
   const [currentModel, setCurrentModel] = useState('');
+  const [provider, setProvider] = useState('');
   const [focusNonce, setFocusNonce] = useState(0);
   // Work mode + the `/rename` dialog: plain in-memory state. This is what the composer STAMPS on its own
   // sends, so persisting it would make a reloaded tab claim a mode the user never re-chose.
@@ -519,7 +522,7 @@ function useBrainChatController(): BrainChatValue {
     // Every field here is hydration from the server, so each one is applied UNCONDITIONALLY: a
     // `if (st.x) setX(st.x)` can only ever set, which leaves a question the daemon already settled on
     // screen (and unanswerable) instead of clearing it.
-    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); setAsk(st.pendingAsk ?? null); setDaemonMode(st.workMode ?? 'build'); setPendingPlan(st.pendingPlan ?? null); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
+    if (st) { setUsage(st.usage); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setActiveSessionId(st.sessionId); setCurrentModel(st.model); setProvider(st.provider ?? ''); setAsk(st.pendingAsk ?? null); setDaemonMode(st.workMode ?? 'build'); setPendingPlan(st.pendingPlan ?? null); setCards(st.cards ?? []); setQueued(st.queued ?? []); }
     // The identity rides purely as query params — native EventSource cannot set headers, and the daemon
     // parses session/client/generation off the URL (tapping the bound conversation, not the active pointer).
     // `snapshot=1` makes the FIRST frame the hydration: the newest history page plus the running turn's
@@ -746,7 +749,7 @@ function useBrainChatController(): BrainChatValue {
       void loadHistory(genRef.current).catch(() => { /* transcript refetch is best-effort */ });
       const stamp = usageStampRef.current; // usage is fenced against the stream; the rest is snapshot-only data
       void elowenClient.brainStatus(boundSessionRef.current)
-        .then((st) => { if (generation === genRef.current) { setUsageIfFresh(st.usage, stamp); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); } })
+        .then((st) => { if (generation === genRef.current) { setUsageIfFresh(st.usage, stamp); setTelemetry(telemetryOf(st)); setLineCfg(st.statusline); setCurrentModel(st.model); setProvider(st.provider ?? ''); } })
         .catch(() => { /* status refresh is best-effort */ });
     });
     onFrame('diff', (e) => {
@@ -860,31 +863,45 @@ function useBrainChatController(): BrainChatValue {
     }
   };
 
-  // View a non-continuable session (a shared Discord channel or a task worker) read-only: load its stored
-  // history, show it, and swap the composer for an exit banner. No live stream is opened. Bumping the
-  // generation discards any in-flight connect so it can't clobber the read-only view, and the stale-gen
-  // check below on our OWN await stops the reverse: this call's history landing after something newer
-  // (another switch/openReadOnly) has already taken over.
+  // View a non-continuable session (a shared Discord channel or a task worker) read-only. Its snapshot is
+  // the authoritative child transcript, identity and cards; parent status/cache must never leak into it.
   const openReadOnly = async (sessionId: string): Promise<void> => {
     esRef.current?.close();
-    esRef.current = null; // no live stream here — and nothing for the silence watchdog to revive
-    // Capture the generation right after bumping it (mirror `connect()`): a slow `brainMessages` below
-    // must not be allowed to land once a newer connect/switch/openReadOnly has superseded this one.
     const generation = nextGeneration();
-    setAsk(null); setCards([]); setNotice('');
-    // The composer is about to be replaced by the read-only banner, so drop the in-flight marker at once
-    // rather than only when the stored history lands below.
+    setAsk(null); setNotice('');
+    // The composer is about to be replaced by the read-only banner, so drop the in-flight marker at once.
     setView((cur) => ({ ...cur, thinking: false }));
     setReadOnly(sessionId);
-    // Read-only previews (a channel / task worker) load their full stored history in one shot — no scroll-up
-    // lazy-load — so close the window: null cursor + no "more" (+ bump the epoch to discard an in-flight page).
     historyCursorRef.current = null;
     setHasMoreHistory(false);
     historyEpochRef.current++;
-    const msgs = await elowenClient.brainMessages(sessionId);
-    if (generation !== genRef.current) return; // a newer connect/switch/openReadOnly superseded this one
-    setView(fromHistory(msgs));
-    setReady(true);
+    const params = new URLSearchParams({ session: sessionId, client: clientId(), generation: String(generation), snapshot: '1' });
+    const es = new EventSource(`${BASE}/brain/stream?${params.toString()}`);
+    esRef.current = es;
+    const onFrame = (type: string, handler: (e: Event) => void): void => {
+      es.addEventListener(type, (e) => {
+        if (generation !== genRef.current || es !== esRef.current) return;
+        handler(e);
+      });
+    };
+    onFrame('snapshot', (e) => {
+      const snap = JSON.parse((e as MessageEvent).data) as BrainStreamSnapshotFrame;
+      historyEpochRef.current++;
+      historyCursorRef.current = snap.nextBefore ?? null;
+      setHasMoreHistory(snap.hasMore ?? false);
+      const folded = fromSnapshot(snap);
+      setView({ ...folded, thinking: snap.control ? snap.control.streaming : folded.thinking });
+      setCards(snap.cards ?? []);
+      if (snap.session) { setCurrentModel(snap.session.model); setProvider(snap.session.provider); }
+      if (snap.sessionId) setActiveSessionId(snap.sessionId);
+      if (snap.control) { setAsk(snap.control.pendingAsk); setDaemonMode(snap.control.workMode); setPendingPlan(snap.control.pendingPlan); }
+      if (Object.prototype.hasOwnProperty.call(snap, 'goal')) setGoal(snap.goal ?? null);
+      setReady(true);
+    });
+    onFrame('card', (e) => {
+      const { card } = JSON.parse((e as MessageEvent).data) as { card: BrainCard };
+      setCards((cur) => upsertCard(cur, card));
+    });
   };
 
   // Leave the read-only preview and return to the live active conversation.
@@ -1219,7 +1236,7 @@ function useBrainChatController(): BrainChatValue {
     turns, busy, ready, reconnecting, registerSurface, hasSurface: surfaces > 0, notice, ask, cards, agentsOpen, setAgentsOpen, statsOpen, setStatsOpen, queued: visibleQueue, readOnly, activeSessionId,
     usage, telemetry, goal, subagents, workflows, lineCfg, input, setInput, attachments, addFiles, removeAttachment, submit, switchSession,
     openReadOnly, exitReadOnly, deleteSession, onQueueRemove, onAnswer, abort, ensureAttached, loadOlder, hasMoreHistory, focusNonce,
-    models, currentModel, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
+    models, currentModel, provider, setModel: (m) => void runModel(m), loadModels: () => void loadModels(), modelsLoading, modelsError,
     showThoughts: thoughts === 'show',
     setShowThoughts: (v) => setThoughts(v ? 'show' : 'hide'),
     workMode, setWorkMode: runMode, planDecision, implementPlan, dismissPlan, planSubmitting,

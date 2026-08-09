@@ -62,7 +62,7 @@ export interface BrainRateLimits {
   fetchedAt: number;
   stale: boolean;
 }
-export interface BrainStatus { running: boolean; sessionId: string | null; title?: string; model: string; usage: BrainUsageView | null; statusline: StatuslineConfig | null; thinkingLevel?: string; thinkingLevels?: string[]; thinkingLevelLabels?: Record<string, string>; fast?: boolean; fastAvailable?: boolean; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; lspEnabled?: boolean; yolo?: boolean }
+export interface BrainStatus { running: boolean; sessionId: string | null; title?: string; model: string; provider: string; usage: BrainUsageView | null; statusline: StatuslineConfig | null; thinkingLevel?: string; thinkingLevels?: string[]; thinkingLevelLabels?: Record<string, string>; fast?: boolean; fastAvailable?: boolean; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; lspEnabled?: boolean; yolo?: boolean }
 export interface McpServerView { name: string; transport: string; status: 'connected' | 'connecting' | 'disconnected' | 'error' | 'disabled'; toolCount: number; tools: { name: string; title?: string; description?: string; schema?: unknown }[]; lastError: string | null; reconnecting?: boolean }
 export interface SkillView { name: string; description: string; source: 'bundled' | 'user'; scope?: string; location?: string; active?: boolean; canDelete?: boolean; missingRequirement?: string }
 export type GoalView = BrainGoalState;

@@ -148,6 +148,10 @@ export interface BrainStreamSnapshotFrame {
   /** The session actually tapped — differs from the requested one after an idle rollover the dead stream
    *  never saw. */
   sessionId?: string;
+  /** Authoritative identity of the tapped session, including a child drill-in. */
+  session?: { model: string; provider: string };
+  /** Persisted display cards for reconnect and read-only drill-in hydration. */
+  cards?: BrainCard[];
   /** The daemon's authoritative control state at snapshot time. The tail is transient — cleared at settle,
    *  bounded, and terminal-less across an internal retry — so this, not the tail's shape, decides whether a
    *  turn is running and whether a question is parked. Both fields are explicit, so hydrating from this
@@ -192,7 +196,7 @@ export interface StatuslineConfig { showModel?: boolean; showContext?: boolean; 
 export interface BrainProject { cwd: string | null; branch: string | null }
 /** One MCP server of this daemon. `mcp: null` (non-admin, or the plugin is off) hides the section. */
 export interface McpServerStatus { name: string; status: string }
-export interface BrainStatus { running: boolean; sessionId: string | null; model: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; workMode?: BrainWorkMode; pendingPlan?: BrainPendingPlan | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean; project?: BrainProject; lspEnabled?: boolean; mcp?: McpServerStatus[] | null }
+export interface BrainStatus { running: boolean; sessionId: string | null; model: string; provider?: string; usage: BrainUsage | null; statusline: StatuslineConfig | null; pendingAsk?: { id: string; questions: AskQuestion[]; kind?: 'approval' } | null; workMode?: BrainWorkMode; pendingPlan?: BrainPendingPlan | null; cards?: BrainCard[]; queued?: { id: string; text: string }[]; yolo?: boolean; project?: BrainProject; lspEnabled?: boolean; mcp?: McpServerStatus[] | null }
 /** One subscription rate-limit window of a connected OAuth account (mirrors the daemon's providerUsage). */
 interface UsageWindow { usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
 /** A connected OAuth account's usage rail: its windows (ordered shortest-first) plus plan/freshness meta. */

@@ -11,7 +11,7 @@ import type { AskQuestion, BrainEvent, BrainUsage, CompactResult, SubagentComple
 import { recordSubagentFinishMarker, recordWorkflowFinishMarker, visibleSubagentUpdate } from './service/sessionEvents.js';
 import { runCompaction, withDescendantUsage, sessionUsageSnapshot } from './events.js';
 import type { ElicitationRegistry } from './elicitation.js';
-import { normalizeCard } from './cards.js';
+import type { CardRegistry } from './cards.js';
 import { projectUserTurn } from './persistence.js';
 import { newCostMeter, runWithMeter } from './openrouterMeter.js';
 import { extractText, frameUntrusted, isThinkingOnlyReply, NO_REPLY_NUDGE, lastAssistant } from './messageView.js';
@@ -110,6 +110,8 @@ export interface ChannelServiceDeps {
    *  Absent ⇒ always admits. */
   admitsNewWork?(): boolean;
   store: BrainStore;
+  /** The same store-backed registry owner chat uses, so channel/sub-agent cards survive replay cleanup. */
+  cards: CardRegistry;
   users: { get(userId: number): { name?: string; username?: string } | null | undefined };
   /** Session composition stays in BrainService.spawnLive — this service only orchestrates. */
   spawn: (opts: SpawnOpts) => Promise<LiveBrain>;
@@ -410,11 +412,11 @@ export class ChannelSessionService {
         // Tell the sink which persisted session this runs as, BEFORE the turn (delegate plugin keys its
         // live progress row on it; Discord ignores the type).
         turnOnEvent?.({ type: 'session', sessionId });
-        // Turn-bound elicitor + broadcast-only cards, same as before — fan to the channel's listeners.
+        // Turn-bound elicitor + store-backed cards, shared with owner chat; fan updates live after persisting.
         const elicit = this.d.elicitation
           ? (qs: AskQuestion[]) => this.d.elicitation!.ask(sessionId, qs, (e) => ch.replay.publish(e))
           : undefined;
-        const emitCard = (raw: unknown) => { const card = normalizeCard(raw); if (card) ch.replay.publish({ type: 'card', card }); };
+        const emitCard = (raw: unknown) => { const card = this.d.cards.set(sessionId, raw); if (card) ch.replay.publish({ type: 'card', card }); };
         // Mirror owner-chat delegation tracking: the progress event is both the live UI seam and the
         // abort tree. A channel can delegate recursively, so every channel node owns its direct children.
         const emitSubagent = (u: SubagentUpdate) => {
