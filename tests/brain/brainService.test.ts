@@ -3913,6 +3913,45 @@ describe('sub-agent session tap + owner steering', () => {
     expect(() => svc.tapSession(1, 'brain-nope', () => {})).toThrow('unknown session');
   });
 
+  it('routes a delegated child snapshot and full live stream to the runner that owns its LiveBrain', async () => {
+    const d = fakeDeps();
+    const off = vi.fn();
+    const remoteTap = vi.fn(async (
+      _userId: number,
+      _sessionId: string,
+      listener: (event: { type: 'text'; delta: string }) => void,
+    ) => {
+      listener({ type: 'text', delta: 'raced after capture' });
+      return {
+        off,
+        snapshot: {
+          type: 'snapshot' as const,
+          cursor: 12,
+          history: [{ id: 'stored', role: 'assistant' as const, text: 'runner history' }],
+          events: [{ type: 'tool' as const, name: 'Read' }],
+        },
+      };
+    });
+    (d as unknown as { subagentRunner: unknown }).subagentRunner = {
+      run: vi.fn(), abort: vi.fn(), steer: vi.fn(), release: vi.fn(), reset: vi.fn(),
+      tapSessionSnapshot: remoteTap,
+    };
+    const svc = new BrainService(d as never);
+    d.store.createSession({ id: 'brain-parent', userId: 1, model: 'm' });
+    d.store.createSession({
+      id: 'brain-ch-subagent-sub-dlg-live', userId: 1, model: 'm', parentSessionId: 'brain-parent',
+    });
+    const live: unknown[] = [];
+
+    const attached = await svc.tapSessionSnapshot(1, 'brain-ch-subagent-sub-dlg-live', (event) => live.push(event));
+
+    expect(remoteTap).toHaveBeenCalledWith(1, 'brain-ch-subagent-sub-dlg-live', expect.any(Function), undefined);
+    expect(attached.snapshot.events).toEqual([{ type: 'tool', name: 'Read' }]);
+    expect(live).toEqual([{ type: 'text', delta: 'raced after capture' }]);
+    attached.off();
+    expect(off).toHaveBeenCalledOnce();
+  });
+
   it('tapSessionSnapshot combines durable history with the pre-tap unsettled event tail exactly once', async () => {
     const d = fakeDeps();
     const svc = new BrainService(d as never);
@@ -3936,7 +3975,7 @@ describe('sub-agent session tap + owner steering', () => {
     d.session.isStreaming = false;
 
     const afterSnapshot: string[] = [];
-    const attached = svc.tapSessionSnapshot(1, 'brain-1', (event) => afterSnapshot.push(event.type));
+    const attached = await svc.tapSessionSnapshot(1, 'brain-1', (event) => afterSnapshot.push(event.type));
     // The steered row is removed from the durable prefix by exact row id, then replayed at its original
     // position. This also prevents the two text streams from coalescing across the user boundary.
     expect(attached.snapshot.history).toEqual([{ id: 'snapshot-user', role: 'user', text: 'stored before opening' }]);
@@ -3953,7 +3992,7 @@ describe('sub-agent session tap + owner steering', () => {
     // Factory persistence runs before the replay journal's agent_end handler. Once settled, the full
     // assistant is in history and the old partial/tool events are gone, so reconnect is idempotent.
     d.emit({ type: 'agent_end', willRetry: false, messages: [{ role: 'assistant', content: 'partial answer later' }] });
-    const settled = svc.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot;
+    const settled = (await svc.tapSessionSnapshot(1, 'brain-1', () => {})).snapshot;
     expect(settled.history.at(-1)).toMatchObject({ role: 'assistant', text: 'partial answer later', segments: [{ kind: 'text', text: 'partial answer later' }] });
     expect(settled.events.some((event) => event.type === 'text' || event.type === 'tool')).toBe(false);
     attached.off();
@@ -3973,21 +4012,21 @@ describe('sub-agent session tap + owner steering', () => {
       };
     };
 
-    expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
+    expect((await svc.tapSessionSnapshot(1, sessionId, () => {})).snapshot.control)
       .toEqual({ streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null });
 
     d.session.isStreaming = true;
     void internals.elicitation.ask(sessionId, [{
       question: 'Continue?', header: 'Continue', multiSelect: false, options: [],
     }], () => {}).catch(() => undefined);
-    const parked = svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control;
+    const parked = (await svc.tapSessionSnapshot(1, sessionId, () => {})).snapshot.control;
     expect(parked?.streaming).toBe(true);
     expect(parked?.pendingAsk).toMatchObject({ questions: [{ header: 'Continue' }] });
 
     // A settled turn reports honestly again, even though the journal is unchanged.
     internals.elicitation.cancelForSession(sessionId);
     d.session.isStreaming = false;
-    expect(svc.tapSessionSnapshot(1, sessionId, () => {}).snapshot.control)
+    expect((await svc.tapSessionSnapshot(1, sessionId, () => {})).snapshot.control)
       .toEqual({ streaming: false, pendingAsk: null, workMode: 'build', pendingPlan: null });
   });
 
@@ -4011,7 +4050,7 @@ describe('sub-agent session tap + owner steering', () => {
     });
 
     expect(svc.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
-    expect(svc.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot.control)
+    expect((await svc.tapSessionSnapshot(1, 'brain-1', () => {})).snapshot.control)
       .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
 
     // Approving it is an ordinary build turn, so the decision clears itself — nothing has to remember it.
@@ -4041,7 +4080,7 @@ describe('sub-agent session tap + owner steering', () => {
     // after a redeploy. activeSessionId falls back to the stored session, and the decision must return.
     const afterRestart = new BrainService(d as never);
     expect(afterRestart.status(1)).toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
-    expect(afterRestart.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot.control)
+    expect((await afterRestart.tapSessionSnapshot(1, 'brain-1', () => {})).snapshot.control)
       .toMatchObject({ workMode: 'plan', pendingPlan: { id: 'call-1', plan: '# Ship it' } });
   });
 
@@ -4201,13 +4240,13 @@ describe('sub-agent session tap + owner steering', () => {
     d.deliverQueued('steer now');
     d.session.isStreaming = false;
 
-    const full = svc.tapSessionSnapshot(1, 'brain-1', () => {});
+    const full = await svc.tapSessionSnapshot(1, 'brain-1', () => {});
     expect(full.snapshot.history.map((row) => row.text)).toEqual(['msg 1', 'msg 2', 'msg 3', 'msg 4', 'msg 5']);
     expect(full.snapshot.hasMore).toBeUndefined(); // no window requested → the CLI's whole-transcript frame
     expect(full.snapshot.nextBefore).toBeUndefined();
     full.off();
 
-    const windowed = svc.tapSessionSnapshot(1, 'brain-1', () => {}, undefined, undefined, { limit: 3 });
+    const windowed = await svc.tapSessionSnapshot(1, 'brain-1', () => {}, undefined, undefined, { limit: 3 });
     // Windowing before the removal would spend one slot on the journaled row and lose `msg 3`.
     expect(windowed.snapshot.history.map((row) => row.text)).toEqual(['msg 3', 'msg 4', 'msg 5']);
     expect(windowed.snapshot.events.some((event) => event.type === 'user')).toBe(true);
@@ -4232,18 +4271,51 @@ describe('sub-agent session tap + owner steering', () => {
 
     // A new PI run clears the transient replay journal. Durable control state must still be present.
     d.emit({ type: 'agent_start' });
-    const running = svc.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot;
+    const running = (await svc.tapSessionSnapshot(1, 'brain-1', () => {})).snapshot;
     expect(running.events).toEqual([]);
     expect(running.goal).toMatchObject({ status: 'active', goal: 'Survive reconnects' });
 
     d.store.updateGoal('brain-1', { status: 'paused', paused_reason: 'waiting for user' });
     d.emit({ type: 'agent_end', willRetry: false, messages: [] });
-    const settled = svc.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot;
+    const settled = (await svc.tapSessionSnapshot(1, 'brain-1', () => {})).snapshot;
     expect(settled.events.some((event) => event.type === 'goal')).toBe(false);
     expect(settled.goal).toMatchObject({ status: 'paused', paused_reason: 'waiting for user' });
 
     svc.goalAction(1, 'clear', 'brain-1');
-    expect(svc.tapSessionSnapshot(1, 'brain-1', () => {}).snapshot.goal).toBeNull();
+    expect((await svc.tapSessionSnapshot(1, 'brain-1', () => {})).snapshot.goal).toBeNull();
+  });
+
+  it('keeps a steered continuation visibly running until the child\'s actual call claim ends', async () => {
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    const child = 'brain-ch-subagent-sub-dlg-steered';
+    d.store.createSession({ id: child, userId: 1, model: 'm', parentSessionId: 'brain-1' });
+    const sessions = (svc as unknown as {
+      sessions: {
+        setChildRunning(parent: string, child: string, running: boolean, source?: 'call' | 'progress'): void;
+      };
+    }).sessions;
+    d.session.prompt.mockImplementationOnce(async () => {
+      sessions.setChildRunning('brain-1', child, true, 'call');
+      const emit = currentSubagentEmitter();
+      emit?.({ id: 'continue-1', sessionId: child, status: 'running', task: 'continue', tools: 0, seconds: 0 });
+      // DelegateContinue itself just settled, but the original delegated call is still in flight.
+      emit?.({ id: 'continue-1', sessionId: child, status: 'done', task: 'continue', tools: 0, seconds: 0 });
+    });
+
+    await svc.send({ userId: 1, text: 'steer it' });
+    expect(d.store.getSubagentRuns('brain-1').find((run) => run.sessionId === child)?.status).toBe('running');
+
+    // Once the actual call claim ends, the child's own terminal progress is terminal again.
+    sessions.setChildRunning('brain-1', child, false, 'call');
+    d.session.prompt.mockImplementationOnce(async () => {
+      currentSubagentEmitter()?.({
+        id: 'continue-1', sessionId: child, status: 'done', task: 'continue', tools: 0, seconds: 1,
+      });
+    });
+    await svc.send({ userId: 1, text: 'observe completion' });
+    expect(d.store.getSubagentRuns('brain-1').find((run) => run.sessionId === child)?.status).toBe('done');
   });
 
   it('persists delegated child state across reconnect and keeps post-parent-idle completion on the original tool row', async () => {
@@ -4271,7 +4343,7 @@ describe('sub-agent session tap + owner steering', () => {
     });
 
     await svc.send({ userId: 1, text: 'delegate it' });
-    const running = svc.tapSessionSnapshot(1, 'brain-1', () => {});
+    const running = await svc.tapSessionSnapshot(1, 'brain-1', () => {});
     const runningTool = running.snapshot.history
       .flatMap((message) => message.segments ?? [])
       .find((segment) => segment.kind === 'tool' && segment.id === 'delegate-1');
@@ -5198,7 +5270,7 @@ describe('per-client session binding (multi-instance CLI)', () => {
     expect(freshId).toBeDefined();
     // The dead SSE never observed the `session` event, but its stable binding was retargeted for this
     // generation. Reconnecting with the old URL must hydrate the fresh transcript.
-    const recovered = svc.tapSessionSnapshot(1, old.sessionId, () => {}, 'cli-a', 1);
+    const recovered = await svc.tapSessionSnapshot(1, old.sessionId, () => {}, 'cli-a', 1);
     expect(recovered.snapshot.sessionId).toBe(freshId);
     expect(recovered.snapshot.history.some((row) => row.text.includes('second'))).toBe(true);
     recovered.off();

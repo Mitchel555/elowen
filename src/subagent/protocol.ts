@@ -1,7 +1,8 @@
 import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ELOWEN_VERSION } from '../api/version.js';
-import type { BrainUsage } from '../brain/events.js';
+import type { BrainEvent, BrainUsage } from '../brain/events.js';
+import type { BrainStreamSnapshot } from '../brain/session/liveEventReplay.js';
 import type { DelegatedProgressEvent, DelegatedTurnRequest } from '../brain/delegatedTurn.js';
 import { parseMcpBridgeSnapshot, type McpBridgeSnapshot } from '../plugins/mcpSnapshot.js';
 import { parseHostRpcRequest, parseHostRpcResult, type HostRpcRequest, type HostRpcResult } from './hostRpc.js';
@@ -65,8 +66,12 @@ export type DaemonToRunner =
    *  The daemon has already authorized the caller against the child's ownership and scope; this process
    *  only carries the injection out and answers with the matching `steered` frame. */
   | { type: 'steer'; steerId: string; channelId: string; text: string }
-  /** Drop the live record for a channel so the DAEMON can run that child's next turn itself (a drill-in
-   *  or a DelegateContinue rehydrates from SQLite). Refused while that channel is busy. */
+  /** Install an atomic snapshot + live event tap on a session held in this runner. Unlike the ordinary
+   *  low-frequency progress frames, this full stream exists only while a user has the child drill-in open. */
+  | { type: 'tap'; tapId: string; userId: number; sessionId: string; history?: { before?: number; limit: number } }
+  | { type: 'untap'; tapId: string }
+  /** Drop the live record for a channel so the DAEMON can run that child's next turn itself (an idle
+   *  continuation rehydrates from SQLite). Refused while that channel is busy. */
   | { type: 'release'; releaseId: string; channelId: string }
   /** The daemon's answer to a runner-originated host call. Errors are data so a rejected workflow
    *  expansion settles the tool call without crashing either IPC peer. */
@@ -96,6 +101,9 @@ export type RunnerToDaemon =
    *  context; `idle` when no streaming turn holds this channel here (the daemon then delivers the text
    *  itself); `aborted` when the delegation's abort fences fired while the steer waited. */
   | { type: 'steered'; steerId: string; outcome: RunnerSteerOutcome }
+  | { type: 'tapped'; tapId: string; snapshot: BrainStreamSnapshot }
+  | { type: 'tap-event'; tapId: string; event: BrainEvent }
+  | { type: 'tap-error'; tapId: string; message: string }
   /** A reverse RPC is bound to a daemon-minted in-flight turn id. There is deliberately no session id in
    *  this frame: the daemon derives the caller session from its own pending-turn table. */
   | { type: 'hostCall'; callId: string; turnId: string; request: HostRpcRequest }
@@ -150,6 +158,27 @@ export function parseDaemonMessage(raw: unknown): DaemonToRunner | undefined {
     // An empty steer text is refused with the frame: PI would queue it, the model would read a blank
     // user message, and the daemon would still be told 'delivered'.
     return steerId && channelId && text ? { type: 'steer', steerId, channelId, text } : undefined;
+  }
+  if (v.type === 'tap') {
+    const tapId = str(v.tapId);
+    const sessionId = str(v.sessionId);
+    if (!tapId || !sessionId || !Number.isSafeInteger(v.userId) || (v.userId as number) <= 0) return undefined;
+    let history: { before?: number; limit: number } | undefined;
+    if (v.history !== undefined) {
+      if (!v.history || typeof v.history !== 'object' || Array.isArray(v.history)) return undefined;
+      const rawHistory = v.history as Record<string, unknown>;
+      if (rawHistory.before !== undefined && (!Number.isSafeInteger(rawHistory.before) || (rawHistory.before as number) < 0)) return undefined;
+      if (!Number.isSafeInteger(rawHistory.limit) || (rawHistory.limit as number) <= 0) return undefined;
+      history = {
+        ...(rawHistory.before !== undefined ? { before: rawHistory.before as number } : {}),
+        limit: rawHistory.limit as number,
+      };
+    }
+    return { type: 'tap', tapId, userId: v.userId as number, sessionId, ...(history ? { history } : {}) };
+  }
+  if (v.type === 'untap') {
+    const tapId = str(v.tapId);
+    return tapId ? { type: 'untap', tapId } : undefined;
   }
   if (v.type === 'release') {
     const releaseId = str(v.releaseId);
@@ -208,6 +237,24 @@ export function parseRunnerMessage(raw: unknown): RunnerToDaemon | undefined {
       // An unknown outcome is a dropped frame, not a coerced one: the daemon acts on this verdict
       // (deliver the text itself, or report the delegation aborted), so guessing would misdeliver.
       return steerId && isSteerOutcome(v.outcome) ? { type: 'steered', steerId, outcome: v.outcome } : undefined;
+    }
+    case 'tapped': {
+      const tapId = str(v.tapId);
+      const snapshot = v.snapshot as Record<string, unknown> | undefined;
+      if (!tapId || !snapshot || snapshot.type !== 'snapshot' || typeof snapshot.cursor !== 'number'
+        || !Array.isArray(snapshot.history) || !Array.isArray(snapshot.events)) return undefined;
+      return { type: 'tapped', tapId, snapshot: snapshot as unknown as BrainStreamSnapshot };
+    }
+    case 'tap-event': {
+      const tapId = str(v.tapId);
+      const event = v.event as Record<string, unknown> | undefined;
+      return tapId && event && typeof event.type === 'string'
+        ? { type: 'tap-event', tapId, event: event as unknown as BrainEvent }
+        : undefined;
+    }
+    case 'tap-error': {
+      const tapId = str(v.tapId);
+      return tapId ? { type: 'tap-error', tapId, message: str(v.message) ?? 'runner tap failed' } : undefined;
     }
     case 'hostCall': {
       const callId = str(v.callId);

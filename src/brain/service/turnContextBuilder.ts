@@ -2,7 +2,7 @@ import { PluginHookBus } from '../../plugins/hookBus.js';
 import type { PluginRegistry } from '../../plugins/registry.js';
 import { runWithPolicy } from '../../plugins/policyContext.js';
 import type { ToolPolicy } from '../../plugins/policyContext.js';
-import { drainSessionNotices, recordSubagentFinishMarker, recordWorkflowFinishMarker } from './sessionEvents.js';
+import { drainSessionNotices, recordSubagentFinishMarker, recordWorkflowFinishMarker, visibleSubagentUpdate } from './sessionEvents.js';
 import type { HookAuditBuffer } from '../../shared/hookAudit.js';
 import type { BrainStore } from '../../store/brainStore.js';
 import type { BrainDeps } from '../brainDeps.js';
@@ -242,20 +242,24 @@ export class TurnContextBuilder {
       const enriched: SubagentUpdate = childLevel
         ? { ...update, thinkingLevel: childLevel, thinkingLabel: childBrain?.thinkingLabels?.[childLevel] ?? childLevel }
         : update;
+      const visible = visibleSubagentUpdate(
+        enriched,
+        this.d.sessions.hasChildClaim(live.sessionId, update.sessionId, 'call'),
+      );
       // Read the child's prior status BEFORE the upsert, so the finish marker lands once on the
       // running→terminal transition (upsertSubagentRun rewrites the row and returns true even for a
       // repeated 'done'). Only a terminal update can ever produce a marker, so skip the read otherwise.
-      const prevStatus = update.status === 'done' || update.status === 'error'
-        ? this.d.store.getSubagentRuns(live.sessionId).find((run) => run.sessionId === update.sessionId)?.status
+      const prevStatus = visible.status === 'done' || visible.status === 'error'
+        ? this.d.store.getSubagentRuns(live.sessionId).find((run) => run.sessionId === visible.sessionId)?.status
         : undefined;
-      if (!this.d.store.upsertSubagentRun(live.sessionId, enriched)) return;
+      if (!this.d.store.upsertSubagentRun(live.sessionId, visible)) return;
       // As the 'progress' source: this emitter tracks the plugin's progress ROW, not the child's actual
       // run (that claim belongs to begin/endDelegatedCall). A DelegateContinue that steered into a
-      // running child settles its row while the original call still runs — its terminal update must
-      // release only the emitter's own claim, or the live child vanishes from DelegateStop/abort/shutdown.
-      this.d.sessions.setChildRunning(live.sessionId, update.sessionId, update.status === 'running', 'progress');
-      live.replay.publish({ type: 'subagent', ...enriched });
-      recordSubagentFinishMarker(this.d.store, live.sessionId, (event) => live.replay.publish(event), prevStatus, update);
+      // running child settles its OWN progress claim, while `visible` stays running under the actual
+      // call claim. UI state and liveness ownership are deliberately separate here.
+      this.d.sessions.setChildRunning(live.sessionId, visible.sessionId, update.status === 'running', 'progress');
+      live.replay.publish({ type: 'subagent', ...visible });
+      recordSubagentFinishMarker(this.d.store, live.sessionId, (event) => live.replay.publish(event), prevStatus, visible);
     };
     const emitSubagentCompletion = (completion: SubagentCompletion): void => {
       this.d.completeSubagent?.(live.sessionId, userId, completion);

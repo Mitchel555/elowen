@@ -58,6 +58,7 @@ function fakeBrain() {
   let unknownSessionError: Error | null = null;
   let snapshotPending: BrainEvent[] = [{ type: 'text', delta: 'post-snapshot event' }];
   let snapshotPendingSync = false;
+  let snapshotDelay: Promise<void> | undefined;
   let snapshotOffCalls = 0;
   const queues = new Map<number, { id: string; text: string }[]>();
   const send = async (request: TurnRequest) => {
@@ -92,6 +93,7 @@ function fakeBrain() {
       snapshotPending = events;
       snapshotPendingSync = synchronous;
     },
+    __setSnapshotDelay: (delay?: Promise<void>) => { snapshotDelay = delay; },
     __failSubagentPreflight: (message: string | null) => { subagentPreflightError = message ? new Error(message) : null; },
     __failSendBeforeAdmission: (message: string | null) => { sendBeforeAdmissionError = message ? new Error(message) : null; },
     __failSendAfterAdmission: (message: string | null) => { sendAfterAdmissionError = message ? new Error(message) : null; },
@@ -168,11 +170,12 @@ function fakeBrain() {
     },
     subscribe: () => () => {},
     tapSession: () => () => {},
-    tapSessionSnapshot: (
+    tapSessionSnapshot: async (
       id: number, session: string, listener: (event: BrainEvent) => void,
       _client?: string, _generation?: number, history?: { limit: number; before?: number },
     ) => {
       tapSnapshotCalls.push({ id, session, history });
+      await snapshotDelay;
       // Arrives after the atomic snapshot was captured but while its first SSE frame is flushing.
       const publishPending = () => { for (const event of snapshotPending) listener(event); };
       if (snapshotPendingSync) publishPending();
@@ -471,6 +474,25 @@ describe('brain routes', () => {
     expect(body).toContain('running child output');
     expect(body).toContain('post-snapshot event');
     expect(body.indexOf('running child output')).toBeLessThan(body.indexOf('post-snapshot event'));
+  });
+
+  it('releases an async runner tap when the client disconnects before its snapshot arrives', async () => {
+    const { app, amyTok, brain } = setup();
+    let releaseSnapshot!: () => void;
+    brain.__setSnapshotDelay(new Promise<void>((resolve) => { releaseSnapshot = resolve; }));
+    const ac = new AbortController();
+    const res = await app.request('/brain/stream?session=brain-ch-subagent-a&snapshot=1', {
+      headers: { authorization: `Bearer ${amyTok}` }, signal: ac.signal,
+    });
+    const reader = res.body!.getReader();
+    const reading = reader.read().catch(() => ({ done: true as const, value: undefined }));
+    await vi.waitFor(() => expect(brain.tapSnapshotCalls).toHaveLength(1));
+
+    ac.abort();
+    releaseSnapshot();
+    await reading;
+    await vi.waitFor(() => expect(brain.snapshotOffCalls).toBe(1));
+    await reader.cancel().catch(() => {});
   });
 
   it('forwards a `history` window to the snapshot tap only when the client asked for one', async () => {

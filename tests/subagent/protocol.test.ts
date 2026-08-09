@@ -67,6 +67,32 @@ describe('workflow host RPC — runner → daemon and back', () => {
   });
 });
 
+describe('runner session tap — daemon → runner and back', () => {
+  it('parses tap lifecycle frames and rejects malformed paging', () => {
+    expect(parseDaemonMessage({
+      type: 'tap', tapId: 'tap-1', userId: 1, sessionId: 'brain-ch-subagent-sub-dlg-1',
+      history: { before: 8, limit: 40 },
+    })).toEqual({
+      type: 'tap', tapId: 'tap-1', userId: 1, sessionId: 'brain-ch-subagent-sub-dlg-1',
+      history: { before: 8, limit: 40 },
+    });
+    expect(parseDaemonMessage({ type: 'untap', tapId: 'tap-1' })).toEqual({ type: 'untap', tapId: 'tap-1' });
+    expect(parseDaemonMessage({ type: 'tap', tapId: 'tap-1', userId: 1, sessionId: 'child', history: {} })).toBeUndefined();
+    expect(parseDaemonMessage({ type: 'tap', tapId: 'tap-1', userId: 0, sessionId: 'child' })).toBeUndefined();
+  });
+
+  it('parses the atomic snapshot and full live event frames', () => {
+    const snapshot = { type: 'snapshot', cursor: 7, history: [], events: [{ type: 'text', delta: 'partial' }] };
+    expect(parseRunnerMessage({ type: 'tapped', tapId: 'tap-1', snapshot }))
+      .toEqual({ type: 'tapped', tapId: 'tap-1', snapshot });
+    expect(parseRunnerMessage({ type: 'tap-event', tapId: 'tap-1', event: { type: 'tool', name: 'Read' } }))
+      .toEqual({ type: 'tap-event', tapId: 'tap-1', event: { type: 'tool', name: 'Read' } });
+    expect(parseRunnerMessage({ type: 'tap-error', tapId: 'tap-1', message: 'unknown session' }))
+      .toEqual({ type: 'tap-error', tapId: 'tap-1', message: 'unknown session' });
+    expect(parseRunnerMessage({ type: 'tapped', tapId: 'tap-1', snapshot: { type: 'snapshot' } })).toBeUndefined();
+  });
+});
+
 describe('steer verb — daemon → runner and back', () => {
   it('parses a steer frame', () => {
     expect(parseDaemonMessage({ type: 'steer', steerId: 's-1', channelId: 'subagent-sub-dlg-1', text: 'also check docs' }))

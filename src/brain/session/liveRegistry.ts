@@ -124,6 +124,11 @@ export class LiveSessionRegistry<T extends { sessionId: string; session: { dispo
     if (claims.size === 0) this.children.delete(parentSessionId);
   }
   childrenOf(parentSessionId: string): string[] { return [...(this.children.get(parentSessionId)?.keys() ?? [])]; }
+  /** Whether one specific lifecycle writer still claims this edge. UI progress uses this to distinguish a
+   * continuation tool's terminal row from the actual delegated call finishing. */
+  hasChildClaim(parentSessionId: string, childSessionId: string, source: ChildClaimSource): boolean {
+    return this.children.get(parentSessionId)?.get(childSessionId)?.has(source) === true;
+  }
   hasActiveChildren(parentSessionId: string): boolean { return (this.children.get(parentSessionId)?.size ?? 0) > 0; }
   clearChildren(parentSessionId: string): void { this.children.delete(parentSessionId); }
   beginParentAbort(parentSessionId: string): void {

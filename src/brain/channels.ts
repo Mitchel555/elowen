@@ -8,7 +8,7 @@ import {
   type DelegatedExecutionScope,
 } from './delegatedScope.js';
 import type { AskQuestion, BrainEvent, BrainUsage, CompactResult, SubagentCompletion, SubagentUpdate, WorkflowCompletion, WorkflowUpdate } from './events.js';
-import { recordSubagentFinishMarker, recordWorkflowFinishMarker } from './service/sessionEvents.js';
+import { recordSubagentFinishMarker, recordWorkflowFinishMarker, visibleSubagentUpdate } from './service/sessionEvents.js';
 import { runCompaction, withDescendantUsage, sessionUsageSnapshot } from './events.js';
 import type { ElicitationRegistry } from './elicitation.js';
 import { normalizeCard } from './cards.js';
@@ -418,18 +418,21 @@ export class ChannelSessionService {
         // Mirror owner-chat delegation tracking: the progress event is both the live UI seam and the
         // abort tree. A channel can delegate recursively, so every channel node owns its direct children.
         const emitSubagent = (u: SubagentUpdate) => {
+          const visible = visibleSubagentUpdate(
+            u,
+            this.d.registry.hasChildClaim(ch.sessionId, u.sessionId, 'call'),
+          );
           // See turnContextBuilder.emitSubagent: read prior status before the upsert so the finish marker
           // fires once on the running→terminal transition, mirrored here for channel-driven delegations.
-          const prevStatus = u.status === 'done' || u.status === 'error'
-            ? this.d.store.getSubagentRuns(ch.sessionId).find((run) => run.sessionId === u.sessionId)?.status
+          const prevStatus = visible.status === 'done' || visible.status === 'error'
+            ? this.d.store.getSubagentRuns(ch.sessionId).find((run) => run.sessionId === visible.sessionId)?.status
             : undefined;
-          if (!this.d.store.upsertSubagentRun(ch.sessionId, u)) return;
-          // 'progress' source, mirroring turnContextBuilder.emitSubagent: the plugin's terminal row for a
-          // steered continuation must not release the claim begin/endDelegatedCall holds for the child's
-          // still-running original call.
-          this.d.registry.setChildRunning(ch.sessionId, u.sessionId, u.status === 'running', 'progress');
-          ch.replay.publish({ type: 'subagent', ...u });
-          recordSubagentFinishMarker(this.d.store, ch.sessionId, (event) => ch.replay.publish(event), prevStatus, u);
+          if (!this.d.store.upsertSubagentRun(ch.sessionId, visible)) return;
+          // 'progress' source, mirroring turnContextBuilder.emitSubagent: the continuation tool's terminal
+          // row stays visibly running under the actual call claim, but releases its own progress claim.
+          this.d.registry.setChildRunning(ch.sessionId, visible.sessionId, u.status === 'running', 'progress');
+          ch.replay.publish({ type: 'subagent', ...visible });
+          recordSubagentFinishMarker(this.d.store, ch.sessionId, (event) => ch.replay.publish(event), prevStatus, visible);
         };
         const emitSubagentCompletion = parentSessionId && this.d.completeSubagent
           ? (completion: SubagentCompletion) => { this.d.completeSubagent!(ch.sessionId, opts.ownerUserId, completion); }

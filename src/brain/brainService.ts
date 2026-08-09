@@ -22,7 +22,7 @@ import { SubagentDispatch } from '../subagent/dispatch.js';
 import { lastAssistantTextIn, type BrainMessageView } from './messageView.js';
 import { runCompaction, withDescendantUsage } from './events.js';
 import type { AskAnswer, BrainEvent, CompactResult } from './events.js';
-import { isNonUserSession, isOwnedUserSession, defaultUserSessionId, freshUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
+import { isNonUserSession, isOwnedUserSession, isSubagentSession, defaultUserSessionId, freshUserSessionId, channelSessionId, archivedChannelSessionId } from './sessionId.js';
 import { lastAssistantText } from './goal.js';
 import { ClientAttachments } from './service/attachments.js';
 import { DelegatedSessionService } from './service/delegatedSession.js';
@@ -855,14 +855,25 @@ export class BrainService {
     return this.lifecycle.tapSession(userId, sessionId, listener, clientId, clientGeneration);
   }
 
-  /** Install a fixed-session tap and capture its durable+live snapshot without yielding. The caller
-   *  must buffer listener events until it has written `snapshot`; because both operations are
-   *  synchronous, every event belongs exactly once (inside the snapshot or after it). */
-  tapSessionSnapshot(userId: number, sessionId: string, listener: (e: BrainEvent) => void, clientId?: string, clientGeneration?: number, history?: MessagePageOpts): { off: () => void; snapshot: BrainStreamSnapshot } {
-    // A reconnect can carry the pre-rollover id while its stable client binding has already moved to the
-    // fresh session. Resolve once up front so BOTH the tap and atomic history/journal snapshot name the
-    // same target; otherwise the tap follows fresh but the first frame accidentally hydrates old history.
+  /** Install a fixed-session tap and capture its durable+live snapshot atomically. A delegated child may
+   *  live in the forked runner rather than this daemon; in that case the same operation is forwarded to
+   *  the process that owns its LiveBrain and replay journal. The route buffers listener events while this
+   *  promise settles, so an event racing the IPC snapshot still belongs exactly once. */
+  async tapSessionSnapshot(
+    userId: number,
+    sessionId: string,
+    listener: (e: BrainEvent) => void,
+    clientId?: string,
+    clientGeneration?: number,
+    history?: MessagePageOpts,
+  ): Promise<{ off: () => void; snapshot: BrainStreamSnapshot }> {
+    // Resolve and authorize in the daemon before crossing IPC. The runner repeats ownership validation;
+    // userId and sessionId in the wire frame are routing facts, never an authority minted by the child.
     const targetSessionId = this.lifecycle.resolveStreamSession(userId, sessionId, clientId, clientGeneration);
+    if (isSubagentSession(targetSessionId)) {
+      const remote = await this.d.subagentRunner?.tapSessionSnapshot?.(userId, targetSessionId, listener, history);
+      if (remote) return remote;
+    }
     const off = this.lifecycle.tapSession(userId, targetSessionId, listener, clientId, clientGeneration);
     try { return { off, snapshot: this.statusView.streamSnapshot(userId, targetSessionId, history) }; }
     catch (error) { off(); throw error; }

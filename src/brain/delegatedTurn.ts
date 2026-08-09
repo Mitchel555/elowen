@@ -4,6 +4,7 @@ import type { ChannelSendOpts } from './channels.js';
 import type { BrainEvent, BrainUsage } from './events.js';
 import { delegatedToolPolicy, normalizeDelegatedExecutionScope, type DelegatedExecutionScope } from './delegatedScope.js';
 import type { HostRpcMethod } from '../subagent/hostRpc.js';
+import type { BrainStreamSnapshot } from './session/liveEventReplay.js';
 
 /** Everything a delegated child's turn needs that a SECOND PROCESS could not derive for itself.
  *
@@ -101,8 +102,16 @@ export interface DelegatedTurnRunner {
    *  so the caller falls back to running the follow-up itself; `aborted` = the delegation's abort fences
    *  fired while the steer waited. */
   steer(channelId: string, text: string): Promise<{ outcome: 'delivered' | 'idle' | 'aborted' }>;
+  /** Atomically snapshot and follow a delegated session held in the runner. The daemon has already checked
+   *  ownership. Undefined means this runner does not hold that session, so the caller uses its local tap. */
+  tapSessionSnapshot?(
+    userId: number,
+    sessionId: string,
+    listener: (event: BrainEvent) => void,
+    history?: { before?: number; limit: number },
+  ): Promise<{ off: () => void; snapshot: BrainStreamSnapshot } | undefined>;
   /** Ask the runner to drop its live record for a channel so the caller can run that child's next turn
-   *  itself (a drill-in or a DelegateContinue rehydrates from SQLite). `busy` = still working on it. */
+   *  itself (an idle continuation rehydrates from SQLite). `busy` = still working on it. */
   release(channelId: string): Promise<{ busy: boolean }>;
   /** Tear the runner down (plugin reload, shutdown). In-flight turns settle as interrupted. */
   reset(reason: string): void;

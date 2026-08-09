@@ -3,6 +3,7 @@ import { setPriority } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import type { BrainEvent } from '../brain/events.js';
+import type { BrainStreamSnapshot } from '../brain/session/liveEventReplay.js';
 import {
   SubagentRunnerUnavailable,
   fromDelegatedProgress,
@@ -158,6 +159,54 @@ export class SubagentRunnerHost implements DelegatedTurnRunner {
       child.on('message', onMessage);
       child.once('exit', onExit);
       if (!this.post(child, { type: 'steer', steerId, channelId, text })) { onExit(); }
+    });
+  }
+
+  async tapSessionSnapshot(
+    userId: number,
+    sessionId: string,
+    listener: (event: BrainEvent) => void,
+    history?: { before?: number; limit: number },
+  ): Promise<{ off: () => void; snapshot: BrainStreamSnapshot } | undefined> {
+    const child = this.child;
+    // A drill-in is observational: it never cold-starts a runner. No live process means no remote replay
+    // exists, and the daemon's durable/local snapshot is the truthful fallback.
+    if (!child || !this.ready) return undefined;
+    const tapId = randomUUID();
+    return new Promise((resolve, reject) => {
+      let attached = false;
+      let closed = false;
+      const cleanup = (): void => {
+        if (closed) return;
+        closed = true;
+        child.off('message', onMessage);
+        child.off('exit', onExit);
+      };
+      const off = (): void => {
+        cleanup();
+        if (child.connected) this.post(child, { type: 'untap', tapId });
+      };
+      const onMessage = (raw: unknown): void => {
+        const msg = parseRunnerMessage(raw);
+        if (!msg || !('tapId' in msg) || msg.tapId !== tapId) return;
+        if (msg.type === 'tap-event') { listener(msg.event); return; }
+        if (msg.type === 'tap-error') {
+          cleanup();
+          reject(new Error(msg.message));
+          return;
+        }
+        if (msg.type !== 'tapped') return;
+        attached = true;
+        resolve({ off, snapshot: msg.snapshot });
+      };
+      const onExit = (): void => {
+        cleanup();
+        if (attached) listener({ type: 'error', message: 'the sub-agent runner exited' });
+        else resolve(undefined);
+      };
+      child.on('message', onMessage);
+      child.once('exit', onExit);
+      if (!this.post(child, { type: 'tap', tapId, userId, sessionId, ...(history ? { history } : {}) })) onExit();
     });
   }
 

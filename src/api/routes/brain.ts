@@ -826,10 +826,10 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
         }
         writeEvent(e);
       };
-      let snapshot: ReturnType<typeof brain.tapSessionSnapshot>['snapshot'] | null = null;
+      let snapshot: Awaited<ReturnType<typeof brain.tapSessionSnapshot>>['snapshot'] | null = null;
       try {
         if (session && withSnapshot) {
-          const attached = brain.tapSessionSnapshot(userId, session, deliver, clientId, clientGeneration, historyWindow);
+          const attached = await brain.tapSessionSnapshot(userId, session, deliver, clientId, clientGeneration, historyWindow);
           off = attached.off;
           snapshot = attached.snapshot;
         } else off = session
@@ -837,6 +837,9 @@ export function registerBrainRoutes(app: ElowenApp, ctx: RouteContext): void {
           : brain.subscribe(userId, deliver, clientId, clientGeneration);
       }
       catch { await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: session ? 'unknown session' : 'brain not started' }), event: 'error' }); return; }
+      // Remote runner taps attach asynchronously. The client may disconnect before that IPC round-trip
+      // completes, so consume an already-fired abort before registering the ordinary close listener.
+      if (c.req.raw.signal.aborted) { unsubscribe(); return; }
       c.req.raw.signal.addEventListener('abort', unsubscribe, { once: true });
       if (pendingOverflow) {
         await closeOverflow();

@@ -108,6 +108,9 @@ const edgeKey = (parentSessionId: string, childSessionId: string): string => `${
  *  a channel stays HELD after its turn ends (that is the point — the next turn reuses the warm session)
  *  and is only let go on release. Reported in the heartbeat so a runner's real session count is visible. */
 const heldChannels = new Set<string>();
+/** Full live streams requested by an authenticated daemon drill-in. These exist only while the matching
+ * SSE is open; ordinary delegated progress stays on the deliberately narrow low-frequency wire path. */
+const liveTaps = new Map<string, () => void>();
 
 /** How late THIS process runs its own timers. The daemon cannot see this from outside — a runner chewing
  *  through tool results and one idling between provider responses look identical over IPC — so the pool's
@@ -258,6 +261,35 @@ process.on('message', (raw: unknown) => {
       })();
       return;
     }
+    case 'tap': {
+      void (async (): Promise<void> => {
+        await booting;
+        try {
+          if (!brain) throw new Error('the sub-agent runner has no brain');
+          liveTaps.get(msg.tapId)?.();
+          const attached = await brain.tapSessionSnapshot(
+            msg.userId,
+            msg.sessionId,
+            (event) => { send({ type: 'tap-event', tapId: msg.tapId, event }); },
+            undefined,
+            undefined,
+            msg.history,
+          );
+          liveTaps.set(msg.tapId, attached.off);
+          if (!send({ type: 'tapped', tapId: msg.tapId, snapshot: attached.snapshot })) {
+            liveTaps.delete(msg.tapId);
+            attached.off();
+          }
+        } catch (e) {
+          send({ type: 'tap-error', tapId: msg.tapId, message: errorText(e) });
+        }
+      })();
+      return;
+    }
+    case 'untap':
+      liveTaps.get(msg.tapId)?.();
+      liveTaps.delete(msg.tapId);
+      return;
     case 'release': {
       // The daemon wants to run this child's next turn itself. Refuse while it is working here — one
       // transcript driven by two live sessions is worse than a refused continuation.
@@ -287,6 +319,8 @@ process.on('message', (raw: unknown) => {
  *  — and holding model spend nobody asked for — so abort what is running and leave. */
 const leave = (reason: string): void => {
   log.warn(`sub-agent runner shutting down: ${reason}`);
+  for (const off of liveTaps.values()) off();
+  liveTaps.clear();
   const channels = [...runningChannels];
   runningChannels.clear();
   void Promise.allSettled(channels.map((channelId) => brain?.abortChannel(channelId)))

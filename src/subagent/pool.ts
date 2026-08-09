@@ -35,6 +35,8 @@
  *      action can never be the evidence for its opposite. */
 import { logger } from '../shared/logger.js';
 import type { BrainEvent } from '../brain/events.js';
+import type { BrainStreamSnapshot } from '../brain/session/liveEventReplay.js';
+import { channelIdOf } from '../brain/sessionId.js';
 import { SubagentRunnerUnavailable, type DelegatedTurnRequest, type DelegatedTurnRunner } from '../brain/delegatedTurn.js';
 import { SubagentRunnerHost, type RunnerHeartbeat, type SubagentRunnerHostDeps } from './runnerHost.js';
 import { FairQueue } from './fairQueue.js';
@@ -460,6 +462,20 @@ export class SubagentRunnerPool implements DelegatedTurnRunner {
     const entry = this.routes.get(channelId);
     if (!entry) return { outcome: 'idle' };
     return entry.host.steer(channelId, text);
+  }
+
+  async tapSessionSnapshot(
+    userId: number,
+    sessionId: string,
+    listener: (event: BrainEvent) => void,
+    history?: { before?: number; limit: number },
+  ): Promise<{ off: () => void; snapshot: BrainStreamSnapshot } | undefined> {
+    // Session affinity is the same invariant as steer/abort: only the routed runner owns the replay journal.
+    const channelId = channelIdOf(sessionId);
+    const entry = this.routes.get(channelId);
+    if (!entry) return undefined;
+    this.routeTouched.set(channelId, Date.now());
+    return entry.host.tapSessionSnapshot(userId, sessionId, listener, history);
   }
 
   async release(channelId: string): Promise<{ busy: boolean }> {

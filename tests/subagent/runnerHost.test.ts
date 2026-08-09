@@ -307,6 +307,39 @@ describe('SubagentRunnerHost — the forked runner as seen from the daemon', () 
     expect(await host.release('subagent-sub-dlg-1')).toEqual({ busy: false });
   });
 
+  it('returns the runner-owned atomic snapshot and relays full live drill-in events until untapped', async () => {
+    const child = new FakeChild();
+    const host = hostWith(child);
+    const run = host.run(request, 'do it');
+    await tick();
+    ready(child);
+    await tick();
+
+    const seen: unknown[] = [];
+    const pendingTap = host.tapSessionSnapshot(1, 'brain-ch-subagent-sub-dlg-1', (event) => seen.push(event), { limit: 40 });
+    await tick();
+    const asked = child.received.find((m) => m.type === 'tap') as Extract<DaemonToRunner, { type: 'tap' }>;
+    expect(asked).toMatchObject({ userId: 1, sessionId: 'brain-ch-subagent-sub-dlg-1', history: { limit: 40 } });
+    // Events can race the snapshot IPC response. The host must already relay them; the HTTP route buffers
+    // this suffix until it has written the snapshot frame.
+    child.reply({ type: 'tap-event', tapId: asked.tapId, event: { type: 'text', delta: 'racing suffix' } });
+    const snapshot = { type: 'snapshot' as const, cursor: 9, history: [], events: [{ type: 'tool', name: 'Read' } as const] };
+    child.reply({ type: 'tapped', tapId: asked.tapId, snapshot });
+    const attached = await pendingTap;
+    expect(attached?.snapshot).toEqual(snapshot);
+    child.reply({ type: 'tap-event', tapId: asked.tapId, event: { type: 'tool_progress', id: 't1', text: 'live output' } });
+    expect(seen).toEqual([
+      { type: 'text', delta: 'racing suffix' },
+      { type: 'tool_progress', id: 't1', text: 'live output' },
+    ]);
+    attached?.off();
+    expect(child.received).toContainEqual({ type: 'untap', tapId: asked.tapId });
+
+    const { turnId } = child.received.find((m) => m.type === 'turn') as { turnId: string };
+    child.reply({ type: 'result', turnId, reply: 'ok' });
+    await run;
+  });
+
   it('steer forwards the text to the runner and resolves with ITS verdict', async () => {
     const child = new FakeChild();
     const host = hostWith(child);
