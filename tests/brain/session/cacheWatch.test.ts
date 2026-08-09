@@ -454,6 +454,59 @@ describe('installCacheWatch — the cache_control marker is caching policy, not 
     expect(warning?.message).not.toContain('REWRITTEN IN PLACE');
   });
 
+  // liveRecall injects a recalled-memory user message whose `content` is a bare STRING. pi-ai expands it to
+  // a `[{type:'text', cache_control}]` block on the request where it is the last user message, then it
+  // reverts to the string once a later step appends past it — the same text in two wire shapes. Stripping
+  // cache_control alone left the shapes hashing differently, so the recall message read as "rewritten in
+  // place" (reproduced from session brain-1-mrxd90yxh2rh). Folding the shapes must silence that.
+  it('does not call a string↔block content shape change a rewrite', () => {
+    const recallAsBlock: unknown[] = [
+      { role: 'user', content: [{ type: 'text', text: 'do work' }] },
+      { role: 'user', content: [{ type: 'text', text: 'recalled: prefer X', cache_control: EPHEMERAL }] },
+    ];
+    // Next request: the recall message is a bare string again and no longer last; a new step follows it.
+    const recallAsString: unknown[] = [
+      { role: 'user', content: [{ type: 'text', text: 'do work' }] },
+      { role: 'user', content: 'recalled: prefer X' },
+      { role: 'assistant', content: [{ type: 'text', text: 'step' }] },
+      { role: 'user', content: [{ type: 'tool_result', content: 'result', cache_control: EPHEMERAL }] },
+    ];
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, sessionId: 'brain-1-test' });
+    capture(providerPayload({ messages: recallAsBlock }));
+    fire(assistantUsage(240_000, T0));
+    capture(providerPayload({ messages: recallAsString }));
+    fire(assistantUsage(33_000, T0 + 1_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).not.toContain('REWRITTEN IN PLACE');
+  });
+
+  // The fold must not blind the monitor to a genuine edit: if the recalled text itself changes, that IS a
+  // rewrite of an already-sent message and must still be named.
+  it('still flags a genuine edit of an already-sent message', () => {
+    const first: unknown[] = [
+      { role: 'user', content: [{ type: 'text', text: 'do work' }] },
+      { role: 'user', content: 'recalled: prefer X' },
+    ];
+    const edited: unknown[] = [
+      { role: 'user', content: [{ type: 'text', text: 'do work' }] },
+      { role: 'user', content: 'recalled: prefer Y' },
+      { role: 'assistant', content: [{ type: 'text', text: 'step' }] },
+      { role: 'user', content: [{ type: 'tool_result', content: 'result', cache_control: EPHEMERAL }] },
+    ];
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, sessionId: 'brain-1-test' });
+    capture(providerPayload({ messages: first }));
+    fire(assistantUsage(240_000, T0));
+    capture(providerPayload({ messages: edited }));
+    fire(assistantUsage(33_000, T0 + 1_000));
+
+    expect(warnings()[0]?.message).toContain('REWRITTEN IN PLACE');
+  });
+
   // Everything an investigation needs, in the record itself: which conversation, the cost, and the block
   // delta that separates a fan-out miss from a genuine rewrite.
   it('records the session, the write and the block delta', () => {

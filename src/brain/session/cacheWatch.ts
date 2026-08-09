@@ -76,6 +76,16 @@ function canonical(value: unknown): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(object)) {
     if (key === 'cache_control') continue;
+    // A message whose `content` is a bare string is wire-equivalent to a single text block: when pi-ai moves
+    // the cache marker onto the payload's last user message it rewrites `content: "x"` into
+    // `[{type:'text', text:'x', cache_control}]` (anthropic-messages.js). The SAME message therefore hashes
+    // differently on the step it stops being last — reported as "rewritten in place" though nothing changed.
+    // Fold both shapes to the block form (cache_control already stripped above) so a rewrite means the text
+    // moved, not the wire shape. Scoped to objects carrying a `role`, i.e. messages, not arbitrary nesting.
+    if (key === 'content' && typeof item === 'string' && typeof object.role === 'string') {
+      out[key] = [{ type: 'text', text: item }];
+      continue;
+    }
     out[key] = canonical(item);
   }
   return out;
