@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { openStatsOverlay } from '../../../src/cli/chat/statsOverlay.js';
-import type { ModelUsageView } from '../../../src/cli/chat/brainClient.js';
+import type { BrainUsageView, ModelUsageView } from '../../../src/cli/chat/brainClient.js';
 import type { BrainContextBreakdown } from '../../../src/shared/wireContract.js';
 
 interface Overlay { render(width: number): string[]; handleInput(data: string): void }
@@ -9,6 +9,7 @@ interface Overlay { render(width: number): string[]; handleInput(data: string): 
 function renderOverlay(o: {
   models?: ModelUsageView[];
   context?: BrainContextBreakdown | null;
+  usage?: Partial<BrainUsageView>;
   section?: 'conversation' | 'models' | 'context';
   keys?: string[];
 }): string[] {
@@ -19,11 +20,14 @@ function renderOverlay(o: {
     requestRender: vi.fn(),
     showOverlay: vi.fn((c: Overlay) => { shown.push(c); return { hide: vi.fn(), focus: vi.fn() }; }),
   };
+  const usage: BrainUsageView | null = o.usage
+    ? { tokens: null, contextWindow: 0, percent: null, totalTokens: 0, cost: 0, ...o.usage }
+    : null;
   openStatsOverlay({
     tui: tui as never,
     editor: {} as never,
     section: o.section,
-    data: { model: 'm', usage: null, models: o.models ?? [], context: o.context ?? null },
+    data: { model: 'm', usage, models: o.models ?? [], context: o.context ?? null },
   });
   const overlay = shown[0];
   if (!overlay) throw new Error('the overlay was never shown');
@@ -57,6 +61,25 @@ describe('stats overlay — Σ speed', () => {
     const row = sigmaRow([model('elowen:x', { output: 100, total: 100, costUsd: 1.5, outputTps: 40 })]);
     expect(row).toContain('—');
     expect(row).not.toMatch(/\s40\s/);
+  });
+});
+
+describe('stats overlay — cache hit', () => {
+  const cacheLine = (usage: Partial<BrainUsageView>): string =>
+    renderOverlay({ usage }).find((l) => l.includes('cache hit')) ?? '';
+
+  it('counts cacheWrite as a miss in the denominator, not just cacheRead + input', () => {
+    // 255660 read, 3957 written (a miss — it was NOT in the cache, it had to be written), 2 fresh.
+    // Correct: 255660 / (255660 + 3957 + 2) = 98.48%. The old cacheRead/(cacheRead+input) gave ~100%.
+    expect(cacheLine({ cacheRead: 255660, cacheWrite: 3957, input: 2 })).toContain('98.48%');
+  });
+
+  it('shows two decimals rather than rounding a near-full rate up to 100%', () => {
+    expect(cacheLine({ cacheRead: 9955, cacheWrite: 0, input: 45 })).toContain('99.55%');
+  });
+
+  it('omits the line entirely when there is no input to measure', () => {
+    expect(cacheLine({ cacheRead: 0, cacheWrite: 0, input: 0 })).toBe('');
   });
 });
 

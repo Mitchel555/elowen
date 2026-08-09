@@ -99,8 +99,15 @@ class StatsOverlay implements Component, Focusable {
         if (u.input != null || u.output != null) {
           body.push(kv('in / out', color.faint(`${formatK(u.input ?? 0)} / ${formatK(u.output ?? 0)}`)));
         }
-        if (u.cacheRead != null && u.input != null && u.cacheRead + u.input > 0) {
-          body.push(kv('cache hit', color.faint(`${Math.round((u.cacheRead / (u.cacheRead + u.input)) * 100)}%`)));
+        // Hit rate = share of INPUT tokens served from cache. The denominator is the whole input —
+        // fresh input + cacheRead + cacheWrite — because cacheWrite tokens were NOT in the cache (they
+        // had to be written), so they are misses. Omitting them overstates the rate (a warm turn with a
+        // small write reads as ~100%). Two decimals, not Math.round, so 99.55% doesn't round up to 100%.
+        {
+          const cacheDenom = (u.cacheRead ?? 0) + (u.cacheWrite ?? 0) + (u.input ?? 0);
+          if (u.cacheRead != null && cacheDenom > 0) {
+            body.push(kv('cache hit', color.faint(`${((u.cacheRead / cacheDenom) * 100).toFixed(2)}%`)));
+          }
         }
         body.push(kv('cost', color.bold(color.text(`$${u.cost.toFixed(2)}`))));
         if (u.outputTps != null && u.outputTps > 0) {
