@@ -755,15 +755,28 @@ export class BrainDelegationStore {
    *  mutating tool call in the discarded suffix), so the parent must decide via DelegateContinue. Only the
    *  boot that holds the claim may do this. The reason is stored for the UI; owner/lease are cleared so the
    *  row is inert (no longer claimable, no auto-delivery). Returns whether a claimed row was updated. */
-  markRecoveryRequired(parentSessionId: string, toolCallId: string, reason: string): boolean {
+  /** Park a claimed run that is NOT safe to replay (an unanswered tool call in the crash-discarded tail),
+   *  AND — in the SAME transaction — enqueue a `notice` result so the parent actually learns the delegation
+   *  was interrupted instead of the run silently sitting `recovery_required` in the DB. Same atomicity
+   *  argument as {@link completeRecoveredRun}: a foreground parent's blocking turn did not survive the
+   *  restart, so the only way it hears about the outcome is the durable inbox. The row stays
+   *  `recovery_required` (not `error`) so the state is auditable and a later DelegateContinue can resume it.
+   *  Guarded by the claim: only the boot still holding the `recovering` row may park it. */
+  markRecoveryRequired(parentSessionId: string, toolCallId: string, reason: string, raw: unknown): boolean {
     const cur = this.bootId;
-    return withWriteLock(this.db, () => this.db.prepare(
-      `UPDATE brain_subagent_runs
-          SET lifecycle = 'recovery_required', owner_boot_id = NULL, lease_until = NULL,
-              state = CASE WHEN json_valid(state) THEN json_set(state, '$.recoveryReason', ?) ELSE state END,
-              updated_at = datetime('now')
-        WHERE parent_session_id = ? AND tool_call_id = ? AND owner_boot_id = ? AND lifecycle = 'recovering'`
-    ).run(bounded(reason, 2_000), parentSessionId, toolCallId, cur).changes === 1);
+    const result = normalizeSubagentResult(raw);
+    if (!parentSessionId || !result || result.toolCallId !== toolCallId) return false;
+    return withWriteLock(this.db, () => {
+      const changed = this.db.prepare(
+        `UPDATE brain_subagent_runs
+            SET lifecycle = 'recovery_required', owner_boot_id = NULL, lease_until = NULL,
+                state = CASE WHEN json_valid(state) THEN json_set(state, '$.recoveryReason', ?) ELSE state END,
+                updated_at = datetime('now')
+          WHERE parent_session_id = ? AND tool_call_id = ? AND owner_boot_id = ? AND lifecycle = 'recovering'`
+      ).run(bounded(reason, 2_000), parentSessionId, toolCallId, cur).changes === 1;
+      if (!changed) return false;
+      return this.enqueueResultRowLocked(parentSessionId, result);
+    });
   }
 
   /** Finish a claimed run in ONE transaction: terminalize the run row AND enqueue its result for the

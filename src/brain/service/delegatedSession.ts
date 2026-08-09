@@ -161,10 +161,13 @@ export class DelegatedSessionService {
     const pending = this.d.store.pendingMessages(childSessionId);
     const outstanding = outstandingToolCalls(pending.map((row) => row.content));
     if (outstanding.length > 0) {
-      this.d.store.markRecoveryRequired(
-        parentSessionId, toolCallId,
-        `interrupted with unanswered tool call(s): ${outstanding.map((o) => o.name).join(', ')} — continuing may repeat a side effect`,
-      );
+      const names = outstanding.map((o) => o.name).join(', ');
+      const reason = `interrupted by a daemon restart with unanswered tool call(s): ${names}`;
+      this.d.store.markRecoveryRequired(parentSessionId, toolCallId, reason, {
+        ...base, status: 'error',
+        error: `${reason}. Not auto-recovered because replaying the turn could repeat a side effect. `
+          + `To resume, continue the sub-agent ${childSessionId} with DelegateContinue — be aware the interrupted step may run again.`,
+      });
       return;
     }
     // Safe to replay: drop the partial tail so the transcript ends clean, then respawn the child with a

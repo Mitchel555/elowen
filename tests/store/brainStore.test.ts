@@ -204,18 +204,28 @@ describe('BrainStore', () => {
     expect(store.pendingSubagentResults('root').map((r) => r.result)).toEqual(['recovered answer']);
   });
 
-  it('parks a claimed run as recovery_required with a reason, only for the owning boot', () => {
+  it('parks a claimed run as recovery_required with a reason and notifies the parent, only for the owning boot', () => {
     store.setDelegationBootId('boot-A');
     store.createSession({ id: 'root', userId: 1, model: 'm' });
     store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
     store.upsertSubagentRun('root', { id: 'd1', sessionId: 'child', status: 'running', task: 't', tools: 0, seconds: 0 });
     store.setDelegationBootId('boot-B');
     store.claimRecoverableRuns(30_000);
-    expect(store.markRecoveryRequired('root', 'd1', 'unanswered Write in discarded suffix')).toBe(true);
+    const notice = { id: 'd1', toolCallId: 'd1', sessionId: 'child', status: 'error' as const, task: 't', error: 'interrupted; use DelegateContinue to resume', tools: 0, seconds: 0 };
+    // A non-owner boot cannot park it, and parking is atomic with the parent notice.
+    store.setDelegationBootId('boot-OTHER');
+    expect(store.markRecoveryRequired('root', 'd1', 'unanswered Write in discarded suffix', notice)).toBe(false);
+    store.setDelegationBootId('boot-B');
+    expect(store.markRecoveryRequired('root', 'd1', 'unanswered Write in discarded suffix', notice)).toBe(true);
     const st = db.prepare("SELECT lifecycle, state, owner_boot_id FROM brain_subagent_runs WHERE tool_call_id='d1'").get() as { lifecycle: string; state: string; owner_boot_id: string | null };
     expect(st.lifecycle).toBe('recovery_required');
     expect(st.owner_boot_id).toBeNull();
     expect(JSON.parse(st.state).recoveryReason).toBe('unanswered Write in discarded suffix');
+    // The parent learns about it through the durable inbox — otherwise it would wait forever.
+    const pending = store.pendingSubagentResults('root');
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ status: 'error' });
+    expect(pending[0]!.error).toContain('DelegateContinue');
   });
 
   it('persists sub-agent results as an idempotent pending inbox and acknowledges them explicitly', () => {

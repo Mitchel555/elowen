@@ -599,8 +599,8 @@ export class BrainStore {
   }
 
   /** Park a claimed run as recovery_required — see {@link BrainDelegationStore.markRecoveryRequired}. */
-  markRecoveryRequired(parentSessionId: string, toolCallId: string, reason: string): boolean {
-    return this.delegation.markRecoveryRequired(parentSessionId, toolCallId, reason);
+  markRecoveryRequired(parentSessionId: string, toolCallId: string, reason: string, raw: unknown): boolean {
+    return this.delegation.markRecoveryRequired(parentSessionId, toolCallId, reason, raw);
   }
 
   /** Terminalize a claimed run and enqueue its result in one transaction — see

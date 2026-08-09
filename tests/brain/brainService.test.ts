@@ -4545,7 +4545,12 @@ describe('sub-agent abort sparing + restart reconcile', () => {
     const row = d.db.prepare("SELECT lifecycle, state FROM brain_subagent_runs WHERE tool_call_id = 'delegate-mut'").get() as { lifecycle: string; state: string };
     expect(row.lifecycle).toBe('recovery_required');
     expect(JSON.parse(row.state).recoveryReason).toContain('Write');
-    expect(d.session.sendCustomMessage).not.toHaveBeenCalled(); // parent decides via DelegateContinue
+    expect(d.session.sendCustomMessage).not.toHaveBeenCalled(); // no blind respawn — the parent decides
+    // But the parent still learns about it: a notice reaches the durable inbox pointing at DelegateContinue.
+    const pending = d.store.pendingSubagentResults(sessionId);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ status: 'error' });
+    expect(pending[0]!.error).toContain('DelegateContinue');
   });
 
   it('boot reconcile terminalizes a workflow on a channel session no owner start() ever opens', async () => {
