@@ -8,6 +8,14 @@
     "resultRetentionMs": {
       "label": "Uchovanie výsledku (ms)",
       "hint": "Ako dlho po dokončení možno delegáciu na pozadí alebo workflow ešte prečítať nástrojmi DelegateStatus, DelegateResult či WorkflowStatus. Po uplynutí sa záznam zabudne a jeho identifikátor už nemožno dohľadať. Rozsah 10 minút až 24 hodín, predvolené 1 hodina."
+    },
+    "sec_watchdog": {
+      "label": "Strážca zaseknutia",
+      "hint": "Kedy sa preruší delegovaný subagent, ktorý prestal javiť známky činnosti."
+    },
+    "stallMinutes": {
+      "label": "Časový limit zaseknutia (minúty)",
+      "hint": "Ako dlho môže byť delegovaný subagent bez známky činnosti (žiadne spustenie nástroja, žiadne hranice krokov), než sa preruší ako zaseknutý. Verdikt je zotaviteľný nástrojom DelegateContinue, takže ide len o poistku proti naozaj zamrznutému subagentovi — pri hlbších analýzach, ktoré premýšľajú dlho, hodnotu zvýšte. Rozsah 5 minút až 4 hodiny, predvolené 1 hodina."
     }
   }
 }

@@ -64,6 +64,23 @@
       "placeholder": "3600000",
       "default": 3600000,
       "hint": "How long after finishing a background delegation or a workflow can still be read with DelegateStatus, DelegateResult or WorkflowStatus. Past it the entry is forgotten and the id no longer resolves. Range 10 minutes to 24 hours, default 1 hour."
+    },
+    {
+      "key": "sec_watchdog",
+      "label": "Stall watchdog",
+      "type": "section",
+      "hint": "When a delegated sub-agent that has gone silent is aborted."
+    },
+    {
+      "key": "stallMinutes",
+      "label": "Stall timeout (minutes)",
+      "type": "number",
+      "min": 5,
+      "max": 240,
+      "step": 5,
+      "placeholder": "60",
+      "default": 60,
+      "hint": "How long a delegated sub-agent may go with no sign of life (no tool starts, no step boundaries) before it is aborted as stalled. The verdict is recoverable with DelegateContinue, so it is only a safety net for a genuinely wedged child — raise it for deep analyses that think for long stretches. Range 5 minutes to 4 hours, default 1 hour."
     }
   ]
 }

@@ -8,6 +8,7 @@ import { Type } from 'typebox';
 import { registerWorkflow } from './lib/workflow.mjs';
 import { clipTail } from './lib/results.mjs';
 import { resolveResultRetentionMs } from './lib/retention.mjs';
+import { resolveStallMs } from './lib/stall.mjs';
 import {
   CONTEXT_HEADER,
   MAX_CONTEXT_CHUNK_CHARS,
@@ -27,20 +28,8 @@ const MAX_READ_CHARS = 50_000;
 // and produce the real conclusion, each waiting at most this long for the session's jobs to go idle.
 const MAX_COLLECT_TURNS = 8;
 const JOB_WAIT_TIMEOUT_MS = 5 * 60_000;
-// How long a delegated turn may go without ANY sign of life from the child before it is aborted as
-// stalled. `run()` itself has no timeout and JOB_WAIT_TIMEOUT_MS only bounds the collect wait, so a
-// child whose provider never answers otherwise holds its slot forever — 64 of those lock delegation
-// permanently, and the only way out is a manual Stop. Liveness is read from the child's own event
-// stream, which a working child feeds constantly (tool starts, step boundaries). Deliberately far above
-// the provider retry/backoff cycles the agent runtime handles by itself, so a slow answer is never
-// mistaken for a wedged one; a stalled verdict is recoverable through DelegateContinue.
-// Overridable so the watchdog can be exercised end to end without a thirty-minute test, and so an
-// operator with a pathologically slow provider can raise it without a rebuild. Not a user-facing knob.
-// 30 min: a deep read-only analysis can legitimately think for a long stretch between visible events
-// (one long provider generation over a big context emits no tool starts), and a stalled verdict is only
-// a safety net for a genuinely wedged child — better to wait than to kill live work.
-const TURN_STALL_MS = Number(process.env.ELOWEN_SUBAGENT_TURN_STALL_MS) || 30 * 60_000;
-const STALL_CHECK_MS = Math.min(30_000, Math.max(50, Math.floor(TURN_STALL_MS / 4)));
+// The stall watchdog timeout is resolved per registration from plugin config (`stallMinutes`) via
+// resolveStallMs — see lib/stall.mjs for the precedence and why liveness alone drives it.
 
 const ok = (text, details = {}) => ({ content: [{ type: 'text', text }], details });
 const errorText = (e) => e instanceof Error ? e.message : String(e);
@@ -167,6 +156,10 @@ export function register(ctx) {
   let run = null; // the host's channel handler, captured on connect
   // One operator knob covers a background job and a workflow alike — see lib/retention.mjs.
   const resultRetentionMs = resolveResultRetentionMs(ctx.config);
+  // Resolved once per registration; a plugin reload (which config changes trigger) rebuilds this closure,
+  // so an operator's new stallMinutes takes effect on the next delegated turn without a daemon restart.
+  const turnStallMs = resolveStallMs(ctx.config);
+  const stallCheckMs = Math.min(30_000, Math.max(50, Math.floor(turnStallMs / 4)));
   // A plugin reload replaces THIS closure wholesale — emitters, the `run` handler and the adapter behind
   // them all die with the old registry — so the map deliberately does NOT outlive it. What matters is that
   // no job is left silently running across that boundary, and the reload hook below handles exactly that:
@@ -520,17 +513,17 @@ export function register(ctx) {
         else if ((e.type === 'step' || e.type === 'idle') && e.usage?.totalTokens) { state.tokens = e.usage.totalTokens; push('running'); }
       };
       const collectSource = { platform: 'subagent', userId: 'subagent', roleIds: [], channelId, access };
-      // See TURN_STALL_MS. Aborting the child session is what unblocks the awaited run() — the rejection
+      // See lib/stall.mjs. Aborting the child session is what unblocks the awaited run() — the rejection
       // lands in runChild's catch, where the stall verdict replaces the raw abort text. The timer is
       // created inside the turn, so it inherits the async context ctx.stopSubagent reads the parent from.
       const watchForStall = () => {
         const timer = setInterval(() => {
           if (state.stalledAt || !state.sessionId) return;
-          if (Date.now() - lastActivityAt < TURN_STALL_MS) return;
+          if (Date.now() - lastActivityAt < turnStallMs) return;
           state.stalledAt = Date.now();
-          ctx.logger.warn(`subagent: ${jobId} stalled — no activity for ${Math.round(TURN_STALL_MS / 60_000)}m, aborting`);
+          ctx.logger.warn(`subagent: ${jobId} stalled — no activity for ${Math.round(turnStallMs / 60_000)}m, aborting`);
           Promise.resolve(ctx.stopSubagent?.(state.sessionId)).catch(() => {});
-        }, STALL_CHECK_MS);
+        }, stallCheckMs);
         timer.unref?.();
         return timer;
       };
@@ -586,7 +579,7 @@ export function register(ctx) {
             state.status = 'error';
             // A stall aborts the child, so what surfaces here is the abort — report the cause instead.
             state.error = state.stalledAt
-              ? `stalled — no provider or tool activity for ${Math.round(TURN_STALL_MS / 60_000)} minutes`
+              ? `stalled — no provider or tool activity for ${Math.round(turnStallMs / 60_000)} minutes`
               : clip(errorText(e), MAX_STORED_RESULT_CHARS);
           }
         } finally {
