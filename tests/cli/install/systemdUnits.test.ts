@@ -47,6 +47,12 @@ describe('install/systemdUnits.daemonUnit', () => {
     const seconds = Number(/^TimeoutStopSec=(\d+)$/m.exec(u)?.[1]);
     expect(seconds).toBeGreaterThan(10 * 60);
   });
+  // With the default KillMode=control-group, SIGTERM reaches the forked sub-agent runners at the same
+  // instant as the daemon, so they abort their delegations before the drain can wait for them. `mixed`
+  // signals the main process alone; the drain above then actually protects the delegated work too.
+  it('signals the daemon alone on stop so runners survive the drain (KillMode=mixed)', () => {
+    expect(u).toMatch(/^KillMode=mixed$/m);
+  });
   it('binds 127.0.0.1 by default (private behind a proxy / on localhost)', () => expect(u).toMatch(/^Environment=ELOWEN_HOST=127\.0\.0\.1$/m));
   it('can bind 0.0.0.0 for proxy-less IP mode so the browser reaches the terminal WS', () => {
     expect(daemonUnit({ ...p, daemonHost: '0.0.0.0' })).toMatch(/^Environment=ELOWEN_HOST=0\.0\.0\.0$/m);
