@@ -86,6 +86,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node scripts/tests/brain-e2e/chat-turn.mjs
+      # The other half of this suite: stopping a turn and killing the session. It exists next to chat-turn
+      # and was simply never wired up here, so nothing guarded that path.
+      - run: node scripts/tests/brain-e2e/stop-kill.mjs
 
   telegram-e2e:
     name: Telegram E2E (real daemon + fake Bot API)
@@ -323,6 +326,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node scripts/tests/delegate-e2e/run.mjs
+      # The DAG itself: dependency order, parallel fan-out, resume re-running only what did not finish, and
+      # DelegateStop ending a child that would otherwise hang forever. It shares this job's built daemon.
+      - run: node scripts/tests/workflow-e2e/run.mjs
 
   web:
     name: Web (build + test)

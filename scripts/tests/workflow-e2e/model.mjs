@@ -207,32 +207,50 @@ const PARENT_MODES = {
   // F: delegate a child that never answers, find its session id, and stop it. Every step reads the tool
   // results already in the turn, so the chain cannot skip a step or fire DelegateStop before it holds a real
   // session id.
-  stop: ({ say, callTool, awaitingTool, lastTool, messages, allText }) => {
-    if (!awaitingTool) {
-      // The stopped child's terminal result is delivered back as a fresh turn; acknowledge it rather than
-      // delegating a second hanging child.
-      return allText.includes(MARKERS.hangTask)
+  // Driven entirely off the WHOLE conversation rather than off this turn's tool window, because a stopped
+  // child settles immediately and the daemon then wakes the parent with its result — as a fresh turn, or
+  // steered into the chain still running. A steer arrives as a USER message, so it resets what
+  // `turnToolResults` considers "this turn" and makes a mid-chain delivery indistinguishable from a fresh
+  // one. Reading progress from the transcript makes the script indifferent to which of the two happened,
+  // which is the only way this scenario is not a race.
+  stop: ({ say, callTool, awaitingTool, lastTool, allText }) => {
+    const jobId = (/Started background delegation (dlg-[0-9a-f-]+)/.exec(allText) ?? [])[1];
+    const sessionId = (/Session: (brain-ch-subagent-\S+)/.exec(allText) ?? [])[1];
+    // The delivered RESULT block, not the task marker: this scenario wrote the task itself, so the marker is
+    // in context from the first tool call on and would read as "delivered" long before anything was.
+    const delivered = /<subagent-result[^>]*status="error"/.test(allText);
+    const acknowledged = allText.includes(MARKERS.stopDelivered);
+    const chainDone = allText.includes(MARKERS.stopDone);
+    const stopIssued = /^(Stopped\.|Nothing to stop)/m.test(allText);
+
+    if (chainDone) {
+      return delivered && !acknowledged
         ? say(`The stopped delegation reported back. ${MARKERS.stopDelivered}`)
+        : say('The stop sequence is already complete.');
+    }
+    // Exactly one hanging child, ever — the suite asserts the child hung on exactly one model request. The
+    // returned job id is the proof it was delegated: the task marker itself travels in the tool call's
+    // ARGUMENTS, which never reach the transcript text, so keying on it would delegate over and over.
+    if (!jobId) {
+      return /Started background delegation/.test(allText)
+        ? say(`No background job id came back. ${MARKERS.stopNoSession}`)
         : callTool('Delegate', { task: `Hold until released. Task marker: ${MARKERS.hangTask}.`, background: true });
     }
-    const results = turnToolResults(messages);
-    const jobId = (/Started background delegation (dlg-[0-9a-f-]+)/.exec(results.join('\n')) ?? [])[1];
-    if (!jobId) return say(`No background job id came back. ${MARKERS.stopNoSession}`);
-    if (results.some((t) => t.startsWith('Stopped.') || t.startsWith('Nothing to stop'))) {
-      // Read the job once more AFTER the stop, so the runner sees what the stop did to the delegation rather
-      // than only what the stop call claimed about itself.
-      return lastTool.startsWith('Stopped.') || lastTool.startsWith('Nothing to stop')
-        ? callTool('DelegateStatus', { id: jobId })
-        : say(`Stop sequence complete. ${MARKERS.stopDone} ${lastTool.split('\n')[0]}`);
+    if (stopIssued) {
+      // Read the job once more AFTER the stop, so the suite sees what the stop did to the delegation rather
+      // than only what the stop call claimed about itself. Close on both markers when the result already
+      // arrived: a mid-chain delivery leaves no later turn to acknowledge it in.
+      return awaitingTool && !/^(Stopped\.|Nothing to stop)/.test(lastTool)
+        ? say(`Stop sequence complete. ${MARKERS.stopDone}${delivered ? ` ${MARKERS.stopDelivered}` : ''} ${lastTool.split('\n')[0]}`)
+        : callTool('DelegateStatus', { id: jobId });
     }
-    const sessionId = (/Session: (brain-ch-subagent-\S+)/.exec(lastTool) ?? [])[1];
     // Stamp the moment the stop is ISSUED. Without it the suite can only observe that the hanging request
     // ended somehow — which a provider timeout, a transport reset or the daemon teardown would also produce.
     // The runner pairs this with the abort stamp to prove the stop is what ended it.
     if (sessionId) { stopClock.issuedAt ??= Date.now(); return callTool('DelegateStop', { id: sessionId }); }
     // The child registers its session a moment after the job starts; poll a BOUNDED number of times rather
     // than stopping a job whose session id is still '(starting)'.
-    return results.length < 12
+    return (allText.match(/Delegation job dlg-/g) ?? []).length < 12
       ? callTool('DelegateStatus', { id: jobId })
       : say(`The child never reported a session id. ${MARKERS.stopNoSession}`);
   },

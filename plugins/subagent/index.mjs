@@ -310,6 +310,28 @@ export function register(ctx) {
     }
   };
 
+  /** Settle a job terminally from OUTSIDE the child's own lifecycle — a plugin reload tearing every child
+   *  down, or an explicit DelegateStop. Both deliver the abort and return immediately, while the child
+   *  resolves a moment later through runChild; without settling here the job would read "running" to
+   *  everything that asks in that window, so a stop would look like it had not worked and be retried.
+   *  The flag latches the verdict: the child either finished in the last instant or resolves AS the abort,
+   *  and neither may flip a state the operator (or the reload) already decided.
+   *
+   *  `deliver` is the difference between the two callers. A reload MUST deliver here, because the closure
+   *  holding this job is about to become unreachable and nothing else could ever settle it. A stop must
+   *  NOT: the stopping turn is still running, and waking it with the child's result mid-turn cuts the tool
+   *  chain it is in the middle of. There the delivery belongs to the child unwinding a moment later, which
+   *  reads the verdict this call already latched. */
+  const settleExternally = (job, error, deliver = false) => {
+    if (job.status !== 'running') return false;
+    job.status = 'error';
+    job.error = error;
+    job.finishedAt = Date.now();
+    job.settledExternally = true;
+    if (deliver) { pushJob(job, 'error'); deliverCompletion(job); }
+    return true;
+  };
+
   ctx.registerPlatform({
     name: 'subagent',
     listen: (onMessage) => { run = onMessage; },
@@ -513,7 +535,7 @@ export function register(ctx) {
           // and reports only what changed since the last one: jobs that finished, plus — on a wait timeout —
           // jobs still running. It stops as soon as an idle wait leaves nothing new to report.
           const reported = new Set();
-          for (let turn = 0; state.sessionId && !state.settledByReload && turn < MAX_COLLECT_TURNS; turn += 1) {
+          for (let turn = 0; state.sessionId && !state.settledExternally && turn < MAX_COLLECT_TURNS; turn += 1) {
             // The host registers this child only for the duration of a channel turn, so `run()` returning
             // just deregistered it — yet the delegation is very much alive, and the wait below can hold it
             // here for minutes. Re-assert that the child is running: the parent's abort tree, its status
@@ -535,7 +557,7 @@ export function register(ctx) {
             raw = await run(collectSource, buildCollectReminder(finished, stillRunning), onEvent);
           }
           const reply = raw || '(the sub-agent returned nothing)';
-          if (!state.settledByReload) {
+          if (!state.settledExternally) {
             // The reload hook may have settled this job terminal while the child was in flight (the host
             // tears every child session down right after a reload). The child resolving afterwards — it
             // either finished in the last instant or was aborted — must not flip that verdict.
@@ -550,7 +572,7 @@ export function register(ctx) {
             }
           }
         } catch (e) {
-          if (!state.settledByReload) {
+          if (!state.settledExternally) {
             state.status = 'error';
             // A stall aborts the child, so what surfaces here is the abort — report the cause instead.
             state.error = state.stalledAt
@@ -560,7 +582,9 @@ export function register(ctx) {
         } finally {
           clearInterval(stallTimer);
         }
-        state.finishedAt = Date.now();
+        // Keep the stamp of whoever settled it first, so a stop's elapsed time is not stretched by however
+        // long the child then took to unwind.
+        state.finishedAt ??= Date.now();
         push(state.status);
         deliverCompletion(state);
         return state.status === 'done' ? state.result : `Error: ${state.error}`;
@@ -608,7 +632,7 @@ export function register(ctx) {
       // catch is defense-in-depth for a future state/reporting change so no detached rejection can turn
       // into a daemon-level unhandled rejection.
       void Promise.resolve().then(runChild).catch((e) => {
-        if (!state.settledByReload) {
+        if (!state.settledExternally) {
           state.status = 'error';
           state.error = clip(errorText(e), MAX_STORED_RESULT_CHARS);
         }
@@ -844,7 +868,15 @@ export function register(ctx) {
     execute: async (_id, p) => {
       if (!ctx.stopSubagent) return ok('Error: stopping a sub-agent is not wired up on this server.');
       try {
-        const { stopped } = await ctx.stopSubagent(asChildSessionId(p.id));
+        const childSessionId = asChildSessionId(p.id);
+        const { stopped } = await ctx.stopSubagent(childSessionId);
+        // Settle the job here rather than waiting for the child to unwind. stopSubagent has already proven
+        // the child belongs to THIS conversation, so matching it by session id addresses nothing wider.
+        if (stopped) {
+          for (const job of jobs.values()) {
+            if (job.sessionId === childSessionId) { settleExternally(job, 'stopped by DelegateStop'); break; }
+          }
+        }
         return ok(stopped ? 'Stopped.' : 'Nothing to stop — that sub-agent already finished (or never started).');
       } catch (e) {
         return ok(`Error: ${errorText(e)}`);
@@ -864,14 +896,7 @@ export function register(ctx) {
     run: () => {
       const running = [];
       for (const job of jobs.values()) {
-        if (job.status !== 'running') continue;
-        running.push(job);
-        job.status = 'error';
-        job.error = 'interrupted by plugin reload';
-        job.finishedAt = Date.now();
-        job.settledByReload = true;
-        pushJob(job, 'error');
-        deliverCompletion(job);
+        if (settleExternally(job, 'interrupted by plugin reload', true)) running.push(job);
       }
       if (running.length) {
         ctx.logger.warn(`subagent: ${running.length} delegation job(s) still running at plugin reload, interrupted: ${running.map((j) => j.id).join(', ')}`);
