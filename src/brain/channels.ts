@@ -105,6 +105,10 @@ export interface ChannelSendOpts {
 export interface ChannelServiceDeps {
   /** The SAME registry instance the chat brain uses — channel locks and LRU live in one place. */
   registry: LiveSessionRegistry<LiveBrain>;
+  /** False once the daemon is draining for shutdown: a NEW platform/channel turn is refused so the drain
+   *  can converge. Delegated sends take sendRemote/runDelegatedTurn, not this seam, so they still run.
+   *  Absent ⇒ always admits. */
+  admitsNewWork?(): boolean;
   store: BrainStore;
   users: { get(userId: number): { name?: string; username?: string } | null | undefined };
   /** Session composition stays in BrainService.spawnLive — this service only orchestrates. */
@@ -238,6 +242,11 @@ export class ChannelSessionService {
     if (!text.startsWith('/')) text = (opts.senderPrefix ?? '') + text;
     const sessionId = channelSessionId(opts.channelId);
     const parentSessionId = opts.parentSessionId;
+    // Draining for shutdown: refuse a NEW ordinary channel turn so the drain converges. A delegated send
+    // (parentSessionId set) is existing work the drain is waiting on — it always runs through.
+    if (this.d.admitsNewWork?.() === false && !parentSessionId) {
+      throw new Error('the daemon is shutting down — try again once it is back up');
+    }
     if (opts.ownerSteer && !parentSessionId) throw new Error('invalid delegated access');
     const delegated = parentSessionId ? this.delegatedExecution(opts, sessionId) : undefined;
     const effectiveToolPolicy = delegated?.toolPolicy ?? opts.toolPolicy;

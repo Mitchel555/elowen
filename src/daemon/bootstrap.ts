@@ -205,6 +205,10 @@ export function installGracefulShutdown(
       return;
     }
     draining = true;
+    // Stop admitting new turns at once, so fresh input arriving through the drain window cannot keep
+    // busy() above zero for the whole budget. Existing turns, delegation and result delivery are
+    // unaffected — they reach the brain through seams other than the two gated send() entries.
+    brain?.beginDrain();
     void (async () => {
       const at = brain?.busy() ?? { turns: 0, children: 0, undelivered: 0 };
       const busy = at.turns > 0 || at.children > 0 || at.undelivered > 0;

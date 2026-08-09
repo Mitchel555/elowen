@@ -12,6 +12,7 @@ const brainBusy = (sequence: Busy[], sent?: string[], notices?: unknown[]) => {
   const state = { reads: 0 };
   const brain = ({
     busy: () => ({ undelivered: 0, ...sequence[Math.min(state.reads++, sequence.length - 1)] }),
+    beginDrain: () => { /* real BrainService latches its admission gate here */ },
     notify: async (text: string, _channelId?: string, notice?: unknown) => { sent?.push(text); notices?.push(notice); },
   }) as unknown as BrainService;
   return { brain, state };
@@ -39,6 +40,19 @@ describe('installGracefulShutdown — a stop waits for running work instead of c
     const { brain, state } = brainBusy([{ turns: 0, children: 0 }]);
     expect(await runSignal(brain)).toEqual([0]);
     expect(state.reads).toBe(2); // the announcement's read + one loop check that found it idle
+  });
+
+  it('tells the brain to stop admitting new turns the moment draining starts', async () => {
+    // Without this the drain waits on busy(), but fresh input keeps arriving through the window and can
+    // hold busy() above zero for the full budget. The handler must latch the admission gate first.
+    const drained: number[] = [];
+    const brain = ({
+      busy: () => ({ turns: 0, children: 0, undelivered: 0 }),
+      notify: async () => { /* quiet */ },
+      beginDrain: () => drained.push(Date.now()),
+    }) as unknown as BrainService;
+    await runSignal(brain);
+    expect(drained).toHaveLength(1);
   });
 
   it('keeps re-checking until the running turn finishes, and only then exits', async () => {
@@ -127,6 +141,7 @@ describe('installGracefulShutdown — a stop waits for running work instead of c
   it('exits even when the announcement fails — a chat outage must not strand the process', async () => {
     const brain = ({
       busy: () => ({ turns: 0, children: 0 }),
+      beginDrain: () => { /* quiet */ },
       notify: async () => { throw new Error('discord is down'); },
     }) as unknown as BrainService;
     expect(await runSignal(brain, { notify: true })).toEqual([0]);
@@ -147,7 +162,7 @@ describe('installGracefulShutdown — a stop waits for running work instead of c
   it('drains on SIGINT too, so an interactive Ctrl-C is not a harder kill than a deploy', async () => {
     const exited: number[] = [];
     const spy = vi.fn(() => ({ turns: 0, children: 0 }));
-    const brain = ({ busy: spy, notify: async () => { /* quiet */ } }) as unknown as BrainService;
+    const brain = ({ busy: spy, beginDrain: () => { /* quiet */ }, notify: async () => { /* quiet */ } }) as unknown as BrainService;
     await new Promise<void>((resolve) => {
       installGracefulShutdown(brain, silentLog, {
         pollMs: 1, drainMs: 50, notify: false,

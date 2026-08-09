@@ -187,6 +187,18 @@ describe('BrainService', () => {
     expect(svc.history(1).find((row) => row.role === 'user')?.text).toContain('1× image');
   });
 
+  it('refuses a new turn once draining so the shutdown drain can converge', async () => {
+    // Fresh input arriving through the 10-minute drain window would otherwise keep busy() above zero for
+    // the whole budget. beginDrain (called by the graceful-shutdown handler) latches the gate.
+    const d = fakeDeps();
+    const svc = new BrainService(d as never);
+    await svc.start(1);
+    await svc.send({ userId: 1, text: 'before drain', mode: 'build', session: 'brain-1' }); // admitted
+    svc.beginDrain();
+    await expect(svc.send({ userId: 1, text: 'after drain', mode: 'build', session: 'brain-1' }))
+      .rejects.toThrow(/shutting down/);
+  });
+
   it('drains a plugin reload a tool requested mid-turn once the turn settles, and coalesces repeats', async () => {
     // Regression: a skill created mid-turn (CreateSkill → ctx.requestReload) must be applied live. The
     // brain cannot reload while the turn that asked for it is still running (it would dispose that very

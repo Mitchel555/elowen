@@ -61,6 +61,10 @@ interface TurnRunnerDeps {
   /** The shared live-session state (owned by the BrainService facade). */
   sessions: LiveSessionRegistry<LiveBrain>;
   lifecycle: ConversationLifecycle;
+  /** False once the daemon is draining for shutdown: a NEW turn is refused so the drain can converge,
+   *  while an interrupted-turn resume still runs. Delegation and result delivery never reach `send`, so
+   *  they are unaffected. Absent ⇒ always admits (test doubles that do not wire shutdown). */
+  admitsNewWork?(): boolean;
   goals: GoalLoopService;
   permissions: PermissionApprovalService;
   elicitation: ElicitationRegistry;
@@ -368,6 +372,13 @@ export class BrainTurnRunner {
       userId, text, images, internal, clientCwd, session, display, client,
     } = request;
     const mode: TurnMode = request.mode ?? 'build';
+    // Once the daemon is draining for shutdown, refuse a NEW turn so the drain can actually converge —
+    // every send() here is fresh top-level work (an owner turn, a goal turn, a background nudge), none of
+    // it the result delivery or delegated dispatch the drain is waiting on (those take other seams). An
+    // interrupted-turn resume is finishing existing work, so it still runs.
+    if (this.d.admitsNewWork?.() === false && !request.interruptResume) {
+      throw new Error('the daemon is shutting down — try again once it is back up');
+    }
     const assertClientCurrent = (sessionId: string): void => {
       if (client && !this.d.lifecycle.authorizeClientRequest(userId, client.id, client.generation, sessionId)) {
         throw new Error('client session has stopped');

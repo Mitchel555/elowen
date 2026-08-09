@@ -111,6 +111,8 @@ export class BrainService {
   private goals: GoalLoopService;
   /** Composes one live conversation (config + plugins + persona + tools) — the single spawn source. */
   private spawner: LiveSessionSpawner;
+  /** Latched by {@link beginDrain} on shutdown; gates new turns so the drain can converge. */
+  private draining = false;
   /** Session addressing, start/resume resolution and every respawn path (rollover, hop, restart). */
   private lifecycle: ConversationLifecycle;
   /** The owner-chat turn pipeline (send). */
@@ -210,6 +212,7 @@ export class BrainService {
     });
     this.turnRunner = new BrainTurnRunner({
       store: d.store, sessions: this.sessions,
+      admitsNewWork: () => !this.draining,
       lifecycle: this.lifecycle, goals: this.goals, permissions: this.permissionSvc,
       elicitation: this.elicitation, cards: this.cards, identity: this.identity,
       titler: this.titler, curator: this.curator,
@@ -262,7 +265,8 @@ export class BrainService {
       get policy() { return d.policy; },
     });
     this.channelService = new ChannelSessionService({
-      registry: this.sessions, store: d.store, users: d.users,
+      registry: this.sessions, admitsNewWork: () => !this.draining,
+      store: d.store, users: d.users,
       maxChannels: () => this.limits().channelSessionCap,
       spawn: (o) => this.spawner.spawn(o), // composition stays in the spawner — single source
       // Verified channel senders get memory too, keyed on their linked account and their own toggles.
@@ -376,6 +380,15 @@ export class BrainService {
    *  has still never reached the agent that asked for it. Exiting there is exactly how a result got lost. */
   busy(): { turns: number; children: number; undelivered: number } {
     return { ...this.sessions.busy(), undelivered: this.d.store.countPendingDeliveries() };
+  }
+
+  /** Latched true by the graceful-shutdown handler on the first SIGTERM. From then on a NEW turn is
+   *  refused (turnRunner.send / channelService.send) so {@link busy} can fall to zero and the drain can
+   *  exit — otherwise fresh input arriving through the drain window keeps it busy for the full budget.
+   *  One-way: a draining daemon is on its way out, never back to admitting. Delegation and result
+   *  delivery take other seams, so they keep running and the drain still waits for them. */
+  beginDrain(): void {
+    this.draining = true;
   }
 
   /** One-shot boot sweep for restart-zombie goals — see GoalLoopService.reconcileGoalsOnBoot. */
