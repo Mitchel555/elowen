@@ -37,6 +37,35 @@ describe('openDb', () => {
     expect(idx).toBeTruthy();
   });
 
+  it('backfills brain_subagent_runs.lifecycle from legacy state, and a legacy running row is NOT a recovery candidate', () => {
+    dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
+    const path = join(dir, 'old.db');
+    // A DB created before the recovery-lifecycle columns existed: the original 5-column shape.
+    const old = new Database(path);
+    old.exec(`CREATE TABLE brain_subagent_runs (
+      parent_session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, child_session_id TEXT NOT NULL,
+      state TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (parent_session_id, tool_call_id))`);
+    const ins = old.prepare('INSERT INTO brain_subagent_runs (parent_session_id, tool_call_id, child_session_id, state) VALUES (?, ?, ?, ?)');
+    ins.run('p1', 'tc-run', 'c1', JSON.stringify({ status: 'running', task: 't', tools: 0, seconds: 1 }));
+    ins.run('p1', 'tc-done', 'c2', JSON.stringify({ status: 'done', task: 't', tools: 0, seconds: 1 }));
+    ins.run('p1', 'tc-err', 'c3', JSON.stringify({ status: 'error', task: 't', tools: 0, seconds: 1 }));
+    ins.run('p1', 'tc-bad', 'c4', 'not-json-at-all'); // malformed: json_extract would throw, so it stays NULL
+    old.close();
+
+    const db = openDb(path);
+    const lc = (tc: string) => (db.prepare('SELECT lifecycle FROM brain_subagent_runs WHERE tool_call_id = ?').get(tc) as { lifecycle: string | null }).lifecycle;
+    // A terminal legacy row maps straight through.
+    expect(lc('tc-done')).toBe('done');
+    expect(lc('tc-err')).toBe('error');
+    // The load-bearing rule: a legacy `running` row becomes legacy_interrupted, NOT `running`. It predates
+    // the owner_boot_id claim, so boot recovery (which only claims lifecycle IN (running,recovering)) must
+    // never respawn it and repeat a mutation from weeks ago.
+    expect(lc('tc-run')).toBe('legacy_interrupted');
+    // A malformed legacy row keeps NULL — boot recovery never claims a NULL, so it is inert, not respawned.
+    expect(lc('tc-bad')).toBeNull();
+  });
+
   it('migrates memory categories with a nullable project binding and its partial unique index', () => {
     dir = mkdtempSync(join(tmpdir(), 'elowen-db-'));
     const path = join(dir, 'old.db');

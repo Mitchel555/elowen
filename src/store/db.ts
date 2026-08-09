@@ -212,6 +212,22 @@ function applyAdditiveMigrations(db: Db): void {
   addColumn(db, 'brain_subagent_runs', 'attempt', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'brain_subagent_runs', 'owner_boot_id', 'TEXT');
   addColumn(db, 'brain_subagent_runs', 'lease_until', 'INTEGER');
+  // Backfill lifecycle from the legacy JSON state exactly once per row, then leave it to the store. A
+  // terminal state maps straight through; a legacy `running` row becomes `legacy_interrupted`, NOT a
+  // recovery candidate — it predates the owner_boot_id claim, so respawning it could repeat a mutation
+  // from weeks ago. Runs every boot but is idempotent (WHERE lifecycle IS NULL), so a row minted by the
+  // new code (which always writes lifecycle) is never touched, and only genuinely legacy NULLs are filled.
+  // The json_valid guard is load-bearing: json_extract THROWS on a malformed row, which would fail the
+  // UPDATE for every row; a malformed legacy row simply keeps NULL and boot recovery never claims it.
+  db.exec(
+    `UPDATE brain_subagent_runs
+        SET lifecycle = CASE json_extract(state, '$.status')
+                          WHEN 'done'  THEN 'done'
+                          WHEN 'error' THEN 'error'
+                          ELSE 'legacy_interrupted'
+                        END
+      WHERE lifecycle IS NULL AND json_valid(state)`
+  );
   // Mid-turn (provisional) message rows — see brain_messages in schema.sql. Every existing row was written
   // by a settled agent_end, so the 0 default correctly reads the whole back catalogue as durable history.
   addColumn(db, 'brain_messages', 'pending', 'INTEGER NOT NULL DEFAULT 0');
