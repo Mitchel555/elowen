@@ -141,6 +141,23 @@ describe('BrainStore', () => {
     expect(store.getSubagentRuns('root')).toEqual([]); // corrupt state never reaches a renderer
   });
 
+  it('stamps lifecycle and this boot on a running sub-agent row, and keeps the owner on terminal states', () => {
+    store.setDelegationBootId('boot-A');
+    store.createSession({ id: 'root', userId: 1, model: 'm' });
+    store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });
+    const row = () => db.prepare("SELECT lifecycle, owner_boot_id FROM brain_subagent_runs WHERE tool_call_id = 'd1'").get() as { lifecycle: string; owner_boot_id: string | null };
+
+    expect(store.upsertSubagentRun('root', { id: 'd1', sessionId: 'child', status: 'running', task: 't', tools: 0, seconds: 0 })).toBe(true);
+    // A running row mirrors the status into lifecycle AND records the boot that owns it, so a later boot
+    // can recognise it as a restart orphan (owner_boot_id != that later boot).
+    expect(row()).toEqual({ lifecycle: 'running', owner_boot_id: 'boot-A' });
+
+    expect(store.upsertSubagentRun('root', { id: 'd1', sessionId: 'child', status: 'done', task: 't', tools: 1, seconds: 1 })).toBe(true);
+    // Terminal state updates lifecycle but leaves the owner intact — a done row is never claimed (the claim
+    // filters on lifecycle), so its owner is a harmless audit trail, not a signal.
+    expect(row()).toEqual({ lifecycle: 'done', owner_boot_id: 'boot-A' });
+  });
+
   it('persists sub-agent results as an idempotent pending inbox and acknowledges them explicitly', () => {
     store.createSession({ id: 'root', userId: 1, model: 'm' });
     store.createSession({ id: 'child', userId: 1, model: 'm', parentSessionId: 'root' });

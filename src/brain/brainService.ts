@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { PluginRegistry } from '../plugins/registry.js';
 import { PluginHookBus } from '../plugins/hookBus.js';
 import type { DelegatedContinueResult, ServiceNotice, SubagentProgressEvent } from '../plugins/api.js';
@@ -134,6 +135,11 @@ export class BrainService {
    *  onto this flag and drained once the turn settles (see drainDeferredPluginReload). */
   private pendingPluginReload = false;
   constructor(private d: BrainDeps) {
+    // One identity per daemon boot, stamped onto every running sub-agent row. A LATER boot uses it to tell
+    // a restart orphan (owner_boot_id != this) from its own live work, and to accept a delegated
+    // completion only for the boot that owns the run. Generated here because BrainService is a per-daemon
+    // singleton, so its construction coincides with the boot.
+    d.store.setDelegationBootId(randomUUID());
     // Mid-turn messages are STEERED into the running turn via PI's native queue (session.steer); PI fans
     // its transient backlog as `queue_update`, mapped to the `queue` snapshot event in the spawner.
     this.factory = new BrainSessionFactory({ store: d.store, chatImagesDir: d.chatImagesDir, createSession: d.createSession, resourceLoaderFactory: d.resourceLoaderFactory });

@@ -273,6 +273,15 @@ function normalizeWorkflowCompletion(
 export class BrainDelegationStore {
   constructor(private db: Db) {}
 
+  /** This daemon boot's identity, stamped onto every `running` row so a LATER boot can tell a restart
+   *  orphan (owner_boot_id != current) from its own live work, and accept a completion only for the boot
+   *  that owns the run. Empty until the daemon calls setBootId at start; a store used without it (most
+   *  unit tests) simply writes an empty owner_boot_id, which boot recovery never claims. */
+  private bootId = '';
+  setBootId(bootId: string): void { this.bootId = bootId; }
+  /** The current boot id — read by boot recovery so the claim + completion use one authoritative value. */
+  currentBootId(): string { return this.bootId; }
+
   /** Persist the newest progress snapshot for one delegate tool call. This is deliberately synchronous:
    *  a background child may finish after the parent turn has already settled, and the live event must
    *  never race ahead of the durable state a reconnect reads. Both sessions must exist, have the same
@@ -296,12 +305,21 @@ export class BrainDelegationStore {
         'SELECT child_session_id FROM brain_subagent_runs WHERE parent_session_id = ? AND tool_call_id = ?'
       ).get(parentSessionId, update.id) as { child_session_id: string } | undefined;
       if (prior && prior.child_session_id !== update.sessionId) return false;
+      // Mirror the JSON status onto the host-owned lifecycle column, and stamp THIS boot's id on a running
+      // row so a later boot can recognise it as a restart orphan and claim it. On terminal states the
+      // owner_boot_id is left untouched (a done/error row is never claimed — the claim filters on lifecycle
+      // — so its owner is irrelevant, and preserving it keeps the audit trail of who finished it).
+      const lifecycle = state.status; // running | done | error
+      const ownerBootId = state.status === 'running' ? this.bootId : null;
       this.db.prepare(
-        `INSERT INTO brain_subagent_runs (parent_session_id, tool_call_id, child_session_id, state)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO brain_subagent_runs (parent_session_id, tool_call_id, child_session_id, state, lifecycle, owner_boot_id)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(parent_session_id, tool_call_id) DO UPDATE SET
-           state = excluded.state, updated_at = datetime('now')`
-      ).run(parentSessionId, update.id, update.sessionId, JSON.stringify(state));
+           state = excluded.state, lifecycle = excluded.lifecycle,
+           owner_boot_id = CASE WHEN excluded.lifecycle = 'running'
+                                THEN excluded.owner_boot_id ELSE brain_subagent_runs.owner_boot_id END,
+           updated_at = datetime('now')`
+      ).run(parentSessionId, update.id, update.sessionId, JSON.stringify(state), lifecycle, ownerBootId);
       return true;
     });
   }

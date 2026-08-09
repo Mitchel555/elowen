@@ -568,6 +568,18 @@ export class BrainStore {
     return cards;
   }
 
+  /** Stamp this daemon boot's identity onto the delegation store, so a `running` sub-agent row records the
+   *  boot that owns it and a later boot can tell a restart orphan from live work — see
+   *  {@link BrainDelegationStore.setBootId}. Called once at daemon start. */
+  setDelegationBootId(bootId: string): void {
+    this.delegation.setBootId(bootId);
+  }
+
+  /** The current daemon boot id — see {@link BrainDelegationStore.currentBootId}. */
+  delegationBootId(): string {
+    return this.delegation.currentBootId();
+  }
+
   /** Persist the newest progress snapshot for one delegate tool call — see
    *  {@link BrainDelegationStore.upsertSubagentRun}. */
   upsertSubagentRun(parentSessionId: string, raw: unknown): boolean {
