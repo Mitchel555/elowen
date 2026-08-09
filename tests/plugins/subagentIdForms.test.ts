@@ -95,10 +95,12 @@ describe('subagent plugin — job id and session id both address the same child'
     expect(read).toEqual([{ parent: 'brain-1', child: CHILD_SESSION }]);
   });
 
-  it('passes an id it cannot resolve straight through, leaving the host guard to answer', async () => {
+  it('translates a dlg- job id even when it is not in memory, so a handle survives a restart', async () => {
     await call('DelegateStop', { id: 'dlg-never-started' });
-    // Not rewritten into a plausible-looking session id: inventing one would turn "no such sub-agent"
-    // into a lookup for a child that never existed, and could collide with a real one.
-    expect(stopped).toEqual([{ parent: 'brain-1', child: 'dlg-never-started' }]);
+    // The job→session derivation is bijective, not a guess: one job id maps to exactly one session id, so
+    // an id that never ran resolves to a session that does not exist and the host guard still answers
+    // "unknown" — the same outcome as before, by a path that ALSO works after a restart has cleared the
+    // in-memory job map (where the id would otherwise stop resolving entirely).
+    expect(stopped).toEqual([{ parent: 'brain-1', child: 'brain-ch-subagent-sub-dlg-never-started' }]);
   });
 });
