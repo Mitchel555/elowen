@@ -101,7 +101,7 @@ export function elowenListMissions(ctx: ElowenToolCtx) {
 export function elowenListSessions(ctx: ElowenToolCtx) {
   return defineTool({
     name: 'ElowenListSessions', label: 'List sessions',
-    description: 'List live Elowen agent sessions.',
+    description: 'List the running Elowen agent sessions — the background worker/pilot/overseer agents launched in tmux for your projects, each with its role and project. This is NOT the list of CLI chat clients or brain conversations: an empty result means no agent is currently running, not that nobody is connected. Use it to see what agent work is live before spawning more or stopping one.',
     parameters: Type.Object({}),
     execute: async () => call(ctx, 'GET', '/sessions'),
   });
