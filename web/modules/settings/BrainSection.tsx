@@ -4,6 +4,7 @@ import { BrainCircuit, Plus, Pencil, Trash2, KeyRound, Link2, Unlink, ExternalLi
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
+import { Slider } from '../../components/ui/Slider';
 import { Field } from '../../components/ui/Field';
 import { Segmented } from '../../components/ui/Segmented';
 import { ModelIcon } from '../../components/ui/ModelIcon';
@@ -321,16 +322,17 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
     catch (error) { toast(t.brain.saveError, 'error'); throw error; }
   }, { ready: nameSeeded && !!agentName.trim() });
 
-  // Max agent steps per run (the turn is aborted past this) — a validated 1..200 integer.
+  // Max agent steps per run (the turn is aborted past this) — a validated 1..1000 integer. The slider
+  // moves in coarse 100-steps; the daemon still accepts any 1..1000 value (API, older configs).
   const [maxSteps, setMaxSteps] = useState('');
   const [stepsSeeded, setStepsSeeded] = useState(false);
   useEffect(() => {
-    if (config && !stepsSeeded) { setMaxSteps(String(config.brain?.maxSteps ?? 20)); setStepsSeeded(true); }
+    if (config && !stepsSeeded) { setMaxSteps(String(config.brain?.maxSteps ?? 200)); setStepsSeeded(true); }
   }, [config, stepsSeeded]);
   const parsedSteps = Number(maxSteps);
   const { status: stepsStatus, retry: retrySteps } = useAutoSaveStatus([maxSteps], async () => {
     const n = Number(maxSteps);
-    try { await updateConfig.mutateAsync({ brain: { maxSteps: Math.min(200, Math.max(1, Math.floor(n))) } }); }
+    try { await updateConfig.mutateAsync({ brain: { maxSteps: Math.min(1000, Math.max(1, Math.floor(n))) } }); }
     catch (error) { toast(t.brain.saveError, 'error'); throw error; }
   }, { ready: stepsSeeded && Number.isFinite(parsedSteps) && parsedSteps >= 1 });
 
@@ -503,7 +505,16 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
           <Input value={agentName} onChange={(e) => setAgentName(e.target.value)} placeholder="Elowen" aria-label={t.brain.agentName} />
         </SettingsRow>
         <SettingsRow label={t.brain.maxSteps} description={t.brain.maxStepsHint} icon={Gauge}>
-          <Input type="number" min={1} max={200} value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} aria-label={t.brain.maxSteps} />
+          <div className="flex items-center gap-3">
+            <Slider
+              min={100} max={1000} step={100}
+              value={Math.min(1000, Math.max(100, Number.isFinite(parsedSteps) && parsedSteps > 0 ? parsedSteps : 200))}
+              onChange={(n) => setMaxSteps(String(n))}
+              aria-label={t.brain.maxSteps}
+              className="w-40"
+            />
+            <span className="w-10 text-right tabular-nums text-sm text-muted">{Number.isFinite(parsedSteps) && parsedSteps > 0 ? parsedSteps : 200}</span>
+          </div>
         </SettingsRow>
         {limits ? (
           <SettingsRow label={t.brain.limits.title} description={t.brain.limits.hint} icon={SlidersHorizontal}>

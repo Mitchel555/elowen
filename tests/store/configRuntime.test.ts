@@ -165,4 +165,14 @@ describe('ConfigStore runtime limits', () => {
     expect(cs.get().runtime.limits.eventRetentionDays).toBe(90);
     expect(cs.get().runtime.toolDeferralEnabled).toBe(false);
   });
+
+  it('clamps maxSteps to the 1..1000 range', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ brain: { maxSteps: 5000 } });
+    expect(cs.get().brain.maxSteps).toBe(1000); // ceiling raised from 200 to 1000
+    cs.update({ brain: { maxSteps: 500 } });
+    expect(cs.get().brain.maxSteps).toBe(500); // an in-range value passes through
+    cs.update({ brain: { maxSteps: 0 } });
+    expect(cs.get().brain.maxSteps).toBe(1); // floor
+  });
 });

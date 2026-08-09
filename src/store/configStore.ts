@@ -194,7 +194,7 @@ const clampTtlDays = (next: number | undefined, fallback: number): number =>
  *  invalid falls back to the current value. Enforced in BrainService (turn_start counting → abort). */
 const DEFAULT_MAX_STEPS = 200;
 const clampMaxSteps = (next: number | undefined, fallback: number): number =>
-  typeof next === 'number' && Number.isFinite(next) ? Math.min(200, Math.max(1, Math.floor(next))) : fallback;
+  typeof next === 'number' && Number.isFinite(next) ? Math.min(1000, Math.max(1, Math.floor(next))) : fallback;
 
 /** Operator-tunable brain limits — the constants that used to be hardcoded across the brain runtime,
  *  surfaced so the instance owner can trade cost/verbosity/latency to taste. Each is a whole number,

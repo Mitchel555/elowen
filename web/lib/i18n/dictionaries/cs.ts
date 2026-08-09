@@ -1309,7 +1309,7 @@ export const cs = {
   brain: {
     agentName: "Jméno asistenta",
     maxSteps: "Max kroků",
-    maxStepsHint: "Maximální počet kroků (kol s modelem), které agent na jeden požadavek udělá, než se zastaví. Brání zacyklení. Na Discordu se aktuální krok zobrazuje jako „Step N / MAX“. Rozsah 1–200, výchozí 20.",
+    maxStepsHint: "Maximální počet kroků (kol s modelem), které agent na jeden požadavek udělá, než se zastaví. Brání zacyklení. Na Discordu se aktuální krok zobrazuje jako „Step N / MAX“. Rozsah 100–1000 po 100, výchozí 200.",
     limits: {
       title: "Limity",
       manage: "Upravit limity",

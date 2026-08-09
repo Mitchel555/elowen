@@ -1309,7 +1309,7 @@ export const sk = {
   brain: {
     agentName: "Meno asistenta",
     maxSteps: "Max krokov",
-    maxStepsHint: "Maximálny počet krokov (kôl s modelom), ktoré agent na jednu požiadavku urobí, než sa zastaví. Bráni zacykleniu. Na Discorde sa aktuálny krok zobrazuje ako „Step N / MAX“. Rozsah 1–200, predvolené 20.",
+    maxStepsHint: "Maximálny počet krokov (kôl s modelom), ktoré agent na jednu požiadavku urobí, než sa zastaví. Bráni zacykleniu. Na Discorde sa aktuálny krok zobrazuje ako „Step N / MAX“. Rozsah 100–1000 po 100, predvolené 200.",
     limits: {
       title: "Limity",
       manage: "Upraviť limity",

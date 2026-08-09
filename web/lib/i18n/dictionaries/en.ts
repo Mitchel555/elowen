@@ -1309,7 +1309,7 @@ export const en = {
   brain: {
     agentName: "Assistant name",
     maxSteps: "Max steps",
-    maxStepsHint: "The maximum number of steps (model round-trips) the agent runs per request before it is stopped. Prevents runaway loops. On Discord the current step shows as \"Step N / MAX\". Range 1-200, default 20.",
+    maxStepsHint: "The maximum number of steps (model round-trips) the agent runs per request before it is stopped. Prevents runaway loops. On Discord the current step shows as \"Step N / MAX\". Range 100-1000 in steps of 100, default 200.",
     limits: {
       title: "Limits",
       manage: "Edit limits",
