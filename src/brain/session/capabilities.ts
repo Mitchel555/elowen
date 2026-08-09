@@ -1,8 +1,10 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { currentSessionId, currentToolPolicy, currentTurnMode, currentTurnPermissions, toolPermitted, type ToolPolicy } from '../../plugins/policyContext.js';
 import { isSessionPlanPath } from '../../plugins/pathGuard.js';
+import type { ToolDeferralOverrides } from '../../shared/wireContract.js';
 import { buildExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { BASH_PERMISSION_TOOLS, bashAlwaysPattern, resolveToolPermission, type ApprovalDecision } from '../toolPermissions.js';
+import { computeDeferredToolNames, type DeferralOptions, type ToolDeferralCandidate } from '../toolSearch/deferralPolicy.js';
 import type { ToolActivationTarget } from '../toolSearch/toolSearchTool.js';
 import { withReason, stripReason } from '../toolReason.js';
 import { frameUntrusted } from '../messageView.js';
@@ -49,6 +51,19 @@ export interface PluginToolResultEvent { tool: string; params: unknown; result: 
  *  hook never sees (or can second-guess) a call the user's own rules already refused. */
 interface PluginToolCallEvent { tool: string; params: unknown }
 
+interface SessionToolDeferralSpec {
+  /** Registry ownership for plugin tools. A missing owner means the tool is built into the brain. */
+  toolOwner: ReadonlyMap<string, string>;
+  /** Exact registered plugin-tool names expanded from manifest `deferLoading` metadata. */
+  toolDeferLoading: ReadonlySet<string>;
+  /** Unified exact-name plan-safe set (core + plugin manifests). */
+  planSafeToolNames: ReadonlySet<string>;
+  /** Core-owned exact/prefix defaults, matched against actual definitions regardless of registry owner. */
+  builtinDeferLoading: readonly string[];
+  overrides?: ToolDeferralOverrides;
+  options?: DeferralOptions;
+}
+
 export interface CapabilitySpec {
   kind: SessionKind;
   /** Built lazily so the owner's API token is never even minted for sessions that must not have it. */
@@ -58,10 +73,11 @@ export interface CapabilitySpec {
    *  keys on a resolved elowenUserId, so a caller only ever reaches their OWN memory and an unlinked/
    *  anonymous sender (no elowenUserId) or a task-worker (no identity) gets a locked no-op. */
   memoryTools?: () => ToolDefinition[];
-  /** The `ToolSearch` built-in, composed for every INTERACTIVE session that actually defers tools (empty
-   *  otherwise). Built lazily like `elowenTools` so it is only constructed when deferral is engaged. It is
-   *  a built-in (permission-gated, not plugin-hook-gated), so it rides with the elowen/memory group. */
-  toolSearch?: () => ToolDefinition[];
+  /** Deferred-tool metadata is evaluated only after every non-ToolSearch group has been built once. */
+  toolDeferral?: SessionToolDeferralSpec;
+  /** The `ToolSearch` built-in, composed for every INTERACTIVE session that actually defers tools. The
+   *  deferred set is handed to the factory so it can close over the same handle the session receives. */
+  toolSearch?: (deferred: Set<string>) => ToolDefinition[];
   /** `ShareImage` — the one way the agent can put a picture in front of the user. Interactive sessions
    *  only: a task worker has no one watching to show it to. */
   shareImage?: () => ToolDefinition[];
@@ -242,6 +258,29 @@ function gatePermissions(tool: ToolDefinition): ToolDefinition {
   return { ...tool, execute };
 }
 
+/** Match the exact/prefix* metadata convention used by plugin manifests. */
+function toolMatchesAny(name: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern);
+}
+
+/** Build source-qualified policy candidates from the exact tool definitions this session will register.
+ *
+ * Core defaults match the real composed definition by name even when its implementation is supplied by a
+ * plugin. This is intentional for GenerateImage/EditImage: they are marketplace plugin definitions, not PI
+ * built-ins, but Elowen owns their loading default. Ownership still selects the override namespace, so an
+ * operator controls them through plugin:image-gen / plugin:image-edit rather than a phantom builtin source. */
+function toolDeferralCandidates(tools: readonly ToolDefinition[], spec: SessionToolDeferralSpec): ToolDeferralCandidate[] {
+  return tools.map((tool) => {
+    const owner = spec.toolOwner.get(tool.name);
+    return {
+      name: tool.name,
+      sourceId: owner ? `plugin:${owner}` : 'builtin',
+      planSafe: spec.planSafeToolNames.has(tool.name),
+      defaultDeferred: spec.toolDeferLoading.has(tool.name) || toolMatchesAny(tool.name, spec.builtinDeferLoading),
+    };
+  });
+}
+
 /** Compose the tool set for one session. THE security invariant lives here: `trusted-channel`,
  *  `foreign-channel` and `task-worker` sessions NEVER receive the owner's Elowen* control-plane tools —
  *  ONLY `owner-chat` does. A shared channel sender (even one holding the admin role) reaching the
@@ -252,28 +291,35 @@ function gatePermissions(tool: ToolDefinition): ToolDefinition {
  *  (gatePermissions) — the single choke point the per-user allow/ask/deny rules act on. */
 export function composeSessionTools(spec: CapabilitySpec): ToolDefinition[] {
   const ownerChat = spec.kind === 'owner-chat';
+  const interactive = spec.kind !== 'task-worker';
   const elowenTools = ownerChat ? (spec.elowenTools?.() ?? []) : [];
   // Memory tools ride every INTERACTIVE session (owner-chat + all channel kinds): memory is per-user, so
   // any linked sender reaches THEIR OWN memory from any surface (web/CLI chat or a Discord channel). The
   // tools re-check identity at execute time and key on the resolved elowenUserId, so an unlinked/anonymous
   // sender gets a locked no-op and no one can reach another user's memory. Task-workers (no identity)
   // never compose them.
-  const memoryTools = spec.kind !== 'task-worker' ? (spec.memoryTools?.() ?? []) : [];
-  // ToolSearch is a built-in fetch mechanism, not a plugin tool — it takes the permission gate (so a
-  // user's own deny can still hide it) but never the plugin hook wrapper. Only present when the session
-  // actually defers tools; otherwise the list is empty and the composed set is byte-identical to before.
-  const toolSearchTools = spec.kind !== 'task-worker' ? (spec.toolSearch?.() ?? []) : [];
+  const memoryTools = interactive ? (spec.memoryTools?.() ?? []) : [];
   // Same reasoning as memory: every interactive surface has a reader, a task worker does not.
-  const shareImageTools = spec.kind !== 'task-worker' ? (spec.shareImage?.() ?? []) : [];
+  const shareImageTools = interactive ? (spec.shareImage?.() ?? []) : [];
   // Plan mode is an owner-chat concept — a channel, cron or sub-agent turn carries no mode at all
   // (currentTurnMode), so there would be nothing for this tool to exit. Composed unconditionally for the
   // owner rather than only while planning, mirroring the reference: the tool is what REFUSES outside plan
   // mode, and a tool that vanishes cannot explain itself to a model that reaches for it.
   const planTools = ownerChat ? [buildExitPlanModeTool()] : [];
   const pluginTools = spec.pluginTools.map((t) => gateToolAccess(t, spec.onToolResult, spec.onToolCall));
-  // Every composed tool gains an optional leading `_reason` (withReason augments the schema; excluded tools
-  // — ToolSearch, mcp__* — pass through), then the whole set takes the permission gate, then stripReason
-  // wraps OUTERMOST so `_reason` is removed from the arguments before any inner wrapper or handler sees it.
+
+  // Build every real group exactly once BEFORE policy evaluation. This is deliberately the same ordered
+  // sequence as the legacy composition with ToolSearch removed: policy observes the full registered set,
+  // while an empty deferred result leaves every existing definition and byte position untouched.
+  const withoutToolSearch = [...elowenTools, ...memoryTools, ...shareImageTools, ...pluginTools, ...planTools];
+  const deferred = interactive && spec.toolDeferral
+    ? computeDeferredToolNames(toolDeferralCandidates(withoutToolSearch, spec.toolDeferral), spec.toolDeferral.overrides, spec.toolDeferral.options)
+    : new Set<string>();
+  const toolSearchTools = deferred.size > 0 ? (spec.toolSearch?.(deferred) ?? []) : [];
+
+  // ToolSearch returns to its historical stable position between memory and ShareImage. Every composed tool
+  // then gains an optional leading `_reason` (excluded ToolSearch/mcp__* pass through), takes the deny and
+  // granular permission gates, and finally strips `_reason` before the inner handler sees the arguments.
   return [...elowenTools, ...memoryTools, ...toolSearchTools, ...shareImageTools, ...pluginTools, ...planTools]
     .map(withReason).map(gateDeniedTools).map(gatePermissions).map(stripReason);
 }

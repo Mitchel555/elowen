@@ -1,54 +1,49 @@
-/** Deferred-tool policy: decide which of a session's registered tools are withheld from the system
- *  prompt (only their NAME is advertised; the full JSON schema is fetched on demand via the `ToolSearch`
- *  tool, which then activates them for the next turn).
- *
- *  The mechanism this feeds already exists in PI (a session's ACTIVE tool set is a by-name subset of its
- *  REGISTERED tools — `customTools` is the registry, `setActiveToolsByName` the active slice) and Elowen
- *  already drives it per turn for per-sender visibility (see `applyToolVisibility`). Deferral is one more
- *  slice on top: the initial active set omits the deferred names, and `ToolSearch` re-adds them as the
- *  model asks.
- *
- *  DELIBERATELY CONSERVATIVE. Withholding a tool trades a lighter prompt for (a) a broken prompt cache on
- *  the turn the active set changes and (b) one round-trip of latency before a fetched tool is callable.
- *  For Elowen's modest NATIVE toolset that trade is a net loss, so the ONLY tools ever deferred are
- *  bridged external MCP tools (`mcp__<server>__<tool>`), and only once there are enough of them to matter
- *  — a handful cost little and are not worth the cache churn. Below the threshold nothing is deferred and
- *  the session behaves byte-identically to before this module existed. */
+import type { ToolDeferralOverrides, ToolLoadingMode } from '../../shared/wireContract.js';
 
-/** Prefix every bridged external MCP tool carries (see the `mcp` plugin's `registerBridgedTool`). It is
- *  the sole deferral surface today: native and other plugin tools are never withheld. */
+/** Prefix every bridged external MCP tool carries (see the mcp plugin's registerBridgedTool). */
 export const MCP_TOOL_PREFIX = 'mcp__';
 
-/** Names/prefixes that must ALWAYS stay active regardless of any future widening of the deferral surface.
- *  `ToolSearch` itself is here because the model needs it in the prompt to fetch anything else; the rest
- *  are the hot-path core whose latency/cache cost of deferral would never be worth it. Matching is exact
- *  or `prefix*` (a trailing `*`). MCP tools never collide with these, so today this is belt-and-suspenders
- *  — it earns its keep only if the deferrable predicate is ever broadened past `mcp__*`. */
+/** Tools on the core interaction path must always remain active. Patterns are exact or prefix*. */
 const NEVER_DEFER: readonly string[] = [
   'ToolSearch',
   'Read', 'Edit', 'Write', 'Search', 'Grep', 'Glob', 'ListDir', 'FileInfo', 'GitStatus',
   'Bash', 'ListProcesses', 'ProcessOutput', 'KillProcess',
-  'AskUserQuestion', 'ShareImage',
+  'AskUserQuestion', 'ShareImage', 'ExitPlanMode', 'Todo*',
   'Elowen*', 'Memory*', 'Lsp*', 'Delegate*', 'Workflow*',
 ];
 
-/** Default: below 11 deferrable tools, defer none. Chosen so a session with one or two small MCP servers
- *  stays untouched (their few tools cost little, and cache/latency churn would not pay for itself), while a
- *  large MCP surface — the case ToolSearch exists for — engages. */
+/** Below 11 unresolved MCP tools, automatic MCP deferral stays off. */
 export const DEFAULT_DEFER_THRESHOLD = 10;
 
-/** The policy's tuning surface. Prod calls {@link computeDeferredToolNames} with the defaults today; these
- *  are the deliberate seam a future settings knob (a global kill switch / per-account threshold) wires into,
- *  and the lever the tests drive the threshold logic through. Kept even without a UI caller ON PURPOSE — a
- *  kill switch is a prod-safety affordance, and defining the seam now is cheaper than retrofitting it. */
 export interface DeferralOptions {
-  /** Global kill switch. `false` → nothing is ever deferred (the session behaves as before). Default true. */
   enabled?: boolean;
-  /** Defer only once the count of deferrable tools EXCEEDS this. Default {@link DEFAULT_DEFER_THRESHOLD}. */
   threshold?: number;
 }
 
-/** True when `name` matches an exact entry or a `prefix*` entry of {@link NEVER_DEFER}. */
+export interface ToolDeferralCandidate {
+  name: string;
+  sourceId: string;
+  planSafe: boolean;
+  defaultDeferred: boolean;
+}
+
+export type ToolDeferralReason =
+  | 'global-disabled'
+  | 'never-defer'
+  | 'plan-safe'
+  | 'tool-override'
+  | 'source-override'
+  | 'source-default'
+  | 'mcp-threshold'
+  | 'default-immediate';
+
+export interface ToolDeferralDecision {
+  name: string;
+  effective: ToolLoadingMode;
+  reason: ToolDeferralReason;
+}
+
+/** True when name matches an exact entry or a prefix* entry of NEVER_DEFER. */
 export function isNeverDeferred(name: string): boolean {
   for (const pattern of NEVER_DEFER) {
     if (pattern.endsWith('*')) {
@@ -60,21 +55,81 @@ export function isNeverDeferred(name: string): boolean {
   return false;
 }
 
-/** A tool is deferrable when it is a bridged MCP tool and not pinned by {@link NEVER_DEFER}. */
+/** Source-agnostic eligibility. Plan-safe locking is candidate metadata resolved by the shared policy. */
 export function isDeferrable(name: string): boolean {
-  return name.startsWith(MCP_TOOL_PREFIX) && !isNeverDeferred(name);
+  return !isNeverDeferred(name);
 }
 
-/** The set of tool names to withhold from the initial active set for a session whose registry is `all`.
- *  Empty when disabled, or when the deferrable count is at/under the threshold (the common case) — an
- *  empty result means "change nothing", which callers rely on to keep the prompt cache warm. */
+function configurableDecision(
+  candidate: ToolDeferralCandidate,
+  overrides: ToolDeferralOverrides | undefined,
+): ToolDeferralDecision | undefined {
+  const toolOverride = overrides?.tools[candidate.sourceId]?.[candidate.name];
+  if (toolOverride) {
+    return { name: candidate.name, effective: toolOverride, reason: 'tool-override' };
+  }
+
+  const sourceOverride = overrides?.sources[candidate.sourceId];
+  if (sourceOverride) {
+    return { name: candidate.name, effective: sourceOverride, reason: 'source-override' };
+  }
+
+  if (candidate.defaultDeferred) {
+    return { name: candidate.name, effective: 'deferred', reason: 'source-default' };
+  }
+
+  return undefined;
+}
+
+/** Resolve the single runtime/UI policy in precedence order while preserving candidate order. */
+export function resolveToolDeferralDecisions(
+  candidates: readonly ToolDeferralCandidate[],
+  overrides?: ToolDeferralOverrides,
+  options: DeferralOptions = {},
+): ToolDeferralDecision[] {
+  if (options.enabled === false) {
+    return candidates.map(({ name }) => ({ name, effective: 'immediate', reason: 'global-disabled' }));
+  }
+
+  const unresolvedMcpCount = candidates.filter((candidate) => {
+    if (isNeverDeferred(candidate.name) || candidate.planSafe) return false;
+    if (configurableDecision(candidate, overrides)) return false;
+    return candidate.name.startsWith(MCP_TOOL_PREFIX);
+  }).length;
+  const deferAutomaticMcp = unresolvedMcpCount > (options.threshold ?? DEFAULT_DEFER_THRESHOLD);
+
+  return candidates.map((candidate): ToolDeferralDecision => {
+    if (isNeverDeferred(candidate.name)) {
+      return { name: candidate.name, effective: 'immediate', reason: 'never-defer' };
+    }
+    if (candidate.planSafe) {
+      return { name: candidate.name, effective: 'immediate', reason: 'plan-safe' };
+    }
+
+    const configured = configurableDecision(candidate, overrides);
+    if (configured) return configured;
+
+    if (candidate.name.startsWith(MCP_TOOL_PREFIX)) {
+      return {
+        name: candidate.name,
+        effective: deferAutomaticMcp ? 'deferred' : 'immediate',
+        reason: 'mcp-threshold',
+      };
+    }
+
+    return { name: candidate.name, effective: 'immediate', reason: 'default-immediate' };
+  });
+}
+
+/** Select names withheld from the initial active set from the shared policy decisions. */
 export function computeDeferredToolNames(
-  all: readonly { name: string }[],
-  opts: DeferralOptions = {},
+  candidates: readonly ToolDeferralCandidate[],
+  overrides?: ToolDeferralOverrides,
+  options: DeferralOptions = {},
 ): Set<string> {
-  if (opts.enabled === false) return new Set();
-  const threshold = opts.threshold ?? DEFAULT_DEFER_THRESHOLD;
-  const deferrable = all.map((t) => t.name).filter(isDeferrable);
-  if (deferrable.length <= threshold) return new Set();
-  return new Set(deferrable);
+  return new Set(
+    resolveToolDeferralDecisions(candidates, overrides, options)
+      .filter((decision) => decision.effective === 'deferred')
+      .map((decision) => decision.name),
+  );
 }

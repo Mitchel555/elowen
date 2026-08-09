@@ -25,6 +25,7 @@ describe('ConfigStore runtime limits', () => {
         toastDurationMs: 4_500,           // TOAST_MS
       },
       toolDeferralEnabled: true,
+      toolDeferralOverrides: { sources: {}, tools: {} },
       // ON: in-process sub-agents share the daemon's one JS thread, so a fan-out starves the interactive
       // path. `false` remains the pre-runner code path, i.e. the rollback an operator can reach for.
       subagentRunnerEnabled: true,
@@ -174,5 +175,68 @@ describe('ConfigStore runtime limits', () => {
     expect(cs.get().brain.maxSteps).toBe(500); // an in-range value passes through
     cs.update({ brain: { maxSteps: 0 } });
     expect(cs.get().brain.maxSteps).toBe(1); // floor
+  });
+
+  it('defaults tool deferral overrides to independent empty maps', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    expect(cs.get().runtime.toolDeferralOverrides).toEqual({ sources: {}, tools: {} });
+  });
+
+  it('round-trips source and per-tool deferral overrides', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    const toolDeferralOverrides = {
+      sources: { 'plugin:discord': 'deferred' as const, builtin: 'immediate' as const },
+      tools: { 'plugin:discord': { DiscordApi: 'immediate' as const }, builtin: { GenerateImage: 'deferred' as const } },
+    };
+    cs.update({ runtime: { toolDeferralOverrides } });
+    expect(cs.get().runtime.toolDeferralOverrides).toEqual(toolDeferralOverrides);
+  });
+
+  it('replaces override maps wholesale so deleting a key restores inheritance', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    cs.update({ runtime: { toolDeferralOverrides: {
+      sources: { 'plugin:discord': 'deferred', 'plugin:cronjob': 'immediate' },
+      tools: { 'plugin:discord': { DiscordApi: 'immediate', DiscordCreateChannel: 'deferred' } },
+    } } });
+    cs.update({ runtime: { toolDeferralOverrides: {
+      sources: { 'plugin:cronjob': 'immediate' },
+      tools: { 'plugin:discord': { DiscordCreateChannel: 'deferred' } },
+    } } });
+    expect(cs.get().runtime.toolDeferralOverrides).toEqual({
+      sources: { 'plugin:cronjob': 'immediate' },
+      tools: { 'plugin:discord': { DiscordCreateChannel: 'deferred' } },
+    });
+  });
+
+  it('drops malformed source ids, modes, and tool names from stored overrides', () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify({
+      runtime: {
+        toolDeferralOverrides: {
+          sources: { builtin: 'deferred', 'plugin:discord': 'immediate', discord: 'deferred', 'plugin:': 'deferred', 'plugin:skills': 'later' },
+          tools: {
+            builtin: { GenerateImage: 'deferred', '': 'immediate', EditImage: 'later' },
+            'plugin:discord': { DiscordApi: 'immediate', '': 'deferred' },
+            discord: { DiscordDeleteChannel: 'deferred' },
+          },
+        },
+      },
+    }));
+    expect(new ConfigStore(db).get().runtime.toolDeferralOverrides).toEqual({
+      sources: { builtin: 'deferred', 'plugin:discord': 'immediate' },
+      tools: { builtin: { GenerateImage: 'deferred' }, 'plugin:discord': { DiscordApi: 'immediate' } },
+    });
+  });
+
+  it('leaves overrides untouched on a limits-only patch and limits untouched on an override patch', () => {
+    const cs = new ConfigStore(openDb(':memory:'));
+    const toolDeferralOverrides = { sources: { 'plugin:discord': 'deferred' as const }, tools: {} };
+    cs.update({ runtime: { toolDeferralOverrides } });
+    cs.update({ runtime: { limits: { toolDeferThreshold: 25 } } });
+    expect(cs.get().runtime.toolDeferralOverrides).toEqual(toolDeferralOverrides);
+    expect(cs.get().runtime.limits.toolDeferThreshold).toBe(25);
+    cs.update({ runtime: { toolDeferralOverrides: { sources: {}, tools: { builtin: { GenerateImage: 'deferred' } } } } });
+    expect(cs.get().runtime.limits.toolDeferThreshold).toBe(25);
+    expect(cs.get().runtime.toolDeferralOverrides).toEqual({ sources: {}, tools: { builtin: { GenerateImage: 'deferred' } } });
   });
 });

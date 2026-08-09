@@ -9,6 +9,7 @@
       "*"
     ]
   },
+  "deferLoading": ["CreateSkill", "DeleteSkill"],
   "icons": {
     "CreateSkill": "📖",
     "ListSkills": "📖",

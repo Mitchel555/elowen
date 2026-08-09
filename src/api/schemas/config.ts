@@ -52,6 +52,16 @@ export const brainLimitsPatchSchema = z.object({
 
 /** The operator-tunable runtime limits, all optional for the same reason as the brain limits above —
  *  `ConfigStore.clampRuntimeLimits` owns the per-field clamp. */
+const toolLoadingModeSchema = z.enum(['immediate', 'deferred']);
+const toolDeferralSourceIdSchema = z.union([
+  z.literal('builtin'),
+  z.string().regex(/^plugin:[a-z0-9][a-z0-9-]{1,63}$/),
+]);
+const toolDeferralOverridesPatchSchema = z.object({
+  sources: z.record(toolDeferralSourceIdSchema, toolLoadingModeSchema),
+  tools: z.record(toolDeferralSourceIdSchema, z.record(z.string().refine((name) => name.trim().length > 0), toolLoadingModeSchema)),
+});
+
 export const runtimeLimitsPatchSchema = z.object({
   localShellTimeoutMs: z.number().optional(),
   memorySemanticFloorPerMille: z.number().optional(),
@@ -135,6 +145,7 @@ export const configPatchSchema = z.object({
   runtime: z.object({
     limits: runtimeLimitsPatchSchema.optional(),
     toolDeferralEnabled: z.boolean().optional(),
+    toolDeferralOverrides: toolDeferralOverridesPatchSchema.optional(),
     subagentRunnerEnabled: z.boolean().optional(),
     // `null` is a REAL value here (auto — let the pool size itself from the machine), not "leave it
     // alone": an absent key is what means that. Non-negative integer, because it counts processes.

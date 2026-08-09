@@ -25,13 +25,15 @@ export interface ToolSearchHandle {
   readonly deferred: Set<string>;
   /** Deferred tools the model has already fetched via ToolSearch — re-added to the active set each turn. */
   readonly activated: Set<string>;
+  /** Names registered by plugins; built-ins are subject only to an explicit deny, as in visibleToolNames. */
+  readonly pluginNames?: ReadonlySet<string>;
   /** The live PI session, wired once created; undefined until then (the tool reports a clear error). */
   session?: ToolActivationTarget;
 }
 
 /** Create a fresh handle for a session whose deferral policy withholds `deferred`. */
-export function createToolSearchHandle(deferred: Set<string>): ToolSearchHandle {
-  return { deferred, activated: new Set(), session: undefined };
+export function createToolSearchHandle(deferred: Set<string>, pluginNames?: ReadonlySet<string>): ToolSearchHandle {
+  return { deferred, activated: new Set(), pluginNames, session: undefined };
 }
 
 /** The subset of a rehydrated message this module reads. Kept structural (not the PI import) so the seed
@@ -114,13 +116,14 @@ function clampCodePoints(s: string, max: number): string {
   return cps.length <= max ? s : cps.slice(0, max).join('');
 }
 
-/** Split a bridged MCP tool name (`mcp__server__tool`) into lowercase search parts. Double and single
- *  underscores both separate — a server or tool fragment may itself contain `_`. */
+/** Split a tool name into lowercase search parts. MCP namespaces retain their prefix convenience,
+ * while separators and CamelCase form searchable words. */
 function nameParts(name: string): string[] {
   return name
     .replace(/^mcp__/, '')
-    .split(/__+/)
-    .flatMap((seg) => seg.split('_'))
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
     .map((p) => p.toLowerCase())
     .filter(Boolean);
 }
@@ -142,7 +145,7 @@ function compileTermPatterns(terms: readonly string[]): Map<string, RegExp> {
 
 /** Score one candidate against the query terms. Exact name-part hit weighs most, then partial name-part,
  *  then a word-boundary DESCRIPTION hit — the same ordering Claude Code's ToolSearch uses, trimmed to what
- *  we need (no MCP-vs-non weighting: every deferred tool here is MCP; no searchHint: PI tools have none). */
+ *  we need (no MCP-vs-non weighting: deferred tools may come from any source; no searchHint: PI tools have none). */
 function scoreCandidate(cand: Candidate, terms: readonly string[], patterns: Map<string, RegExp>): number {
   const parts = nameParts(cand.name);
   const desc = cand.description.toLowerCase();
@@ -209,7 +212,7 @@ export function resolveToolSearch(
 
 /** The `<available_tools_deferred>` awareness block appended to the system prompt: one line per deferred
  *  tool (name + trimmed description) so the model learns what it can fetch via ToolSearch WITHOUT carrying
- *  the full parameter schemas. Stable for the life of a session (the bridged MCP set does not change
+ *  the full parameter schemas. Stable for the life of a session (the registered tool set does not change
  *  mid-session), so it is prompt-cache friendly. Returns '' when nothing is deferred. */
 export function formatDeferredToolsBlock(
   all: readonly { name: string; description?: string }[],
@@ -258,15 +261,14 @@ export function toolSearchTool(handle: ToolSearchHandle): ToolDefinition {
     name: 'ToolSearch',
     label: 'Search tools',
     description: [
-      'Fetch full parameter schemas for deferred tools so you can call them. Some tools (bridged external',
-      'MCP tools) are advertised by NAME ONLY in the <available_tools_deferred> block: until fetched, only',
-      'the name is known — there is no parameter schema, so the tool cannot be invoked. This tool matches a',
-      'query against the deferred list and activates the matches; they become callable ON YOUR NEXT TURN.',
-      'Query forms:',
-      '"select:mcp__github__create_issue,mcp__github__list_issues" — fetch these exact tools by name (a bare',
-      'exact name works too); "mcp__github" — every deferred tool under that server; "github issue" —',
-      'keyword search over names and descriptions, best matches up to max_results; "+github create" —',
-      'require "github", rank by "create". If nothing is deferred this tool is a no-op.',
+      'Fetch full parameter schemas for deferred tools so you can call them. Deferred tools are advertised by',
+      'NAME ONLY in the <available_tools_deferred> block: until fetched, only the name is known — there is no',
+      'parameter schema, so the tool cannot be invoked. This tool matches a query against the deferred list and',
+      'activates the matches; they become callable ON YOUR NEXT TURN. Query forms:',
+      '"select:DiscordCreateChannel,mcp__github__create_issue" — fetch these exact tools by name (a bare exact',
+      'name works too); "mcp__github" — every deferred tool under that bridged MCP server; "discord channel" —',
+      'keyword search over names and descriptions, best matches up to max_results; "+github create" — require',
+      '"github", rank by "create". If nothing is deferred this tool is a no-op.',
     ].join(' '),
     parameters: Type.Object({
       query: Type.String({ description: 'Keywords, or "select:<name>[,<name>...]" for an exact fetch, or "+term" to require a term.' }),
@@ -287,10 +289,13 @@ export function toolSearchTool(handle: ToolSearchHandle): ToolDefinition {
       // Defense in depth: only activate tools the ACTING sender is allowed to use. The execute-time gate
       // already refuses a forbidden call, and the per-turn visibility pass hides a forbidden tool again on
       // the next turn — but filtering here stops a forbidden tool's schema from being advertised at all and
-      // stops a foreign/read-only caller from writing it into the shared `activated` set. Deferred tools are
-      // bridged MCP (plugin) tools, so `toolPermitted` is the right predicate. No turn policy (tests) → allow.
+      // stops a foreign/read-only caller from writing it into the shared `activated` set. Keep the same
+      // plugin/builtin distinction as `visibleToolNames`: allow-lists narrow plugins, while built-ins are
+      // narrowed only by an exact deny. No turn policy (tests) → allow.
       const tp = currentToolPolicy();
-      const matched = tp ? found.filter((name) => toolPermitted(name, tp)) : found;
+      const matched = tp
+        ? found.filter((name) => handle.pluginNames?.has(name) ? toolPermitted(name, tp) : !tp.deny?.has(name))
+        : found;
       if (matched.length === 0) {
         // The model may have re-selected a tool that is ALREADY active (common after compaction/respawn,
         // where its own history says "Activated …"). That name is not in the deferred set, so the search

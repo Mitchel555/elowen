@@ -93,13 +93,13 @@ export interface BrainSearchHit { sessionId: string; sessionTitle: string; role:
 import type {
   ToolOutputView, BrainWorkflowView, BrainMessageView, BrainMessageImage, SlashCommandDef, AskQuestion, BrainStreamControl,
   BrainWorkMode, BrainPendingPlan,
-  User, BrainLimits, RuntimeConfig as WireRuntimeConfig, RuntimeLimits, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
+  User, BrainLimits, RuntimeConfig as WireRuntimeConfig, RuntimeLimits, ToolDeferralOverrides, BrainUsage, MemoryRow, MemoryCategoryRow, MemoryEventRow, BrainGoalState,
   MemoryVitalityHistory, MemoryVitalityPoint,
   BrainContextBreakdown, BrainForkedSession,
   CommitFileChange, CommitLogEntry,
 } from '../../src/shared/wireContract.js';
 // `BrainStreamControl` is only referenced by the snapshot frame below, so it is imported but not re-exported.
-export type { ToolOutputView, BrainWorkflowView, BrainMessageImage, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, RuntimeLimits, BrainUsage, CommitFileChange, CommitLogEntry };
+export type { ToolOutputView, BrainWorkflowView, BrainMessageImage, SlashCommandDef, AskQuestion, BrainWorkMode, BrainPendingPlan, User, BrainLimits, RuntimeLimits, ToolDeferralOverrides, BrainUsage, CommitFileChange, CommitLogEntry };
 export type { BrainContextBreakdown, BrainForkedSession };
 export type BrainMessage = BrainMessageView;
 /** One stored memory as served by `GET /memory` — the daemon's `MemoryRow` plus its server-computed
@@ -127,7 +127,11 @@ export interface MemoryRetentionConfig {
 /** The runtime block the daemon serves extends the wire shape with the retention group (see the daemon's
  *  `RuntimeConfigWithRetention` in src/store/configStore.ts). Optional like `brain.limits`: a daemon
  *  predating the feature serves the wire shape alone, and the editor seeds the defaults. */
-export type RuntimeConfig = WireRuntimeConfig & { memoryRetention?: MemoryRetentionConfig };
+export type RuntimeConfig = Omit<WireRuntimeConfig, 'toolDeferralOverrides'> & {
+  /** Optional while a web client may still receive a response from a daemon predating tool deferral overrides. */
+  toolDeferralOverrides?: ToolDeferralOverrides;
+  memoryRetention?: MemoryRetentionConfig;
+};
 
 /** One backwards page of chat history (lazy-load). `nextBefore` is the cursor for the next older page —
  *  null once the oldest turn has been loaded, which is also when `hasMore` is false. */
@@ -219,7 +223,7 @@ export interface ConfigPatch {
   /** Wholesale brain provider list; an entry may carry `apiKey` to (re)set that provider's secret. */
   brain?: { providers?: (Omit<BrainProvider, 'apiKeySet'> & { apiKey?: string })[]; agentName?: string; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
   /** Runtime knobs merged per-field by the daemon, like the brain limits above. */
-  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; memoryRetention?: Partial<MemoryRetentionConfig> };
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; toolDeferralOverrides?: ToolDeferralOverrides; memoryRetention?: Partial<MemoryRetentionConfig> };
 }
 interface MissionPrInfo { branch: string; prNumber: number | null; prUrl: string | null; prState: string | null; fixRounds: number; lastFeedback: string | null }
 export interface UserPatch { is_admin?: boolean; allowed_execs?: string[]; disabled_tools?: string[] }

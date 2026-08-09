@@ -52,12 +52,28 @@ describe('loadPlugins', () => {
     makePlugin(root, 'alpha', `export function register(ctx){ ctx.registerTool({name:'alpha_tool'}); }`);
     makePlugin(root, 'mike', `export function register(ctx){ ctx.registerTool({name:'mike_tool'}); }`);
     makePlugin(root, 'zeta', `export function register(ctx){ ctx.registerTool({name:'zeta_tool'}); }`);
+    // The first owner wins the tool collision. Only a merged tool may receive its owner's defer default.
+    makePlugin(root, 'collisionalpha', `export function register(ctx){ ctx.registerTool({name:'CollisionTool'}); }`);
+    makePlugin(root, 'collisionzeta', `export function register(ctx){ ctx.registerTool({name:'CollisionTool'}); }`, '1', { deferLoading: ['CollisionTool'] });
   });
   afterAll(() => { rmSync(root, { recursive: true, force: true }); });
 
   it('wires a plugin manifest showOutput into the registry tool-output policy set', async () => {
     const reg = await loadPlugins({ dirs: [root], enabled: ['quiet'], logger: log });
     expect([...reg.toolShowOutput].sort()).toEqual(['Bash', 'quiet_*']);
+  });
+
+  it('does not carry a deferred-tool default from a plugin whose colliding tool was rejected', async () => {
+    const warnings: string[] = [];
+    const reg = await loadPlugins({
+      dirs: [root],
+      enabled: ['collisionalpha', 'collisionzeta'],
+      logger: { info() {}, warn: (message) => warnings.push(message), error() {} },
+    });
+
+    expect(reg.toolOwner.get('CollisionTool')).toBe('collisionalpha');
+    expect([...reg.toolDeferLoading]).toEqual([]);
+    expect(warnings).toContain("[plugin:collisionzeta] deferLoading 'CollisionTool' ignored: no matching tools registered by 'collisionzeta'");
   });
 
   it('refuses a tool the manifest did not declare in provides.tools', async () => {

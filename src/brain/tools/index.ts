@@ -30,6 +30,11 @@ export const BUILTIN_TOOL_ICONS: Record<string, string> = {
  *  acts on, not something the reader needs echoed, so their success stays hidden and repeated calls
  *  collapse into one row (a failure or a hook note still surfaces; see `toolOutputView`). Keys are
  *  exact names or `prefix*` patterns. */
+/** Core-owned loading defaults for definitions without a bundled manifest. The image implementations
+ *  currently arrive through marketplace plugins, but Elowen still owns their default and matches these
+ *  names against the actual composed registry; their plugin owner remains the override namespace. */
+export const BUILTIN_TOOL_DEFER_LOADING: readonly string[] = ['GenerateImage', 'EditImage'];
+
 export const BUILTIN_TOOL_OUTPUT_SHOWN: string[] = [
   'Lsp*',
   // NOTE: ExitPlanMode is deliberately absent. Its result text is an instruction addressed to the MODEL

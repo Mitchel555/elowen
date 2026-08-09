@@ -275,6 +275,13 @@ export interface BrainLimits {
   askHistoryTurns: number;
 }
 
+export type ToolLoadingMode = 'immediate' | 'deferred';
+
+export interface ToolDeferralOverrides {
+  sources: Record<string, ToolLoadingMode>;
+  tools: Record<string, Record<string, ToolLoadingMode>>;
+}
+
 /** Operator-tunable runtime limits (Settings → Elowen AI → Runtime): each a whole number the daemon
  *  clamps to a sane range. A SIBLING of `BrainLimits` rather than more fields on it: these govern the
  *  daemon's surrounding runtime — the CLI's `!` escape, the memory relevance floor, the deferred-tool
@@ -329,6 +336,9 @@ export interface RuntimeConfig {
   limits: RuntimeLimits;
   /** Global kill switch for deferred tools. `false` → nothing is ever withheld from the prompt. */
   toolDeferralEnabled: boolean;
+  /** Owner-qualified loading decisions. Missing keys inherit the source's default; maps replace wholesale
+   *  so removing a key restores that inheritance. */
+  toolDeferralOverrides: ToolDeferralOverrides;
   /** Execute delegated sub-agent turns in a forked runner process instead of on the daemon's own event
    *  loop. OFF by default, and `false` is literally the old in-process path — which is what makes this
    *  the operator's rollback with no redeploy. Read live, so the next delegated turn follows it. */

@@ -208,6 +208,42 @@ describe('PluginRegistry', () => {
     });
   });
 
+  describe('setDeferLoading (owner-scoped ToolSearch defaults)', () => {
+    const tool = (name: string) => ({ name } as never);
+
+    it('expands exact and prefix patterns only to the declaring plugin\'s registered tools', () => {
+      const reg = new PluginRegistry();
+      reg.contextFor('mcp', {}, noopLog).registerTool(tool('mcp__github__create_issue'));
+      reg.contextFor('mcp', {}, noopLog).registerTool(tool('mcp__github__list_issues'));
+      reg.contextFor('discord', {}, noopLog).registerTool(tool('mcp__discord__admin'));
+      reg.contextFor('discord', {}, noopLog).registerTool(tool('DiscordCreateChannel'));
+
+      reg.setDeferLoading('mcp', ['mcp__*']);
+      reg.setDeferLoading('discord', ['DiscordCreateChannel']);
+
+      expect([...reg.toolDeferLoading].sort()).toEqual([
+        'DiscordCreateChannel',
+        'mcp__github__create_issue',
+        'mcp__github__list_issues',
+      ]);
+    });
+
+    it('warns and stores no global pattern when an owner has no matching tool', () => {
+      const reg = new PluginRegistry();
+      const warnings: string[] = [];
+      reg.contextFor('owner', {}, noopLog).registerTool(tool('OwnerTool'));
+      reg.contextFor('other', {}, noopLog).registerTool(tool('OtherTool'));
+
+      reg.setDeferLoading('owner', ['Other*', 'MissingTool'], (message) => warnings.push(message));
+
+      expect([...reg.toolDeferLoading]).toEqual([]);
+      expect(warnings).toEqual([
+        "deferLoading 'Other*' ignored: no matching tools registered by 'owner'",
+        "deferLoading 'MissingTool' ignored: no matching tools registered by 'owner'",
+      ]);
+    });
+  });
+
   describe('registerTool manifest gating', () => {
     const U = undefined;
     const tool = (name: string) => ({ name } as never);

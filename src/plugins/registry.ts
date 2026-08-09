@@ -101,6 +101,9 @@ export class PluginRegistry {
    *  (`BUILTIN_TOOL_PLAN_SAFE`) into the set plan mode composes from. Exact names only — see the manifest
    *  field's doc for why a `prefix*` would be unsafe here. */
   readonly toolPlanSafe = new Set<string>();
+  /** Tool names whose owning plugin declares them deferred into ToolSearch by default. Unlike output
+   *  policy patterns, this stores only exact registered names after owner-scoped expansion. */
+  readonly toolDeferLoading = new Set<string>();
 
   /** Absorb another registry's contributions (the loader stages each plugin and merges on success).
    *  Tools, controls + commands are name-keyed and drive tool dispatch / admin routes / the slash menu, so
@@ -197,6 +200,24 @@ export class PluginRegistry {
         continue;
       }
       this.toolPlanSafe.add(name);
+    }
+  }
+
+  /** Expand one plugin manifest's deferred-tool defaults against the merged registry. A pattern may match
+   *  only tools owned by `owner`, so it cannot defer a sibling's tool; the result stores exact names only. */
+  setDeferLoading(owner: string, patterns: string[] | undefined, warn?: (msg: string) => void): void {
+    for (const raw of patterns ?? []) {
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+      const pattern = raw.trim();
+      const prefix = pattern.endsWith('*') ? pattern.slice(0, -1) : undefined;
+      const matches = [...this.toolOwner.entries()]
+        .filter(([name, toolOwner]) => toolOwner === owner && (prefix === undefined ? name === pattern : name.startsWith(prefix)))
+        .map(([name]) => name);
+      if (matches.length === 0) {
+        warn?.(`deferLoading '${pattern}' ignored: no matching tools registered by '${owner}'`);
+        continue;
+      }
+      for (const name of matches) this.toolDeferLoading.add(name);
     }
   }
 

@@ -36,6 +36,7 @@
       "DiscordRemoveThreadMember"
     ]
   },
+  "deferLoading": ["Discord*"],
   "icons": { "Discord*": "💬" },
   "configSchema": [
     {

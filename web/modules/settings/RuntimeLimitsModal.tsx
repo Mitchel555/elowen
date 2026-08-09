@@ -1,5 +1,5 @@
 'use client';
-import { Gauge, TerminalSquare, Radar, Layers, History, Activity, AlarmClock, MessageSquare, Copy, CopyCheck, Star, HeartPulse, PenLine, Cpu, type LucideIcon } from 'lucide-react';
+import { Gauge, TerminalSquare, Radar, History, Activity, AlarmClock, MessageSquare, Copy, CopyCheck, Star, HeartPulse, PenLine, Cpu, type LucideIcon } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { HelpTip } from '../../components/ui/HelpTip';
@@ -51,7 +51,6 @@ const RUNTIME_LIMIT_FIELDS: RuntimeLimitField[] = [
   { key: 'memoryImportanceWeightPerMille', kind: 'share', min: 0, max: 300, step: 10, icon: Star },
   { key: 'memoryVitalityWeightPerMille', kind: 'share', min: 0, max: 300, step: 10, icon: HeartPulse },
   { key: 'memoryCuratorMaxOps', kind: 'count', min: 0, max: 6, step: 1, icon: PenLine },
-  { key: 'toolDeferThreshold', kind: 'count', min: 1, max: 100, step: 1, icon: Layers },
   { key: 'eventRetentionDays', kind: 'days', min: 1, max: 365, step: 1, icon: History },
   // Adjacent on purpose: the two are one setting asked at two moments (a watched page, and a wake-up where
   // no timer could have run), and they share a floor — 35 s, above the daemon's 30 s heartbeat, because a
@@ -136,22 +135,6 @@ export function RuntimeLimitsModal({ runtime, applied, onChange, onClose, presen
               </div>
             );
           })}
-          {/* The deferral kill switch sits with the threshold it overrides: off means no tool is ever
-              withheld from the prompt, whatever the threshold says. */}
-          <div className="flex items-center gap-2.5 py-3.5">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center text-text-muted">
-              <Layers size={18} aria-hidden />
-            </span>
-            <span className="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-medium text-text">
-              {t.brain.runtime.toolDeferralEnabled}
-              <HelpTip>{t.brain.runtime.toolDeferralEnabledHint}</HelpTip>
-            </span>
-            <Toggle
-              checked={runtime.toolDeferralEnabled}
-              onChange={(next) => onChange((cur) => ({ ...cur, toolDeferralEnabled: next }))}
-              label={t.brain.runtime.toolDeferralEnabled}
-            />
-          </div>
           {/* The daemon re-reads this per delegation, so flipping it takes effect on the next sub-agent
               without a restart — that live read is what makes it a usable rollback under load. */}
           <div className="flex items-center gap-2.5 py-3.5">

@@ -109,6 +109,7 @@ const DYNAMIC_NAMESPACES = [
   'agents',            // AgentsTable: t.agents[a.status]
   'brain.limits',      // BrainLimitsModal: t.brain.limits[f.key] + t.brain.limits[`${f.key}Hint`]
   'brain.runtime',     // RuntimeLimitsModal: t.brain.runtime[f.key] + t.brain.runtime[`${f.key}Hint`]
+  'brain.toolLoading.reason', // ToolDeferralModal: t.brain.toolLoading.reason[reason]
   'brain.retention',   // MemoryRetentionModal: t.brain.retention[field.key] + t.brain.retention[`${field.key}Hint`]
   'brain.types',       // BrainSection: t.brain.types[type] — daemon-driven provider type set
   'kanban',            // KanbanBoard: t.kanban[col.labelKey]

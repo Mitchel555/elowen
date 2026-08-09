@@ -2,7 +2,7 @@ import type { Db } from './db.js';
 import { defaultPromptTemplate } from '../overseer/planner.js';
 import { DEFAULT_BINS, EXEC_NOTES, KNOWN_EXECS, isAllowedExec } from '../shared/execs.js';
 import type { EmbeddingConfig } from '../embeddings/embeddingService.js';
-import type { BrainLimits, RuntimeConfig, RuntimeLimits } from '../shared/wireContract.js';
+import type { BrainLimits, RuntimeConfig, RuntimeLimits, ToolDeferralOverrides } from '../shared/wireContract.js';
 import { DEFAULT_MEMORY_RETENTION, type MemoryRetentionConfig } from '../brain/memoryVitality.js';
 
 // The brain-limits shape is the daemon↔web wire contract (Settings → Elowen AI → Limits) — defined
@@ -531,6 +531,42 @@ function sanitizeModelNotes(input: unknown): Record<string, string> {
   return out;
 }
 
+const TOOL_LOADING_MODES = new Set(['immediate', 'deferred']);
+const PLUGIN_SOURCE_ID_RE = /^plugin:[a-z0-9][a-z0-9-]{1,63}$/;
+
+function isToolDeferralSourceId(value: string): boolean {
+  return value === 'builtin' || PLUGIN_SOURCE_ID_RE.test(value);
+}
+
+/** Keep persisted user overrides owner-qualified and structurally valid. Unknown but well-formed plugin
+ *  source ids deliberately survive: an override must outlive a temporarily disabled plugin. */
+function sanitizeToolDeferralOverrides(input: unknown): ToolDeferralOverrides {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { sources: {}, tools: {} };
+  const raw = input as { sources?: unknown; tools?: unknown };
+  const sources: ToolDeferralOverrides['sources'] = {};
+  const tools: ToolDeferralOverrides['tools'] = {};
+  if (raw.sources && typeof raw.sources === 'object' && !Array.isArray(raw.sources)) {
+    for (const [sourceId, mode] of Object.entries(raw.sources as Record<string, unknown>)) {
+      if (isToolDeferralSourceId(sourceId) && TOOL_LOADING_MODES.has(mode as string)) {
+        sources[sourceId] = mode as ToolDeferralOverrides['sources'][string];
+      }
+    }
+  }
+  if (raw.tools && typeof raw.tools === 'object' && !Array.isArray(raw.tools)) {
+    for (const [sourceId, sourceTools] of Object.entries(raw.tools as Record<string, unknown>)) {
+      if (!isToolDeferralSourceId(sourceId) || !sourceTools || typeof sourceTools !== 'object' || Array.isArray(sourceTools)) continue;
+      const sanitizedTools: Record<string, ToolDeferralOverrides['sources'][string]> = {};
+      for (const [toolName, mode] of Object.entries(sourceTools as Record<string, unknown>)) {
+        if (toolName.trim() && TOOL_LOADING_MODES.has(mode as string)) {
+          sanitizedTools[toolName] = mode as ToolDeferralOverrides['sources'][string];
+        }
+      }
+      if (Object.keys(sanitizedTools).length > 0) tools[sourceId] = sanitizedTools;
+    }
+  }
+  return { sources, tools };
+}
+
 const DEFAULT_CONFIG: ElowenConfig = {
   allowedExecs: [...KNOWN_EXECS],
   customModels: [],
@@ -561,7 +597,7 @@ const DEFAULT_CONFIG: ElowenConfig = {
     removed: [],
   },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, subagentRunnerEnabled: DEFAULT_SUBAGENT_RUNNER_ENABLED, subagentRunnerPoolMax: DEFAULT_SUBAGENT_RUNNER_POOL_MAX, memoryRetention: defaultMemoryRetention() },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_TOOL_DEFERRAL_ENABLED, toolDeferralOverrides: { sources: {}, tools: {} }, subagentRunnerEnabled: DEFAULT_SUBAGENT_RUNNER_ENABLED, subagentRunnerPoolMax: DEFAULT_SUBAGENT_RUNNER_POOL_MAX, memoryRetention: defaultMemoryRetention() },
   embedding: { providerId: '', model: '', baseUrl: '', dimensions: null },
   categorization: { providerId: '', model: '', baseUrl: '' },
 };
@@ -648,7 +684,7 @@ const defaultStored = (): Stored => ({
   webPushContact: '',
   plugins: { enabled: [...DEFAULT_CONFIG.plugins.enabled], removed: [], config: {} },
   brain: { providers: [], agentName: 'Elowen', maxSteps: DEFAULT_MAX_STEPS, modelContextWindows: {}, limits: { ...DEFAULT_BRAIN_LIMITS }, hiddenOauth: [] },
-  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled, subagentRunnerEnabled: DEFAULT_CONFIG.runtime.subagentRunnerEnabled, subagentRunnerPoolMax: DEFAULT_CONFIG.runtime.subagentRunnerPoolMax, memoryRetention: defaultMemoryRetention() },
+  runtime: { limits: { ...DEFAULT_RUNTIME_LIMITS }, toolDeferralEnabled: DEFAULT_CONFIG.runtime.toolDeferralEnabled, toolDeferralOverrides: { sources: {}, tools: {} }, subagentRunnerEnabled: DEFAULT_CONFIG.runtime.subagentRunnerEnabled, subagentRunnerPoolMax: DEFAULT_CONFIG.runtime.subagentRunnerPoolMax, memoryRetention: defaultMemoryRetention() },
   embedding: { ...DEFAULT_CONFIG.embedding },
   categorization: { ...DEFAULT_CONFIG.categorization },
 });
@@ -671,7 +707,7 @@ export interface ConfigPatch {
    *  apiKey KEEPS the currently stored key for that id — the UI never sees (or resends) secrets. */
   brain?: { providers?: unknown; agentName?: unknown; maxSteps?: number; modelContextWindows?: Record<string, number>; limits?: Partial<BrainLimits>; hiddenOauth?: string[] };
   /** Runtime knobs merged per-field (like the brain limits): a patch tuning one slider leaves the rest. */
-  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; subagentRunnerEnabled?: boolean; subagentRunnerPoolMax?: number | null; memoryRetention?: Partial<MemoryRetentionConfig> };
+  runtime?: { limits?: Partial<RuntimeLimits>; toolDeferralEnabled?: boolean; toolDeferralOverrides?: ToolDeferralOverrides; subagentRunnerEnabled?: boolean; subagentRunnerPoolMax?: number | null; memoryRetention?: Partial<MemoryRetentionConfig> };
   /** Embedding config is merged per-field (like autopilot); `dimensions: null` clears the width hint. */
   embedding?: { providerId?: string; model?: string; baseUrl?: string; dimensions?: number | null };
   /** Categorization config merged per-field (like embedding). */
@@ -737,6 +773,7 @@ export class ConfigStore {
         runtime: {
           limits: clampRuntimeLimits(p.runtime?.limits, d.runtime.limits),
           toolDeferralEnabled: typeof p.runtime?.toolDeferralEnabled === 'boolean' ? p.runtime.toolDeferralEnabled : d.runtime.toolDeferralEnabled,
+          toolDeferralOverrides: sanitizeToolDeferralOverrides(p.runtime?.toolDeferralOverrides),
           subagentRunnerEnabled: typeof p.runtime?.subagentRunnerEnabled === 'boolean' ? p.runtime.subagentRunnerEnabled : d.runtime.subagentRunnerEnabled,
           subagentRunnerPoolMax: p.runtime?.subagentRunnerPoolMax !== undefined ? sanitizePoolMax(p.runtime.subagentRunnerPoolMax, d.runtime.subagentRunnerPoolMax) : d.runtime.subagentRunnerPoolMax,
           memoryRetention: clampMemoryRetention(p.runtime?.memoryRetention, d.runtime.memoryRetention),
@@ -893,6 +930,11 @@ export class ConfigStore {
       runtime: {
         limits: clampRuntimeLimits(patch.runtime?.limits, cur.runtime.limits),
         toolDeferralEnabled: typeof patch.runtime?.toolDeferralEnabled === 'boolean' ? patch.runtime.toolDeferralEnabled : cur.runtime.toolDeferralEnabled,
+        // Overrides replace wholesale: omitting a key is how the UI restores its inherited policy.
+        // Overrides replace wholesale: omitting a key is how the UI restores its inherited policy.
+        toolDeferralOverrides: patch.runtime?.toolDeferralOverrides !== undefined
+          ? sanitizeToolDeferralOverrides(patch.runtime.toolDeferralOverrides)
+          : cur.runtime.toolDeferralOverrides,
         subagentRunnerEnabled: typeof patch.runtime?.subagentRunnerEnabled === 'boolean' ? patch.runtime.subagentRunnerEnabled : cur.runtime.subagentRunnerEnabled,
         subagentRunnerPoolMax: patch.runtime?.subagentRunnerPoolMax !== undefined ? sanitizePoolMax(patch.runtime.subagentRunnerPoolMax, cur.runtime.subagentRunnerPoolMax) : cur.runtime.subagentRunnerPoolMax,
         memoryRetention: clampMemoryRetention(patch.runtime?.memoryRetention, cur.runtime.memoryRetention),

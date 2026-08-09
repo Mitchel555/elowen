@@ -15,6 +15,129 @@ import type { ElowenEvent } from '../sse.js';
 import type { ElowenApp, RouteContext } from '../context.js';
 import { readSystemDiagnostics } from '../systemDiagnostics.js';
 import { webhookProxyStatus } from '../webhookProxy.js';
+import { BUILTIN_TOOL_DEFER_LOADING, BUILTIN_TOOL_PLAN_SAFE, builtinToolMetas } from '../../brain/tools/index.js';
+import { buildExitPlanModeTool } from '../../brain/tools/exitPlanMode.js';
+import {
+  isDeferrable,
+  resolveToolDeferralDecisions,
+  type ToolDeferralCandidate,
+  type ToolDeferralReason,
+} from '../../brain/toolSearch/deferralPolicy.js';
+import type { PluginRegistry } from '../../plugins/registry.js';
+import type { RuntimeConfig, ToolLoadingMode } from '../../shared/wireContract.js';
+
+export interface ToolDeferralGroup {
+  sourceId: string;
+  label: string;
+  kind: 'plugin' | 'builtin';
+  override: ToolLoadingMode | null;
+  tools: Array<{
+    name: string;
+    label: string;
+    description?: string;
+    eligible: boolean;
+    lockedReason: 'never-defer' | 'plan-safe' | null;
+    defaultMode: ToolLoadingMode;
+    override: ToolLoadingMode | null;
+    effective: ToolLoadingMode;
+    reason: ToolDeferralReason;
+  }>;
+}
+
+type CatalogTool = { name: string; label: string; description?: string };
+
+function matchesPattern(name: string, pattern: string): boolean {
+  return pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern;
+}
+
+function humanLabel(name: string): string {
+  const spaced = name.replace(/([a-z\d])([A-Z])/g, '$1 $2').replace(/[-_]+/g, ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** Build the UI catalog from the live registry, but resolve every effective mode through the same policy
+ *  function session composition uses. Security locks therefore remain server-owned and cannot drift in web. */
+export function buildToolDeferralCatalog(registry: PluginRegistry | undefined, runtime: RuntimeConfig): ToolDeferralGroup[] {
+  const bySource = new Map<string, { label: string; kind: 'plugin' | 'builtin'; tools: CatalogTool[] }>();
+  const add = (sourceId: string, label: string, kind: 'plugin' | 'builtin', tool: CatalogTool): void => {
+    const group = bySource.get(sourceId) ?? { label, kind, tools: [] };
+    if (!group.tools.some((item) => item.name === tool.name)) group.tools.push(tool);
+    bySource.set(sourceId, group);
+  };
+
+  for (const tool of registry?.tools ?? []) {
+    const owner = registry?.toolOwner.get(tool.name);
+    const description = typeof tool.description === 'string' ? tool.description : undefined;
+    add(owner ? `plugin:${owner}` : 'builtin', owner ? humanLabel(owner) : 'Built-in', owner ? 'plugin' : 'builtin', {
+      name: tool.name,
+      label: tool.label ?? tool.name,
+      ...(description ? { description } : {}),
+    });
+  }
+
+  for (const tool of builtinToolMetas()) add('builtin', 'Built-in', 'builtin', tool);
+  const exitPlanMode = buildExitPlanModeTool();
+  add('builtin', 'Built-in', 'builtin', {
+    name: exitPlanMode.name,
+    label: exitPlanMode.label ?? exitPlanMode.name,
+    ...(typeof exitPlanMode.description === 'string' ? { description: exitPlanMode.description } : {}),
+  });
+  // Exact core-default names whose live definition may be absent in this process (a PI/provider integration
+  // or a marketplace plugin — image-gen/image-edit — that isn't installed here). Keep them configurable, but
+  // ONLY as a 'builtin' fallback when the registry doesn't already know their owning plugin. When the plugin
+  // IS installed the tool is already grouped under its `plugin:<owner>` source above; adding it here too
+  // would duplicate it across two groups and diverge from the runtime, which owns loading via the same list
+  // yet keeps the override namespace on the owner (see capabilities.toolDeferralCandidates).
+  for (const pattern of BUILTIN_TOOL_DEFER_LOADING) {
+    if (!pattern.endsWith('*') && !registry?.toolOwner.has(pattern)) {
+      add('builtin', 'Built-in', 'builtin', { name: pattern, label: humanLabel(pattern) });
+    }
+  }
+
+  const sourceEntries = [...bySource.entries()].sort(([a], [b]) => {
+    if (a === 'builtin') return 1;
+    if (b === 'builtin') return -1;
+    return a.localeCompare(b);
+  });
+  for (const [, group] of sourceEntries) group.tools.sort((a, b) => a.name.localeCompare(b.name));
+
+  const candidates: ToolDeferralCandidate[] = sourceEntries.flatMap(([sourceId, group]) => group.tools.map((tool) => ({
+    name: tool.name,
+    sourceId,
+    planSafe: sourceId === 'builtin' ? BUILTIN_TOOL_PLAN_SAFE.includes(tool.name) : (registry?.toolPlanSafe.has(tool.name) ?? false),
+    // Mirror the runtime default exactly (capabilities.toolDeferralCandidates): a name is deferred-by-default
+    // if its manifest opted in OR it's a core BUILTIN_TOOL_DEFER_LOADING name — regardless of whether the
+    // owner is a plugin. That's what keeps a plugin-owned image tool showing 'deferred' here as it runs.
+    defaultDeferred: (registry?.toolDeferLoading.has(tool.name) ?? false)
+      || BUILTIN_TOOL_DEFER_LOADING.some((pattern) => matchesPattern(tool.name, pattern)),
+  })));
+  const decisions = new Map(resolveToolDeferralDecisions(candidates, runtime.toolDeferralOverrides, {
+    enabled: runtime.toolDeferralEnabled,
+    threshold: runtime.limits.toolDeferThreshold,
+  }).map((decision) => [decision.name, decision]));
+  const candidateByName = new Map(candidates.map((candidate) => [candidate.name, candidate]));
+
+  return sourceEntries.map(([sourceId, group]) => ({
+    sourceId,
+    label: group.label,
+    kind: group.kind,
+    override: runtime.toolDeferralOverrides.sources[sourceId] ?? null,
+    tools: group.tools.map((tool) => {
+      const candidate = candidateByName.get(tool.name)!;
+      const decision = decisions.get(tool.name)!;
+      const lockedReason = !isDeferrable(tool.name) ? 'never-defer' : candidate.planSafe ? 'plan-safe' : null;
+      return {
+        ...tool,
+        eligible: lockedReason === null,
+        lockedReason,
+        defaultMode: candidate.defaultDeferred ? 'deferred' : 'immediate',
+        override: runtime.toolDeferralOverrides.tools[sourceId]?.[tool.name] ?? null,
+        effective: decision.effective,
+        reason: decision.reason,
+      };
+    }),
+  }));
+}
 
 /** True when `bin` resolves to an executable on the daemon's PATH — the readiness check for a task exec
  *  that names an external agent CLI (the embedded `elowen:` engine skips this, it's always runnable). */
@@ -75,6 +198,11 @@ export function registerConfigRoutes(app: ElowenApp, ctx: RouteContext): void {
   });
 
   app.get('/config', (c) => c.json(d.config.get()));
+  app.get('/config/tool-deferral', async (c) => {
+    if (notAdminUnlessSetup(c)) return c.json({ error: 'forbidden' }, 403);
+    const registry = await d.plugins?.get();
+    return c.json(buildToolDeferralCatalog(registry, d.config.get().runtime));
+  });
   app.put('/config', async (c) => {
     // Editing the daemon config is admin-only (the Administration surface); reads stay open so the
     // app can populate model pickers etc. During setup (no users yet) it's open so onboarding can

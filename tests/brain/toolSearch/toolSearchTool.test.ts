@@ -20,10 +20,23 @@ const CANDIDATES = [
   { name: 'mcp__slack__post_message', description: 'Send a message to a Slack channel' },
 ];
 
+const MIXED_CANDIDATES = [
+  { name: 'DiscordCreateChannel', description: 'Create a Discord channel' },
+  { name: 'ScanCode', description: 'Scan source code for dangerous patterns' },
+  ...CANDIDATES,
+];
+
+const CAMEL_CASE_CANDIDATES = [
+  { name: 'CreateChannel', description: '' },
+  { name: 'DiscordCreateChannel', description: '' },
+  { name: 'Code', description: '' },
+  { name: 'ScanCode', description: '' },
+];
+
 describe('resolveToolSearch', () => {
-  it('select:<names> activates those exact tools, case-insensitively', () => {
-    const got = resolveToolSearch('select:mcp__github__create_issue,mcp__slack__post_message', CANDIDATES, 5);
-    expect(got).toEqual(['mcp__github__create_issue', 'mcp__slack__post_message']);
+  it('select:<names> activates exact mixed plugin tools, case-insensitively', () => {
+    const got = resolveToolSearch('select:DiscordCreateChannel,mcp__github__create_issue', MIXED_CANDIDATES, 5);
+    expect(got).toEqual(['DiscordCreateChannel', 'mcp__github__create_issue']);
   });
 
   it('select: ignores names not in the deferred candidate set', () => {
@@ -36,9 +49,21 @@ describe('resolveToolSearch', () => {
     expect(got).toEqual(['mcp__github__create_issue', 'mcp__github__list_issues']);
   });
 
+  it('keyword search matches CamelCase names and descriptions', () => {
+    expect(resolveToolSearch('discord channel', CAMEL_CASE_CANDIDATES, 5)).toEqual(['DiscordCreateChannel', 'CreateChannel']);
+    expect(resolveToolSearch('scan code', CAMEL_CASE_CANDIDATES, 5)).toEqual(['ScanCode', 'Code']);
+  });
+
+  it('keyword search mixes native-style plugin and bridged MCP names', () => {
+    expect(resolveToolSearch('discord github', MIXED_CANDIDATES, 5)).toEqual([
+      'DiscordCreateChannel',
+      'mcp__github__create_issue',
+      'mcp__github__list_issues',
+    ]);
+  });
+
   it('keyword search matches on description too', () => {
-    const got = resolveToolSearch('slack', CANDIDATES, 5);
-    expect(got).toEqual(['mcp__slack__post_message']);
+    expect(resolveToolSearch('slack', CANDIDATES, 5)).toEqual(['mcp__slack__post_message']);
   });
 
   it('a bare exact tool name fetches that tool directly (no select: needed)', () => {
@@ -106,11 +131,13 @@ describe('requestedExactNames', () => {
 });
 
 describe('formatDeferredToolsBlock', () => {
-  it('lists deferred tools with trimmed descriptions', () => {
-    const deferred = new Set(['mcp__github__create_issue']);
-    const block = formatDeferredToolsBlock(CANDIDATES, deferred);
+  it('lists mixed deferred tools with trimmed descriptions without MCP-only wording', () => {
+    const deferred = new Set(['DiscordCreateChannel', 'mcp__github__create_issue']);
+    const block = formatDeferredToolsBlock(MIXED_CANDIDATES, deferred);
     expect(block).toContain('<available_tools_deferred>');
+    expect(block).toContain('- DiscordCreateChannel: Create a Discord channel');
     expect(block).toContain('- mcp__github__create_issue: Create a new GitHub issue in a repo');
+    expect(block).not.toMatch(/only MCP/i);
     // A non-deferred candidate is not listed.
     expect(block).not.toContain('mcp__slack__post_message');
   });
@@ -192,11 +219,11 @@ describe('seedActivatedFromHistory', () => {
 });
 
 /** A fake activation target recording setActiveToolsByName calls. */
-function fakeSession(active: string[]): ToolActivationTarget & { calls: string[][] } {
+function fakeSession(active: string[], tools = CANDIDATES): ToolActivationTarget & { calls: string[][] } {
   const state = { active: [...active], calls: [] as string[][] };
   return {
     calls: state.calls,
-    getAllTools: () => CANDIDATES,
+    getAllTools: () => tools,
     getActiveToolNames: () => state.active,
     setActiveToolsByName: (names) => { state.active = [...names]; state.calls.push(names); },
   };
@@ -300,7 +327,7 @@ describe('toolSearchTool.execute', () => {
 
   it('never activates a matched tool the acting sender is forbidden (policy filter)', async () => {
     const deferred = new Set(CANDIDATES.map((c) => c.name));
-    const handle = createToolSearchHandle(deferred);
+    const handle = createToolSearchHandle(deferred, new Set(CANDIDATES.map((c) => c.name)));
     handle.session = fakeSession(['Read', 'ToolSearch']);
     const tool = toolSearchTool(handle);
     // Sender denies the create tool; the search matches both github tools but only the allowed one activates.
@@ -314,6 +341,23 @@ describe('toolSearchTool.execute', () => {
     const target = handle.session as ReturnType<typeof fakeSession>;
     expect(target.getActiveToolNames()).not.toContain('mcp__github__create_issue');
     expect((res.details as { matched: string[] }).matched).toEqual(['mcp__github__list_issues']);
+  });
+
+  it('applies allow-list filtering to plugins but not built-ins', async () => {
+    const tools = [
+      { name: 'DiscordCreateChannel', description: 'Create a Discord channel' },
+      { name: 'ShareImage', description: 'Share an image' },
+    ];
+    const deferred = new Set(tools.map((tool) => tool.name));
+    const handle = createToolSearchHandle(deferred, new Set(['DiscordCreateChannel']));
+    handle.session = fakeSession(['ToolSearch'], tools);
+    const tool = toolSearchTool(handle);
+    const res = await runWithPolicy(
+      POLICY,
+      () => tool.execute('id', { query: 'discord image' }, undefined, undefined, {} as never),
+      { toolPolicy: { allow: new Set(['DiscordCreateChannel']) } },
+    );
+    expect((res.details as { matched: string[] }).matched).toEqual(['DiscordCreateChannel', 'ShareImage']);
   });
 });
 

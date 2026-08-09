@@ -86,6 +86,10 @@ export interface PluginManifest {
    *  `DiscordListChannels` reads and `DiscordDeleteChannel` does not — so a pattern here would be a way to
    *  hand plan mode a destructive tool by accident. Undeclared = treated as mutating (fail closed). */
   planSafe?: string[];
+  /** Tools deferred into ToolSearch by default. Entries are exact tool names or `prefix*` patterns for
+   *  dynamic surfaces; patterns expand only to tools currently registered by this same plugin, never to
+   *  another plugin's tools. */
+  deferLoading?: string[];
   /** Path (relative to the plugin folder) of the plugin's brand icon (SVG), shown in the settings UI.
    *  Defaults to `icon.svg` when omitted; the icon route serves it if the file exists, else the UI
    *  falls back to a lucide/emoji glyph. */
@@ -113,6 +117,7 @@ const ManifestSchema = Type.Object({
   icons: Type.Optional(Type.Record(Type.String(), Type.String())),
   showOutput: Type.Optional(Type.Array(Type.String())),
   planSafe: Type.Optional(Type.Array(Type.String())),
+  deferLoading: Type.Optional(Type.Array(Type.String())),
   icon: Type.Optional(Type.String()),
   configSchema: Type.Optional(Type.Array(Type.Object({
     key: Type.String({ minLength: 1 }),

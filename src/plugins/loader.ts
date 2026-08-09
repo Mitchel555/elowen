@@ -190,6 +190,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<PluginRegis
         registry.setIcons(manifest.icons);
         registry.setShowOutput(manifest.showOutput);
         registry.setPlanSafe(manifest.planSafe, manifest.provides, (m) => opts.logger.warn(`[plugin:${name}] ${m}`));
+        registry.setDeferLoading(name, manifest.deferLoading, (m) => opts.logger.warn(`[plugin:${name}] ${m}`));
         loaded.add(name);
         opts.logger.info(`plugin loaded: ${name}@${manifest.version}`);
       } catch (err) {

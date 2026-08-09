@@ -64,13 +64,14 @@ function webBounds(): Record<string, [min: number, max: number]> {
 }
 
 describe('runtime limits — web editor against the daemon clamp', () => {
-  it('offers exactly the daemon fields, no more and no fewer', () => {
-    expect(Object.keys(webBounds()).sort()).toEqual(Object.keys(daemonBounds()).sort());
+  it('offers every runtime field except the threshold owned by Tool loading', () => {
+    expect(Object.keys(webBounds()).sort()).toEqual(Object.keys(daemonBounds()).filter((key) => key !== 'toolDeferThreshold').sort());
     expect(Object.keys(webDefaults).sort()).toEqual(Object.keys(daemonDefaults).sort());
   });
 
-  it('bounds every slider to the daemon clamp bound', () => {
-    expect(webBounds()).toEqual(daemonBounds());
+  it('bounds every runtime slider to its daemon clamp bound', () => {
+    const { toolDeferThreshold: _toolDeferThreshold, ...runtimeBounds } = daemonBounds();
+    expect(webBounds()).toEqual(runtimeBounds);
   });
 
   it('seeds the form with the daemon defaults', () => {
@@ -92,7 +93,7 @@ describe('runtime limits — web editor against the daemon clamp', () => {
   // and all three assertions would pass on nothing.
   it('actually read both tables', () => {
     expect(Object.keys(daemonBounds())).toHaveLength(12);
-    expect(Object.keys(webBounds())).toHaveLength(12);
+    expect(Object.keys(webBounds())).toHaveLength(11);
     expect(daemonBounds().localShellTimeoutMs).toEqual([10000, 300000]);
     expect(daemonBounds().memorySemanticFloorPerMille).toEqual([100, 800]);
     expect(webBounds().eventRetentionDays).toEqual([1, 365]);

@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useId, useRef, useState } from 'react';
-import { BrainCircuit, Plus, Pencil, Trash2, KeyRound, Link2, Unlink, ExternalLink, Check, ListChecks, SlidersHorizontal, Gauge, EyeOff, ShieldCheck } from 'lucide-react';
+import { BrainCircuit, Plus, Pencil, Trash2, KeyRound, Link2, Unlink, ExternalLink, Check, ListChecks, SlidersHorizontal, Gauge, EyeOff, ShieldCheck, Boxes } from 'lucide-react';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -14,6 +14,7 @@ import { SelectionSummary } from '../../components/ui/SelectionSummary';
 import { Modal, ModalBody } from '../../components/ui/Modal';
 import { BrainLimitsModal, BRAIN_LIMIT_DEFAULTS } from './BrainLimitsModal';
 import { RuntimeLimitsModal, RUNTIME_LIMIT_DEFAULTS } from './RuntimeLimitsModal';
+import { ToolDeferralModal } from './ToolDeferralModal';
 import { MemoryRetentionModal, DEFAULT_MEMORY_RETENTION } from './MemoryRetentionModal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { LoadingState } from '../../components/ui/states';
@@ -306,6 +307,7 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
   const [modelsFor, setModelsFor] = useState<BrainProviderType | null>(null);
   const [limitsOpen, setLimitsOpen] = useState(false);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
+  const [toolLoadingOpen, setToolLoadingOpen] = useState(false);
   const [retentionOpen, setRetentionOpen] = useState(false);
   const [disconnectTarget, setDisconnectTarget] = useState<BrainProviderType | null>(null);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
@@ -373,6 +375,7 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
       setRuntime({
         limits: config.runtime?.limits ?? RUNTIME_LIMIT_DEFAULTS,
         toolDeferralEnabled: config.runtime?.toolDeferralEnabled ?? true,
+        toolDeferralOverrides: config.runtime?.toolDeferralOverrides ?? { sources: {}, tools: {} },
         // A daemon predating the feature serves the runtime block without the retention group — seed the
         // defaults so the editor always has the full block to edit (mirrors `brain.limits ?? defaults`).
         memoryRetention: config.runtime?.memoryRetention ?? DEFAULT_MEMORY_RETENTION,
@@ -387,7 +390,11 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
   const { status: runtimeStatus, retry: retryRuntime } = useAutoSaveStatus([runtime], async () => {
     if (!runtime) return;
     try {
-      const saved = await updateConfig.mutateAsync({ runtime });
+      // Tool loading owns its own explicit save. Omitting only those fields prevents this debounced editor
+      // from replaying a stale tool-loading draft while preserving the runtime and retention controls it owns.
+      const { toolDeferralEnabled: _toolDeferralEnabled, toolDeferralOverrides: _toolDeferralOverrides, ...runtimePatch } = runtime;
+      const { toolDeferThreshold: _toolDeferThreshold, ...limits } = runtimePatch.limits;
+      const saved = await updateConfig.mutateAsync({ runtime: { ...runtimePatch, limits } });
       const effective = saved.runtime?.limits;
       const clamped: Partial<RuntimeLimits> = {};
       for (const key of Object.keys(runtime.limits) as (keyof RuntimeLimits)[]) {
@@ -532,6 +539,13 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
           </SettingsRow>
         ) : null}
         {runtime ? (
+          <SettingsRow label={t.brain.toolLoading.title} description={t.brain.toolLoading.hint} icon={Boxes}>
+            <button type="button" data-selection-manage className="spatial-inline-action" onClick={() => setToolLoadingOpen(true)}>
+              <Boxes size={14} aria-hidden />{t.brain.toolLoading.manage}
+            </button>
+          </SettingsRow>
+        ) : null}
+        {runtime ? (
           <SettingsRow label={t.brain.retention.title} description={t.brain.retention.hint} icon={ShieldCheck}>
             <button type="button" data-selection-manage className="spatial-inline-action" onClick={() => setRetentionOpen(true)}>
               <ShieldCheck size={14} aria-hidden />{t.brain.retention.manage}
@@ -554,6 +568,20 @@ export function BrainSection({ onSaveState }: { onSaveState?: (section: string, 
               applied={appliedRuntime}
               onChange={(fn) => setRuntime((cur) => (cur ? fn(cur) : cur))}
               onClose={() => setRuntimeOpen(false)}
+              presentation="drawer"
+            />
+      ) : null}
+      {runtime && toolLoadingOpen ? (
+            <ToolDeferralModal
+              runtime={runtime}
+              onSave={(patch) => updateConfig.mutateAsync(patch)}
+              onSaved={(next) => setRuntime((current) => current ? {
+                ...current,
+                toolDeferralEnabled: next.toolDeferralEnabled,
+                toolDeferralOverrides: next.toolDeferralOverrides,
+                limits: { ...current.limits, toolDeferThreshold: next.limits.toolDeferThreshold },
+              } : current)}
+              onClose={() => setToolLoadingOpen(false)}
               presentation="drawer"
             />
       ) : null}

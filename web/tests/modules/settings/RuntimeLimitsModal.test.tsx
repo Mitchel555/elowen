@@ -65,20 +65,11 @@ describe('RuntimeLimitsModal', () => {
     expect(screen.getByText(/Saved as 365 days/)).toBeTruthy();
   });
 
-  it('flips the deferral kill switch without touching the limits', () => {
-    const { apply } = renderModal();
-    fireEvent.click(screen.getByRole('switch', { name: 'Defer external tools' }));
-    const next = apply(0);
-    expect(next.toolDeferralEnabled).toBe(false);
-    expect(next.limits).toEqual(RUNTIME_LIMIT_DEFAULTS);
-  });
-
   it('turns the sub-agent runner on without disturbing the other runtime switches', () => {
     const { apply } = renderModal();
     fireEvent.click(screen.getByRole('switch', { name: 'Run sub-agents in separate processes' }));
     const next = apply(0);
     expect(next.subagentRunnerEnabled).toBe(true);
-    // The two kill switches sit side by side, so a mis-wired handler would silently flip the wrong one.
     expect(next.toolDeferralEnabled).toBe(true);
     expect(next.limits).toEqual(RUNTIME_LIMIT_DEFAULTS);
   });

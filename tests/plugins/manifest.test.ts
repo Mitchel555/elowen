@@ -16,6 +16,15 @@ describe('parseManifest', () => {
     const m = parseManifest({ ...good, showOutput: ['Bash', 'Lsp*'] });
     expect(m.showOutput).toEqual(['Bash', 'Lsp*']);
   });
+  it('accepts exact and prefix deferred-tool defaults, absent by default', () => {
+    expect(parseManifest(good).deferLoading).toBeUndefined();
+    const m = parseManifest({ ...good, deferLoading: ['ScanCode', 'mcp__*'] });
+    expect(m.deferLoading).toEqual(['ScanCode', 'mcp__*']);
+  });
+  it('rejects malformed deferred-tool defaults', () => {
+    expect(() => parseManifest({ ...good, deferLoading: 'ScanCode' })).toThrow();
+    expect(() => parseManifest({ ...good, deferLoading: ['ScanCode', 42] })).toThrow();
+  });
   it('accepts every declared config field type, including the model picker', () => {
     const m = parseManifest({
       ...good,

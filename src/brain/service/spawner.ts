@@ -4,11 +4,10 @@ import { PluginHookBus } from '../../plugins/hookBus.js';
 import { logger } from '../../shared/logger.js';
 import type { BrainRuntimeConfig } from '../providers.js';
 import { buildBrainRegistry, resolveBrainModelRoute } from '../providers.js';
-import { buildElowenTools, buildMemoryTools, BUILTIN_TOOL_ICONS, BUILTIN_TOOL_PLAN_SAFE } from '../tools/index.js';
+import { buildElowenTools, buildMemoryTools, BUILTIN_TOOL_DEFER_LOADING, BUILTIN_TOOL_ICONS, BUILTIN_TOOL_PLAN_SAFE } from '../tools/index.js';
 import { buildShareImageTool } from '../tools/shareImageTool.js';
 import { makeToolIconResolver } from '../toolIcons.js';
 import { composeSessionTools } from '../session/capabilities.js';
-import { computeDeferredToolNames } from '../toolSearch/deferralPolicy.js';
 import { createToolSearchHandle, toolSearchTool, formatDeferredToolsBlock, type ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 import { buildPromptTemplates } from '../slashCommands.js';
 import { formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
@@ -172,28 +171,33 @@ export class LiveSessionSpawner {
     const toolHookBus = plugins && plugins.hooks.length > 0
       ? new PluginHookBus({ hooks: plugins.hooks, hookOwners: plugins.hookOwners, capabilities: plugins.pluginCapabilities, logger: logger('plugin-hooks') })
       : undefined;
-    // Deferred-tool policy: which registered tools (bridged external MCP tools, above the threshold) are
-    // withheld from the initial prompt and fetched on demand via ToolSearch. Computed from the RAW plugin
-    // tools — gating preserves names, and only `mcp__*` names are ever deferrable — so it is stable whether
-    // read before or after composition. Empty (the common case) → no ToolSearch tool, no awareness block,
-    // no change from before this existed. Threshold and kill switch are operator-tunable (Settings →
-    // Elowen AI → Runtime), read here so a change applies to the next spawn; absent wiring keeps the
-    // policy's own defaults.
+    // Read the entire runtime policy once per spawn. Minimal callers may omit runtimeConfig altogether;
+    // persisted settings changes apply to the next spawn without a daemon restart.
     const runtime = this.d.runtimeConfig?.();
-    const deferred = computeDeferredToolNames(
-      pluginTools,
-      runtime ? { enabled: runtime.toolDeferralEnabled, threshold: runtime.limits.toolDeferThreshold } : {},
-    );
-    const toolSearchHandle: ToolSearchHandle | undefined = deferred.size > 0 ? createToolSearchHandle(deferred) : undefined;
+    const toolDeferralOverrides = runtime?.toolDeferralOverrides;
+    const planSafeToolNames = new Set([...BUILTIN_TOOL_PLAN_SAFE, ...(plugins?.toolPlanSafe ?? [])]);
+    let toolSearchHandle: ToolSearchHandle | undefined;
     const allTools = composeSessionTools({
       kind: opts.channel ? (opts.trustedChannel ? 'trusted-channel' : 'foreign-channel') : 'owner-chat',
       elowenTools: () => buildElowenTools({ url: this.d.url, token: this.d.users.ensureAdvisorToken(ownerUserId) }),
       memoryTools: memStore && memService && memCats && memCategorizer && memProjects
         ? () => buildMemoryTools({ store: memStore, service: memService, categories: memCats, categorizer: memCategorizer, projects: memProjects })
         : undefined,
-      // ToolSearch rides the built-in group (permission-gated, not plugin-hook-gated); present only when
-      // the session actually defers tools.
-      toolSearch: toolSearchHandle ? () => [toolSearchTool(toolSearchHandle)] : undefined,
+      // composeSessionTools first builds every other group once, then resolves policy over that exact set.
+      // The callback creates the one shared handle only when something is actually withheld and returns
+      // ToolSearch to its historical stable position in the ordered definitions.
+      toolDeferral: {
+        toolOwner: plugins?.toolOwner ?? new Map(),
+        toolDeferLoading: plugins?.toolDeferLoading ?? new Set(),
+        planSafeToolNames,
+        builtinDeferLoading: BUILTIN_TOOL_DEFER_LOADING,
+        overrides: toolDeferralOverrides,
+        options: runtime ? { enabled: runtime.toolDeferralEnabled, threshold: runtime.limits.toolDeferThreshold } : undefined,
+      },
+      toolSearch: (deferred) => {
+        toolSearchHandle = createToolSearchHandle(deferred);
+        return [toolSearchTool(toolSearchHandle)];
+      },
       // Needs somewhere to keep the bytes; an in-memory store has none, and the tool says so rather than
       // silently doing nothing.
       shareImage: () => [buildShareImageTool({ store: this.d.store, imagesDir: this.d.chatImagesDir })],
@@ -387,7 +391,7 @@ export class LiveSessionSpawner {
       // Read-only-ness is declared with the tool, exactly like its icon above: the core co-locates its
       // own, a plugin states its own in the manifest. Assembled once per session so a plugin toggle
       // applies on the next spawn without a daemon restart.
-      planSafeToolNames: new Set([...BUILTIN_TOOL_PLAN_SAFE, ...(plugins?.toolPlanSafe ?? [])]),
+      planSafeToolNames,
       workDir: cwd,
       queuedSteer, queuedFollowUp, deliveringUserEchoes: [],
       // Baseline for owner mode-switch detection: left undefined so the FIRST turn on a fresh live (new

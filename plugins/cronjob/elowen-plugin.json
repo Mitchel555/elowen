@@ -5,6 +5,7 @@
   "description": "Scheduled prompts: recurring jobs (\"every 30m\", \"daily 07:30\") and one-shot wake-ups (\"in 20m\", \"at 18:30\") that run as the brain's own conversations with full owner powers. Admin-only management.",
   "entry": "index.mjs",
   "provides": { "tools": ["CronAdd", "ScheduleWakeup", "CronList", "CronRemove"], "platforms": ["cron"] },
+  "deferLoading": ["CronAdd", "CronList", "CronRemove", "ScheduleWakeup"],
   "icons": { "Cron*": "⏰", "ScheduleWakeup": "⏰" },
   "configSchema": [
     {
