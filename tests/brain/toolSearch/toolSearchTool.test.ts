@@ -391,7 +391,8 @@ describe('verifyActivation', () => {
   });
 
   // The other way PI ends up recording no addedToolNames: the match was already active, so the set does
-  // not grow. Same cost as a silent drop — no tool_reference, and a rewritten tools block next request.
+  // not grow. Same cost as a silent drop — no native deferred load (Anthropic tool_reference, OpenAI
+  // tool_search_call/output), and a rewritten tools block next request.
   it('reports an activation that changed nothing because the match was already active', () => {
     const session = registryBoundSession(['Read', 'mcp__github__list_issues'], ['Read', 'mcp__github__list_issues']);
     const before = new Set(['Read', 'mcp__github__list_issues']);

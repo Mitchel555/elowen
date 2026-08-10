@@ -72,9 +72,11 @@ export function seedActivatedFromHistory(handle: ToolSearchHandle, messages: rea
  *  cannot be assumed to have worked: `setActiveToolsByName` keeps only names it finds in its tool REGISTRY
  *  and ignores the rest without erroring, and it replaces the whole set — so a name already active but no
  *  longer registered disappears in the same call. Both matter beyond the tool being uncallable, because
- *  PI records `addedToolNames` (the input to Anthropic's native deferred-tool loading) only when the set
- *  after the call is a strict superset of the set before it. A silent drop therefore also costs a full
- *  prompt-cache rewrite on the next request. Returns the names that failed to stick, for tests. */
+ *  PI records `addedToolNames` (the load point for native deferred-tool loading — Anthropic's
+ *  `defer_loading`/`tool_reference` as well as OpenAI Responses' `tool_search_call`/`tool_search_output`)
+ *  only when the set after the call is a strict superset of the set before it. A silent drop therefore
+ *  also costs a full prompt-cache rewrite on the next request. Returns the names that failed to stick,
+ *  for tests. */
 export function verifyActivation(
   session: ToolActivationTarget,
   requested: ReadonlySet<string>,
@@ -83,7 +85,8 @@ export function verifyActivation(
 ): string[] {
   const actual = new Set(session.getActiveToolNames());
   // A match that was ALREADY active adds nothing to the set, which is the other condition under which PI
-  // records no `addedToolNames` — deferred loading is skipped and the result carries no tool_reference.
+  // records no `addedToolNames` — native deferred loading is skipped for this result on both providers
+  // (no Anthropic tool_reference, no OpenAI tool_search_call/output items).
   // Worth its own line: it means the deferred set and the active set disagreed before the call.
   if (activeBefore && matched.length > 0 && matched.every((name) => activeBefore.has(name))) {
     log.warn(`activation was a no-op — ${matched.join(', ')} already active; deferred-tool loading will be skipped for this result`);

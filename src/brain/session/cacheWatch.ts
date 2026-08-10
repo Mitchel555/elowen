@@ -6,13 +6,17 @@ import { currentTurnMode, type TurnWorkMode } from '../../plugins/policyContext.
 
 /** Prompt-cache observability, modeled on Claude Code's promptCacheBreakDetection. In a healthy
  * append-only conversation `cacheRead` grows monotonically: each request reads the prefix the previous
- * request wrote. A DROP means the prefix changed or Anthropic evicted/routed away from it. The payload
+ * request wrote. A DROP means the prefix changed or the provider evicted/routed away from it. The payload
  * monitor hashes the exact provider request so the warning can distinguish those cases without retaining
  * prompt content.
  *
  * Two expected drops are suppressed: a real compaction (baseline resets) and an idle gap beyond the cache
- * TTL. Installed for Anthropic sessions only; other providers report best-effort cache stats whose drops
- * are routine noise. */
+ * TTL. Installed for Anthropic sessions ('anthropic' flavor: usage.cacheRead/cacheWrite from
+ * cache_read/creation_input_tokens) and for ChatGPT-backend sessions ('openai-responses' flavor: pi-ai
+ * maps input_tokens_details.cached_tokens → usage.cacheRead and cache_write_tokens → usage.cacheWrite in
+ * openai-responses-shared.js; the chatgpt backend reports no cache writes, so cacheWrite stays 0 and the
+ * report omits it rather than claiming "wrote 0"). Other providers report best-effort cache stats whose
+ * drops are routine noise. */
 
 const log = logger('brain-cache');
 
@@ -120,7 +124,10 @@ function safeToolLabel(value: unknown, index: number): string {
 
 function historyLabel(value: unknown, index: number): string {
   const message = record(value);
-  const role = typeof message?.role === 'string' ? message.role : 'unknown';
+  // Anthropic messages carry `role`; OpenAI Responses input items without one (function_call,
+  // function_call_output, reasoning, tool_search_call…) are labeled by their item `type` instead.
+  const role = typeof message?.role === 'string' ? message.role
+    : typeof message?.type === 'string' ? message.type : 'unknown';
   const content = Array.isArray(message?.content) ? message.content : [];
   const toolResult = content.some((block) => record(block)?.type === 'tool_result');
   return `${index}:${role}${toolResult ? '/tool_result' : ''}`;
@@ -133,9 +140,13 @@ function isDeferredTool(value: unknown): boolean {
 function snapshotPayload(value: unknown, turnMode: TurnWorkMode | undefined): CachePayloadSnapshot {
   const payload = record(value);
   const tools = Array.isArray(payload?.tools) ? payload.tools : [];
-  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  // Anthropic requests carry `system` + `messages`; OpenAI Responses requests carry `instructions` +
+  // `input` (items rather than role messages). Read whichever pair is present so one snapshot shape
+  // serves both flavors.
+  const messages = Array.isArray(payload?.messages) ? payload.messages
+    : Array.isArray(payload?.input) ? payload.input : [];
   return {
-    systemHash: hash(canonical(payload?.system)),
+    systemHash: hash(canonical(payload?.system ?? payload?.instructions)),
     toolsHash: hash(canonical(tools)),
     tools: tools.slice(0, MAX_TRACKED_TOOL_SEGMENTS).map((tool, index) => ({
       hash: hash(canonical(tool)),
@@ -312,6 +323,7 @@ function deferredOnlyAppend(
 function attributePayloadChange(
   previous: CachePayloadSnapshot | undefined,
   current: CachePayloadSnapshot | undefined,
+  flavor: CacheWatchFlavor,
 ): string {
   if (!previous || !current) return 'payload snapshot unavailable';
   const changes: string[] = [];
@@ -348,10 +360,17 @@ function attributePayloadChange(
   // Nothing in the payload changed, so the prefix was still THERE — it just could not be found from the
   // breakpoint. Naming that explicitly is the difference between an actionable warning and "eviction,
   // shrug": one says which code to fix, the other says the provider had a bad day.
+  //
+  // Anthropic only: the lookback/breakpoint mechanics do not exist on OpenAI's prompt cache (automatic
+  // longest-prefix matching, no breakpoints), so attributing an OpenAI drop to a fan-out miss would name
+  // a mechanism that is not there.
   const added = current.blockCount - previous.blockCount;
-  if (added > BLOCK_LOOKBACK) {
+  if (flavor === 'anthropic' && added > BLOCK_LOOKBACK) {
     return `${unchanged}; this step appended ${added} content blocks, past the ${BLOCK_LOOKBACK}-position `
       + `lookback window Anthropic scans from a breakpoint — a FAN-OUT MISS, not a rewrite${suffix}`;
+  }
+  if (flavor === 'openai-responses') {
+    return `${unchanged}; likely provider eviction or routing (OpenAI prompt caching is best-effort)${suffix}`;
   }
   return `${unchanged}; likely provider eviction or routing${suffix}`;
 }
@@ -362,6 +381,7 @@ interface DropReport {
   to: number;
   wrote?: number;
   gapMs: number;
+  flavor: CacheWatchFlavor;
   previous?: CachePayloadSnapshot;
   current?: CachePayloadSnapshot;
 }
@@ -390,21 +410,33 @@ function formatDropReport(r: DropReport): string {
     const deferred = r.current.deferredToolCount > 0 ? ` (${r.current.deferredToolCount} deferred)` : '';
     lines.push(`  tools    ${r.current.toolCount}${deferred}`);
   }
-  lines.push(`  verdict  ${attributePayloadChange(r.previous, r.current)}`);
+  lines.push(`  verdict  ${attributePayloadChange(r.previous, r.current, r.flavor)}`);
   return lines.join('\n');
 }
 
 type SessionEvent = { type?: string; message?: { role?: string; timestamp?: number; stopReason?: string; usage?: { cacheRead?: number; cacheWrite?: number } }; aborted?: boolean; result?: unknown };
 type Subscribable = { subscribe?: (listener: (event: SessionEvent) => void) => unknown };
 
+/** Which provider wire this watch reads. Same detector and thresholds either way; the flavor only picks
+ *  the payload shape already handled by snapshotPayload, the warm-window default, and the report wording
+ *  (no Anthropic fan-out verdict and no "wrote 0" line for a backend that does not report cache writes). */
+export type CacheWatchFlavor = 'anthropic' | 'openai-responses';
+
+/** OpenAI's prompt cache is automatic with eviction typically starting after 5–10 minutes of inactivity
+ *  (no operator-selectable TTL like PI_CACHE_RETENTION). The conservative end keeps a routine expiry from
+ *  being reported as a break. */
+const OPENAI_CACHE_TTL_MS = 5 * 60_000;
+
 export interface CacheWatchOptions {
-  /** Warm window in ms; a drop after a longer gap is TTL expiry, not a break. Defaults to the cache
-   * TTL MINUS a 1-minute buffer — the opposite rounding direction from the clearing gate. */
+  /** Warm window in ms; a drop after a longer gap is TTL expiry, not a break. Defaults to the flavor's
+   * cache TTL MINUS a 1-minute buffer — the opposite rounding direction from the clearing gate. */
   ttlMs?: number;
   now?: () => number;
   monitor?: CachePayloadMonitor;
   /** Conversation id to report in warnings, so a drop can be traced to the session it happened in. */
   sessionId?: string;
+  /** Provider wire being watched; defaults to 'anthropic' (the original sole flavor). */
+  flavor?: CacheWatchFlavor;
 }
 
 export function installCacheWatch(
@@ -412,7 +444,9 @@ export function installCacheWatch(
   options: CacheWatchOptions = {},
 ): void {
   if (typeof session.subscribe !== 'function') return;
-  const ttlMs = options.ttlMs ?? (cacheTtlMs(process.env) - 60_000);
+  const flavor = options.flavor ?? 'anthropic';
+  const defaultTtl = flavor === 'openai-responses' ? OPENAI_CACHE_TTL_MS : cacheTtlMs(process.env);
+  const ttlMs = options.ttlMs ?? (defaultTtl - 60_000);
   const now = options.now ?? Date.now;
   let previous: { cacheRead: number; at: number; snapshot?: CachePayloadSnapshot } | null = null;
   session.subscribe((event) => {
@@ -442,12 +476,18 @@ export function installCacheWatch(
         && drop / previous.cacheRead > CACHE_DROP_MIN_RATIO
         && at - previous.at < ttlMs
       ) {
+        // The chatgpt backend does not report cache_write_tokens (pi-ai maps the absent field to 0);
+        // printing "wrote 0" there would read as "the prefix was not re-written" when it simply is not
+        // measured. Anthropic's genuine "wrote 0" stays — there it is informative.
+        const wrote = message.usage?.cacheWrite;
+        const wroteKnown = flavor !== 'openai-responses' || (typeof wrote === 'number' && wrote > 0);
         log.warn(formatDropReport({
           sessionId: options.sessionId,
           from: previous.cacheRead,
           to: cacheRead,
-          wrote: message.usage?.cacheWrite,
+          ...(wroteKnown && typeof wrote === 'number' ? { wrote } : {}),
           gapMs: at - previous.at,
+          flavor,
           previous: previous.snapshot,
           current: snapshot,
         }));

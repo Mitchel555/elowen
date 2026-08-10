@@ -24,7 +24,7 @@ afterEach(() => setLogSink(undefined));
 
 type Listener = (event: unknown) => void;
 
-function harness(options: { ttlMs?: number; monitor?: CachePayloadMonitor; sessionId?: string } = { ttlMs: TTL }): { fire: Listener } {
+function harness(options: { ttlMs?: number; monitor?: CachePayloadMonitor; sessionId?: string; flavor?: 'anthropic' | 'openai-responses' } = { ttlMs: TTL }): { fire: Listener } {
   let listener: Listener = () => undefined;
   const session = { subscribe: (fn: Listener) => { listener = fn; } };
   installCacheWatch(session, options);
@@ -392,6 +392,93 @@ describe('installCacheWatch — warning context', () => {
     // The two POST-compaction payloads are identical; only the stale pre-compaction one differs.
     expect(warnings()[0]?.message).not.toContain('system prompt changed');
     expect(warnings()[0]?.message).toContain('tracked payload prefix unchanged');
+  });
+});
+
+describe('installCacheWatch — openai-responses flavor (ChatGPT backend)', () => {
+  // pi-ai maps input_tokens_details.cached_tokens → usage.cacheRead for openai-codex-responses
+  // (openai-responses-shared.js), so the same detector reads the same normalized field; only the payload
+  // shape (instructions/input instead of system/messages) and the report wording differ.
+  const responsesPayload = (overrides: { instructions?: unknown; tools?: unknown[]; input?: unknown[] } = {}): Record<string, unknown> => ({
+    model: 'gpt-5.6-sol',
+    instructions: overrides.instructions ?? 'stable instructions',
+    tools: overrides.tools ?? [{ type: 'function', name: 'Read', parameters: { type: 'object' } }],
+    input: overrides.input ?? [
+      { role: 'user', content: [{ type: 'input_text', text: 'do work' }] },
+      { type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'result' },
+    ],
+  });
+
+  it('attributes a warm drop on the Responses payload shape (instructions + input items)', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, flavor: 'openai-responses' });
+    capture(responsesPayload());
+    fire(assistantUsage(100_000, T0));
+    capture(responsesPayload({
+      instructions: 'changed instructions',
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'do work' }] },
+        { type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"other"}' },
+        { type: 'function_call_output', call_id: 'call_1', output: 'result' },
+      ],
+    }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).toContain('system prompt changed');
+    // Items without a role are labeled by their Responses item type.
+    expect(warnings()[0]?.message).toContain('history REWRITTEN IN PLACE at 1:function_call');
+  });
+
+  it('never attributes an OpenAI drop to the Anthropic fan-out lookback', () => {
+    const monitor = createCachePayloadMonitor();
+    const capture = payloadCapture(monitor);
+    const { fire } = harness({ ttlMs: TTL, monitor, flavor: 'openai-responses' });
+    const base = responsesPayload();
+    capture(base);
+    fire(assistantUsage(100_000, T0));
+    // A wide fan-out step: identical prefix, dozens of appended items — on Anthropic this names the
+    // lookback window, but OpenAI's prompt cache has no breakpoints, so that verdict would be a lie.
+    const baseInput = Array.isArray(base.input) ? base.input : [];
+    const fanned = [
+      ...baseInput,
+      ...Array.from({ length: 30 }, (_, i) => ({ type: 'function_call_output', call_id: `c${i}`, output: `r${i}` })),
+    ];
+    capture(responsesPayload({ input: fanned }));
+    fire(assistantUsage(20_000, T0 + 5_000));
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).not.toContain('FAN-OUT MISS');
+    expect(warnings()[0]?.message).toContain('OpenAI prompt caching is best-effort');
+  });
+
+  it('omits the wrote figure the chatgpt backend does not report, instead of printing "wrote 0"', () => {
+    const { fire } = harness({ ttlMs: TTL, flavor: 'openai-responses' });
+    fire(assistantUsage(100_000, T0));
+    fire({
+      type: 'message_end',
+      message: { role: 'assistant', timestamp: T0 + 5_000, usage: { cacheRead: 20_000, cacheWrite: 0 } },
+    });
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.message).not.toContain('wrote');
+    // …while an actually-reported write would still be shown.
+    fire({
+      type: 'message_end',
+      message: { role: 'assistant', timestamp: T0 + 10_000, usage: { cacheRead: 10_000, cacheWrite: 4_096 } },
+    });
+    expect(warnings()[1]?.message).toContain('wrote 4096');
+  });
+
+  it('defaults the warm window to the ~5-minute OpenAI retention, not the Anthropic env TTL', () => {
+    const { fire } = harness({ flavor: 'openai-responses' }); // no ttlMs override
+    fire(assistantUsage(100_000, T0));
+    fire(assistantUsage(80_000, T0 + 3 * 60_000)); // 3 min — inside the 4-minute window → break
+    expect(warnings()).toHaveLength(1);
+    fire(assistantUsage(10_000, T0 + 3 * 60_000 + 4 * 60_000 + 30_000)); // past the window → expiry
+    expect(warnings()).toHaveLength(1);
   });
 });
 

@@ -18,7 +18,7 @@ import { assessColdCompaction, type AssessColdCompaction } from './coldStartComp
 import { installHistoryImageStripping } from './historyImageStripping.js';
 import { imagesRejected } from './imageRejection.js';
 import { installToolResultClearing } from './toolResultClearing.js';
-import { createCachePayloadMonitor, installCacheWatch, type CachePayloadMonitor } from './cacheWatch.js';
+import { createCachePayloadMonitor, installCacheWatch, type CachePayloadMonitor, type CacheWatchFlavor } from './cacheWatch.js';
 import { installCacheBreakpoints } from './cacheBreakpoints.js';
 import { seedActivatedFromHistory, type ToolSearchHandle } from '../toolSearch/toolSearchTool.js';
 import { logger } from '../../shared/logger.js';
@@ -138,7 +138,8 @@ export interface BrainResourceLoaderOptions {
   compactionCircuitBreakerExtension?: (pi: ExtensionAPI) => void;
   /** Recall memories again mid-turn, searching from the work rather than the opening message. */
   liveRecall?: LiveRecallOptions;
-  /** Anthropic provider-payload hashes consumed by cacheWatch after each response. */
+  /** Provider-payload hashes (Anthropic or OpenAI Responses shape) consumed by cacheWatch after each
+   *  response. */
   cacheMonitor?: CachePayloadMonitor;
   /** Add the trailing prompt-cache breakpoint (Anthropic only). Deliberately independent of
    *  `cacheMonitor`: that one only watches, this one changes the request, so switching observability off
@@ -393,7 +394,12 @@ export class BrainSessionFactory {
       thresholdBudget,
       ...(spec.onCompactionStopped ? { onTripped: spec.onCompactionStopped } : {}),
     });
-    const cacheMonitor = spec.model.provider === 'anthropic' ? createCachePayloadMonitor() : undefined;
+    // Anthropic by provider (the original scope), ChatGPT backend by wire api: pi-ai maps its
+    // input_tokens_details.cached_tokens onto the same usage.cacheRead the watch reads, and the payload
+    // snapshot understands the Responses instructions/input shape (see cacheWatch's flavor).
+    const cacheFlavor: CacheWatchFlavor | undefined = spec.model.provider === 'anthropic' ? 'anthropic'
+      : spec.model.api === 'openai-codex-responses' ? 'openai-responses' : undefined;
+    const cacheMonitor = cacheFlavor ? createCachePayloadMonitor() : undefined;
     const resourceLoader = (this.d.resourceLoaderFactory ?? defaultResourceLoaderFactory)({
       cwd: spec.cwd, systemPrompt: spec.systemPrompt, appendSystemPrompt: spec.appendSystemPrompt,
       skills: spec.skills, prompts: spec.promptTemplates, contextFiles: spec.contextFiles,
@@ -480,9 +486,12 @@ export class BrainSessionFactory {
       },
     });
     // cacheWatch is the tripwire that logs whether a warm drop came from system, tools, a history segment,
-    // or a likely provider-side eviction. Anthropic-only: other providers report best-effort cache stats
-    // whose warm drops are routine noise.
-    if (cacheMonitor) installCacheWatch(session, { monitor: cacheMonitor, sessionId: spec.sessionId });
+    // or a likely provider-side eviction. Installed for Anthropic and the ChatGPT (openai-codex-responses)
+    // backend — both report real cacheRead figures; other providers report best-effort cache stats whose
+    // warm drops are routine noise.
+    if (cacheMonitor && cacheFlavor) {
+      installCacheWatch(session, { monitor: cacheMonitor, sessionId: spec.sessionId, flavor: cacheFlavor });
+    }
     // Compaction is PI-native: our per-user % maps to PI's absolute reserveTokens (shouldCompact fires
     // once contextTokens > contextWindow − reserveTokens). Applied AFTER create — createAgentSession reads
     // compaction lazily (getCompactionSettings at each check), so an in-memory override here takes effect;
