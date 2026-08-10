@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Local driver for the Chetty Azure host. Anything it does not handle itself is forwarded verbatim
+# to `elo` on the VM, stdin included — so `chetty node <<'JS' … JS` works from here exactly as it
+# does on the box.
+#
+# The commands that live HERE rather than there are the ones needing the Azure CLI, which is
+# installed on this machine and deliberately not on the VM.
+set -euo pipefail
+
+HOST=${CHETTY_SSH_HOST:-chetty-agent}
+RG=${CHETTY_RG:-chetty-agent}
+AOAI=${CHETTY_AOAI:-chetty-agent-openai}
+PROVIDER_ID=${CHETTY_PROVIDER_ID:-azure-openai}
+CAPACITY=${CHETTY_CAPACITY:-50}
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+die() { echo "chetty: $*" >&2; exit 1; }
+
+# Quote every argument for the remote shell; ssh would otherwise flatten them and re-split on spaces.
+remote() {
+  local cmd="elo" a
+  for a in "$@"; do cmd+=" $(printf '%q' "$a")"; done
+  ssh "$HOST" "$cmd"
+}
+
+cmd_install() {
+  echo "==> installing elo on $HOST"
+  scp -q "$HERE/elo" "$HOST:/tmp/elo"
+  ssh "$HOST" 'sudo install -m 0755 /tmp/elo /usr/local/bin/elo && rm -f /tmp/elo && elo help >/dev/null && echo ok'
+}
+
+cmd_models() {
+  az cognitiveservices account list-models -n "$AOAI" -g "$RG" \
+    --query "[?contains(name,'${1:-gpt}')].{model:name,version:version,sku:join(',',skus[].name)}" -o table
+}
+
+cmd_deployments() {
+  az cognitiveservices account deployment list -n "$AOAI" -g "$RG" \
+    --query "[].{name:name,model:properties.model.name,sku:sku.name,capacity:sku.capacity,state:properties.provisioningState}" -o table
+}
+
+# Deploy a model in Azure AND wire it into Elowen in one step: the two halves are useless apart, and
+# doing them separately is how a model ends up in the picker with no deployment behind it.
+cmd_model_add() {
+  local model=${1:?model name} version=${2:-}
+  if [ -z "$version" ]; then
+    version=$(az cognitiveservices account list-models -n "$AOAI" -g "$RG" \
+      --query "[?name=='$model'].version | [0]" -o tsv)
+  fi
+  [ -n "$version" ] || die "model '$model' is not offered on $AOAI"
+
+  echo "==> azure deployment $model ($version)"
+  az cognitiveservices account deployment create -n "$AOAI" -g "$RG" \
+    --deployment-name "$model" --model-name "$model" --model-version "$version" \
+    --model-format OpenAI --sku-name GlobalStandard --sku-capacity "$CAPACITY" \
+    --query '{state:properties.provisioningState,capacity:sku.capacity}' -o tsv
+
+  echo "==> wiring into elowen"
+  # Round-trip through the public config view: provider entries come back without their key and the
+  # daemon re-attaches the stored one by id, so this never has to see or move the secret.
+  remote config . \
+    | node "$HERE/lib/model-patch.mjs" "$PROVIDER_ID" "$model" \
+    | remote patch > /dev/null
+
+  echo "==> now configured:"
+  remote config '.brain.providers[] | {id, models}'
+  remote config '.allowedExecs'
+}
+
+cmd_deploy() { "$HERE/../deploy.sh" "$@"; }
+
+cmd_help() {
+  cat <<'EOF'
+chetty — drive the Chetty Azure host from here
+
+  install                 (re)install the `elo` bridge on the VM
+  models [filter]         Azure models on offer (default filter: gpt)
+  deployments             Azure model deployments that exist
+  model add <name> [ver]  deploy a model in Azure and wire it into Elowen
+  deploy                  rsync + rebuild + restart (deploy.sh)
+
+  <anything else>         forwarded to `elo` on the VM, stdin included
+
+Examples
+  chetty model add gpt-5.6-terra
+  chetty config '.allowedExecs'
+  chetty run "ahoj"
+  chetty node <<'JS'
+    console.log(cfg().defaults);
+  JS
+EOF
+}
+
+case ${1:-help} in
+  help|-h|--help) cmd_help ;;
+  install)     shift; cmd_install "$@" ;;
+  models)      shift; cmd_models "$@" ;;
+  deployments) shift; cmd_deployments "$@" ;;
+  deploy)      shift; cmd_deploy "$@" ;;
+  model)
+    shift
+    case ${1:-} in
+      add) shift; cmd_model_add "$@" ;;
+      *)   die "unknown: model ${1:-} (try: model add <name>)" ;;
+    esac ;;
+  *) remote "$@" ;;
+esac

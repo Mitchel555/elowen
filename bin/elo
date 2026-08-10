@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# Admin bridge for the Chetty Elowen host. Runs ON the VM (installed to /usr/local/bin/elo).
+#
+# Exists so routine administration does not need a bespoke script, an scp and a daemon restart every
+# time. Two escape hatches carry most of the weight:
+#   elo node   — pipe JavaScript in on stdin; it runs inside the app container with the database open
+#   elo api    — call any daemon endpoint; a token is minted and revoked around the call
+# Prefer `elo patch` over writing the settings row directly: the daemon validates and merges the
+# patch and picks it up live, where a raw row write needs a restart and skips every guard.
+set -euo pipefail
+
+COMPOSE_DIR=${COMPOSE_DIR:-/opt/elowen}
+CONTAINER=${ELO_CONTAINER:-elowen-elowen-1}
+DB=${ELO_DB:-/data/db/elowen.db}
+DAEMON=${ELO_DAEMON:-http://127.0.0.1:4400}
+
+die() { echo "elo: $*" >&2; exit 1; }
+
+# --- token lifecycle ---------------------------------------------------------
+# A full-scope token for the first admin, alive only for the call being made. Minting per call beats
+# parking a standing credential on the box.
+mint_token() {
+  docker exec -e ELO_DB="$DB" "$CONTAINER" node -e '
+const Database = require("better-sqlite3");
+const { randomBytes } = require("node:crypto");
+const db = new Database(process.env.ELO_DB);
+const user = db.prepare("SELECT id FROM users WHERE is_admin = 1 ORDER BY id LIMIT 1").get();
+if (!user) throw new Error("no admin user");
+const token = randomBytes(32).toString("hex");
+db.prepare("INSERT INTO auth_tokens (token,user_id,scope,task_id) VALUES (?,?,?,?)").run(token, user.id, "full", null);
+console.log(token);
+'
+}
+
+revoke_token() {
+  [ -n "${1:-}" ] || return 0
+  docker exec -e ELO_DB="$DB" -e ELO_TOKEN="$1" "$CONTAINER" node -e '
+const Database = require("better-sqlite3");
+new Database(process.env.ELO_DB).prepare("DELETE FROM auth_tokens WHERE token = ?").run(process.env.ELO_TOKEN);
+' >/dev/null 2>&1 || true
+}
+
+# Cleanup state is global on purpose: an EXIT trap runs after the function that minted the token has
+# already returned, so a `local` would be out of scope by then and revocation would silently skip.
+MINTED_TOKEN=""
+CONTAINER_TMP=""
+cleanup() {
+  [ -n "$MINTED_TOKEN" ] && revoke_token "$MINTED_TOKEN"
+  [ -n "$CONTAINER_TMP" ] && docker exec "$CONTAINER" rm -f "$CONTAINER_TMP" >/dev/null 2>&1
+  return 0
+}
+trap cleanup EXIT
+
+cmd_help() {
+  cat <<'EOF'
+elo — admin bridge for the Chetty Elowen host
+
+  health                    daemon /health
+  status                    containers, version, sub-agent pool mode
+  logs [n] [service]        container logs (default 80 lines, service elowen)
+  restart [service]         restart a service and wait for healthy
+
+  node [--write]            run JavaScript from stdin INSIDE the container
+                            preloaded: db, cfg(), saveCfg(next) (--write only)
+  sql                       read-only SQL from stdin, rows as JSON
+  shell <cmd...>            run a command inside the container
+  host <cmd...>             run a command on the VM itself
+
+  api <METHOD> <path>       call any daemon endpoint; JSON body on stdin
+  config [jq-filter]        GET /config, optionally filtered
+  patch                     PUT /config with the JSON patch on stdin
+  run <prompt>              run one real brain turn and print the reply
+
+  backup                    snapshot the database inside the data volume
+
+Examples
+  elo config '.brain.providers[].models'
+  echo '{"brain":{"maxSteps":500}}' | elo patch
+  elo sql <<<'SELECT username FROM users'
+  elo node <<'JS'
+    console.log(cfg().allowedExecs);
+  JS
+EOF
+}
+
+cmd_health() { docker exec "$CONTAINER" curl -fsS "$DAEMON/health"; echo; }
+
+cmd_status() {
+  docker ps --format '{{.Names}}  {{.Status}}' | sed 's/^/  /'
+  echo
+  docker exec "$CONTAINER" curl -fsS "$DAEMON/health"
+  echo
+}
+
+cmd_logs() { docker compose -f "$COMPOSE_DIR/compose.yml" logs --tail "${1:-80}" "${2:-elowen}"; }
+
+cmd_restart() {
+  local svc=${1:-elowen}
+  docker compose -f "$COMPOSE_DIR/compose.yml" restart "$svc"
+  [ "$svc" = "elowen" ] || return 0
+  for _ in $(seq 1 60); do
+    docker exec "$CONTAINER" curl -fsS "$DAEMON/health" >/dev/null 2>&1 && { echo "healthy"; return 0; }
+    sleep 5
+  done
+  die "daemon did not become healthy"
+}
+
+# Pipe a script in on stdin. It runs as an ES module with the database already open, so a one-off
+# inspection or fix is a heredoc instead of a file that has to be written, copied and cleaned up.
+cmd_node() {
+  local rw=""
+  [ "${1:-}" = "--write" ] && rw=1
+  local tmp; tmp=$(mktemp)
+  {
+    cat <<'PREAMBLE'
+import { createRequire } from 'node:module';
+const require = createRequire('/app/package.json');
+const Database = require('better-sqlite3');
+
+const db = new Database(process.env.ELO_DB, process.env.ELO_RW ? {} : { readonly: true });
+const cfg = () => JSON.parse(db.prepare('SELECT data FROM settings WHERE id = 1').get().data);
+const saveCfg = (next) => {
+  if (!process.env.ELO_RW) throw new Error('saveCfg needs `elo node --write`');
+  db.prepare('UPDATE settings SET data = ? WHERE id = 1').run(JSON.stringify(next));
+};
+void db; void cfg; void saveCfg;
+PREAMBLE
+    cat
+  } > "$tmp"
+  docker cp "$tmp" "$CONTAINER:/tmp/elo-run.mjs" >/dev/null
+  rm -f "$tmp"
+  CONTAINER_TMP=/tmp/elo-run.mjs
+  docker exec -e ELO_DB="$DB" -e ELO_RW="$rw" "$CONTAINER" node /tmp/elo-run.mjs
+}
+
+cmd_sql() {
+  local query; query=$(cat)
+  docker exec -e ELO_DB="$DB" -e ELO_QUERY="$query" "$CONTAINER" node -e '
+const Database = require("better-sqlite3");
+const db = new Database(process.env.ELO_DB, { readonly: true });
+console.log(JSON.stringify(db.prepare(process.env.ELO_QUERY).all(), null, 2));
+'
+}
+
+cmd_shell() { docker exec "$CONTAINER" "$@"; }
+cmd_host() { "$@"; }
+
+cmd_api() {
+  local method=${1:?method} path=${2:?path}
+  local body=""
+  [ -t 0 ] || body=$(cat)
+  # Revoked explicitly rather than from the EXIT trap: bash resets traps to their default inside a
+  # subshell, and `elo config | jq` puts this call in exactly that position — the trap would never
+  # fire and every invocation would leave a live admin token behind. MINTED_TOKEN stays set as a
+  # safety net for an abrupt exit between minting and revoking.
+  local token; token=$(mint_token)
+  MINTED_TOKEN=$token
+  local rc=0
+  if [ -n "$body" ]; then
+    printf '%s' "$body" | docker exec -i "$CONTAINER" \
+      curl -fsS -X "$method" -H "authorization: Bearer $token" \
+        -H 'content-type: application/json' --data-binary @- "$DAEMON$path" || rc=$?
+  else
+    docker exec "$CONTAINER" \
+      curl -fsS -X "$method" -H "authorization: Bearer $token" "$DAEMON$path" || rc=$?
+  fi
+  echo
+  revoke_token "$token"; MINTED_TOKEN=""
+  return $rc
+}
+
+cmd_config() {
+  local filter=${1:-.}
+  if command -v jq >/dev/null 2>&1; then cmd_api GET /config </dev/null | jq "$filter"
+  else cmd_api GET /config </dev/null; fi
+}
+
+cmd_patch() { cmd_api PUT /config; }
+
+cmd_run() {
+  local prompt=${1:?prompt}; shift
+  local token; token=$(mint_token)
+  MINTED_TOKEN=$token
+  local rc=0
+  # Remaining arguments go straight to the CLI, so `elo run "hi" --model x --new` works.
+  docker exec -e ELOWEN_TOKEN="$token" -e ELOWEN_URL="$DAEMON" "$CONTAINER" \
+    node dist/cli/bin.js run "$prompt" "$@" || rc=$?
+  revoke_token "$token"; MINTED_TOKEN=""
+  return $rc
+}
+
+cmd_backup() {
+  docker exec -e ELO_DB="$DB" "$CONTAINER" node -e '
+const Database = require("better-sqlite3");
+const db = new Database(process.env.ELO_DB, { readonly: true });
+const to = `${process.env.ELO_DB}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+db.backup(to).then(() => console.log(to));
+'
+}
+
+sub=${1:-help}; shift || true
+case "$sub" in
+  help|-h|--help) cmd_help ;;
+  health)   cmd_health ;;
+  status)   cmd_status ;;
+  logs)     cmd_logs "$@" ;;
+  restart)  cmd_restart "$@" ;;
+  node)     cmd_node "$@" ;;
+  sql)      cmd_sql ;;
+  shell)    cmd_shell "$@" ;;
+  host)     cmd_host "$@" ;;
+  api)      cmd_api "$@" ;;
+  config)   cmd_config "$@" ;;
+  patch)    cmd_patch ;;
+  run)      cmd_run "$@" ;;
+  backup)   cmd_backup ;;
+  *)        die "unknown command '$sub' (try: elo help)" ;;
+esac
