@@ -1,0 +1,34 @@
+{$ELOWEN_DOMAIN} {
+	encode zstd gzip
+
+	# Real-PTY terminal streaming bypasses the web BFF and talks to the daemon directly.
+	# Without it terminals silently degrade to the snapshot mirror.
+	handle /ws/* {
+		reverse_proxy elowen:4400 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Plugin webhooks (e.g. the Teams bot endpoint). Authenticated by the plugin itself.
+	handle /hooks/* {
+		reverse_proxy elowen:4400 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# The service worker must never be cached, or clients pin an old build.
+	handle /sw.js {
+		header Cache-Control "no-cache, no-store, must-revalidate"
+		reverse_proxy elowen:4500 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy elowen:4500 {
+			header_up X-Real-IP {remote_host}
+			# SSE: stream responses through instead of buffering them.
+			flush_interval -1
+		}
+	}
+}

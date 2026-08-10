@@ -1,0 +1,40 @@
+services:
+  elowen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: elowen-chetty:latest
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Database, logs and the agent workspace all live here, on the VM's local disk.
+      # Local block storage is what lets SQLite keep WAL enabled.
+      - elowen-data:/data
+    # Deliberately no `ports:`. Publishing 4400 would expose the daemon API, and a daemon
+    # token can spawn agents — only the caddy container may reach it over the compose network.
+    expose:
+      - "4400"
+      - "4500"
+    # The daemon drains running turns for up to 10 minutes on SIGTERM; anything shorter
+    # kills in-flight agent work on every redeploy.
+    stop_grace_period: 660s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - elowen
+    environment:
+      ELOWEN_DOMAIN: ${ELOWEN_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  elowen-data:
+  caddy-data:
+  caddy-config:
