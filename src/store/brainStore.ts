@@ -592,6 +592,12 @@ export class BrainStore {
     return this.delegation.getSubagentRuns(parentSessionId);
   }
 
+  /** The child sessions durably claimed for restart recovery — see
+   *  {@link BrainDelegationStore.recoveringSubagentSessionIds}. */
+  recoveringSubagentSessionIds(parentSessionId: string): ReturnType<BrainDelegationStore['recoveringSubagentSessionIds']> {
+    return this.delegation.recoveringSubagentSessionIds(parentSessionId);
+  }
+
   /** Claim every restart-orphaned delegation for this boot — see
    *  {@link BrainDelegationStore.claimRecoverableRuns}. */
   claimRecoverableRuns(leaseMs: number): ReturnType<BrainDelegationStore['claimRecoverableRuns']> {

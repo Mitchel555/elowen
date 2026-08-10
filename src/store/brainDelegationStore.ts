@@ -363,6 +363,24 @@ export class BrainDelegationStore {
     return out;
   }
 
+  /** Child sessions this boot durably claimed for restart recovery. This is a read-model liveness source:
+   *  claim happens before platforms start, so the recovery turn has a real window where no in-memory child
+   *  edge exists yet. Keep the same parent/child owner validation as getSubagentRuns so status shaping can
+   *  safely treat these rows as visible without widening which conversation may observe them. */
+  recoveringSubagentSessionIds(parentSessionId: string): string[] {
+    return (this.db.prepare(
+      `SELECT r.child_session_id
+         FROM brain_subagent_runs r
+         JOIN brain_sessions p ON p.id = r.parent_session_id
+         JOIN brain_sessions c ON c.id = r.child_session_id
+        WHERE r.parent_session_id = ?
+          AND r.lifecycle = 'recovering'
+          AND c.parent_session_id = p.id
+          AND c.user_id = p.user_id
+        ORDER BY r.updated_at ASC, r.rowid ASC`
+    ).all(parentSessionId) as { child_session_id: string }[]).map((row) => row.child_session_id);
+  }
+
   /** The delegated sub-agents ONE conversation spawned, newest first — the parent's own record of what
    *  it already ran, and the only way it may address a child for a continuation.
    *

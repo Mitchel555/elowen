@@ -159,7 +159,15 @@ export class BrainStatusService {
     // NOT that fix — it is the read-time fallback for a row that goes stale WITHIN a process run: a child
     // whose live registration is already gone while its terminal upsert has not landed. Hiding it keeps a
     // dead child from rendering a phantom running spinner in the meantime.
-    const active = new Set(this.d.sessions.childrenOf(sessionId));
+    //
+    // A boot-claimed recovery is the one durable exception. Claiming precedes platform startup, while the
+    // in-memory child edge is raised only when the recovery turn enters ChannelSessionService.send. Without
+    // this second liveness source, a reconnect snapshot taken in that window drops the running child from
+    // the transcript projection, and recovery emits no plugin progress event that could add it later.
+    const active = new Set([
+      ...this.d.sessions.childrenOf(sessionId),
+      ...this.d.store.recoveringSubagentSessionIds(sessionId),
+    ]);
     return this.d.store.getSubagentRuns(sessionId)
       .filter((run) => run.status !== 'running' || active.has(run.sessionId));
   }
