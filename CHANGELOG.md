@@ -5,6 +5,55 @@ All notable changes to Elowen are documented here. The format loosely follows
 
 ## [Unreleased]
 
+## [0.27.82] - 2026-08-10
+
+Delegated sub-agents now survive a daemon restart. A delegation that was still running is respawned from
+its durable transcript and its parent is handed the real result, instead of every restart quietly killing
+work that had run for the better part of an hour. Tool loading became configurable and now recognizes
+OpenAI's native tool search the same way it already used Anthropic's, you can open a running sub-agent's
+transcript from the web and the CLI, and another round of prompt-cache fixes keeps long conversations warm
+instead of re-billing them at full price.
+
+### Added
+- **A running delegation survives a restart.** A restart used to abort every sub-agent and mark it
+  `error`; now the drain lets a runner finish (`KillMode=mixed`), and a child that outlives the drain — or
+  a hard crash — is respawned from its durable transcript on the next boot and its result is delivered to
+  the parent. A claim uses a boot-scoped lease so two boots can never recover the same row, and a suffix
+  that contains an unanswered mutating tool call is flagged `recovery_required` (surfaced to the parent
+  through the durable inbox) rather than blindly replayed. `DelegateContinue`/`Status`/`Result`/`Stop` now
+  resolve a `dlg-` job id back to its child session, so those handles keep working after a restart too.
+- **Configurable tool loading.** Rarely used plugin tools are deferred out of the cached prompt and
+  fetched on demand through `ToolSearch`; Settings → Brain → tool loading lets you keep a group immediate,
+  defer it, or hand it fully to ToolSearch, with per-source and per-tool overrides. Deferral now works
+  natively on OpenAI models (Responses tool search) as well as Anthropic (`defer_loading`), and a startup
+  warning flags a GPT-5.4+ model registered without the capability, which would silently degrade to a
+  cache-unfriendly fallback.
+- **Drill into a sub-agent.** The agents panel opens a running (or finished) sub-agent's own transcript
+  live, in the web and the CLI, showing its real model, provider and cards rather than the parent's.
+- **A workflow node can grow its own workflow.** A node running inside a runner can call
+  `WorkflowAddNodes` over a real host RPC, so a workflow can expand as the work reveals more work.
+- **Room to run longer.** The `maxSteps` ceiling was raised to 1000 (edited with a coarse slider), the
+  sub-agent stall watchdog timeout became configurable (default 60 minutes), and the three memory-recall
+  limits doubled.
+
+### Changed & Fixed
+- **Prompt cache stays warm.** A cleared tool result stays cleared across duplicates and respawns, the
+  trailing cache breakpoint actually reaches a prior write, a wide fan-out no longer re-caches the whole
+  conversation, a string↔text-block content-shape difference stopped faking a "rewritten in place", and
+  live memory recall is budgeted per batch so long work keeps its memory.
+- **Restarts don't leave a service down.** The web unit exits on `SIGTERM` and its stop is bounded, so a
+  web restart can't leave the UI down; the daemon stops admitting new turns once it starts draining, so
+  the restart drain converges; and credentials are served from disk so a re-login no longer needs a
+  restart.
+- **CLI/TUI.** A half-open SSE stream is recovered so a long turn can't freeze the TUI, `/stats` counts
+  `cacheWrite` in its cache-hit figure (no more rounding to 100%), and a tool result's tone is read from
+  its headline instead of any alarming word in its body.
+- **Workflows** stay visible after their anchor row is compacted, and a node is no longer invited to
+  expand a workflow it cannot reach.
+- **Observability.** The event-loop lag metric no longer averages away the very stall it exists to find,
+  and a refused sub-agent runner fork is now visible in `/health` instead of masquerading as an idle pool.
+- **Web layout.** Settings group-header actions wrap below the title on narrow (mobile) viewports.
+
 ## [0.27.81] - 2026-08-07
 
 Sub-agents moved out of the daemon's single thread: delegated turns now run in a self-sizing pool of
