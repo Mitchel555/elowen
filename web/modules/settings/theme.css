@@ -7,8 +7,11 @@
 .settings-group { min-width: 0; border-bottom: var(--hairline); }
 .settings-group:last-child { border-bottom: 0; }
 .settings-group[data-tone="danger"] { background: linear-gradient(90deg, rgb(239 68 68 / 0.055), transparent 62%); }
-.settings-group__header { display: flex; min-height: 4.6rem; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem clamp(1.25rem, 2vw, 2rem); border-bottom: var(--hairline); background: rgb(255 255 255 / 0.012); }
-.settings-group__heading { display: flex; min-width: 0; align-items: center; gap: 0.8rem; }
+.settings-group__header { display: flex; min-height: 4.6rem; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem clamp(1.25rem, 2vw, 2rem); border-bottom: var(--hairline); background: rgb(255 255 255 / 0.012); }
+/* Grow so the heading keeps the first line to itself; when wide actions (e.g. the tool-loading Segmented
+   with three labels) no longer fit beside it, flex-wrap drops them to their own full-width line below
+   instead of overrunning the title on a narrow (mobile) viewport. */
+.settings-group__heading { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 0.8rem; }
 .settings-group__icon, .settings-row__icon { display: grid; width: 2.55rem; height: 2.55rem; flex: none; place-items: center; border: 1px solid rgb(255 255 255 / 0.1); border-radius: 50%; color: var(--color-text-muted); background: rgb(255 255 255 / 0.012); }
 .settings-group__heading h2 { color: var(--color-text); font-size: 1rem; font-weight: 600; letter-spacing: -0.02em; }
 .settings-group__heading p { margin-top: 0.2rem; color: var(--color-text-muted); font-size: 0.7rem; line-height: 1.45; }
@@ -42,6 +45,9 @@
   .settings-group__header, .settings-row, .settings-toolbar { padding-inline: 1rem; }
   .settings-row { grid-template-columns: 1fr; gap: 0.75rem; }
   .settings-row__actions { justify-self: start; }
+  /* Actions wrap to their own full-width line under the heading (see flex-wrap above), left-aligned so a
+     three-option Segmented has the whole row instead of being crushed against the title. */
+  .settings-group__actions { flex-basis: 100%; justify-content: flex-start; }
 }
 
 .settings-control-row__status i { width: 0.48rem; height: 0.48rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 12px currentColor; }
