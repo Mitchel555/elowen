@@ -330,6 +330,29 @@ jobs:
       # DelegateStop ending a child that would otherwise hang forever. It shares this job's built daemon.
       - run: node scripts/tests/workflow-e2e/run.mjs
 
+  recovery-e2e:
+    name: Recovery E2E (delegation restart)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # The isolated real daemon uses the same tmux-backed startup path as the other brain E2E suites.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # Exercises boot recovery against an actual daemon process restarted over the same throwaway SQLite DB:
+      # safe background/foreground respawn, fail-closed unanswered tool calls and the legacy-row migration.
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/tests/recovery-e2e/run.mjs
+
   web:
     name: Web (build + test)
     runs-on: ubuntu-latest

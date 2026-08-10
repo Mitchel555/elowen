@@ -67,6 +67,9 @@ async function waitForHealth(baseUrl, deadlineMs) {
  * @param {Record<string,string>} [opts.env] Extra environment for the daemon child, applied LAST. The
  *        filter below strips every inherited `ELOWEN_*` var on purpose, so a suite that needs one (the
  *        load harness needs its trace-output dir) has to pass it explicitly rather than rely on leakage.
+ * @param {(dataDir: string, dbPath: string) => void} [opts.prepareDataDir] Optional synchronous fixture hook
+ *        run after the isolated temp paths exist but before the daemon's first boot. It is for migration E2E
+ *        fixtures only; it must write exclusively under `dataDir`.
  * @returns {Promise<{ baseUrl: string, token: string, dataDir: string, port: number, providerId: string, model: string, pid: ()=>number|undefined, stop: ()=>Promise<void>, restart: ()=>Promise<string> }>}
  */
 export async function spawnRealDaemon(opts) {
@@ -167,6 +170,7 @@ export async function spawnRealDaemon(opts) {
     return login();
   };
 
+  opts.prepareDataDir?.(dataDir, dbPath);
   launch();
 
   try {
