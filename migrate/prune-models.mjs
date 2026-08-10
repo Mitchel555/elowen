@@ -37,8 +37,15 @@ const before = {
 cfg.allowedExecs = (cfg.allowedExecs ?? []).filter((e) => validExecs.has(e));
 cfg.customModels = (cfg.customModels ?? []).filter((m) => validExecs.has(m.exec));
 
-// Presets and notes key off models that are simply absent here; keeping them only clutters the UI.
-cfg.hiddenPresets = (cfg.hiddenPresets ?? []).filter((p) => validExecs.has(p) || validWindowKeys.has(p));
+// hiddenPresets is a HIDE list, not an allow list: the web ships EXEC_PRESETS (mirroring KNOWN_EXECS)
+// hardcoded and renders every one of them unless it appears here. None of those built-ins can run
+// without their own provider or CLI binary, so anything unbacked has to be ADDED, not removed —
+// emptying this list is what makes Sonnet, Opus and the Ollama presets reappear in the picker.
+const { KNOWN_EXECS } = await import('/app/dist/shared/execs.js');
+cfg.hiddenPresets = [...new Set([
+  ...(cfg.hiddenPresets ?? []),
+  ...KNOWN_EXECS.filter((e) => !validExecs.has(e)),
+])];
 cfg.modelNotes = Object.fromEntries(
   Object.entries(cfg.modelNotes ?? {}).filter(([k]) => validExecs.has(k) || validWindowKeys.has(k)),
 );
