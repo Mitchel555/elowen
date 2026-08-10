@@ -875,7 +875,13 @@ function useBrainChatController(): BrainChatValue {
     historyCursorRef.current = null;
     setHasMoreHistory(false);
     historyEpochRef.current++;
-    const params = new URLSearchParams({ session: sessionId, client: clientId(), generation: String(generation), snapshot: '1' });
+    // A drill-in is a READ-ONLY tap on an owned child (sub-agent / shared Discord channel / task worker),
+    // NOT this client's parent attachment. Carrying `client`+`generation` sends the request down
+    // resolveStreamSession's generation-bound branch, which validates the target as an OWNED USER session
+    // and so rejects a channel child as `unknown session`. The CLI omits them here for the same reason
+    // (brainClient.stream identifies only the bound parent stream). `generation` still guards THIS
+    // controller's frame handlers locally, below — it is a client-side race fence, not the server param.
+    const params = new URLSearchParams({ session: sessionId, snapshot: '1' });
     const es = new EventSource(`${BASE}/brain/stream?${params.toString()}`);
     esRef.current = es;
     const onFrame = (type: string, handler: (e: Event) => void): void => {
@@ -901,6 +907,14 @@ function useBrainChatController(): BrainChatValue {
     onFrame('card', (e) => {
       const { card } = JSON.parse((e as MessageEvent).data) as { card: BrainCard };
       setCards((cur) => upsertCard(cur, card));
+    });
+    onFrame('error', () => {
+      // The child tap failed server-side (the session is gone, or momentarily unresolvable). Never leave
+      // the reader staring at a blank read-only view forever: report it and fall back to the live
+      // conversation. Without this, an `error` SSE frame is silently dropped and the drill-in just hangs.
+      es.close();
+      toast(t.brainChat.searchOpenError, 'error');
+      void exitReadOnly();
     });
   };
 

@@ -63,6 +63,11 @@ describe('read-only child snapshot', () => {
     const params = new URL(child.url, 'http://localhost').searchParams;
     expect(params.get('session')).toBe('brain-child');
     expect(params.get('snapshot')).toBe('1');
+    // A drill-in must NOT carry the parent client attachment identity: with client+generation the daemon's
+    // resolveStreamSession runs its owned-user-session branch and rejects the channel child as `unknown
+    // session`, which is exactly why web drill-in was hanging while the CLI (which omits them) worked.
+    expect(params.get('client')).toBeNull();
+    expect(params.get('generation')).toBeNull();
 
     child.emit('snapshot', {
       type: 'snapshot', sessionId: 'brain-child', session: { model: 'child-model', provider: 'openai-codex' },
@@ -74,5 +79,22 @@ describe('read-only child snapshot', () => {
 
     child.emit('card', { card: { id: 'child-live', title: 'Child live card', body: 'live' } });
     await waitFor(() => expect(screen.getByTestId('cards')).toHaveTextContent('Child live card'));
+  });
+
+  it('closes the child tap and leaves the read-only view when the server sends an error frame', async () => {
+    const { wrapper } = createWrapper();
+    render(<ToastProvider><BrainChatProvider><Harness /></BrainChatProvider></ToastProvider>, { wrapper });
+    await waitFor(() => expect(FakeES.instances).toHaveLength(1));
+
+    await act(async () => { fireEvent.click(screen.getByText('open child')); });
+    await waitFor(() => expect(FakeES.instances).toHaveLength(2));
+    const child = FakeES.instances[1]!;
+
+    // Previously this frame was dropped and the drill-in hung on a blank view forever.
+    child.emit('error', { type: 'error', message: 'unknown session' });
+
+    await waitFor(() => expect(child.closed).toBe(true));
+    // Falls back to the live conversation (a fresh parent stream is opened).
+    await waitFor(() => expect(FakeES.instances.length).toBeGreaterThan(2));
   });
 });
